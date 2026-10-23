@@ -27,8 +27,12 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
+use common_recordbatch::filter::PruningFilter;
 use common_telemetry::{error, info, warn};
+use common_time::timestamp::TimeUnit;
 use crossbeam_utils::atomic::AtomicCell;
+use datafusion_common::ScalarValue;
+use futures::stream::{BoxStream, StreamExt};
 use object_store::ObjectStore;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -42,7 +46,7 @@ use store_api::region_engine::{
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{PathType, StagingPartitionDirective};
-use store_api::sst_entry::ManifestSstEntry;
+use store_api::sst_entry::{ManifestSstEntry, manifest_columns};
 use store_api::storage::{FileId, RegionId, SequenceNumber};
 use tokio::sync::RwLockWriteGuard;
 pub use utils::*;
@@ -824,57 +828,76 @@ impl MitoRegion {
 
     /// Returns the SST entries of the region.
     pub async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
-        let table_dir = self.table_dir();
-        let path_type = self.access_layer.path_type();
-
-        let visible_ssts = self
-            .version()
-            .ssts
-            .levels()
-            .iter()
-            .flat_map(|level| level.files().map(|file| file.file_id().file_id()))
-            .collect::<HashSet<_>>();
-
-        let manifest_files = self.manifest_ctx.manifest().await.files.clone();
-        let staging_files = self
-            .manifest_ctx
-            .staging_manifest()
+        self.manifest_sst_stream(PruningFilter::default(), ManifestSstProjection::new(None))
+            .collect()
             .await
-            .map(|m| m.files.clone())
-            .unwrap_or_default();
-        let files = manifest_files
-            .into_iter()
-            .chain(staging_files)
-            .collect::<HashMap<_, _>>();
+    }
 
-        files
-            .values()
-            .map(|meta| {
+    /// Traverses manifest snapshots without copying the file maps. Staging metadata
+    /// overrides the normal manifest for the same file.
+    pub(crate) fn manifest_sst_stream(
+        &self,
+        filters: PruningFilter,
+        projection: ManifestSstProjection,
+    ) -> BoxStream<'_, ManifestSstEntry> {
+        Box::pin(async_stream::stream! {
+            let table_dir = self.table_dir();
+            let path_type = self.access_layer.path_type();
+            let visible_files = self.manifest_visible_file_ids(projection);
+            let (manifest, staging) = {
+                let manager = self.manifest_ctx.manifest_manager.read().await;
+                (manager.manifest(), manager.staging_manifest())
+            };
+            let normal_files = manifest.files.values().map(|meta| (false, meta));
+            let staging_files = staging.iter().flat_map(|s| s.files.values()).map(|meta| (true, meta));
+            for (index, (is_staging, meta)) in normal_files.chain(staging_files).enumerate() {
+                // A selective filter may otherwise traverse millions of files in
+                // a single poll without yielding any rows.
+                if index > 0 && index % 1024 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                if !is_staging && staging.as_ref().is_some_and(|s| s.files.contains_key(&meta.file_id)) {
+                    continue;
+                }
+                if !manifest_file_matches(meta, &filters) {
+                    continue;
+                }
+                // Paths describe the creating region, not the referring region.
+                // Construct them only when a path predicate or projection needs them.
+                let mut file_path = None;
+                if !filters.matches(|column| match column {
+                    manifest_columns::FILE_PATH => Some(ScalarValue::Utf8(Some(file_path.get_or_insert_with(|| {
+                        sst_file_path(table_dir, meta.file_id(), path_type)
+                    }).clone()))),
+                    _ => None,
+                }) {
+                    continue;
+                }
                 let region_id = self.region_id;
                 let origin_region_id = meta.region_id;
                 let (index_version, index_file_path, index_file_size) = if meta.index_file_size > 0
                 {
-                    let index_file_path = index_file_path(table_dir, meta.index_id(), path_type);
+                    let index_file_path = projection.index_file_path.then(|| index_file_path(table_dir, meta.index_id(), path_type));
                     (
                         meta.index_version,
-                        Some(index_file_path),
+                        index_file_path,
                         Some(meta.index_file_size),
                     )
                 } else {
                     (0, None, None)
                 };
-                let visible = visible_ssts.contains(&meta.file_id);
-                ManifestSstEntry {
-                    table_dir: table_dir.to_string(),
+                let visible = visible_files.as_ref().is_some_and(|files| files.contains(&meta.file_id));
+                yield ManifestSstEntry {
+                    table_dir: if projection.table_dir { table_dir.to_string() } else { String::new() },
                     region_id,
                     table_id: region_id.table_id(),
                     region_number: region_id.region_number(),
                     region_group: region_id.region_group(),
                     region_sequence: region_id.region_sequence(),
-                    file_id: meta.file_id.to_string(),
+                    file_id: if projection.file_id { meta.file_id.to_string() } else { String::new() },
                     index_version,
                     level: meta.level,
-                    file_path: sst_file_path(table_dir, meta.file_id(), path_type),
+                    file_path: if projection.file_path { file_path.unwrap_or_else(|| sst_file_path(table_dir, meta.file_id(), path_type)) } else { String::new() },
                     file_size: meta.file_size,
                     max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
                     index_file_path,
@@ -885,15 +908,31 @@ impl MitoRegion {
                     min_ts: meta.time_range.0,
                     max_ts: meta.time_range.1,
                     sequence: meta.sequence.map(|s| s.get()),
-                    partition_expr: meta.partition_expr.as_ref().map(ToString::to_string),
+                    partition_expr: if projection.partition_expr { meta.partition_expr.as_ref().map(ToString::to_string) } else { None },
                     origin_region_id,
                     node_id: None,
                     visible,
-                    primary_key_min: meta.primary_key_min.clone(),
-                    primary_key_max: meta.primary_key_max.clone(),
-                }
-            })
-            .collect()
+                    primary_key_min: if projection.primary_key_min { meta.primary_key_min.clone() } else { None },
+                    primary_key_max: if projection.primary_key_max { meta.primary_key_max.clone() } else { None },
+                };
+            }
+        })
+    }
+
+    /// Copies only file IDs so a paused inspection cannot delay SST purging.
+    /// Hidden residual columns are included in the query's projection.
+    fn manifest_visible_file_ids(
+        &self,
+        projection: ManifestSstProjection,
+    ) -> Option<HashSet<FileId>> {
+        projection.visible.then(|| {
+            self.version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files().map(|file| file.file_id().file_id()))
+                .collect()
+        })
     }
 
     /// Returns the file metas of the region by file ids.
@@ -1993,6 +2032,77 @@ pub fn parse_partition_expr(partition_expr_str: Option<&str>) -> Result<Option<P
     }
 }
 
+/// Columns requiring allocations or snapshots during an inspection scan.
+#[derive(Clone, Copy)]
+pub(crate) struct ManifestSstProjection {
+    visible: bool,
+    table_dir: bool,
+    file_id: bool,
+    file_path: bool,
+    index_file_path: bool,
+    partition_expr: bool,
+    primary_key_min: bool,
+    primary_key_max: bool,
+}
+
+impl ManifestSstProjection {
+    /// Selects columns by index in [`ManifestSstEntry::schema`]; `None` selects all columns.
+    pub(crate) fn new(projection: Option<&[usize]>) -> Self {
+        let schema = ManifestSstEntry::schema();
+        let included = |name: &str| {
+            projection.is_none_or(|indices| {
+                indices.iter().any(|index| {
+                    schema
+                        .column_schemas()
+                        .get(*index)
+                        .is_some_and(|column| column.name == name)
+                })
+            })
+        };
+        Self {
+            visible: included(manifest_columns::VISIBLE),
+            table_dir: included(manifest_columns::TABLE_DIR),
+            file_id: included(manifest_columns::FILE_ID),
+            file_path: included(manifest_columns::FILE_PATH),
+            index_file_path: included(manifest_columns::INDEX_FILE_PATH),
+            partition_expr: included(manifest_columns::PARTITION_EXPR),
+            primary_key_min: included(manifest_columns::PRIMARY_KEY_MIN),
+            primary_key_max: included(manifest_columns::PRIMARY_KEY_MAX),
+        }
+    }
+}
+
+/// Applies supported file predicates before allocating an inspection row. Unknown
+/// predicates and evaluation failures are left to the query's residual filter.
+fn manifest_file_matches(meta: &FileMeta, filters: &PruningFilter) -> bool {
+    filters.matches(|column| {
+        Some(match column {
+            manifest_columns::FILE_SIZE => ScalarValue::UInt64(Some(meta.file_size)),
+            manifest_columns::LEVEL => ScalarValue::UInt8(Some(meta.level)),
+            manifest_columns::NUM_ROWS => ScalarValue::UInt64(Some(meta.num_rows)),
+            manifest_columns::NUM_ROW_GROUPS => ScalarValue::UInt64(Some(meta.num_row_groups)),
+            manifest_columns::ORIGIN_REGION_ID => {
+                ScalarValue::UInt64(Some(meta.region_id.as_u64()))
+            }
+            manifest_columns::MIN_TS => ScalarValue::TimestampNanosecond(
+                meta.time_range
+                    .0
+                    .convert_to(TimeUnit::Nanosecond)
+                    .map(|ts| ts.value()),
+                None,
+            ),
+            manifest_columns::MAX_TS => ScalarValue::TimestampNanosecond(
+                meta.time_range
+                    .1
+                    .convert_to(TimeUnit::Nanosecond)
+                    .map(|ts| ts.value()),
+                None,
+            ),
+            _ => return None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2023,6 +2133,66 @@ mod tests {
     use crate::test_util::scheduler_util::SchedulerEnv;
     use crate::test_util::version_util::VersionControlBuilder;
     use crate::time_provider::StdTimeProvider;
+
+    #[test]
+    fn test_manifest_file_predicates() {
+        use common_recordbatch::filter::PruningFilter;
+        use common_time::Timestamp;
+        use datafusion_common::ScalarValue;
+        use datafusion_expr::{col, lit};
+        let meta = super::FileMeta {
+            file_size: 100,
+            time_range: (
+                Timestamp::new_millisecond(10),
+                Timestamp::new_millisecond(20),
+            ),
+            ..Default::default()
+        };
+        for (expr, expected) in [
+            (col("file_size").lt(lit(101u64)), true),
+            (col("file_size").lt(lit(100u64)), false),
+            (
+                col("min_ts").eq(lit(ScalarValue::TimestampNanosecond(
+                    Some(10_000_000),
+                    None,
+                ))),
+                true,
+            ),
+            (
+                col("max_ts").lt(lit(ScalarValue::TimestampNanosecond(
+                    Some(20_000_000),
+                    None,
+                ))),
+                false,
+            ),
+            (col("file_id").eq(lit("unknown")), true),
+        ] {
+            let filter = PruningFilter::new(std::slice::from_ref(&expr));
+            assert_eq!(
+                super::manifest_file_matches(&meta, &filter),
+                expected,
+                "{expr}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_manifest_timestamp_overflow_is_null() {
+        use common_recordbatch::filter::PruningFilter;
+        use common_time::Timestamp;
+        use datafusion_expr::col;
+        let meta = super::FileMeta {
+            time_range: (
+                Timestamp::new_second(i64::MAX),
+                Timestamp::new_second(i64::MAX),
+            ),
+            ..Default::default()
+        };
+        let filter = PruningFilter::new(&[col("min_ts").is_null()]);
+        assert!(super::manifest_file_matches(&meta, &filter));
+        let filter = PruningFilter::new(&[col("max_ts").is_not_null()]);
+        assert!(!super::manifest_file_matches(&meta, &filter));
+    }
 
     #[test]
     fn test_region_state_lock_free() {
@@ -2089,6 +2259,106 @@ mod tests {
             topic_latest_entry_id: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_manifest_stream_does_not_pin_sst_handles() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use common_recordbatch::filter::PruningFilter;
+        use datafusion_expr::{col, lit};
+        use futures::StreamExt;
+
+        use super::ManifestSstProjection;
+        use crate::sst::file::FileMeta;
+        use crate::sst::file_purger::FilePurger;
+
+        #[derive(Debug, Default)]
+        struct CountingPurger(AtomicUsize);
+
+        impl FilePurger for CountingPurger {
+            fn remove_file(&self, _: FileMeta, is_delete: bool, _: bool) {
+                if is_delete {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+
+        for include_visible in [false, true] {
+            let env = SchedulerEnv::new().await;
+            let region = build_test_region(&env).await;
+            let purger = Arc::new(CountingPurger::default());
+            let files = (0..2)
+                .map(|_| FileMeta {
+                    region_id: region.region_id,
+                    file_id: FileId::random(),
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>();
+            let mut edit = empty_edit();
+            edit.files_to_add = files.clone();
+            region
+                .manifest_ctx
+                .manifest_manager
+                .write()
+                .await
+                .update(
+                    RegionMetaActionList::with_action(RegionMetaAction::Edit(edit.clone())),
+                    false,
+                )
+                .await
+                .unwrap();
+            region
+                .version_control
+                .apply_edit(Some(edit), &[], purger.clone());
+
+            let schema = store_api::sst_entry::ManifestSstEntry::schema();
+            let columns = if include_visible {
+                vec!["file_id", "visible"]
+            } else {
+                vec!["file_id"]
+            };
+            let projection = columns
+                .iter()
+                .map(|name| {
+                    schema
+                        .column_schemas()
+                        .iter()
+                        .position(|column| column.name == *name)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let projection = ManifestSstProjection::new(Some(&projection));
+            let snapshot = region.manifest_visible_file_ids(projection);
+            assert_eq!(snapshot.is_some(), include_visible);
+            if let Some(snapshot) = snapshot {
+                assert_eq!(snapshot, files.iter().map(|file| file.file_id).collect());
+            }
+            // A direct caller may omit a residual column. The source must not
+            // interpret an unmaterialized visible value as grounds for pruning.
+            let filters = PruningFilter::new(&[col("visible").eq(lit(true))]);
+            let mut stream = region.manifest_sst_stream(filters, projection);
+            let first = stream.next().await.unwrap();
+            if include_visible {
+                assert!(first.visible);
+            }
+            let mut removal = empty_edit();
+            removal.files_to_remove = files;
+            region
+                .version_control
+                .apply_edit(Some(removal), &[], purger.clone());
+            // Both final FileHandles must reach the purger while the stream is
+            // suspended at its first yield, rather than waiting for cancellation.
+            assert_eq!(purger.0.load(Ordering::SeqCst), 2);
+            let second = stream.next().await.unwrap();
+            if include_visible {
+                assert!(
+                    second.visible,
+                    "visibility must retain the original snapshot"
+                );
+            }
+            assert!(stream.next().await.is_none());
         }
     }
 
