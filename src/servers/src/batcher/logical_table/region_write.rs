@@ -22,9 +22,12 @@ use arrow::compute;
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
+use common_error::ext::BoxedError;
 use common_grpc::error::Error as GrpcError;
 use common_grpc::flight;
+use common_query::WriteProgress;
 use common_telemetry::tracing_context::TracingContext;
+use operator::write_dispatcher::TrackedWrite;
 use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -69,6 +72,42 @@ pub trait PhysicalFlushPartitionProvider: Send + Sync {
 pub trait PhysicalFlushWriteDispatcher: Send + Sync {
     /// Dispatches one physical flush together, sharing routing refreshes across its writes.
     async fn dispatch(&self, requests: Vec<RegionRequest>) -> Result<usize>;
+
+    async fn dispatch_tracked(
+        &self,
+        requests: Vec<TrackedWrite>,
+        inputs: usize,
+    ) -> Vec<WriteProgress> {
+        let mut progress = vec![WriteProgress::default(); inputs];
+        let total = requests.iter().map(|r| r.owners.len()).sum::<usize>();
+        let owners = requests
+            .iter()
+            .flat_map(|r| r.owners.iter().copied())
+            .collect::<Vec<_>>();
+        match self
+            .dispatch(requests.into_iter().map(|r| r.request).collect())
+            .await
+        {
+            Ok(rows) if rows == total => {
+                for owner in owners {
+                    progress[owner].affected_rows += 1;
+                }
+            }
+            Ok(_) => {
+                return vec![
+                    WriteProgress::failed(BoxedError::new(
+                        error::InternalSnafu {
+                            err_msg: "Unattributable physical write acknowledgement"
+                        }
+                        .build()
+                    ));
+                    inputs
+                ];
+            }
+            Err(error) => return vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+        }
+        progress
+    }
 }
 
 #[derive(Clone)]
@@ -126,6 +165,15 @@ pub(crate) struct WriteDispatcherPhysicalFlushAdapter {
 
 #[async_trait]
 impl PhysicalFlushWriteDispatcher for WriteDispatcherPhysicalFlushAdapter {
+    async fn dispatch_tracked(
+        &self,
+        requests: Vec<TrackedWrite>,
+        inputs: usize,
+    ) -> Vec<WriteProgress> {
+        self.write_dispatcher
+            .dispatch_tracked(requests, inputs)
+            .await
+    }
     async fn dispatch(&self, requests: Vec<RegionRequest>) -> Result<usize> {
         self.write_dispatcher
             .dispatch_with_metrics(
@@ -195,6 +243,7 @@ pub(crate) fn plan_region_batch(
 }
 
 /// Partitions a physical flush while retaining columns needed for rerouting.
+#[cfg(test)]
 pub(crate) fn plan_region_batches(
     combined_batch: RecordBatch,
     physical_table_id: TableId,

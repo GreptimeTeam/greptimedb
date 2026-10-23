@@ -95,6 +95,9 @@ pub struct QueryContext {
     /// Process-local admission for one database in this request. Never sent over the wire.
     #[builder(setter(skip))]
     admitted_write: Option<(String, String)>,
+    /// Preserve storage acknowledgements for protocol-level partial-write accounting.
+    #[builder(setter(skip))]
+    confirmed_writes: bool,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -289,6 +292,15 @@ impl From<&QueryContext> for api::v1::QueryContext {
 }
 
 impl QueryContext {
+    pub fn with_confirmed_writes(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.confirmed_writes = true;
+        ctx
+    }
+
+    pub fn confirmed_writes(&self) -> bool {
+        self.confirmed_writes
+    }
     /// Forks this context with an independent snapshot of mutable session data.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
@@ -750,6 +762,7 @@ impl QueryContextBuilder {
             channel,
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
+            confirmed_writes: false,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),

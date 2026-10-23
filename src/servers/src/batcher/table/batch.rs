@@ -17,12 +17,12 @@ use std::time::Instant;
 
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
+use common_query::WriteProgress;
 use common_telemetry::error;
 use operator::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use operator::metrics::DIST_INGEST_ROW_COUNT;
 use snafu::ResultExt;
-use table::metadata::TableInfoRef;
 
 use crate::batcher::table::flow_notifier::FlowNotifier;
 use crate::batcher::table::metrics::{
@@ -45,15 +45,22 @@ pub(in crate::batcher::table) async fn flush_batch(
     let result = send_batch(&batch, &inserter).await;
     FLUSH_ELAPSED.observe(started.elapsed().as_secs_f64());
     match result {
-        Ok((table, combined)) => {
+        Ok(progress) => {
             FLUSH_TOTAL.inc();
-            FLUSH_ROWS.observe(batch.total_rows as f64);
-            DIST_INGEST_ROW_COUNT
-                .with_label_values(&[batch.submissions[0].ctx.get_db_string().as_str()])
-                .inc_by(batch.total_rows as u64);
-            notify_batches(batch.submissions, Ok(()));
-            // Admission is best-effort and only occurs after affected-row validation.
-            notifier.notify(table, &combined);
+            for (pending, result) in batch.submissions.into_iter().zip(progress) {
+                FLUSH_ROWS.observe(result.affected_rows as f64);
+                DIST_INGEST_ROW_COUNT
+                    .with_label_values(&[pending.ctx.get_db_string().as_str()])
+                    .inc_by(result.affected_rows as u64);
+                if result.error.is_some() {
+                    FLUSH_FAILURES.inc();
+                    FLUSH_DROPPED_ROWS
+                        .inc_by((pending.batch.num_rows() - result.affected_rows) as u64);
+                } else {
+                    notifier.notify(pending.table_info, &pending.batch);
+                }
+                let _ = pending.response_tx.send(result);
+            }
         }
         Err(error) => {
             error!(error; "Failed to flush table batch, rows: {}", batch.total_rows);
@@ -64,7 +71,7 @@ pub(in crate::batcher::table) async fn flush_batch(
     }
 }
 
-async fn send_batch(batch: &Batch, inserter: &Inserter) -> Result<(TableInfoRef, RecordBatch)> {
+async fn send_batch(batch: &Batch, inserter: &Inserter) -> Result<Vec<WriteProgress>> {
     let first = batch.submissions.first().ok_or_else(|| {
         UnexpectedSnafu {
             violated: "cannot execute an empty flush".to_string(),
@@ -72,15 +79,21 @@ async fn send_batch(batch: &Batch, inserter: &Inserter) -> Result<(TableInfoRef,
         .build()
     })?;
     let combined = combine_batches(batch.submissions.iter().map(|pending| &pending.batch))?;
-    let affected_rows = inserter
-        .flush_bulk_batch(
+    let owners = batch
+        .submissions
+        .iter()
+        .enumerate()
+        .flat_map(|(owner, pending)| std::iter::repeat_n(owner, pending.batch.num_rows()))
+        .collect();
+    inserter
+        .flush_bulk_batch_tracked(
             first.table_info.clone(),
-            combined.clone(),
+            combined,
             first.ctx.clone(),
+            owners,
+            batch.submissions.len(),
         )
-        .await?;
-    validate_affected_rows(batch.total_rows, affected_rows)?;
-    Ok((first.table_info.clone(), combined))
+        .await
 }
 
 fn combine_batches<'a>(batches: impl IntoIterator<Item = &'a RecordBatch>) -> Result<RecordBatch> {
@@ -99,15 +112,6 @@ fn combine_batches<'a>(batches: impl IntoIterator<Item = &'a RecordBatch>) -> Re
         .fail();
     }
     concat_batches(&schema, batches).context(ComputeArrowSnafu)
-}
-
-fn validate_affected_rows(expected: usize, actual: usize) -> Result<()> {
-    if expected != actual {
-        return UnexpectedSnafu {
-            violated: format!("batched write affected {actual} rows, expected {expected}; individual results cannot be attributed"),
-        }.fail();
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -144,13 +148,5 @@ mod tests {
         );
         let changed = RecordBatch::try_new(Arc::new(metadata), first.columns().to_vec()).unwrap();
         assert!(combine_batches([&first, &changed]).is_err());
-    }
-
-    #[test]
-    fn test_affected_rows_must_match_before_attribution() {
-        for (expected, actual, valid) in [(0, 0, true), (3, 3, true), (3, 2, false), (3, 4, false)]
-        {
-            assert_eq!(valid, validate_affected_rows(expected, actual).is_ok());
-        }
     }
 }
