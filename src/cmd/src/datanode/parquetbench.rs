@@ -350,6 +350,7 @@ impl ParquetbenchCommand {
                 index_file_size: 0,
                 index_version: 0,
                 num_rows: parquet_meta.file_metadata().num_rows() as u64,
+                num_rows_is_logical: false,
                 num_row_groups: parquet_meta.num_row_groups() as u64,
                 sequence: None,
                 partition_expr: None,

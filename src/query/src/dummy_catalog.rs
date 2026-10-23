@@ -294,6 +294,19 @@ impl DummyTableProvider {
         self.scan_request.lock().unwrap().json_type_hint = hint;
     }
 
+    /// Whether this Mito scan still needs a count hint. Optimizer passes may
+    /// revisit the same aggregate; an already hinted provider is left alone.
+    pub(crate) fn needs_metadata_count_hint(&self) -> bool {
+        self.engine.name() == "mito" && !self.scan_request.lock().unwrap().metadata_count_hint
+    }
+
+    /// Requests exact-count preparation only from the ordinary Mito engine.
+    pub(crate) fn with_metadata_count_hint(&self) {
+        if self.engine.name() == "mito" {
+            self.scan_request.lock().unwrap().metadata_count_hint = true;
+        }
+    }
+
     /// Gets the scan request of the provider.
     #[cfg(test)]
     pub fn scan_request(&self) -> ScanRequest {

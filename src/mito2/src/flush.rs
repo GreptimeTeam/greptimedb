@@ -856,6 +856,7 @@ impl RegionFlushTask {
             index_file_size: sst_info.index_metadata.file_size,
             index_version: 0,
             num_rows: sst_info.num_rows as u64,
+            num_rows_is_logical: false,
             num_row_groups: sst_info.num_row_groups,
             sequence: NonZeroU64::new(max_sequence),
             partition_expr,
