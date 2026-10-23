@@ -111,17 +111,31 @@ impl MockInstanceBuilder {
     async fn rebuild(&self, instance: MockInstanceImpl) -> MockInstanceImpl {
         match self {
             MockInstanceBuilder::Standalone(builder) => {
-                let MockInstanceImpl::Standalone(instance) = instance else {
+                let MockInstanceImpl::Standalone(mut instance) = instance else {
                     unreachable!()
                 };
+                instance.datanode.shutdown().await.unwrap();
+                instance.procedure_manager.stop().await.unwrap();
                 let GreptimeDbStandalone {
                     opts,
                     guard,
                     kv_backend,
                     procedure_manager,
                     event_recorder_handle,
-                    ..
+                    frontend,
+                    datanode,
+                    mito_engine,
                 } = instance;
+                // Procedure loaders retain the old datanode, including its WAL lock.
+                drop((
+                    frontend,
+                    datanode,
+                    mito_engine,
+                    procedure_manager,
+                    event_recorder_handle,
+                ));
+                let (procedure_manager, event_recorder_handle) =
+                    standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
                 MockInstanceImpl::Standalone(
                     builder
                         .build_with(
@@ -130,7 +144,7 @@ impl MockInstanceBuilder {
                             opts,
                             procedure_manager,
                             event_recorder_handle,
-                            false,
+                            true,
                         )
                         .await,
                 )

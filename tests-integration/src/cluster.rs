@@ -58,6 +58,7 @@ use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use frontend::service_config::BatcherOptions;
 use futures::TryStreamExt;
 use hyper_util::rt::TokioIo;
 use meta_client::client::MetaClientBuilder;
@@ -203,6 +204,7 @@ pub struct GreptimeDbClusterBuilder {
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
     frontend_auto_create_table: bool,
+    table_batcher: BatcherOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
@@ -241,6 +243,7 @@ impl GreptimeDbClusterBuilder {
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
             frontend_auto_create_table: true,
+            table_batcher: BatcherOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
@@ -304,6 +307,13 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_frontend_auto_create_table(mut self, auto_create_table: bool) -> Self {
         self.frontend_auto_create_table = auto_create_table;
+        self
+    }
+
+    /// Configures ordinary-table batching for the frontend.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
         self
     }
 
@@ -655,6 +665,7 @@ impl GreptimeDbClusterBuilder {
             event_recorder: self.event_recorder_options.clone(),
             ..Default::default()
         };
+        fe_opts.pending_rows_batcher.table = self.table_batcher.clone();
 
         // Choose a random unused port between [14000, 24000] for local test to avoid conflicts.
         let port_range = 14000..=24000;
