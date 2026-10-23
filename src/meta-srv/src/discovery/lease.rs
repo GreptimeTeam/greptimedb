@@ -103,7 +103,7 @@ mod tests {
     };
     use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::kv_backend::ResettableKvBackendRef;
-    use common_meta::peer::{Peer, PeerDiscovery};
+    use common_meta::peer::Peer;
     use common_meta::rpc::store::PutRequest;
     use common_time::util::current_time_millis;
     use common_workload::DatanodeWorkloadType;
@@ -157,6 +157,7 @@ mod tests {
                 memory_usage_bytes: 0,
                 hostname: String::new(),
                 env_vars,
+                schedulable: None,
             },
         )
         .await;
@@ -199,6 +200,7 @@ mod tests {
                 memory_usage_bytes: 0,
                 hostname: String::new(),
                 env_vars: Default::default(),
+                schedulable: None,
             },
         )
         .await;
@@ -236,6 +238,7 @@ mod tests {
             memory_usage_bytes: 0,
             hostname: "test_hostname".to_string(),
             env_vars: Default::default(),
+            schedulable: None,
         };
 
         let key_prefix = NodeInfoKey::key_prefix_with_role(Role::Frontend);

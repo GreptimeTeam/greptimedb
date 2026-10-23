@@ -23,13 +23,19 @@ use crate::cluster::MetaPeerClientBuilder;
 use crate::error::Result;
 use crate::metasrv::SelectorContext;
 use crate::selector::{Selector, SelectorOptions};
+use crate::test_util::new_node_scheduling_discovery;
 
 /// Returns [SelectorContext] for test purpose.
+///
+/// Its `peer_discovery` is decorated with
+/// [`SchedulingAwarePeerDiscovery`](crate::discovery::node_scheduling::SchedulingAwarePeerDiscovery)
+/// backed by an empty scheduling state, so every datanode is schedulable until a test marks it
+/// otherwise in the same in-memory backend.
 pub fn new_test_selector_context() -> SelectorContext {
     let kv_backend = Arc::new(MemoryKvBackend::new());
     let meta_peer_client = MetaPeerClientBuilder::default()
         .election(None)
-        .in_memory(kv_backend.clone())
+        .in_memory(kv_backend)
         .build()
         .map(Arc::new)
         .unwrap();
@@ -37,7 +43,7 @@ pub fn new_test_selector_context() -> SelectorContext {
     SelectorContext {
         affinity_fallback: Default::default(),
         affinity: Arc::new(NoopAffinity),
-        peer_discovery: meta_peer_client,
+        peer_discovery: Arc::new(new_node_scheduling_discovery(&meta_peer_client).1),
     }
 }
 
