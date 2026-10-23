@@ -452,9 +452,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:

@@ -30,6 +30,9 @@ use tokio::time::error::Elapsed;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to write a batch group"))]
+    BatchWrite { source: std::sync::Arc<Error> },
+
     #[snafu(display("Failed to execute async task"))]
     AsyncTaskExecute {
         #[snafu(implicit)]
@@ -446,6 +449,7 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            Self::BatchWrite { source } => source.status_code(),
             NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
                 source.status_code()
             }
@@ -524,6 +528,7 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            Self::BatchWrite { source } => source.retry_hint(),
             RegionNotReady { .. } | RegionNotFound { .. } => RetryHint::RetryAfterRouteRefresh,
             RegionBusy { .. }
             | ConcurrentQueryLimiterClosed { .. }

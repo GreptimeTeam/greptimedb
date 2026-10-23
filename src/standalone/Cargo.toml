@@ -46,4 +46,6 @@ tokio.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+datanode = { workspace = true, features = ["testing"] }
+mito2 = { workspace = true, features = ["test"] }
 toml.workspace = true

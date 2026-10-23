@@ -1622,7 +1622,7 @@ impl FlushStatus {
 #[cfg(test)]
 mod tests {
     use api::v1::{OpType, Rows};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_error::status_code::StatusCode;
     use datatypes::arrow::datatypes::Schema;
     use datatypes::arrow::record_batch::RecordBatch;
@@ -2062,28 +2062,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_region_closed_notifies_pending_bulk_writes() {
+    async fn test_region_closed_notifies_pending_requests() {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
-        let (bulk_req, output_rx) = new_test_bulk_request(region_id);
+        let (write_req, write_rx) = new_test_write_request(region_id);
+        let (bulk_req, bulk_rx) = new_test_bulk_request(region_id);
+        let (ddl_tx, ddl_rx) = oneshot::channel();
         let status = FlushStatus {
             region_id,
             version_control,
             state: CancellableTaskState::new(),
             pending_task: None,
             closing: false,
-            pending_ddls: Vec::new(),
-            pending_writes: Vec::new(),
+            pending_ddls: vec![SenderDdlRequest {
+                region_id,
+                sender: OptionOutputTx::from(ddl_tx),
+                request: DdlRequest::Truncate(
+                    store_api::region_request::RegionTruncateRequest::All,
+                ),
+            }],
+            pending_writes: vec![write_req],
             pending_bulk_writes: vec![bulk_req],
         };
 
         status.on_region_closed(Arc::new(RegionClosedSnafu { region_id }.build()));
 
-        let err = output_rx
-            .await
-            .expect("pending bulk write must receive explicit error")
-            .unwrap_err();
+        for rx in [write_rx, bulk_rx] {
+            let err = rx.await.unwrap().unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::Cancelled);
+            assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+        }
+        let err = ddl_rx.await.unwrap().unwrap_err();
         assert_eq!(err.status_code(), StatusCode::Cancelled);
+        assert_eq!(err.retry_hint(), RetryHint::RetryAfterRouteRefresh);
     }
 
     #[tokio::test]

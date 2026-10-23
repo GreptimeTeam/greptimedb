@@ -41,6 +41,18 @@ pub use retry_hint::{retry_hint_from_postgres_error, retry_hint_from_postgres_po
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Failed to execute batch request"))]
+    BatchRequest { source: Arc<Error> },
+
+    #[snafu(display(
+        "Region request has {} failed entries; {}",
+        response.failures.len(),
+        response.first_failure().map(|(index, error)| format!("entry {index}: {}", error.output_msg())).unwrap_or_default()
+    ))]
+    PartialRegion {
+        response: Box<api::region::BatchRegionResponse<Error>>,
+    },
+
     #[snafu(display("Empty key is not allowed"))]
     EmptyKey {
         #[snafu(implicit)]
@@ -1167,6 +1179,10 @@ impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         use Error::*;
         match self {
+            Error::PartialRegion { response } => response
+                .first_failure()
+                .map_or(StatusCode::Internal, |(_, error)| error.status_code()),
+            Error::BatchRequest { source } => source.status_code(),
             IllegalServerState { .. }
             | EtcdTxnOpResponse { .. }
             | EtcdFailed { .. }
@@ -1330,6 +1346,8 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            Error::PartialRegion { .. } => RetryHint::Retryable,
+            Error::BatchRequest { source } => source.retry_hint(),
             RetryLater { source, .. } => match source.retry_hint() {
                 RetryHint::RetryAfterRouteRefresh => RetryHint::RetryAfterRouteRefresh,
                 RetryHint::Retryable | RetryHint::NonRetryable => RetryHint::Retryable,

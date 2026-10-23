@@ -53,9 +53,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -83,9 +83,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
-      - uses: arduino/setup-protoc@v3
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc@3.23.4
       - uses: KyleMayes/install-llvm-action@v1
         with:
           version: "14.0"
