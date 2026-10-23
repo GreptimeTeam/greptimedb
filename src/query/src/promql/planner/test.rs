@@ -2199,6 +2199,41 @@ async fn native_fused_unsupported_shape_falls_back() {
     assert_eq!(display, without_flag.display_indent().to_string());
 }
 
+/// A label rewrite stays on the existing plan, which is the one that projects its new label.
+///
+/// The native node's output schema is the table's own time index, fields and tags, so a tree that
+/// rewrote labels would report a label set the existing plan's projection emits and the node cannot.
+/// Each query below writes `newlabel`, which the fixture table does not have (its only tag is
+/// `tag_0`), so a fused plan would visibly lose it.
+#[tokio::test]
+async fn native_fused_label_rewrites_keep_legacy_output_labels() {
+    for query in [
+        // The rewrite at the statement root...
+        r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)")"#,
+        r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0")"#,
+        // ... and below another call, which is the same shape one level deeper.
+        r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
+        r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let display = native.display_indent().to_string();
+        assert!(
+            find_fused_series(&native).is_none(),
+            "`{query}` rewrites labels the node's schema cannot declare: {display}"
+        );
+        assert!(
+            display.contains("newlabel"),
+            "`{query}` must keep the projection that emits its new label: {display}"
+        );
+        let without_flag = build_native_fused_plan(query, false).await;
+        assert_eq!(
+            display,
+            without_flag.display_indent().to_string(),
+            "`{query}` must keep the existing plan, not an approximation of it"
+        );
+    }
+}
+
 /// The flag off: no statement is offered to the native route at all.
 #[tokio::test]
 async fn native_fused_flag_off_keeps_the_existing_plan() {

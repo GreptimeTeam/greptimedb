@@ -470,6 +470,12 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
         PromExpr::Paren(ParenExpr { expr }) => collect_selectors(expr, out),
         PromExpr::Call(call) => {
+            // A label rewrite adds a label the node's output schema cannot declare: that schema is
+            // built from the table's own tags, so folding `label_replace`/`label_join` in would
+            // silently drop the destination label the existing plan projects.
+            if matches!(call.func.name, "label_replace" | "label_join") {
+                return;
+            }
             for arg in &call.args.args {
                 collect_selectors(arg, out);
             }
