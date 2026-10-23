@@ -3108,6 +3108,179 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prom_remote_read_metric_name_permissions() -> TestResult<()> {
+        struct ReadAcl(std::sync::Mutex<Vec<PermissionTableTargets>>);
+        impl PermissionChecker for ReadAcl {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                _: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                Ok(PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                assert!(matches!(req, PermissionReq::Action(auth::PROM_STORE_READ)));
+                self.0.lock().unwrap().push(targets.clone());
+                Ok(match targets {
+                    PermissionTableTargets::Resolved(tables)
+                        if tables.iter().all(|table| table.table == "target") =>
+                    {
+                        PermissionResp::Allow
+                    }
+                    _ => PermissionResp::Reject,
+                })
+            }
+        }
+        let checker = Arc::new(ReadAcl(Default::default()));
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        plugins.insert::<query::query_engine::options::QueryOptions>(
+            query::query_engine::options::QueryOptions {
+                disallow_cross_catalog_query: true,
+            },
+        );
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_plugins(
+            MemTable::table("source", batch.clone()),
+            MemTable::table("target", batch),
+            plugins,
+        )
+        .await?;
+        let name = |op, value: &str| LabelMatcher {
+            name: servers::prom_store::METRIC_NAME_LABEL.into(),
+            value: value.into(),
+            r#type: op as i32,
+        };
+        for matchers in [vec![name(PromMatcherType::Re, ".*")], vec![]] {
+            let response = PromStoreProtocolHandler::read(
+                &instance,
+                ReadRequest {
+                    queries: vec![RemoteQuery {
+                        matchers,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                test_query_ctx(1),
+            )
+            .await
+            .unwrap();
+            let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+            let response = ReadResponse::decode(body.as_slice()).unwrap();
+            assert_eq!(response.results[0].timeseries.len(), 1);
+            assert!(
+                response.results[0].timeseries[0]
+                    .labels
+                    .iter()
+                    .any(|label| label.name == servers::prom_store::METRIC_NAME_LABEL
+                        && label.value == "target")
+            );
+        }
+        // Existing inaccessible names and nonexistent names have identical responses.
+        for metric in ["source", "missing"] {
+            let request = |op| ReadRequest {
+                queries: vec![RemoteQuery {
+                    matchers: vec![name(op, metric)],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let response = PromStoreProtocolHandler::read(
+                &instance,
+                request(PromMatcherType::Re),
+                test_query_ctx(1),
+            )
+            .await
+            .unwrap();
+            let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+            let response = ReadResponse::decode(body.as_slice()).unwrap();
+            assert_eq!(response.results.len(), 1);
+            assert!(response.results[0].timeseries.is_empty());
+            assert_permission_denied(
+                PromStoreProtocolHandler::read(
+                    &instance,
+                    request(PromMatcherType::Eq),
+                    test_query_ctx(1),
+                )
+                .await,
+            );
+        }
+        checker.0.lock().unwrap().clear();
+        // Empty matches still invoke the operation/table permission check.
+        PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    matchers: vec![
+                        name(PromMatcherType::Eq, "source"),
+                        name(PromMatcherType::Neq, "source"),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            checker.0.lock().unwrap().pop().unwrap(),
+            PermissionTableTargets::resolved(vec![])
+        );
+
+        // Reject a forbidden catalog before discovery, including an empty EQ candidate.
+        for mut matchers in [
+            vec![name(PromMatcherType::Re, ".*")],
+            vec![name(PromMatcherType::Eq, "")],
+        ] {
+            matchers.push(LabelMatcher {
+                name: "__database__".into(),
+                value: "other-public".into(),
+                r#type: PromMatcherType::Eq as i32,
+            });
+            let err = PromStoreProtocolHandler::read(
+                &instance,
+                ReadRequest {
+                    queries: vec![RemoteQuery {
+                        matchers,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                test_query_ctx(1),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(StatusCode::AccessDenied, err.status_code());
+            assert!(checker.0.lock().unwrap().is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_prom_remote_read_with_custom_timestamp_and_value_columns() -> TestResult<()> {
         let schema = Arc::new(GtSchema::new(vec![
             ColumnSchema::new(

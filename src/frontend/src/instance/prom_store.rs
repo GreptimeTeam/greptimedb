@@ -29,7 +29,8 @@ use auth::{
 };
 use client::OutputData;
 use common_catalog::{format_full_table_name, parse_optional_catalog_and_schema_from_db_string};
-use common_error::ext::BoxedError;
+use common_error::ext::{BoxedError, ErrorExt};
+use common_error::status_code::StatusCode;
 use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, greptime_value};
@@ -296,20 +297,141 @@ impl Instance {
         &self,
         ctx: QueryContextRef,
         queries: &[Query],
-        query_targets: &[PermissionTableTarget],
-    ) -> ServerResult<Vec<Option<RemoteQueryOutput>>> {
+        query_targets: &[Vec<PermissionTableTarget>],
+        metrics: &mut HashMap<String, u64>,
+    ) -> ServerResult<Vec<QueryResult>> {
         let mut results = Vec::with_capacity(queries.len());
-
-        for (query, target) in queries.iter().zip(query_targets) {
-            let result = self
-                .handle_remote_query(&ctx, &target.catalog, &target.schema, &target.table, query)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteQuerySnafu)?;
-
+        for (query, targets) in queries.iter().zip(query_targets) {
+            let mut result = QueryResult { timeseries: vec![] };
+            for target in targets {
+                // Look up and execute one table at a time. Do not retain live streams
+                // for all matched tables while collecting the response.
+                let Some(output) = self
+                    .handle_remote_query(
+                        &ctx,
+                        &target.catalog,
+                        &target.schema,
+                        &target.table,
+                        query,
+                    )
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?
+                else {
+                    continue;
+                };
+                let RemoteQueryOutput {
+                    table_name,
+                    timestamp_column_name,
+                    value_column_name,
+                    output,
+                } = output;
+                let plan = output.meta.plan.clone();
+                let table_result = to_query_result(
+                    &table_name,
+                    &timestamp_column_name,
+                    &value_column_name,
+                    output,
+                )
+                .await?;
+                result.timeseries.extend(table_result.timeseries);
+                if let Some(ref plan) = plan {
+                    collect_plan_metrics(plan, &mut [metrics]);
+                }
+            }
             results.push(result);
         }
         Ok(results)
+    }
+
+    /// Resolves table targets per query after validating matchers and catalog scope.
+    /// An EQ fixes the candidate name; otherwise, names are listed in the selected
+    /// catalog/schema. All name matchers apply to candidates; only discovered targets
+    /// are filtered for visibility. Final permission checks remain the caller's job.
+    ///
+    /// The outer vector preserves query order, including empty groups; each inner
+    /// vector contains the tables whose results belong to that query.
+    async fn resolve_remote_query_targets(
+        &self,
+        ctx: &QueryContextRef,
+        queries: &[Query],
+    ) -> ServerResult<Vec<Vec<PermissionTableTarget>>> {
+        // Validate every query before enumerating metadata or short-circuiting on an EQ.
+        let matchers = queries
+            .iter()
+            .map(|query| prom_store::MetricNameMatchers::new(&query.matchers))
+            .collect::<ServerResult<Vec<_>>>()?;
+        let disallow_cross_catalog_query = self
+            .plugins
+            .get::<QueryOptions>()
+            .map(|opts| opts.disallow_cross_catalog_query)
+            .unwrap_or_default();
+        let mut query_targets = Vec::with_capacity(queries.len());
+        for (query, matchers) in queries.iter().zip(matchers) {
+            let target =
+                resolve_remote_query_target(ctx, query, matchers.exact_name().unwrap_or_default());
+            if disallow_cross_catalog_query {
+                validate_catalog_and_schema(&target.catalog, &target.schema, ctx)
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?;
+            }
+            let mut names = match matchers.exact_name() {
+                Some(name) => vec![name.to_string()],
+                None => self
+                    .catalog_manager
+                    .table_names(&target.catalog, &target.schema, Some(ctx))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteQuerySnafu)?,
+            };
+            names.retain(|name| !name.is_empty() && matchers.matches(name));
+            names.sort_unstable();
+            names.dedup();
+            let mut targets = Vec::with_capacity(names.len());
+            for name in names {
+                let target = PermissionTableTarget::new(&target.catalog, &target.schema, name);
+                if matchers.exact_name().is_none()
+                    && !self.is_visible_remote_read_target(&target, ctx).await?
+                {
+                    continue;
+                }
+                targets.push(target);
+            }
+            query_targets.push(targets);
+        }
+        Ok(query_targets)
+    }
+
+    /// Filters automatically discovered targets: returns false for tables denied
+    /// by Remote Read ACLs or marked as Metric Engine physical tables via
+    /// `physical_metric_table`. Ordinary Mito tables are not excluded by this check.
+    /// Other errors propagate. Explicit EQ targets bypass this filter.
+    async fn is_visible_remote_read_target(
+        &self,
+        target: &PermissionTableTarget,
+        ctx: &QueryContextRef,
+    ) -> ServerResult<bool> {
+        let checker = self.plugins.get::<PermissionCheckerRef>();
+        if checker.as_ref().uses_table_targets() {
+            match checker
+                .as_ref()
+                .check_permission_with_table_targets(
+                    ctx.current_user(),
+                    PermissionReq::Action(PROM_STORE_READ),
+                    PermissionTableTargets::resolved(vec![target.clone()]),
+                )
+                .context(AuthSnafu)
+            {
+                Ok(_) => {}
+                Err(error) if error.status_code() == StatusCode::PermissionDenied => {
+                    return Ok(false);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(!self
+            .is_physical_query_permission_target(target, ctx)
+            .await?)
     }
 }
 
@@ -598,79 +720,31 @@ impl PromStoreProtocolHandler for Instance {
         interceptor_ref.pre_read(&request, ctx.clone())?;
         let ctx = Arc::new(ctx.fork());
 
-        let table_names = request
-            .queries
-            .iter()
-            .map(prom_store::table_name)
-            .collect::<ServerResult<Vec<_>>>()?;
-        let query_targets = request
-            .queries
-            .iter()
-            .zip(&table_names)
-            .map(|(query, table_name)| resolve_remote_query_target(&ctx, query, table_name))
-            .collect::<Vec<_>>();
-        let disallow_cross_catalog_query = self
-            .plugins
-            .get::<QueryOptions>()
-            .map(|opts| opts.disallow_cross_catalog_query)
-            .unwrap_or_default();
-        if disallow_cross_catalog_query {
-            for target in &query_targets {
-                validate_catalog_and_schema(&target.catalog, &target.schema, &ctx)
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteQuerySnafu)?;
-            }
-        }
+        // Select matching tables per query, filtering inaccessible and physical tables
+        // during automatic discovery.
+        let query_targets = self
+            .resolve_remote_query_targets(&ctx, &request.queries)
+            .await?;
+
         let targets = self
             .resolve_query_permission_targets(
-                PermissionTableTargets::resolved(query_targets.clone()),
+                PermissionTableTargets::resolved(query_targets.iter().flatten().cloned().collect()),
                 &ctx,
             )
             .await?;
+
         self.check_table_permission(&ctx, PermissionReq::Action(PROM_STORE_READ), targets)
             .context(AuthSnafu)?;
 
         let response_type = negotiate_response_type(&request.accepted_response_types)?;
 
-        for query in &request.queries {
-            prom_store::validate_matchers(&query.matchers)?;
-        }
-
         // TODO(dennis): use read_hints to speedup query if possible
-        let results = self
-            .handle_remote_queries(ctx, &request.queries, &query_targets)
-            .await?;
-
         match response_type {
             ResponseType::Samples => {
-                let mut query_results = Vec::with_capacity(results.len());
                 let mut map = HashMap::new();
-                for result in results {
-                    let Some(result) = result else {
-                        query_results.push(QueryResult { timeseries: vec![] });
-                        continue;
-                    };
-                    let RemoteQueryOutput {
-                        table_name,
-                        timestamp_column_name,
-                        value_column_name,
-                        output,
-                    } = result;
-                    let plan = output.meta.plan.clone();
-                    query_results.push(
-                        to_query_result(
-                            &table_name,
-                            &timestamp_column_name,
-                            &value_column_name,
-                            output,
-                        )
-                        .await?,
-                    );
-                    if let Some(ref plan) = plan {
-                        collect_plan_metrics(plan, &mut [&mut map]);
-                    }
-                }
-
+                let query_results = self
+                    .handle_remote_queries(ctx, &request.queries, &query_targets, &mut map)
+                    .await?;
                 let response = ReadResponse {
                     results: query_results,
                 };
