@@ -110,7 +110,16 @@ impl ObjectStoreIo {
             warn!(error; "Failed to delete the conditional create probe {path} of the object store WAL");
         }
         match recreated {
-            Err(error) if reports_existing_object(&error) => Ok(()),
+            // The first create stored this key, so `AlreadyExists` can only
+            // refer to it.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
+                ) =>
+            {
+                Ok(())
+            }
             Err(error) => Err(error).context(WalObjectStoreSnafu {
                 operation: "write",
                 path,
