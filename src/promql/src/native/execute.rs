@@ -3860,9 +3860,17 @@ impl NativeExecutor {
                     .as_ref()
                     .map_or(0, RangeEvaluator::retained_bytes);
                 let emitted = runtime.emitted_bytes();
-                runtime
-                    .buffer
-                    .resize(retained.saturating_add(emitted).saturating_add(held))?;
+                let queued = runtime
+                    .queued
+                    .iter()
+                    .map(|(_, bytes)| *bytes)
+                    .sum::<usize>();
+                runtime.buffer.resize(
+                    queued
+                        .saturating_add(retained)
+                        .saturating_add(emitted)
+                        .saturating_add(held),
+                )?;
                 runtime.enqueue_output(output)?;
             }
         }

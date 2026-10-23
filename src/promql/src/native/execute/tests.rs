@@ -1896,6 +1896,71 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
     );
 }
 
+/// Multiple outputs queued by one merge remain charged until each is pulled.
+#[test]
+fn a_merge_flush_reserves_every_queued_output() {
+    let inner_grid = grid(0, 60_000, 2);
+    let outer_grid = grid(60_000, 60_000, 1);
+    let tree = NativeTree::try_new(window_with(
+        map(evaluated_input(Arc::clone(&inner_grid)), vec![MathOp::Abs]),
+        RangeFunction::LastOverTime,
+        120_000,
+        Some(Arc::clone(&inner_grid)),
+        Arc::clone(&outer_grid),
+    ))
+    .unwrap();
+    let schema = evaluated_schema(Arc::clone(&inner_grid));
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("x", name),
+                0,
+                values,
+                true,
+            ))
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the first merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&first)),
+        vec![(0, vec![Some(1.0)])]
+    );
+    assert_eq!(first.series.metric.tags()[0].value.as_ref(), "a");
+    let window = &execution.state().runtimes[0];
+    assert_eq!(window.queued.len(), 1);
+    let queued_bytes: usize = window.queued.iter().map(|(_, bytes)| *bytes).sum();
+    let retained = window
+        .window
+        .as_ref()
+        .map_or(0, RangeEvaluator::retained_bytes);
+    let emitted = window.emitted_bytes();
+    assert_eq!(
+        window.buffer.reservation.size(),
+        queued_bytes + retained + emitted
+    );
+    assert_eq!(pool.reserved(), execution.state().reserved_bytes());
+
+    let second = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the second merged output is delivered");
+    assert_eq!(
+        addressed(std::slice::from_ref(&second)),
+        vec![(0, vec![Some(3.0)])]
+    );
+    assert_eq!(second.series.metric.tags()[0].value.as_ref(), "b");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
 /// A pool that cannot admit what a collecting chain holds fails the execution and gives everything
 /// back.
 ///
