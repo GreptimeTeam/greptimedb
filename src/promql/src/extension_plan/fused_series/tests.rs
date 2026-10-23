@@ -1285,6 +1285,12 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
     assert_eq!(1, count(&after, "native.root.input.completed_series"));
     // One execution's set, not two: a copy of the original's roots would answer 2 here.
     assert_eq!(original.iter().count(), after.iter().count());
+    let retained = exec
+        .metrics()
+        .expect("the original keeps its runtime roots");
+    assert_eq!(original.iter().count(), retained.iter().count());
+    assert_eq!(1, count(&retained, "native.root.completed_series"));
+    assert_eq!(1, count(&retained, "native.root.input.completed_series"));
 }
 
 /// Dropping a partially consumed execution releases its live reservation but preserves its peak.
