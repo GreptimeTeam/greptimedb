@@ -369,7 +369,6 @@ jobs:
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
         env:
-          CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
           RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           FUZZ_TARGETS: |
             fuzz_create_database
