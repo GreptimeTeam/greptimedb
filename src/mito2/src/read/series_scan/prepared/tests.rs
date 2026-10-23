@@ -172,14 +172,14 @@ async fn write(
 struct ReadRecorder {
     inner: oio::Reader,
     path: String,
-    reads: Arc<Mutex<Vec<String>>>,
+    reads: Arc<Mutex<Vec<(String, mock::BytesRange)>>>,
 }
 impl mock::Read for ReadRecorder {
     async fn read(
         &self,
         range: mock::BytesRange,
     ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
-        self.reads.lock().unwrap().push(self.path.clone());
+        self.reads.lock().unwrap().push((self.path.clone(), range));
         self.inner.read(range).await
     }
 
@@ -187,7 +187,7 @@ impl mock::Read for ReadRecorder {
         &self,
         range: mock::BytesRange,
     ) -> object_store::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
-        self.reads.lock().unwrap().push(self.path.clone());
+        self.reads.lock().unwrap().push((self.path.clone(), range));
         self.inner.open(range).await
     }
 }
@@ -215,9 +215,18 @@ fn scanner_with_projection(
     format: SelectedFormat,
     projection: Vec<usize>,
 ) -> SeriesScan {
+    SeriesScan::new(scan_input(region, store, format, projection), false)
+}
+
+fn scan_input(
+    region: &MitoRegionRef,
+    store: ObjectStore,
+    format: SelectedFormat,
+    projection: Vec<usize>,
+) -> ScanInput {
     let version = region.version();
     let mapper = FlatProjectionMapper::new(&version.metadata, projection).unwrap();
-    let input = ScanInput::builder(region.access_layer.clone(), mapper)
+    ScanInput::builder(region.access_layer.clone(), mapper)
         .with_files(
             version
                 .ssts
@@ -239,8 +248,7 @@ fn scanner_with_projection(
             )
             .unwrap(),
         )
-        .build();
-    SeriesScan::new(input, false)
+        .build()
 }
 
 fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
@@ -319,7 +327,7 @@ async fn prepared_sources_share_discovery_and_read_independently() {
             .lock()
             .unwrap()
             .iter()
-            .any(|p| p.ends_with(".samples"))
+            .any(|(p, _)| p.ends_with(".samples"))
     );
     let left = source.read_series(0..2).unwrap();
     let right = source.read_series(0..2).unwrap();
@@ -328,7 +336,7 @@ async fn prepared_sources_share_discovery_and_read_independently() {
             .lock()
             .unwrap()
             .iter()
-            .any(|p| p.ends_with(".samples"))
+            .any(|(p, _)| p.ends_with(".samples"))
     );
     let (left, right) = tokio::join!(left.try_collect::<Vec<_>>(), right.try_collect::<Vec<_>>());
     let expected = rows(&left.unwrap());
@@ -345,7 +353,7 @@ async fn prepared_sources_share_discovery_and_read_independently() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|p| p.contains("/series/"))
+        .filter(|(p, _)| p.contains("/series/"))
         .count();
     let mut partition_rows = Vec::new();
     for p in 0..3 {
@@ -365,7 +373,7 @@ async fn prepared_sources_share_discovery_and_read_independently() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|p| p.contains("/series/"))
+            .filter(|(p, _)| p.contains("/series/"))
             .count()
     );
     let survivor = source.read_series(0..2).unwrap();
@@ -391,6 +399,17 @@ async fn native_scan_reports_incomplete_coverage_and_uses_prepared_source() {
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
+    assert!(raw_scanner.raw_series_schema(&binding).is_err());
+    assert!(
+        raw_scanner
+            .scan_series_partition(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                0,
+                &binding,
+            )
+            .is_err()
+    );
     assert!(
         raw_scanner
             .prepare_series(
@@ -427,6 +446,17 @@ async fn native_scan_reports_incomplete_coverage_and_uses_prepared_source() {
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
+    assert!(raw_scanner.raw_series_schema(&binding).is_err());
+    assert!(
+        raw_scanner
+            .scan_series_partition(
+                &QueryScanContext::default(),
+                &ExecutionPlanMetricsSet::new(),
+                0,
+                &binding,
+            )
+            .is_err()
+    );
     assert!(
         raw_scanner
             .prepare_series(
@@ -707,5 +737,385 @@ async fn manual_build_repairs_schema_changes(#[case] semantic_type: SemanticType
     for (id, old) in &rebuilt.samples {
         assert_eq!(old.entry(), unchanged.samples[id].entry());
     }
+    engine.stop().await.unwrap();
+}
+
+struct SamplesReadRecorder {
+    inner: Arc<dyn SamplesFormatReader>,
+    requests: Arc<Mutex<Vec<SamplesReadRequest>>>,
+}
+
+impl SamplesFormatReader for SamplesReadRecorder {
+    fn schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
+        self.inner.schema()
+    }
+
+    fn read(
+        &self,
+        request: SamplesReadRequest,
+    ) -> Result<futures::stream::BoxStream<'static, Result<RecordBatch>>> {
+        self.requests.lock().unwrap().push(request.clone());
+        self.inner.read(request)
+    }
+}
+
+#[tokio::test]
+async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
+    use common_time::{Timestamp, range::TimestampRange};
+
+    let (_env, engine, region) = fixture().await;
+    write(&engine, &region, 1, 1500, Some(2.0)).await;
+    write(&engine, &region, 2, 1600, Some(3.0)).await;
+    write(&engine, &region, 0, 1000, Some(4.0)).await;
+    write(&engine, &region, 0, 2000, None).await;
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ReadRecorder {
+                    inner,
+                    path: path.to_owned(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let make_scan = |format| {
+        let mut input = scan_input(
+            &region,
+            store.clone(),
+            format,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        );
+        // Bounds in a finer unit must round up for both inclusive start and exclusive end.
+        input.time_range = TimestampRange::new(
+            Timestamp::new_microsecond(1_000_001),
+            Timestamp::new_microsecond(1_600_001),
+        );
+        SeriesScan::new(input, false)
+    };
+    let legacy = make_scan(SelectedFormat::Legacy);
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let oracle = legacy
+        .scan_series_partition(&ctx, &metrics, 0, &labels(legacy.metadata()))
+        .unwrap()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let scan = make_scan(SelectedFormat::Columnar);
+    scan.prepare_series(&ctx, &metrics, &labels(scan.metadata()))
+        .await
+        .unwrap()
+        .unwrap();
+    let source = scan.prepared.source.get().unwrap().as_ref().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let source = ColumnarPreparedSource {
+        context: source.context.clone(),
+        labels: source.labels.clone(),
+        raw: source.raw.clone(),
+        candidates: source.candidates.clone(),
+        metrics: source.metrics.clone(),
+        reservation: source.reservation.clone(),
+        samples: Arc::new(
+            source
+                .samples
+                .iter()
+                .map(|inner| {
+                    Arc::new(SamplesReadRecorder {
+                        inner: inner.clone(),
+                        requests: requests.clone(),
+                    }) as Arc<dyn SamplesFormatReader>
+                })
+                .collect(),
+        ),
+    };
+    let stream = source.read_series(0..source.num_series()).unwrap();
+    assert!(requests.lock().unwrap().is_empty());
+    let result = stream.try_collect::<Vec<_>>().await.unwrap();
+    // SST time-range pruning is inexact; apply the exact residual bounds to the oracle.
+    let expected = rows(&oracle)
+        .into_iter()
+        .filter(|(_, time, _)| (1001..1601).contains(time))
+        .collect::<Vec<_>>();
+    assert_eq!(expected, rows(&result));
+    assert_eq!(
+        vec![1500, 1600],
+        rows(&result).iter().map(|(_, t, _)| *t).collect::<Vec<_>>()
+    );
+    {
+        let requests = requests.lock().unwrap();
+        assert_eq!(source.samples.len(), requests.len());
+        let ids = source
+            .candidates
+            .iter()
+            .map(|c| c.id)
+            .collect::<BTreeSet<_>>();
+        for request in requests.iter() {
+            assert_eq!(Some(&ids), request.ids.as_ref());
+            assert_eq!(Some(1001), request.start);
+            assert_eq!(Some(1601), request.end);
+        }
+    }
+    // Each selected samples part opens its header once, even when it has multiple series.
+    let mut headers = HashMap::<String, usize>::new();
+    for (path, range) in reads.lock().unwrap().iter() {
+        if path.ends_with(".samples") && range.offset() == 0 {
+            *headers.entry(path.clone()).or_default() += 1;
+        }
+    }
+    assert!(!headers.is_empty());
+    assert!(headers.values().all(|count| *count == 1));
+    requests.lock().unwrap().clear();
+    assert!(
+        source
+            .read_series(1..1)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(source.read_series(0..source.num_series() + 1).is_err());
+    let chunks = source
+        .read_series(1..3)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows(&result), rows(&chunks));
+    assert!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.ids.as_ref().unwrap().len() == 2)
+    );
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case(common_time::timestamp::TimeUnit::Second)]
+#[case(common_time::timestamp::TimeUnit::Millisecond)]
+#[case(common_time::timestamp::TimeUnit::Microsecond)]
+#[case(common_time::timestamp::TimeUnit::Nanosecond)]
+#[tokio::test]
+async fn visibility_uses_named_columns_and_region_time_unit(
+    #[case] unit: common_time::timestamp::TimeUnit,
+) {
+    use common_time::{Timestamp, range::TimestampRange};
+    use datatypes::arrow::array::Int64Array;
+    use datatypes::arrow::datatypes::{DataType, Field, Schema};
+    use store_api::storage::SequenceRange;
+
+    let (_env, engine, region) = fixture().await;
+    let mut metadata = (*region.version().metadata).clone();
+    let time_name = metadata.time_index_column().column_schema.name.clone();
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_schema.name == time_name)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::timestamp_datatype(unit);
+    let mapper = FlatProjectionMapper::new(&Arc::new(metadata), vec![]).unwrap();
+    let input = ScanInput::builder(region.access_layer.clone(), mapper)
+        .with_snapshot_sequence(Some(4))
+        .with_sequence_range(SequenceRange::new(Some(1), Some(5)))
+        .with_time_range(TimestampRange::new(
+            Timestamp::new(-1, unit),
+            Timestamp::new(2, unit),
+        ))
+        .build();
+    let context = StreamContext::seq_scan_ctx(input);
+    let time_type = DataType::Timestamp(unit.into(), None);
+    let values: ArrayRef = Arc::new(Int64Array::from(vec![-2, -1, 0, 1, 2]));
+    let time = cast(&values, &time_type).unwrap();
+    // Neither internal column is at its normal flat-format offset.
+    let batch = RecordBatch::try_new(
+        Arc::new(Schema::new(vec![
+            Field::new(&time_name, time_type, false),
+            Field::new("other", DataType::Int64, false),
+            Field::new(SEQUENCE_COLUMN_NAME, DataType::UInt64, false),
+        ])),
+        vec![
+            time,
+            values,
+            Arc::new(UInt64Array::from(vec![1, 2, 3, 4, 5])),
+        ],
+    )
+    .unwrap();
+    let filtered = filter_visibility(batch.clone(), &context).unwrap();
+    assert_eq!(3, filtered.num_rows());
+    assert_eq!(
+        &[2, 3, 4],
+        filtered
+            .column_by_name(SEQUENCE_COLUMN_NAME)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .as_ref()
+    );
+    assert!(
+        filter_visibility(batch.project(&[0, 1]).unwrap(), &context)
+            .unwrap_err()
+            .to_string()
+            .contains("missing sequence")
+    );
+    assert!(
+        filter_visibility(batch.project(&[1, 2]).unwrap(), &context)
+            .unwrap_err()
+            .to_string()
+            .contains("missing time index")
+    );
+    let wrong_time = RecordBatch::try_from_iter(vec![
+        (time_name.as_str(), batch.column(1).clone()),
+        (SEQUENCE_COLUMN_NAME, batch.column(2).clone()),
+    ])
+    .unwrap();
+    assert!(
+        filter_visibility(wrong_time, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a timestamp")
+    );
+    let wrong_unit = if unit == common_time::timestamp::TimeUnit::Second {
+        common_time::timestamp::TimeUnit::Millisecond
+    } else {
+        common_time::timestamp::TimeUnit::Second
+    };
+    let wrong_time = RecordBatch::try_from_iter(vec![
+        (
+            time_name.as_str(),
+            cast(
+                batch.column(1),
+                &DataType::Timestamp(wrong_unit.into(), None),
+            )
+            .unwrap(),
+        ),
+        (SEQUENCE_COLUMN_NAME, batch.column(2).clone()),
+    ])
+    .unwrap();
+    assert!(
+        filter_visibility(wrong_time, &context)
+            .unwrap_err()
+            .to_string()
+            .contains("expected")
+    );
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
+    use crate::read::range::RowGroupIndex;
+    use crate::series_index::SeriesIndexVersion;
+    use crate::sst::file::FileHandle;
+    use crate::sst::file_purger::NoopFilePurger;
+
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ReadRecorder {
+                    inner,
+                    path: path.to_owned(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let make_context = || {
+        StreamContext::seq_scan_ctx(scan_input(
+            &region,
+            store.clone(),
+            SelectedFormat::Columnar,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        ))
+    };
+    let mut context = make_context();
+    let ranges = context.partition_ranges();
+    validate_inputs(&context, &ranges).unwrap();
+    context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
+        index: context.input.num_files(),
+        row_group_index: -1,
+    }]
+    .into();
+    assert!(
+        validate_inputs(&context, &ranges)
+            .unwrap_err()
+            .to_string()
+            .contains("extension ranges")
+    );
+
+    let mut context = make_context();
+    context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
+        index: 0,
+        row_group_index: i64::MAX,
+    }]
+    .into();
+    assert!(
+        validate_inputs(&context, &ranges[..1])
+            .unwrap_err()
+            .to_string()
+            .contains("complete SST")
+    );
+
+    let mut context = make_context();
+    let mut meta = context.input.files[0].meta_ref().clone();
+    meta.region_id = store_api::storage::RegionId::new(123, 456);
+    context.input.files[0] = FileHandle::new(meta, Arc::new(NoopFilePurger));
+    assert!(
+        validate_inputs(&context, &ranges)
+            .unwrap_err()
+            .to_string()
+            .contains("foreign SST")
+    );
+
+    let mut context = make_context();
+    let index = context.input.series_index.as_mut().unwrap();
+    index.version = Arc::new(SeriesIndexVersion {
+        series_indexes: index.version.series_indexes.clone(),
+        ..Default::default()
+    });
+    assert!(
+        validate_inputs(&context, &ranges)
+            .unwrap_err()
+            .to_string()
+            .contains("no columnar samples")
+    );
+    let scan = SeriesScan::new(context.input, false);
+    let binding = labels(scan.metadata());
+    assert!(scan.raw_series_schema(&binding).is_err());
+    assert!(
+        scan.scan_series_partition(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            0,
+            &binding
+        )
+        .is_err()
+    );
+    assert!(
+        scan.prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &binding
+        )
+        .await
+        .is_err()
+    );
+    assert!(reads.lock().unwrap().is_empty());
     engine.stop().await.unwrap();
 }

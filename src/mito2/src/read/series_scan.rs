@@ -386,6 +386,16 @@ impl SeriesScan {
             );
             return Ok(None);
         }
+        if self.uses_columnar() {
+            let ranges = self
+                .properties
+                .partitions
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
+        }
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,

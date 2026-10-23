@@ -37,10 +37,14 @@ use datatypes::value::ValueRef;
 use futures::TryStreamExt;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use snafu::{IntoError, ResultExt};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::region_engine::{
     PartitionRange, PreparedSeriesSource, RawLabelSource, SendableRawSeriesStream, SeriesInfo,
 };
-use store_api::storage::consts::ReservedColumnId;
+use store_api::storage::FileId;
+use store_api::storage::consts::{ReservedColumnId, SEQUENCE_COLUMN_NAME};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
 
@@ -132,6 +136,93 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
     }
 }
 
+/// Validates the pinned assignments and coverage without opening artifacts.
+pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<()> {
+    collect_inputs(context, ranges).map(|_| ())
+}
+
+fn collect_inputs(
+    context: &StreamContext,
+    ranges: &[PartitionRange],
+) -> Result<(Vec<usize>, HashSet<FileId>)> {
+    let input = &context.input;
+    let metadata = input.region_metadata();
+    let index = input
+        .series_index
+        .as_ref()
+        .ok_or_else(|| invalid("missing columnar index context"))?;
+    let mut files = BTreeMap::<usize, HashSet<i64>>::new();
+    for range in ranges {
+        let range = context
+            .ranges
+            .get(range.identifier)
+            .ok_or_else(|| invalid("invalid prepared scan range"))?;
+        for row_group in &range.row_group_indices {
+            if context.is_mem_range_index(*row_group) {
+                return Err(invalid("columnar prepared reads require flushed memtables"));
+            }
+            if !context.is_file_range_index(*row_group) {
+                return Err(invalid(
+                    "columnar prepared reads do not support extension ranges",
+                ));
+            }
+            files
+                .entry(row_group.index - input.num_memtables())
+                .or_default()
+                .insert(row_group.row_group_index);
+        }
+    }
+    let mut indexes = HashSet::new();
+    let file_indices = files.keys().copied().collect();
+    for (file_idx, groups) in files {
+        let file = &input.files[file_idx];
+        if !groups.contains(&-1)
+            && (groups.len() as u64 != file.meta_ref().num_row_groups
+                || groups
+                    .iter()
+                    .any(|group| *group < 0 || *group as u64 >= file.meta_ref().num_row_groups))
+        {
+            return Err(invalid(
+                "columnar samples require complete SST range assignments",
+            ));
+        }
+        if file.meta_ref().region_id != metadata.region_id {
+            return Err(invalid(
+                "columnar prepared reads do not support foreign SSTs",
+            ));
+        }
+        let mut covered = false;
+        for handle in index.version.series_indexes.values() {
+            if handle.entry().format() == ArtifactFormat::ColumnarSeries
+                && handle
+                    .entry()
+                    .covers_file(file.meta_ref(), metadata.region_id)
+            {
+                indexes.insert(handle.entry().index_uuid);
+                covered = true;
+            }
+        }
+        if !covered {
+            return Err(invalid(format!(
+                "SST {} has no columnar series coverage; run build_series_index()",
+                file.file_id()
+            )));
+        }
+        index
+            .version
+            .samples
+            .get(&file.file_id().file_id())
+            .filter(|handle| handle.entry().artifact.format == ArtifactFormat::ColumnarSamples)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "SST {} has no columnar samples; run build_series_index()",
+                    file.file_id()
+                ))
+            })?;
+    }
+    Ok((file_indices, indexes))
+}
+
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
@@ -163,74 +254,11 @@ impl ColumnarPreparedSource {
             .series_index
             .as_ref()
             .ok_or_else(|| invalid("missing columnar index context"))?;
-        let mut files = BTreeMap::<usize, HashSet<i64>>::new();
-        for range in &ranges {
-            let range = context
-                .ranges
-                .get(range.identifier)
-                .ok_or_else(|| invalid("invalid prepared scan range"))?;
-            for row_group in &range.row_group_indices {
-                if context.is_mem_range_index(*row_group) {
-                    return Err(invalid("columnar prepared reads require flushed memtables"));
-                }
-                if !context.is_file_range_index(*row_group) {
-                    return Err(invalid(
-                        "columnar prepared reads do not support extension ranges",
-                    ));
-                }
-                files
-                    .entry(row_group.index - input.num_memtables())
-                    .or_default()
-                    .insert(row_group.row_group_index);
-            }
-        }
-        let mut indexes = HashSet::new();
+        let (files, indexes) = collect_inputs(&context, &ranges)?;
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
-        for (file_idx, groups) in files {
+        for file_idx in files {
             let file = &input.files[file_idx];
-            if !groups.contains(&-1)
-                && (groups.len() as u64 != file.meta_ref().num_row_groups
-                    || groups
-                        .iter()
-                        .any(|group| *group < 0 || *group as u64 >= file.meta_ref().num_row_groups))
-            {
-                return Err(invalid(
-                    "columnar samples require complete SST range assignments",
-                ));
-            }
-            if file.meta_ref().region_id != metadata.region_id {
-                return Err(invalid(
-                    "columnar prepared reads do not support foreign SSTs",
-                ));
-            }
-            let mut covered = false;
-            for handle in index.version.series_indexes.values() {
-                if handle.entry().format() == ArtifactFormat::ColumnarSeries
-                    && handle
-                        .entry()
-                        .covers_file(file.meta_ref(), metadata.region_id)
-                {
-                    indexes.insert(handle.entry().index_uuid);
-                    covered = true;
-                }
-            }
-            if !covered {
-                return Err(invalid(format!(
-                    "SST {} has no columnar series coverage; run build_series_index()",
-                    file.file_id()
-                )));
-            }
-            let handle = index
-                .version
-                .samples
-                .get(&file.file_id().file_id())
-                .filter(|handle| handle.entry().artifact.format == ArtifactFormat::ColumnarSamples)
-                .ok_or_else(|| {
-                    invalid(format!(
-                        "SST {} has no columnar samples; run build_series_index()",
-                        file.file_id()
-                    ))
-                })?;
+            let handle = &index.version.samples[&file.file_id().file_id()];
             let reader = ColumnarSamplesFormat::default()
                 .reader(index.store.clone(), handle.clone())
                 .await?;
@@ -404,34 +432,63 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         let reservation = self.reservation.clone();
         let stream = async_stream::try_stream! {
             let _reservation = reservation;
-            for ordinal in range {
-                let mut sources = Vec::<BoxedRecordBatchStream>::new();
-                for reader in samples.iter() {
-                    let batch_stream = reader.read(SamplesReadRequest {
+            if range.is_empty() { return; }
+            let unit = context.input.region_metadata().time_index_type().unit();
+            let bounds = context.input.time_range.as_ref();
+            let start = bounds.and_then(|r| *r.start()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
+            let end = bounds.and_then(|r| *r.end()).and_then(|t| t.convert_to_ceil(unit)).map(|t| t.value());
+            let mut sources = Vec::<BoxedRecordBatchStream>::new();
+            for reader in samples.iter() {
+                let candidates = candidates.clone();
+                let range = range.clone();
+                let context = context.clone();
+                let reader = reader.clone();
+                sources.push(Box::pin(async_stream::try_stream! {
+                    let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
+                    // Account for the ID selection retained by the samples reader, including
+                    // B-tree node overhead, before allocating it.
+                    let selection_bytes = range.len() * (std::mem::size_of::<MetricSeriesId>() + 64);
+                    reservation.try_grow(selection_bytes).context(crate::error::MergeCandidateSeriesSnafu)?;
+                    let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
+                    let mut batches = reader.read(SamplesReadRequest {
                         projection: reader.schema().fields().iter().map(|f| f.name().clone()).collect(),
-                        ids: Some(BTreeSet::from([candidates[ordinal].id])),
+                        ids: Some(ids),
+                        start,
+                        end,
                         ..Default::default()
                     })?;
-                    let candidates = candidates.clone();
-                    let context = context.clone();
-                    sources.push(Box::pin(async_stream::try_stream! {
-                        let reservation = MemoryConsumer::new("ColumnarSamplesRead").register(&context.input.scan_memory_pool);
-                        let mut batches = batch_stream;
-                        while let Some(batch) = batches.try_next().await? {
-                            let batch = sample_to_flat(batch, &candidates[ordinal], &context)?;
-                            let batch = filter_visibility(batch, &context)?;
-                            if batch.num_rows() == 0 { continue; }
-                            let bytes = batch.get_array_memory_size();
+                    while let Some(batch) = batches.try_next().await? {
+                        let tables = batch.column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                            .and_then(|a| a.as_any().downcast_ref::<UInt32Array>())
+                            .ok_or_else(|| invalid("missing or invalid sample table ID column"))?;
+                        let tsids = batch.column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+                            .and_then(|a| a.as_any().downcast_ref::<UInt64Array>())
+                            .ok_or_else(|| invalid("missing or invalid sample TSID column"))?;
+                        let mut offset = 0;
+                        while offset < batch.num_rows() {
+                            let id = MetricSeriesId { table_id: tables.value(offset), tsid: tsids.value(offset) };
+                            // Sparse keys begin with the order-preserving table ID/TSID prefix.
+                            let ordinal = candidates[range.clone()].binary_search_by_key(&id, |c| c.id)
+                                .map_err(|_| invalid("sample contains an unselected series"))? + range.start;
+                            let mut end = offset + 1;
+                            while end < batch.num_rows() && tables.value(end) == id.table_id && tsids.value(end) == id.tsid {
+                                end += 1;
+                            }
+                            let flat = sample_to_flat(batch.slice(offset, end - offset), &candidates[ordinal], &context)?;
+                            let flat = filter_visibility(flat, &context)?;
+                            offset = end;
+                            if flat.num_rows() == 0 { continue; }
+                            let bytes = flat.get_array_memory_size();
                             reservation.try_grow(bytes).context(crate::error::MergeCandidateSeriesSnafu)?;
-                            yield batch;
+                            yield flat;
                             reservation.shrink(bytes);
                         }
-                    }));
-                }
-                let mut merged = SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?;
-                while let Some(batch) = merged.try_next().await? {
-                    yield ScanBatch::RecordBatch(batch);
-                }
+                    }
+                }));
+            }
+            let mut merged = SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?;
+            while let Some(batch) = merged.try_next().await? {
+                yield ScanBatch::RecordBatch(batch);
             }
         };
         Ok(raw::make_stream(
@@ -516,34 +573,55 @@ fn sample_to_flat(
 }
 
 fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<RecordBatch> {
-    let sequence = batch
-        .column(batch.num_columns() - 2)
+    let sequence_column = batch
+        .column_by_name(SEQUENCE_COLUMN_NAME)
+        .ok_or_else(|| invalid("missing sequence column __sequence"))?;
+    let sequence = sequence_column
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| invalid("invalid sequence array"))?;
-    let time = batch
-        .column(batch.num_columns() - 4)
-        .as_any()
-        .downcast_ref::<datatypes::arrow::array::TimestampMillisecondArray>()
-        .ok_or_else(|| invalid("invalid timestamp array"))?;
+        .ok_or_else(|| invalid("sequence column __sequence must be UInt64"))?;
+    let metadata = context.input.region_metadata();
+    let timestamp = &metadata.time_index_column().column_schema;
+    let time_column = batch
+        .column_by_name(&timestamp.name)
+        .ok_or_else(|| invalid(format!("missing time index column {}", timestamp.name)))?;
+    let unit = metadata.time_index_type().unit();
+    let (time, actual_unit) = datatypes::timestamp::timestamp_array_to_primitive(time_column)
+        .ok_or_else(|| {
+            invalid(format!(
+                "time index column {} must be a timestamp",
+                timestamp.name
+            ))
+        })?;
+    if common_time::timestamp::TimeUnit::from(actual_unit) != unit {
+        return Err(invalid(format!(
+            "time index column {} has unit {actual_unit:?}, expected {unit:?}",
+            timestamp.name
+        )));
+    }
+    let sequence_filter = context
+        .input
+        .sequence_range
+        .map(|range| range.filter(sequence_column))
+        .transpose()
+        .context(ComputeArrowSnafu)?;
     let filter = BooleanArray::from(
         (0..batch.num_rows())
             .map(|i| {
-                context
-                    .input
-                    .snapshot_sequence
-                    .is_none_or(|max| sequence.value(i) <= max)
+                !sequence.is_null(i)
+                    && !time.is_null(i)
+                    && context
+                        .input
+                        .snapshot_sequence
+                        .is_none_or(|max| sequence.value(i) <= max)
+                    && sequence_filter
+                        .as_ref()
+                        .is_none_or(|filter| filter.value(i))
                     && context.input.time_range.as_ref().is_none_or(|range| {
-                        range.contains(&common_time::Timestamp::new_millisecond(time.value(i)))
+                        range.contains(&common_time::Timestamp::new(time.value(i), unit))
                     })
             })
             .collect::<Vec<_>>(),
     );
-    let batch = filter_record_batch(&batch, &filter).context(ComputeArrowSnafu)?;
-    Ok(crate::read::scan_util::filter_flat_batch_by_sequence(
-        batch.clone(),
-        context.input.sequence_range,
-        true,
-    )?
-    .unwrap_or_else(|| batch.slice(0, 0)))
+    filter_record_batch(&batch, &filter).context(ComputeArrowSnafu)
 }
