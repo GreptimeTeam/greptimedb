@@ -385,14 +385,6 @@ impl Categorizer {
     }
 }
 
-/// Whether any node of `tree` reads more than one series at a time.
-///
-/// Everything the native compiler emits today reads one series: an instant selection, a window and
-/// a point-wise map each select, fold or map the samples of the series they were handed. An
-/// aggregate folds a label set's series together and a binary operation pairs them, so both consume
-/// several series at once. Neither has a compiler producer yet, which is why refusing them costs
-/// nothing today: a tree built some other way is exactly what this check is for, because evaluating
-/// it one region at a time would fold a partial input and answer a wrong query silently.
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};

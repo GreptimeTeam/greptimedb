@@ -1360,9 +1360,11 @@ mod test {
     }
 
     #[test]
-    fn assign_partition_ranges_preserves_requested_partition_count() {
-        let ranges = (0..4)
-            .map(|identifier| PartitionRange {
+    fn assign_partition_ranges_balances_rows_deterministically() {
+        let ranges: Vec<_> = [100, 200, 150, 250]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, num_rows)| PartitionRange {
                 start: common_time::Timestamp::new(
                     identifier as i64,
                     common_time::timestamp::TimeUnit::Second,
@@ -1371,11 +1373,53 @@ mod test {
                     identifier as i64 + 1,
                     common_time::timestamp::TimeUnit::Second,
                 ),
-                num_rows: 1,
-                identifier,
+                num_rows,
+                identifier: identifier + 1,
             })
             .collect();
-        assert_eq!(assign_partition_ranges(ranges, 4).len(), 4);
+        let assigned = assign_partition_ranges(ranges.clone(), 2);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4, 1], vec![2, 3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        let assigned = assign_partition_ranges(ranges.clone(), 5);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4], vec![1], vec![2], vec![], vec![3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        assert_eq!(assign_partition_ranges(vec![], 5), vec![vec![]; 5]);
     }
 
     #[test]
