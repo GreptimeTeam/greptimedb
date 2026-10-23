@@ -316,7 +316,12 @@ impl DfLogicalPlanner {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan_pql(
+        &self,
+        stmt: &EvalStmt,
+        query_ctx: QueryContextRef,
+        native_route_allowed: bool,
+    ) -> Result<LogicalPlan> {
         let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
@@ -345,7 +350,9 @@ impl DfLogicalPlanner {
             stmt,
             &self.engine_state,
             promql_annotations,
-            self.engine_state.experimental_native_promql()
+            native_route_allowed
+                && self.engine_state.experimental_native_promql()
+                && self.engine_state.in_process_region_transport()
                 && crate::promql::planner::native::native_promql_requested(&query_ctx),
         )
         .await
@@ -463,8 +470,16 @@ impl DfLogicalPlanner {
                     alias: eval.alias.clone(),
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
-
-                self.plan(&stmt, query_ctx).await
+                // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
+                // `FusedSeries` node would sit under a SQL root. The in-process encodability
+                // exception is scoped to a plan whose root is the node, so here the node would be
+                // cut off and left in the frontend, where the physical planner cannot build it -
+                // a query that used to answer would fail instead. The route is therefore not
+                // offered for an embedded statement.
+                let QueryStatement::Promql(eval, _alias) = &stmt else {
+                    unreachable!("a TQL eval parses to a PromQL statement");
+                };
+                self.plan_pql(eval, query_ctx, false).await
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -701,7 +716,8 @@ impl LogicalPlanner for DfLogicalPlanner {
     async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx).await,
+            // The statement's own plan is what a region receives, so the native route is offered.
+            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx, true).await,
         }
     }
 
