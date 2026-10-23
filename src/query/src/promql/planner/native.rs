@@ -34,7 +34,7 @@ use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
@@ -46,9 +46,7 @@ use promql_parser::parser::{
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
-use store_api::metric_engine_consts::{
-    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
-};
+use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile, statement_grid};
@@ -167,38 +165,40 @@ impl PromPlanner {
         let logical_scan = metric_scan_and_table_id(&input);
         let has_verified_metric_rewrite = logical_scan.is_some();
         let scan = match logical_scan {
-            Some((mut scan, predicate, table_id)) => {
-                let logical_provider = self
-                    .table_provider
-                    .resolve_table(table_ref.clone())
-                    .await
-                    .context(crate::promql::error::CatalogSnafu)?;
-                let logical_table = self.table_from_source(&logical_provider)?;
-                let meta = &logical_table.table_info().meta;
-                if meta.engine != METRIC_ENGINE_NAME
-                    || !meta
-                        .options
-                        .extra_options
-                        .contains_key(LOGICAL_TABLE_METADATA_KEY)
-                    || logical_table.table_info().ident.table_id != table_id
-                {
+            Some((mut scan, predicate)) => {
+                // Preserve logical field order and the table restriction on the direct physical scan.
+                let source_schema = scan.source.schema();
+                let Some(mut ordered_projection) = fields
+                    .iter()
+                    .map(|field| source_schema.index_of(field).ok())
+                    .collect::<Option<Vec<_>>>()
+                else {
                     return Ok(None);
+                };
+                let original_projection = scan.projection.as_ref();
+                let selected_indices = original_projection
+                    .cloned()
+                    .unwrap_or_else(|| (0..source_schema.fields().len()).collect());
+                for index in selected_indices {
+                    let is_field = fields
+                        .iter()
+                        .any(|field| field == source_schema.field(index).name());
+                    if !is_field && !ordered_projection.contains(&index) {
+                        ordered_projection.push(index);
+                    }
                 }
-                // The physical scan bypasses logical-region request transformation, so preserve
-                // the validated logical-table restriction as a pushed-down scan predicate.
                 scan.filters.push(predicate);
+                scan = TableScanBuilder::from(scan)
+                    .with_projection(Some(ordered_projection))
+                    .build()
+                    .context(DataFusionPlanningSnafu)?;
                 input = LogicalPlan::TableScan(scan.clone());
                 scan
             }
-            None => {
-                if self.ctx.use_tsid {
-                    return Ok(None);
-                }
-                match &input {
-                    LogicalPlan::TableScan(scan) => scan.clone(),
-                    _ => return Ok(None),
-                }
-            }
+            None => match &input {
+                LogicalPlan::TableScan(scan) => scan.clone(),
+                _ => return Ok(None),
+            },
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -424,7 +424,7 @@ fn supports_native_raw_series(engine: &str) -> bool {
 /// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`.
 fn metric_scan_and_table_id(
     plan: &LogicalPlan,
-) -> Option<(datafusion::logical_expr::TableScan, Expr, u32)> {
+) -> Option<(datafusion::logical_expr::TableScan, Expr)> {
     let plan = match plan {
         LogicalPlan::Projection(projection) => projection.input.as_ref(),
         plan => plan,
@@ -444,15 +444,16 @@ fn metric_scan_and_table_id(
     {
         return None;
     }
-    let Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(table_id)), _) =
-        binary.right.as_ref()
-    else {
+    if !matches!(
+        binary.right.as_ref(),
+        Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(_)), _)
+    ) {
         return None;
-    };
+    }
     let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
         return None;
     };
-    Some((scan.clone(), filter.predicate.clone(), *table_id))
+    Some((scan.clone(), filter.predicate.clone()))
 }
 
 fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
