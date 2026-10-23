@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -31,7 +31,8 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
-use crate::compaction::picker::{PickerOutput, new_picker};
+use crate::compaction::picker::history::PickHistory;
+use crate::compaction::picker::{PickerOutput, new_picker_with_history};
 use crate::compaction::scheduler::state::{
     CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
 };
@@ -55,6 +56,7 @@ use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
+    pub(crate) pick_history: Arc<Mutex<PickHistory>>,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
@@ -201,22 +203,29 @@ impl CompactionScheduler {
             )
         });
 
-        // Avoid queuing serial outputs from a stale snapshot. Repicking after each
-        // batch lets newly flushed L0 files outrank L1 work that has not started.
+        // Bound accepted work independently of discovery. Waiting compensation
+        // persists across batches, including when automatic execution is serial.
         let max_picker_outputs = max_background_compactions.min(request.max_parallelism.max(1));
         let region_options = RegionOptions {
             compaction: dynamic_compaction_opts,
             ..request.current_version.options.clone()
         };
-        let picker = new_picker(
+        request
+            .pick_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .discard_selection();
+        let picker = new_picker_with_history(
             &options,
             &region_options,
             Some(max_picker_outputs),
             time_range,
             trigger == CompactionTrigger::Manual,
+            (trigger == CompactionTrigger::Automatic).then(|| request.pick_history.clone()),
         );
         let region_id = request.region_id();
         let CompactionRequest {
+            pick_history: _,
             engine_config,
             current_version,
             access_layer,
@@ -326,6 +335,11 @@ impl CompactionScheduler {
                         )
                         .await;
                 };
+                status
+                    .pick_history
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .accept(&picker_output);
                 prepared.picker_output = picker_output;
                 let Some(status) = self.region_status.get_mut(&region_id) else {
                     return CompactionTransition::NoAction;
@@ -531,6 +545,17 @@ impl CompactionScheduler {
             );
             false
         });
+        if let Some(status) = self.region_status.get(&region_id) {
+            status
+                .pick_history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .accept_inputs(
+                    units
+                        .iter()
+                        .flat_map(|unit| unit.inputs.iter().map(FileHandle::file_id)),
+                );
+        }
         if units.is_empty() {
             return Ok(None);
         }
