@@ -5505,6 +5505,22 @@ impl PromPlanner {
             .map(|idx| schema.field(idx).data_type())
     }
 
+    /// Whether every field column carries a type the region's raw series preflight serves.
+    ///
+    /// That preflight accepts numeric columns and native histograms only, so anything else - a
+    /// string, a boolean, a timestamp - has no raw framing. A route that offered it would fail
+    /// after the logical plan is fixed; declining keeps the existing plan.
+    fn field_columns_are_raw_series_servable(
+        schema: &DFSchemaRef,
+        field_columns: &[String],
+    ) -> bool {
+        field_columns.iter().all(|field| {
+            Self::field_column_type(schema, field).is_some_and(|data_type| {
+                data_type.is_numeric() || data_type == &Self::native_histogram_arrow_type()
+            })
+        })
+    }
+
     fn field_column_is_native_histogram(schema: &DFSchemaRef, field_column: &str) -> bool {
         Self::field_column_type(schema, field_column)
             .is_some_and(|data_type| data_type == &Self::native_histogram_arrow_type())

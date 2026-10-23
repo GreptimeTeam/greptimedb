@@ -916,6 +916,23 @@ async fn build_test_table_provider_with_partition_columns(
         partition_key_indices,
         ConcreteDataType::timestamp_millisecond_datatype(),
         false,
+        ConcreteDataType::float64_datatype(),
+    )
+    .await
+}
+
+/// A table whose single value field has the given type.
+async fn build_test_table_provider_with_field_type(
+    field_type: ConcreteDataType,
+) -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        field_type,
     )
     .await
 }
@@ -927,6 +944,7 @@ async fn build_test_table_provider_with_options(
     partition_key_indices: Vec<usize>,
     timestamp_type: ConcreteDataType,
     append_mode: bool,
+    field_type: ConcreteDataType,
 ) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (schema_name, table_name) in table_name_tuples {
@@ -945,7 +963,7 @@ async fn build_test_table_provider_with_options(
         for i in 0..num_field {
             columns.push(ColumnSchema::new(
                 format!("field_{i}"),
-                ConcreteDataType::float64_datatype(),
+                field_type.clone(),
                 true,
             ));
         }
@@ -1749,6 +1767,7 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
         vec![],
         ConcreteDataType::timestamp_microsecond_datatype(),
         false,
+        ConcreteDataType::float64_datatype(),
     )
     .await;
     let native =
@@ -1760,6 +1779,7 @@ async fn native_fused_non_millisecond_time_index_falls_back() {
         vec![],
         ConcreteDataType::timestamp_microsecond_datatype(),
         false,
+        ConcreteDataType::float64_datatype(),
     )
     .await;
     let without_flag =
@@ -1781,6 +1801,7 @@ async fn native_fused_append_mode_table_falls_back() {
         vec![],
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
+        ConcreteDataType::float64_datatype(),
     )
     .await;
     let native =
@@ -1792,6 +1813,7 @@ async fn native_fused_append_mode_table_falls_back() {
         vec![],
         ConcreteDataType::timestamp_millisecond_datatype(),
         true,
+        ConcreteDataType::float64_datatype(),
     )
     .await;
     let without_flag =
@@ -1819,6 +1841,53 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
 }
 
 /// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
+/// A value field the region's raw scan cannot serve keeps the existing plan.
+///
+/// The preflight serves numeric columns and native histograms only, and the physical layer turns
+/// its refusal into a planning error once the logical plan is fixed. A bare selector over a string
+/// field answered normally before this route existed, so it must keep doing that.
+#[tokio::test]
+async fn native_fused_non_numeric_field_falls_back() {
+    for field_type in [
+        ConcreteDataType::string_datatype(),
+        ConcreteDataType::boolean_datatype(),
+    ] {
+        let native = build_native_fused_plan_with_provider(
+            "some_metric",
+            true,
+            build_test_table_provider_with_field_type(field_type.clone()).await,
+        )
+        .await;
+        let without_flag = build_native_fused_plan_with_provider(
+            "some_metric",
+            false,
+            build_test_table_provider_with_field_type(field_type.clone()).await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&native).is_none(),
+            "{field_type} must not reach the native route"
+        );
+        assert_eq!(
+            native.display_indent().to_string(),
+            without_flag.display_indent().to_string(),
+            "{field_type} must keep the existing plan"
+        );
+    }
+}
+
+/// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
+#[tokio::test]
+async fn native_fused_whole_vector_operation_falls_back() {
+    for query in ["sort(some_metric)", "absent(some_metric)"] {
+        let native = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&native).is_none(),
+            "`{query}` reads the whole vector and must not be placed region-side"
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     let plan = build_native_fused_plan("sum(rate(some_metric[5m]))", true).await;
