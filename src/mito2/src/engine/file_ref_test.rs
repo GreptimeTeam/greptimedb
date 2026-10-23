@@ -53,3 +53,98 @@ async fn get_snapshot_of_file_refs_skips_missing_file_handle_region() {
     assert!(manifest.manifest_version.is_empty());
     assert!(manifest.cross_region_refs.is_empty());
 }
+
+#[tokio::test]
+async fn get_snapshot_preserves_old_index_readers_until_release() {
+    use store_api::region_engine::{RegionEngine, RegionRole};
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::{FileId, FileRef};
+
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+    use crate::region::RegionLeaderState;
+    use crate::sst::file::{FileMeta, IndexType};
+    use crate::sst::version::SstVersion;
+    use crate::test_util::CreateRequestBuilder;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            gc: crate::gc::GcConfig {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let meta = FileMeta {
+        region_id,
+        file_id: FileId::random(),
+        available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+        ..Default::default()
+    };
+    let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+    version.add_files(region.file_purger.clone(), [meta.clone()].into_iter());
+    let old_reader = version.levels()[0].files[&meta.file_id].clone();
+    let current_meta = FileMeta {
+        index_version: 1,
+        ..meta.clone()
+    };
+    version.add_files(
+        region.file_purger.clone(),
+        [current_meta.clone()].into_iter(),
+    );
+    region
+        .manifest_ctx
+        .update_manifest(
+            RegionLeaderState::Writable,
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![current_meta],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            })),
+            false,
+        )
+        .await
+        .unwrap();
+    let snapshot = engine
+        .get_snapshot_of_file_refs([region_id], HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.file_refs[&region_id],
+        HashSet::from([FileRef::new(region_id, meta.file_id, Some(0))])
+    );
+    drop(old_reader);
+    let snapshot = engine
+        .get_snapshot_of_file_refs([region_id], HashMap::new())
+        .await
+        .unwrap();
+    assert!(snapshot.file_refs[&region_id].is_empty());
+    drop(version);
+    let snapshot = engine
+        .get_snapshot_of_file_refs([region_id], HashMap::new())
+        .await
+        .unwrap();
+    assert!(
+        snapshot
+            .file_refs
+            .get(&region_id)
+            .is_none_or(HashSet::is_empty)
+    );
+}

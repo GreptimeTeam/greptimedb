@@ -29,11 +29,13 @@ use crate::sst::range_index::RangeIndexDeleter;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
-    /// Send a request to remove the file.
-    /// If `is_delete` is true, the file will be deleted from the storage.
-    /// Otherwise, only the reference will be removed.
-    /// If `index_outdated` is true, the index file will be deleted regardless of `is_delete`.
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool);
+    /// Releases one metadata version's reference, deleting its index if outdated.
+    /// This never deletes the SST itself.
+    fn remove_file(&self, file_meta: FileMeta, index_outdated: bool);
+
+    /// Purges a retired SST after all metadata versions release their readers.
+    /// This does not release a reference; each version already did so on drop.
+    fn purge_file(&self, file_meta: FileMeta);
 
     /// Retire cached scan results immediately, without waiting for physical deletion.
     fn invalidate_file(&self, _: &FileMeta) {}
@@ -53,9 +55,9 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn remove_file(&self, _file_meta: FileMeta, _is_delete: bool, _index_outdated: bool) {
-        // noop
-    }
+    fn remove_file(&self, _file_meta: FileMeta, _index_outdated: bool) {}
+
+    fn purge_file(&self, _file_meta: FileMeta) {}
 }
 
 /// Purger that purges file for current region.
@@ -208,17 +210,19 @@ impl FilePurger for LocalFilePurger {
         }
     }
 
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool) {
-        if is_delete {
-            schedule_range_index_deletion(
-                &self.scheduler,
-                self.range_index_deleter.as_ref(),
-                file_meta.file_id,
-            );
-            self.delete_file(file_meta);
-        } else if index_outdated {
+    fn remove_file(&self, file_meta: FileMeta, index_outdated: bool) {
+        if index_outdated {
             self.delete_index(file_meta);
         }
+    }
+
+    fn purge_file(&self, file_meta: FileMeta) {
+        schedule_range_index_deletion(
+            &self.scheduler,
+            self.range_index_deleter.as_ref(),
+            file_meta.file_id,
+        );
+        self.delete_file(file_meta);
     }
 }
 
@@ -263,19 +267,17 @@ impl FilePurger for ObjectStoreFilePurger {
         }
     }
 
-    fn remove_file(&self, file_meta: FileMeta, is_delete: bool, _index_outdated: bool) {
-        // if not on local file system, instead inform the global file purger to remove the file reference.
-        // notice that no matter whether the file is deleted or not, we need to remove the reference
-        // because the file is no longer in use nonetheless.
-        // for same reason, we don't care about index_outdated here.
+    fn remove_file(&self, file_meta: FileMeta, _index_outdated: bool) {
+        // GC handles physical SST and index deletion after references are released.
         self.file_ref_manager.remove_file(&file_meta);
-        if is_delete {
-            schedule_range_index_deletion(
-                &self.scheduler,
-                self.range_index_deleter.as_ref(),
-                file_meta.file_id,
-            );
-        }
+    }
+
+    fn purge_file(&self, file_meta: FileMeta) {
+        schedule_range_index_deletion(
+            &self.scheduler,
+            self.range_index_deleter.as_ref(),
+            file_meta.file_id,
+        );
     }
 
     fn new_file(&self, file_meta: &FileMeta) {
@@ -312,6 +314,7 @@ mod tests {
     async fn test_range_index_purge_on_handle_release(
         #[case] gc_enabled: bool,
         #[values(false, true)] is_delete: bool,
+        #[values(false, true)] update_index: bool,
     ) {
         common_telemetry::init_default_ut_logging();
 
@@ -341,7 +344,7 @@ mod tests {
         let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
         object_store.write(&path, vec![0; 4096]).await.unwrap();
 
-        let scheduler = Arc::new(LocalScheduler::new(3));
+        let scheduler = Arc::new(LocalScheduler::new(1));
 
         let index_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let owner = RegionId::new(9, 1);
@@ -371,36 +374,54 @@ mod tests {
         );
 
         {
-            let handle = FileHandle::new(
-                FileMeta {
-                    region_id: sst_file_id.region_id(),
-                    file_id: sst_file_id.file_id(),
-                    time_range: FileTimeRange::default(),
-                    level: 0,
-                    file_size: 4096,
-                    max_row_group_uncompressed_size: 4096,
-                    available_indexes: Default::default(),
-                    indexes: Default::default(),
-                    index_file_size: 0,
-                    index_version: 0,
-                    num_rows: 0,
-                    num_row_groups: 0,
-                    sequence: None,
-                    partition_expr: None,
-                    num_series: 0,
-                    ..Default::default()
-                },
-                file_purger,
+            let meta = FileMeta {
+                region_id: sst_file_id.region_id(),
+                file_id: sst_file_id.file_id(),
+                file_size: 4096,
+                max_row_group_uncompressed_size: 4096,
+                ..Default::default()
+            };
+            let mut version = crate::sst::version::SstVersion::new(
+                crate::test_util::memtable_util::metadata_for_test(),
             );
-            if is_delete {
-                handle.mark_deleted();
+            version.add_files(file_purger, [meta].into_iter());
+            let reader = version.levels()[0].files[&sst_file_id.file_id()].clone();
+            if update_index {
+                for index_version in 1..=2 {
+                    let mut meta = reader.meta_ref().clone();
+                    meta.index_version = index_version;
+                    meta.available_indexes.push(IndexType::InvertedIndex);
+                    let path = location::index_file_path(sst_dir, meta.index_id(), PathType::Bare);
+                    object_store.write(&path, "index").await.unwrap();
+                    version.add_files(reader.file_purger(), [meta].into_iter());
+                }
             }
-            // Retirement must invalidate before any snapshot releases its handle,
-            // for both local purge and object-store GC.
+            if is_delete {
+                version.mark_all_deleted();
+            }
+            // Invalidate before any old index-version reader releases the SST.
             assert_eq!(cache.get_range_result(&cache_key).is_none(), is_delete);
-            let reader = handle.clone();
-            drop(handle);
+            drop(version);
+            // A single-worker queue barrier makes premature purging deterministic.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            scheduler
+                .schedule(Box::pin(async move {
+                    tx.send(()).unwrap();
+                }))
+                .unwrap();
+            rx.await.unwrap();
+            assert!(object_store.exists(&path).await.unwrap());
             assert!(index_store.exists(&index_path).await.unwrap());
+            if update_index {
+                for index_version in 1..=2 {
+                    let path = location::index_file_path(
+                        sst_dir,
+                        RegionIndexId::new(sst_file_id, index_version),
+                        PathType::Bare,
+                    );
+                    assert!(object_store.exists(&path).await.unwrap());
+                }
+            }
             drop(reader);
         }
 
@@ -411,6 +432,19 @@ mod tests {
             gc_enabled || !is_delete
         );
         assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
+        if update_index {
+            for index_version in 1..=2 {
+                let path = location::index_file_path(
+                    sst_dir,
+                    RegionIndexId::new(sst_file_id, index_version),
+                    PathType::Bare,
+                );
+                assert_eq!(
+                    object_store.exists(&path).await.unwrap(),
+                    gc_enabled || !is_delete
+                );
+            }
+        }
     }
 
     #[tokio::test]

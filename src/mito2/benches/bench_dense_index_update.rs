@@ -38,6 +38,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
+use index::target::IndexTarget;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use mito2::read::{Batch, BatchBuilder};
 use mito2::sst::index::Indexer;
@@ -358,7 +359,11 @@ fn bench_dense_index_update(c: &mut Criterion) {
                                 intermediate.clone(),
                                 None,
                                 NonZeroUsize::new(SEGMENT_ROWS).unwrap(),
-                                inverted_columns.clone(),
+                                inverted_columns
+                                    .iter()
+                                    .copied()
+                                    .map(IndexTarget::ColumnId)
+                                    .collect(),
                             )
                         });
                         let bloom = if shape.bloom {

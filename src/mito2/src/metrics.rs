@@ -230,6 +230,14 @@ lazy_static! {
         "Number of SSTs to scan in a scan task",
         vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
     ).unwrap();
+    /// Planned maximum concurrent sources per query scan limit evaluation or compaction reader.
+    /// Includes memtables counted by the file limit, rejected scans, and memory-budgeted scans.
+    pub static ref SCAN_MAX_CONCURRENT_FILES: HistogramVec = register_histogram_vec!(
+        "greptime_mito_scan_max_concurrent_files",
+        "Estimated maximum concurrent files (including memtable sources) per query scan limit evaluation or compaction reader",
+        &[TYPE_LABEL],
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 384.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0],
+    ).unwrap();
     /// Histogram for the number of rows returned per query.
     pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
         "greptime_mito_read_rows_return",

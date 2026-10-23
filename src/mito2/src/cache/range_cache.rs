@@ -439,6 +439,86 @@ mod tests {
         ));
     }
 
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn index_replacement_retirement_invalidates_and_blocks_old_reader_fills(
+        #[values(false, true)] gc_enabled: bool,
+    ) {
+        use common_base::readable_size::ReadableSize;
+        use store_api::region_engine::RegionEngine;
+        use store_api::region_request::RegionRequest;
+        use store_api::storage::RegionId;
+
+        use crate::config::MitoConfig;
+        use crate::gc::GcConfig;
+        use crate::sst::file::IndexType;
+        use crate::sst::version::SstVersion;
+        use crate::test_util::{CreateRequestBuilder, TestEnv};
+
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                range_result_cache_size: ReadableSize::mb(1),
+                gc: GcConfig {
+                    enable: gc_enabled,
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Create(CreateRequestBuilder::new().build()),
+            )
+            .await
+            .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        let cache = engine.cache_manager();
+        let worker = cache.range_result_cache.as_ref().unwrap();
+        let meta = FileMeta {
+            region_id,
+            file_id: FileId::random(),
+            ..Default::default()
+        };
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(region.file_purger.clone(), [meta.clone()].into_iter());
+        let old_reader = version.levels()[0].files[&meta.file_id].clone();
+        let key = range_cache_key(&[meta.file_id]);
+        worker.insert(key.clone(), empty_result());
+        assert!(worker.get(&key).is_some());
+        let loading_key = key.clone().for_cross_range_merge();
+        let (release, gate) = oneshot::channel();
+        let pending = receiver(worker.get_or_load(
+            loading_key.clone(),
+            vec![old_reader.clone()],
+            async move {
+                gate.await.unwrap();
+                Some(empty_result())
+            },
+        ));
+        let updated = FileMeta {
+            index_version: 1,
+            available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+            ..meta
+        };
+        version.add_files(region.file_purger.clone(), [updated.clone()].into_iter());
+        version.remove_files([updated].into_iter());
+
+        // R1-C1: neither a pre-existing flight nor a new request through the old
+        // index handle may refill a range after the current handle is retired.
+        assert!(old_reader.is_deleted());
+        assert!(worker.get(&key).is_none());
+        assert!(matches!(
+            worker.get_or_load(key, vec![old_reader], async { Some(empty_result()) }),
+            RangeCacheLookup::Bypass
+        ));
+        release.send(()).unwrap();
+        assert!(loaded(pending).await.is_some());
+        assert!(worker.get(&loading_key).is_none());
+    }
+
     #[tokio::test]
     async fn admission_rejection_does_not_discard_the_shared_result() {
         let worker = RangeCacheWorker::new(1);

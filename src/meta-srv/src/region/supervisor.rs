@@ -702,7 +702,19 @@ impl RegionSupervisor {
         } else {
             None
         };
-        let exclude_peer_ids = HashSet::from_iter(failure_datanodes.iter().copied());
+        let mut exclude_peer_ids: HashSet<u64> =
+            HashSet::from_iter(failure_datanodes.iter().copied());
+        let unschedulable_datanodes = self
+            .selector_context
+            .peer_discovery
+            .active_datanodes(None)
+            .await
+            .map_err(common_error::ext::BoxedError::new)
+            .context(error::OtherSnafu)?
+            .into_iter()
+            .filter(|datanode| !datanode.is_schedulable())
+            .map(|datanode| datanode.peer.id);
+        exclude_peer_ids.extend(unschedulable_datanodes);
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
                 let opts = SelectorOptions {
@@ -944,6 +956,7 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use common_meta::affinity::NoopAffinity;
     use common_meta::ddl::RegionFailureDetectorController;
     use common_meta::ddl::test_util::{
         test_create_logical_table_task, test_create_physical_table_task,
@@ -964,6 +977,7 @@ pub(crate) mod tests {
     use tokio::time::sleep;
 
     use super::RegionSupervisorSelector;
+    use crate::metasrv::SelectorContext;
     use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
     use crate::procedure::region_migration::RegionMigrationTriggerReason;
     use crate::procedure::region_migration::manager::{
@@ -977,9 +991,19 @@ pub(crate) mod tests {
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
 
     pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
+        new_test_supervisor_with(
+            new_test_selector_context(),
+            RegionSupervisorSelector::NaiveSelector(Arc::new(RandomNodeSelector::new(vec![
+                Peer::empty(1),
+            ]))),
+        )
+    }
+
+    pub(crate) fn new_test_supervisor_with(
+        selector_context: SelectorContext,
+        selector: RegionSupervisorSelector,
+    ) -> (RegionSupervisor, Sender<Event>) {
         let env = TestingEnv::new();
-        let selector_context = new_test_selector_context();
-        let selector = Arc::new(RandomNodeSelector::new(vec![Peer::empty(1)]));
         let context_factory = env.context_factory();
         let region_migration_manager = Arc::new(RegionMigrationManager::new(
             env.procedure_manager().clone(),
@@ -996,7 +1020,7 @@ pub(crate) mod tests {
                 rx,
                 Default::default(),
                 selector_context,
-                RegionSupervisorSelector::NaiveSelector(selector),
+                selector,
                 region_migration_manager,
                 runtime_switch_manager,
                 peer_resolver,
@@ -1202,6 +1226,61 @@ pub(crate) mod tests {
             regions: vec![],
             timestamp: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn test_select_peers_excludes_unschedulable_datanodes() {
+        use std::collections::HashSet as StdHashSet;
+
+        use crate::key::NodeSchedulingRole;
+        use crate::selector::{Selector, SelectorOptions};
+        use crate::test_util::{
+            create_meta_peer_client, new_node_scheduling_discovery, put_datanodes,
+        };
+
+        /// Selector that records the excluded peers and returns a fixed peer.
+        struct ExcludeAssertSelector;
+
+        #[async_trait::async_trait]
+        impl Selector for ExcludeAssertSelector {
+            type Context = SelectorContext;
+            type Output = Vec<Peer>;
+
+            async fn select(
+                &self,
+                _ctx: &Self::Context,
+                opts: SelectorOptions<'_>,
+            ) -> crate::error::Result<Self::Output> {
+                assert_eq!(StdHashSet::from([7, 8]), opts.exclude_peer_ids);
+                Ok(vec![Peer::empty(9)])
+            }
+        }
+
+        // Datanode 7 is marked unschedulable; datanode 8 failed.
+        let client = create_meta_peer_client();
+        put_datanodes(&client, vec![Peer::empty(7)]).await;
+        let (manager, discovery) = new_node_scheduling_discovery(&client);
+        manager
+            .mark_unschedulable(NodeSchedulingRole::Datanode, 7)
+            .await
+            .unwrap();
+
+        let selector_context = SelectorContext {
+            affinity_fallback: Default::default(),
+            affinity: Arc::new(NoopAffinity),
+            peer_discovery: Arc::new(discovery),
+        };
+        let (supervisor, _tx) = new_test_supervisor_with(
+            selector_context,
+            RegionSupervisorSelector::NaiveSelector(Arc::new(ExcludeAssertSelector)),
+        );
+
+        let region_peers = supervisor
+            .select_peers(7, &[RegionId::new(1, 1)], &[8])
+            .await
+            .unwrap();
+        assert_eq!(1, region_peers.len());
+        assert_eq!(Peer::empty(9), region_peers[0].1);
     }
 
     #[tokio::test]

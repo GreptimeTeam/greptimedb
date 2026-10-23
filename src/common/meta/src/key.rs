@@ -3318,6 +3318,7 @@ mod tests {
                     Ok(RangeResponse { kvs, more: false })
                 })
             }),
+            range_async_fn: None,
             batch_get_fn: Some({
                 let batch_get_calls = batch_get_calls.clone();
                 Arc::new(move |req| {

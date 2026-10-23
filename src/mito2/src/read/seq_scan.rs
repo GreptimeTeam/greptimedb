@@ -36,6 +36,7 @@ use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
@@ -44,14 +45,25 @@ use crate::read::range::RangeMeta;
 use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
-    compute_parallel_channel_size, scan_flat_file_ranges, scan_flat_mem_ranges,
-    should_split_flat_batches_for_merge,
+    BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
+    SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
+    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
+
+/// Describes where flat source batches will be merged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlatReadMode {
+    /// Each range is consumed independently.
+    Sequential,
+    /// Range outputs feed a later SeriesScan merge.
+    CrossRangeMerge,
+    /// Sources from all ranges feed the compaction merge.
+    Compaction,
+}
 
 /// Scans a region and returns rows in a sorted sequence.
 ///
@@ -135,6 +147,11 @@ impl SeqScan {
     pub(crate) async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
         assert!(self.stream_ctx.input.compaction);
 
+        // Compaction merges all input files together instead of scanning ranges sequentially.
+        SCAN_MAX_CONCURRENT_FILES
+            .with_label_values(&["compaction"])
+            .observe(self.stream_ctx.input.num_files() as f64);
+
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
         debug_assert_eq!(1, self.properties.partitions.len());
@@ -166,7 +183,7 @@ impl SeqScan {
             build_flat_sources(
                 stream_ctx,
                 part_range,
-                true,
+                FlatReadMode::Compaction,
                 part_metrics,
                 partition_pruner.clone(),
                 &mut sources,
@@ -275,13 +292,19 @@ impl SeqScan {
     pub(crate) async fn build_flat_partition_range_read(
         stream_ctx: &Arc<StreamContext>,
         part_range: &PartitionRange,
-        compaction: bool,
+        read_mode: FlatReadMode,
         part_metrics: &PartitionMetrics,
         partition_pruner: Arc<PartitionPruner>,
         file_scan_semaphore: Option<Arc<Semaphore>>,
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
-        let cache_key = build_range_cache_key(stream_ctx, part_range);
+        let cache_key = build_range_cache_key(stream_ctx, part_range).map(|key| {
+            if read_mode == FlatReadMode::CrossRangeMerge {
+                key.for_cross_range_merge()
+            } else {
+                key
+            }
+        });
         let ctx = stream_ctx.clone();
         let range = *part_range;
         let metrics = part_metrics.clone();
@@ -295,7 +318,7 @@ impl SeqScan {
             Self::build_uncached_partition_range(
                 &ctx,
                 &range,
-                compaction,
+                read_mode,
                 &metrics,
                 partition_pruner,
                 file_scan_semaphore,
@@ -309,7 +332,7 @@ impl SeqScan {
     async fn build_uncached_partition_range(
         stream_ctx: &Arc<StreamContext>,
         part_range: &PartitionRange,
-        compaction: bool,
+        read_mode: FlatReadMode,
         part_metrics: &PartitionMetrics,
         partition_pruner: Arc<PartitionPruner>,
         file_scan_semaphore: Option<Arc<Semaphore>>,
@@ -319,7 +342,7 @@ impl SeqScan {
         let split_batch_size = build_flat_sources(
             stream_ctx,
             part_range,
-            compaction,
+            read_mode,
             part_metrics,
             partition_pruner,
             &mut sources,
@@ -422,7 +445,11 @@ impl SeqScan {
                 let (mut reader, _) = Self::build_flat_partition_range_read(
                     &stream_ctx,
                     &part_range,
-                    compaction,
+                    if compaction {
+                        FlatReadMode::Compaction
+                    } else {
+                        FlatReadMode::Sequential
+                    },
                     &part_metrics,
                     partition_pruner.clone(),
                     file_scan_semaphore.clone(),
@@ -517,9 +544,6 @@ impl SeqScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_limit() {
-            return Ok(());
-        }
         // Check max file count limit for all partitions since we scan them in parallel.
         let total_max_files: usize = self
             .properties
@@ -527,6 +551,15 @@ impl SeqScan {
             .iter()
             .map(|partition| Self::max_files_in_partition(&self.stream_ctx.ranges, partition))
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_max_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_max_files > max_concurrent_files {
@@ -645,12 +678,13 @@ impl fmt::Debug for SeqScan {
 pub(crate) async fn build_flat_sources(
     stream_ctx: &Arc<StreamContext>,
     part_range: &PartitionRange,
-    compaction: bool,
+    read_mode: FlatReadMode,
     part_metrics: &PartitionMetrics,
     partition_pruner: Arc<PartitionPruner>,
     sources: &mut Vec<BoxedRecordBatchStream>,
     semaphore: Option<Arc<Semaphore>>,
 ) -> Result<Option<usize>> {
+    let compaction = read_mode == FlatReadMode::Compaction;
     // Gets range meta.
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     #[cfg(debug_assertions)]
@@ -750,11 +784,17 @@ pub(crate) async fn build_flat_sources(
         }
     }
 
-    // Queries merge one range at a time; compaction merges sources from all ranges.
+    // SeriesScan also merges range outputs. Split at the source, before deduplication
+    // and LastRow selection, so their output batching is preserved by the range cache.
     let needs_merge =
         ordered_sources.iter().flatten().count() > 1 || (compaction && stream_ctx.ranges.len() > 1);
-    let split_batch_size = if needs_merge {
+    let split_batch_size = if needs_merge || read_mode == FlatReadMode::CrossRangeMerge {
         should_split_flat_batches_for_merge(stream_ctx, range_meta).filter(|rows_per_series| {
+            // A single-source range only benefits at the downstream merge. Tiny
+            // splits add cache replay, channel and distribution work per batch.
+            if !needs_merge && *rows_per_series < BATCH_SIZE_THRESHOLD as usize {
+                return false;
+            }
             // Compaction writes every merged batch out, so splitting short series
             // would hand the SST writer and indexer one tiny batch per series.
             !compaction || *rows_per_series >= MIN_COMPACTION_SPLIT_ROWS

@@ -78,6 +78,9 @@ pub(crate) struct ScanRequestFingerprint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum RangeScanStage {
     Data,
+    /// Source batches may be split for a later cross-range merge. Keep their
+    /// cached batch boundaries separate from ordinary sequential scans.
+    DataForCrossRangeMerge,
     CandidateSeries,
     SeriesData(SeriesRange),
 }
@@ -239,6 +242,12 @@ pub(crate) struct RangeScanCacheKey {
 }
 
 impl RangeScanCacheKey {
+    pub(crate) fn for_cross_range_merge(mut self) -> Self {
+        debug_assert_eq!(self.scan.stage, RangeScanStage::Data);
+        self.scan.stage = RangeScanStage::DataForCrossRangeMerge;
+        self
+    }
+
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.row_groups.capacity() * mem::size_of::<(FileId, i64)>()
@@ -585,6 +594,11 @@ fn build_range_cache_key_inner(
     let scan = match stage {
         Some(RangeScanStage::CandidateSeries) => scan.for_candidate_series(),
         Some(RangeScanStage::SeriesData(assignment)) => scan.for_series_data(assignment),
+        Some(RangeScanStage::DataForCrossRangeMerge) => {
+            let mut scan = scan;
+            scan.stage = RangeScanStage::DataForCrossRangeMerge;
+            scan
+        }
         Some(RangeScanStage::Data) | None => scan,
     };
 
@@ -1407,6 +1421,12 @@ mod tests {
         let series_key_0 = build_series_range_cache_key(&ctx, &part_range, range_0).unwrap();
         let series_key_1 = build_series_range_cache_key(&ctx, &part_range, range_1).unwrap();
 
+        let merge_key = data_key.clone().for_cross_range_merge();
+        assert_ne!(merge_key, data_key);
+        assert_ne!(merge_key.scan, candidate_key.scan);
+        assert_ne!(merge_key.scan, series_key_0.scan);
+        assert_eq!(merge_key.row_groups, data_key.row_groups);
+        assert_eq!(merge_key, data_key.clone().for_cross_range_merge());
         assert_ne!(data_key.scan, candidate_key.scan);
         assert_ne!(data_key.scan, series_key_0.scan);
         assert_ne!(candidate_key.scan, series_key_0.scan);

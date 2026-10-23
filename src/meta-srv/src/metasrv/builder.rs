@@ -56,6 +56,7 @@ use store_api::storage::MAX_REGION_SEQ;
 use crate::bootstrap::build_default_meta_peer_client;
 use crate::cache_invalidator::MetasrvCacheInvalidator;
 use crate::cluster::MetaPeerClientRef;
+use crate::discovery::node_scheduling::SchedulingAwarePeerDiscovery;
 use crate::error::{self, BuildWalProviderSnafu, OtherSnafu, Result};
 use crate::event::EventHandlerImpl;
 use crate::gc::{DefaultGcSchedulerCtx, GcScheduler};
@@ -70,6 +71,7 @@ use crate::metasrv::{
     RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorFactoryRef, SelectorRef,
     TABLE_ID_SEQ,
 };
+use crate::node_scheduling::NodeSchedulingManager;
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
@@ -238,7 +240,31 @@ impl MetasrvBuilder {
 
         let meta_peer_client = meta_peer_client
             .unwrap_or_else(|| build_default_meta_peer_client(&election, &in_memory));
-        let database_operator = Arc::new(DatabaseOperator::new(meta_peer_client.clone()));
+
+        let node_scheduling_manager = Arc::new(NodeSchedulingManager::new(kv_backend.clone()));
+
+        // The only place a node scheduling decorator is built. Every consumer that reads the
+        // datanode list (region placement, failover exclusions) must go through
+        // `Metasrv::selector_ctx().peer_discovery`, and building a `PeerDiscoveryRef` from the raw
+        // client is impossible by construction. Bypassing this decorator silently drops the
+        // drain fence, so do not build a second instance.
+        let selector_ctx = SelectorContext {
+            affinity_fallback: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityFallback>())
+                .unwrap_or_default(),
+            affinity: plugins
+                .as_ref()
+                .and_then(|plugins| plugins.get::<AffinityRef>())
+                .unwrap_or_else(|| Arc::new(NoopAffinity)),
+            peer_discovery: Arc::new(SchedulingAwarePeerDiscovery::new(
+                node_scheduling_manager.clone(),
+                meta_peer_client.clone(),
+            )),
+        };
+        // Frontends only; the decorator passes them through unchanged.
+        let database_operator =
+            Arc::new(DatabaseOperator::new(selector_ctx.peer_discovery.clone()));
 
         let event_inserter = Box::new(InsertForwarder::new(
             database_operator.clone(),
@@ -274,18 +300,6 @@ impl MetasrvBuilder {
         let flow_metadata_manager = Arc::new(FlowMetadataManager::new(
             leader_cached_kv_backend.clone() as _,
         ));
-
-        let selector_ctx = SelectorContext {
-            affinity_fallback: plugins
-                .as_ref()
-                .and_then(|plugins| plugins.get::<AffinityFallback>())
-                .unwrap_or_default(),
-            affinity: plugins
-                .as_ref()
-                .and_then(|plugins| plugins.get::<AffinityRef>())
-                .unwrap_or_else(|| Arc::new(NoopAffinity)),
-            peer_discovery: meta_peer_client.clone(),
-        };
 
         let wal_provider = build_wal_provider(&options.wal, kv_backend.clone())
             .await
@@ -679,6 +693,7 @@ impl MetasrvBuilder {
             resource_stat: Arc::new(resource_stat),
             gc_ticker,
             database_operator,
+            node_scheduling_manager,
         })
     }
 }
@@ -916,5 +931,45 @@ mod tests {
                 .unwrap(),
             &resolver
         ));
+    }
+
+    #[tokio::test]
+    async fn test_builder_wires_node_scheduling_discovery() {
+        use common_meta::peer::Peer;
+
+        use crate::key::NodeSchedulingRole;
+        use crate::test_util::put_datanodes;
+
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions {
+                enable_telemetry: false,
+                ..Default::default()
+            })
+            .build()
+            .await
+            .unwrap();
+
+        put_datanodes(
+            metasrv.meta_peer_client(),
+            vec![Peer::empty(1), Peer::empty(2)],
+        )
+        .await;
+        metasrv
+            .node_scheduling_manager()
+            .mark_unschedulable(NodeSchedulingRole::Datanode, 2)
+            .await
+            .unwrap();
+
+        let datanodes = metasrv
+            .selector_ctx()
+            .peer_discovery
+            .active_datanodes(None)
+            .await
+            .unwrap();
+        assert_eq!(2, datanodes.len());
+        for datanode in datanodes {
+            let expected = datanode.peer.id != 2;
+            assert_eq!(Some(expected), datanode.schedulable);
+        }
     }
 }

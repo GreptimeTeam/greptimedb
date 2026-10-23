@@ -37,6 +37,7 @@ use store_api::storage::{ColumnId, FileId, IndexVersion, RegionId};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::region::options::IndexOptions;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
@@ -456,56 +457,73 @@ impl FileMeta {
         self.index_file_size
     }
 
-    /// Check whether the file index is consistent with the given region metadata.
-    pub fn is_index_consistent_with_region(&self, metadata: &[ColumnMetadata]) -> bool {
+    /// Check whether the file index is consistent with the given region metadata
+    /// and index options.
+    pub fn is_index_consistent_with_region(
+        &self,
+        metadata: &[ColumnMetadata],
+        index_options: &IndexOptions,
+    ) -> bool {
         let id_to_indexes = self
             .indexes
             .iter()
             .map(|index| (index.column_id, index))
             .collect::<std::collections::HashMap<_, _>>();
+        let inverted_options = &index_options.inverted_index;
         for column in metadata {
-            if !column.column_schema.is_indexed() {
+            let schema = &column.column_schema;
+            // The index builder never creates these inverted indexes, so expecting
+            // them would make every manual build rebuild the file again.
+            let expects_inverted = schema.is_inverted_indexed()
+                && inverted_options.segment_row_count > 0
+                && !inverted_options
+                    .ignore_column_ids
+                    .contains(&column.column_id);
+            let expects_fulltext = schema.is_fulltext_indexed();
+            let expects_skipping = schema.is_skipping_indexed();
+            if !expects_inverted && !expects_fulltext && !expects_skipping {
                 continue;
             }
-            if let Some(index) = id_to_indexes.get(&column.column_id) {
-                let indexes = &index.created_indexes;
-                if column.column_schema.is_inverted_indexed()
-                    && !indexes.contains(&IndexType::InvertedIndex)
-                {
-                    return false;
-                }
-                if column.column_schema.is_fulltext_indexed()
-                    && !indexes.contains(&IndexType::FulltextIndex)
-                {
-                    return false;
-                }
-                if column
-                    .column_schema
-                    .fulltext_options()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|options| {
-                        options.enable && options.backend == FulltextBackend::Bloom
-                    })
-                    && index.fulltext_bloom_version < FULLTEXT_BLOOM_VERSION
-                {
-                    debug!(
-                        "Fulltext bloom index is outdated, region_id: {}, file_id: {}, column_id: {}, version: {}, current: {}",
-                        self.region_id,
-                        self.file_id,
-                        column.column_id,
-                        index.fulltext_bloom_version,
-                        FULLTEXT_BLOOM_VERSION
-                    );
-                    return false;
-                }
-                if column.column_schema.is_skipping_indexed()
-                    && !indexes.contains(&IndexType::BloomFilterIndex)
-                {
-                    return false;
-                }
-            } else {
+            let missing_index = |index_type: IndexType| {
+                debug!(
+                    "File index is missing, region_id: {}, file_id: {}, column_id: {}, index_type: {:?}",
+                    self.region_id, self.file_id, column.column_id, index_type
+                );
+                false
+            };
+            let Some(index) = id_to_indexes.get(&column.column_id) else {
+                debug!(
+                    "File has no index for column, region_id: {}, file_id: {}, column_id: {}",
+                    self.region_id, self.file_id, column.column_id
+                );
                 return false;
+            };
+            let indexes = &index.created_indexes;
+            if expects_inverted && !indexes.contains(&IndexType::InvertedIndex) {
+                return missing_index(IndexType::InvertedIndex);
+            }
+            if expects_fulltext && !indexes.contains(&IndexType::FulltextIndex) {
+                return missing_index(IndexType::FulltextIndex);
+            }
+            if schema
+                .fulltext_options()
+                .ok()
+                .flatten()
+                .is_some_and(|options| options.enable && options.backend == FulltextBackend::Bloom)
+                && index.fulltext_bloom_version < FULLTEXT_BLOOM_VERSION
+            {
+                debug!(
+                    "Fulltext bloom index is outdated, region_id: {}, file_id: {}, column_id: {}, version: {}, current: {}",
+                    self.region_id,
+                    self.file_id,
+                    column.column_id,
+                    index.fulltext_bloom_version,
+                    FULLTEXT_BLOOM_VERSION
+                );
+                return false;
+            }
+            if expects_skipping && !indexes.contains(&IndexType::BloomFilterIndex) {
+                return missing_index(IndexType::BloomFilterIndex);
             }
         }
         true
@@ -533,13 +551,13 @@ impl fmt::Debug for FileHandle {
         f.debug_struct("FileHandle")
             .field("meta", self.meta_ref())
             .field("compacting", &self.compacting())
-            .field("deleted", &self.inner.deleted.load(Ordering::Relaxed))
+            .field("deleted", &self.is_deleted())
             .finish()
     }
 }
 
 impl FileHandle {
-    /// Creates a handle sharing the file's physical state and original statistics.
+    /// Creates a new logical SST reference. Index replacements must reuse its lifetime.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
@@ -555,6 +573,23 @@ impl FileHandle {
     ) -> FileHandle {
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
+        }
+    }
+
+    /// Replaces an index metadata view without splitting the underlying SST lifetime.
+    pub(crate) fn with_updated_index(&self, meta: FileMeta) -> Self {
+        debug_assert_eq!(self.file_id(), meta.file_id());
+        let primary_key_range = meta
+            .primary_key_range()
+            .or_else(|| self.raw_primary_key_range());
+        let lifetime = self.inner.lifetime.clone();
+        *lifetime.meta.lock().unwrap() = meta.clone();
+        Self {
+            inner: Arc::new(FileHandleInner::with_lifetime(
+                meta,
+                lifetime,
+                primary_key_range,
+            )),
         }
     }
 
@@ -597,8 +632,11 @@ impl FileHandle {
 
     /// Mark the file as deleted and will delete it on drop asynchronously
     pub fn mark_deleted(&self) {
-        if !self.inner.deleted.swap(true, Ordering::Relaxed) {
-            self.inner.file_purger.invalidate_file(&self.inner.meta);
+        if !self.inner.lifetime.deleted.swap(true, Ordering::Relaxed) {
+            self.inner
+                .lifetime
+                .file_purger
+                .invalidate_file(&self.inner.meta);
         }
     }
 
@@ -634,7 +672,7 @@ impl FileHandle {
     }
 
     pub fn file_purger(&self) -> FilePurgerRef {
-        self.inner.file_purger.clone()
+        self.inner.lifetime.file_purger.clone()
     }
 
     pub fn size(&self) -> u64 {
@@ -654,7 +692,7 @@ impl FileHandle {
     }
 
     pub fn is_deleted(&self) -> bool {
-        self.inner.deleted.load(Ordering::Relaxed)
+        self.inner.lifetime.deleted.load(Ordering::Relaxed)
     }
 
     /// Returns bounds aligned to the caller's pinned schema, before any comparison
@@ -760,39 +798,66 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
-    deleted: AtomicBool,
     index_outdated: AtomicBool,
     primary_key_range: RwLock<PrimaryKeyRange>,
-    file_purger: FilePurgerRef,
+    lifetime: Arc<SstLifetime>,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        self.file_purger.remove_file(
+        self.lifetime.file_purger.remove_file(
             self.meta.clone(),
-            self.deleted.load(Ordering::Acquire),
             self.index_outdated.load(Ordering::Acquire),
         );
     }
 }
 
 impl FileHandleInner {
-    /// There should only be one `FileHandleInner` for each file on a datanode
     fn new(
         meta: FileMeta,
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
-    ) -> FileHandleInner {
-        file_purger.new_file(&meta);
-        FileHandleInner {
+    ) -> Self {
+        let lifetime = Arc::new(SstLifetime {
+            meta: Mutex::new(meta.clone()),
+            deleted: AtomicBool::new(false),
+            file_purger,
+        });
+        Self::with_lifetime(meta, lifetime, primary_key_range)
+    }
+
+    fn with_lifetime(
+        meta: FileMeta,
+        lifetime: Arc<SstLifetime>,
+        primary_key_range: Option<(Bytes, Bytes)>,
+    ) -> Self {
+        lifetime.file_purger.new_file(&meta);
+        Self {
             meta,
             compacting: AtomicBool::new(false),
-            deleted: AtomicBool::new(false),
             index_outdated: AtomicBool::new(false),
             primary_key_range: RwLock::new(
                 primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
             ),
-            file_purger,
+            lifetime,
+        }
+    }
+}
+
+/// Physical deletion must wait for readers of every index metadata version.
+/// Independent logical references (for example, copied regions) do not share this guard.
+struct SstLifetime {
+    /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
+    meta: Mutex<FileMeta>,
+    deleted: AtomicBool,
+    file_purger: FilePurgerRef,
+}
+
+impl Drop for SstLifetime {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Acquire) {
+            self.file_purger
+                .purge_file(self.meta.get_mut().unwrap().clone());
         }
     }
 }
@@ -1382,7 +1447,7 @@ mod tests {
             ..Default::default()
         };
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
-        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 2: Superset match. File has more indexes than required.
         file_meta.indexes = vec![ColumnIndexMetadata {
@@ -1394,7 +1459,7 @@ mod tests {
             ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
-        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 3: Missing index type. File has the column but lacks the required index type.
         file_meta.indexes = vec![ColumnIndexMetadata {
@@ -1403,7 +1468,7 @@ mod tests {
             ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, true, false)]; // Requires fulltext too
-        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 4: Missing column. Region requires an index on a column not in the file's index list.
         file_meta.indexes = vec![ColumnIndexMetadata {
@@ -1412,7 +1477,7 @@ mod tests {
             ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)]; // Requires index on column 1
-        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 5: No indexes required by region. Should always be consistent.
         file_meta.indexes = vec![ColumnIndexMetadata {
@@ -1421,12 +1486,12 @@ mod tests {
             ..Default::default()
         }];
         let region_meta = vec![new_column_meta(1, "tag1", false, false, false)]; // No index required
-        assert!(file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 6: Empty file indexes. Region requires an index.
         file_meta.indexes = vec![];
         let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
-        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
 
         // Case 7: Multiple columns, one is inconsistent.
         file_meta.indexes = vec![
@@ -1445,7 +1510,17 @@ mod tests {
             new_column_meta(1, "tag1", true, false, false),
             new_column_meta(2, "tag2", false, true, true), // Requires Fulltext and BloomFilter
         ];
-        assert!(!file_meta.is_index_consistent_with_region(&region_meta));
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
+
+        // Case 8: Inverted indexes the builder skips by index options are not required.
+        file_meta.indexes = vec![];
+        let region_meta = vec![new_column_meta(1, "tag1", true, false, false)];
+        let mut index_options = IndexOptions::default();
+        index_options.inverted_index.ignore_column_ids = vec![1];
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &index_options));
+        let mut index_options = IndexOptions::default();
+        index_options.inverted_index.segment_row_count = 0;
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &index_options));
     }
 
     #[test]
@@ -1478,10 +1553,13 @@ mod tests {
 
         let bloom = fulltext_column(FulltextBackend::Bloom);
         // Written before the version was recorded, i.e. with the old bloom blob.
-        assert!(!file_meta(0).is_index_consistent_with_region(&bloom));
-        assert!(file_meta(FULLTEXT_BLOOM_VERSION).is_index_consistent_with_region(&bloom));
+        assert!(!file_meta(0).is_index_consistent_with_region(&bloom, &IndexOptions::default()));
+        assert!(
+            file_meta(FULLTEXT_BLOOM_VERSION)
+                .is_index_consistent_with_region(&bloom, &IndexOptions::default())
+        );
         // Tantivy indexes carry no bloom version.
         let tantivy = fulltext_column(FulltextBackend::Tantivy);
-        assert!(file_meta(0).is_index_consistent_with_region(&tantivy));
+        assert!(file_meta(0).is_index_consistent_with_region(&tantivy, &IndexOptions::default()));
     }
 }
