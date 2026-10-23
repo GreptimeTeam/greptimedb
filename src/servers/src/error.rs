@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::net::SocketAddr;
 use std::string::FromUtf8Error;
-use std::sync::Arc;
 
 use axum::http::StatusCode as HttpStatusCode;
 use axum::response::{IntoResponse, Response};
@@ -735,9 +734,6 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
-
-    #[snafu(display("Failed to submit batch: {}", source))]
-    SubmitBatch { source: Arc<Error> },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -876,7 +872,6 @@ impl ErrorExt for Error {
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
             Operator { source, .. } => source.status_code(),
-            SubmitBatch { source, .. } => source.status_code(),
         }
     }
 
@@ -911,7 +906,6 @@ impl ErrorExt for Error {
             Partition { source, .. } => source.retry_hint(),
             MetricEngine { source, .. } => source.retry_hint(),
             Operator { source, .. } => source.retry_hint(),
-            SubmitBatch { source, .. } => source.retry_hint(),
 
             MemoryLimitExceeded { source, .. } => source.retry_hint(),
             CollectRecordbatch { source, .. } => source.retry_hint(),

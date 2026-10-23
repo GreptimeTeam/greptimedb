@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use arrow::error::ArrowError;
 use common_error::ext::{BoxedError, ErrorExt};
@@ -29,6 +30,12 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Storage write did not complete: {source}"))]
+    StorageWrite {
+        source: Arc<BoxedError>,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Unsupported input datatypes {:?} in function {}", datatypes, function))]
     UnsupportedInputDataType {
         function: String,
@@ -218,6 +225,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl ErrorExt for Error {
     fn status_code(&self) -> StatusCode {
         match self {
+            Error::StorageWrite { source, .. } => source.status_code(),
             Error::InvalidInputState { .. }
             | Error::ToScalarValue { .. }
             | Error::GetScalarVector { .. }

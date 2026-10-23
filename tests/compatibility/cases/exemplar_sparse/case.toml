@@ -1,0 +1,8 @@
+name = "exemplar_sparse"
+reason = "Preserve ordinary sparse string keys, append duplicates, nanosecond timestamps and JSON2 across restart."
+introduced_by = "persistent_metric_exemplars"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.4.0-alpha.0"]
+to_range = [">=v1.4.0-alpha.0"]
+features = ["sparse", "json2", "table", "read"]
+owner = "mito2"

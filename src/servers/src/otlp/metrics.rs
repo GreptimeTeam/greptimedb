@@ -51,6 +51,7 @@ use crate::semantic::{
     METRIC_TYPE_UPDOWN_COUNTER,
 };
 
+mod exemplars;
 mod prepare;
 mod resource_info;
 
@@ -110,6 +111,8 @@ const MAX_REJECTION_MESSAGE_BYTES: usize = 512;
 /// Result of converting one OTLP metrics request.
 #[derive(Debug)]
 pub struct MetricsConversion {
+    pub exemplars: RowInsertRequests,
+    pub exemplar_rows: usize,
     pub requests: RowInsertRequests,
     /// Row count of `requests`; the resource descriptor is not counted.
     pub rows: usize,
@@ -391,6 +394,7 @@ fn process_scope_attrs(scope: &ScopeMetrics, metric_ctx: &OtlpMetricCtx) -> Opti
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_metrics(
     table_writer: &mut MultiTableData,
     metric: &Metric,
@@ -399,6 +403,7 @@ fn encode_metrics(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let name = &metadata.name;
 
@@ -412,6 +417,7 @@ fn encode_metrics(
                     resource_attrs,
                     scope_attrs,
                     metric_ctx,
+                    exemplars,
                 )?;
                 add_accepted_data_points(outcome, gauge.data_points.len())?;
             }
@@ -423,6 +429,7 @@ fn encode_metrics(
                     resource_attrs,
                     scope_attrs,
                     metric_ctx,
+                    exemplars,
                 )?;
                 add_accepted_data_points(outcome, sum.data_points.len())?;
             }
@@ -445,6 +452,7 @@ fn encode_metrics(
                 scope_attrs,
                 metric_ctx,
                 outcome,
+                exemplars,
             )?,
             metric::Data::ExponentialHistogram(hist) => encode_exponential_histogram(
                 table_writer,
@@ -454,6 +462,7 @@ fn encode_metrics(
                 scope_attrs,
                 metric_ctx,
                 outcome,
+                exemplars,
             )?,
         }
     }
@@ -538,6 +547,7 @@ fn append_rejection_message(message: &mut Option<String>, reason: impl FnOnce() 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_exponential_histogram(
     table_writer: &mut MultiTableData,
     metadata: &MetricMetadata,
@@ -546,6 +556,7 @@ fn encode_exponential_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let name = &metadata.name;
     let temporality = match exponential_histogram_gate(histogram) {
@@ -605,6 +616,14 @@ fn encode_exponential_histogram(
             table,
             std::iter::once((column_schema.clone(), Some(value))),
             &mut row,
+        )?;
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
         )?;
         table.add_row(row);
         add_accepted_data_points(outcome, 1)?;
@@ -898,11 +917,15 @@ fn write_attributes(
                 )
             }
         };
-        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL {
+        // OTLP attribute keys may include __name__, but Prometheus metric identity comes from
+        // the OTLP metric name. Reject collisions after translation and scope prefixing.
+        // https://opentelemetry.io/docs/specs/otel/compatibility/prometheus_and_openmetrics/#metric-metadata-1
+        if key == OTLP_AGGREGATION_TEMPORALITY_LABEL || key == crate::prom_store::METRIC_NAME_LABEL
+        {
             return Err(error::InvalidOtlpMetricInputSnafu {
                 reason: format!(
                     "OTLP attribute `{}` resolves to reserved label `{}`",
-                    attr.key, OTLP_AGGREGATION_TEMPORALITY_LABEL
+                    attr.key, key
                 ),
             }
             .build());
@@ -1026,6 +1049,7 @@ fn encode_gauge(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let table = table_writer.get_or_default_table_data(
         name,
@@ -1046,6 +1070,14 @@ fn encode_gauge(
         )?;
 
         write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
+        )?;
         table.add_row(row);
     }
 
@@ -1061,6 +1093,7 @@ fn encode_sum(
     resource_attrs: Option<&Vec<KeyValue>>,
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let is_delta = matches!(
         AggregationTemporality::try_from(sum.aggregation_temporality),
@@ -1094,6 +1127,14 @@ fn encode_sum(
         } else {
             write_data_point_value(table, &mut row, greptime_value(), &data_point.value)?;
         }
+        exemplars::append(
+            exemplars,
+            &data_point.exemplars,
+            name,
+            table,
+            &row,
+            metric_ctx,
+        )?;
         table.add_row(row);
     }
 
@@ -1115,6 +1156,7 @@ const HISTOGRAM_LE_COLUMN: &str = "le";
 /// quantile functions on this table.
 /// Delta points retain their temporality tag and interval values. Bucket counts
 /// are prefix-summed within each point, never accumulated across timestamps.
+#[allow(clippy::too_many_arguments)]
 fn encode_histogram(
     table_writer: &mut MultiTableData,
     name: &str,
@@ -1123,6 +1165,7 @@ fn encode_histogram(
     scope_attrs: Option<&Vec<KeyValue>>,
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
+    exemplars: &mut Vec<crate::exemplar::Exemplar>,
 ) -> Result<()> {
     let normalized_name = name;
 
@@ -1185,7 +1228,28 @@ fn encode_histogram(
             }
             values
         };
-        for (bound, value) in bucket_values {
+        let mut by_bucket = vec![Vec::new(); bucket_values.len()];
+        for exemplar in &data_point.exemplars {
+            let value = match exemplars::value(exemplar) {
+                Ok(value) => value,
+                Err(_) => {
+                    crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                        .with_label_values(&["otlp"])
+                        .inc();
+                    continue;
+                }
+            };
+            let Some(bucket) = bucket_values.iter().position(|(bound, _)| {
+                value <= *bound || (value.is_nan() && *bound == f64::INFINITY)
+            }) else {
+                crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                    .with_label_values(&["otlp"])
+                    .inc();
+                continue;
+            };
+            by_bucket[bucket].push(exemplar);
+        }
+        for ((bound, value), bucket_exemplars) in bucket_values.into_iter().zip(by_bucket) {
             let mut bucket_row = bucket_table.alloc_one_row();
             write_tags_and_timestamp(
                 bucket_table,
@@ -1197,9 +1261,18 @@ fn encode_histogram(
                 metric_ctx,
             )?;
             write_temporality_tag(bucket_table, &mut bucket_row, is_delta)?;
+            // Preserve existing OTLP series identities, including the "inf" bucket.
             row_writer::write_tag(bucket_table, HISTOGRAM_LE_COLUMN, bound, &mut bucket_row)?;
             row_writer::write_f64(bucket_table, greptime_value(), value, &mut bucket_row)?;
 
+            exemplars::append(
+                exemplars,
+                bucket_exemplars,
+                &bucket_table_name,
+                bucket_table,
+                &bucket_row,
+                metric_ctx,
+            )?;
             bucket_table.add_row(bucket_row);
         }
 
@@ -1411,14 +1484,15 @@ fn encode_summary(
 mod tests {
     use api::v1::ColumnDataType;
     use common_query::prelude::set_default_prefix;
-    use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, InstrumentationScope};
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::summary_data_point::ValueAtQuantile;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
         AggregationTemporality, HistogramDataPoint, NumberDataPoint, SummaryDataPoint,
     };
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+    use session::protocol_ctx::OtlpMetricTranslationStrategy;
 
     use super::*;
 
@@ -1536,8 +1610,19 @@ mod tests {
     }
 
     #[test]
-    fn test_descriptors_exclude_points_rejected_by_destination_preflight() {
+    fn test_descriptors_and_exemplars_exclude_points_rejected_by_destination_preflight() {
         let mut request = gauge_request(vec![keyvalue("service.name", "api")], "accepted");
+        let Some(metric::Data::Gauge(gauge)) = request.resource_metrics[0].scope_metrics[0].metrics
+            [0]
+        .data
+        .as_mut() else {
+            unreachable!()
+        };
+        gauge.data_points[0].exemplars.push(Exemplar {
+            time_unix_nano: 1,
+            value: Some(exemplar::Value::AsDouble(0.5)),
+            ..Default::default()
+        });
         let mut rejected = request.resource_metrics[0].clone();
         let metric = &mut rejected.scope_metrics[0].metrics[0];
         metric.name = "rejected".into();
@@ -1548,6 +1633,7 @@ mod tests {
             2 * common_catalog::consts::SEMANTIC_GRAPH_WINDOW_NANOS as u64;
         request.resource_metrics.push(rejected);
         let prepared = prepare_metrics(request, &mut descriptor_ctx()).unwrap();
+        assert!(prepared.has_exemplars());
         let conversion = prepared
             .finish(
                 vec![None, Some("incompatible schema".into())],
@@ -1560,6 +1646,17 @@ mod tests {
                 conversion.outcome.rejected_data_points
             ),
             (1, 1)
+        );
+        assert_eq!(conversion.exemplar_rows, 1);
+        let exemplar_rows = conversion.exemplars.inserts[0].rows.as_ref().unwrap();
+        let metric = exemplar_rows
+            .schema
+            .iter()
+            .position(|c| c.column_name == common_query::prelude::EXEMPLAR_METRIC_COLUMN)
+            .unwrap();
+        assert_eq!(
+            exemplar_rows.rows[0].values[metric].value_data,
+            Some(ValueData::StringValue("accepted".into()))
         );
         let descriptors = conversion.resource_info.unwrap();
         let rows = descriptors.inserts[0].rows.as_ref().unwrap();
@@ -1662,6 +1759,84 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_metric_name_attribute() {
+        set_default_prefix(None).unwrap();
+        for (strategy, key) in [
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithSuffixes,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithoutSuffixes,
+                "__name__",
+            ),
+            (
+                OtlpMetricTranslationStrategy::NoUtf8EscapingWithSuffixes,
+                "__name__",
+            ),
+            (OtlpMetricTranslationStrategy::NoTranslation, "__name__"),
+            (
+                OtlpMetricTranslationStrategy::UnderscoreEscapingWithSuffixes,
+                "..name..",
+            ),
+        ] {
+            for source in [
+                AttributeType::Resource,
+                AttributeType::Scope,
+                AttributeType::DataPoint,
+            ] {
+                let mut request = gauge_request(vec![], "source_metric");
+                let resource = &mut request.resource_metrics[0];
+                let scope = &mut resource.scope_metrics[0];
+                let Some(metric::Data::Gauge(gauge)) = scope.metrics[0].data.as_mut() else {
+                    unreachable!();
+                };
+                gauge.data_points[0].exemplars.push(Exemplar {
+                    value: Some(exemplar::Value::AsDouble(0.25)),
+                    time_unix_nano: 1_000_000,
+                    ..Default::default()
+                });
+                let attributes = vec![keyvalue(key, "wrong_metric")];
+                match source {
+                    AttributeType::Resource => {
+                        resource.resource.as_mut().unwrap().attributes = attributes;
+                    }
+                    AttributeType::Scope => {
+                        scope.scope = Some(InstrumentationScope {
+                            attributes,
+                            ..Default::default()
+                        });
+                    }
+                    AttributeType::DataPoint => gauge.data_points[0].attributes = attributes,
+                }
+                let mut ctx = OtlpMetricCtx {
+                    metric_translation_strategy: strategy,
+                    promote_all_resource_attrs: true,
+                    promote_scope_attrs: true,
+                    ..Default::default()
+                };
+                let result = to_grpc_insert_requests(request, &mut ctx);
+                if source == AttributeType::Scope {
+                    let conversion = result.unwrap();
+                    assert_eq!(1, conversion.exemplar_rows);
+                    assert!(
+                        column_names(&conversion.requests, "source_metric")
+                            .contains(&"otel_scope___name__".to_string())
+                    );
+                } else {
+                    let conversion = result.unwrap();
+                    assert_eq!(conversion.outcome.accepted_data_points, 0);
+                    assert_eq!(conversion.outcome.rejected_data_points, 1);
+                    assert_eq!(conversion.exemplar_rows, 0);
+                    assert!(conversion.outcome.error_message.unwrap().contains(&format!(
+                        "OTLP attribute `{key}` resolves to reserved label `__name__`"
+                    )));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_boolean_attributes_keep_series_distinct() {
         set_default_prefix(None).unwrap();
         let request = metrics_request(vec![Metric {
@@ -1745,6 +1920,7 @@ mod tests {
             Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -1795,6 +1971,7 @@ mod tests {
             Some(&vec![]),
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -1931,6 +2108,7 @@ mod tests {
             Some(&vec![keyvalue("scope", "otel")]),
             &OtlpMetricCtx::default(),
             &mut outcome,
+            &mut Vec::new(),
         )
         .unwrap();
 
@@ -2551,6 +2729,168 @@ mod tests {
                 }],
                 ..Default::default()
             }],
+        }
+    }
+
+    #[test]
+    fn test_invalid_exemplars_preserve_metric_payload() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        let valid = Exemplar {
+            time_unix_nano: 1,
+            value: Some(exemplar::Value::AsDouble(0.5)),
+            ..Default::default()
+        };
+        for invalid in [
+            Exemplar::default(),
+            Exemplar {
+                trace_id: vec![1],
+                ..valid.clone()
+            },
+            Exemplar {
+                span_id: vec![1],
+                ..valid.clone()
+            },
+            Exemplar {
+                time_unix_nano: u64::MAX,
+                ..valid.clone()
+            },
+            Exemplar {
+                filtered_attributes: vec![keyvalue("http.url", &"x".repeat(128))],
+                ..valid.clone()
+            },
+        ] {
+            let exemplars = vec![invalid.clone(), valid.clone(), invalid, valid.clone()];
+            let point = NumberDataPoint {
+                time_unix_nano: 1,
+                value: Some(Value::AsDouble(1.0)),
+                exemplars: exemplars.clone(),
+                ..Default::default()
+            };
+            let metrics = vec![
+                Metric {
+                    name: "gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![point.clone()],
+                    })),
+                    ..Default::default()
+                },
+                Metric {
+                    name: "sum".into(),
+                    data: Some(metric::Data::Sum(Sum {
+                        data_points: vec![point],
+                        aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+                exponential_metric(
+                    "histogram",
+                    vec![ExponentialHistogramDataPoint {
+                        exemplars,
+                        ..exponential_point()
+                    }],
+                    AggregationTemporality::Cumulative,
+                ),
+            ];
+            let conversion =
+                to_grpc_insert_requests(metrics_request(metrics), &mut OtlpMetricCtx::default())
+                    .unwrap();
+            assert_eq!(conversion.rows, 3);
+            assert_eq!(conversion.outcome.accepted_data_points, 3);
+            assert_eq!(conversion.outcome.rejected_data_points, 0);
+            assert_eq!(conversion.exemplar_rows, 6);
+        }
+    }
+
+    #[test]
+    fn test_unassignable_histogram_exemplars_preserve_metric_payload() {
+        use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        let metrics = vec![
+            Metric {
+                name: "gauge".into(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![NumberDataPoint {
+                        time_unix_nano: 1,
+                        value: Some(Value::AsDouble(7.0)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            },
+            Metric {
+                name: "histogram".into(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    data_points: vec![HistogramDataPoint {
+                        time_unix_nano: 1,
+                        count: 1,
+                        explicit_bounds: vec![1.0],
+                        // Cumulative conversion tolerates a missing infinity bucket.
+                        bucket_counts: vec![1],
+                        exemplars: [2.0, 0.5, f64::INFINITY, f64::NAN]
+                            .into_iter()
+                            .map(|value| Exemplar {
+                                time_unix_nano: 1,
+                                value: Some(exemplar::Value::AsDouble(value)),
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    }],
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                })),
+                ..Default::default()
+            },
+        ];
+        let conversion =
+            to_grpc_insert_requests(metrics_request(metrics), &mut OtlpMetricCtx::default())
+                .unwrap();
+        assert_eq!(conversion.rows, 3);
+        assert_eq!(conversion.outcome.accepted_data_points, 2);
+        assert_eq!(conversion.outcome.rejected_data_points, 0);
+        for (table, value) in [
+            ("gauge", 7.0),
+            ("histogram_bucket", 1.0),
+            ("histogram_count", 1.0),
+        ] {
+            let rows = conversion
+                .requests
+                .inserts
+                .iter()
+                .find(|request| request.table_name == table)
+                .unwrap()
+                .rows
+                .as_ref()
+                .unwrap();
+            let value_index = rows
+                .schema
+                .iter()
+                .position(|column| column.column_name == greptime_value())
+                .unwrap();
+            assert_eq!(rows.rows.len(), 1);
+            assert_eq!(
+                rows.rows[0].values[value_index].value_data,
+                Some(ValueData::F64Value(value))
+            );
+        }
+        assert_eq!(conversion.exemplar_rows, 1);
+        let rows = conversion.exemplars.inserts[0].rows.as_ref().unwrap();
+        for (column, value) in [
+            (greptime_value(), ValueData::F64Value(0.5)),
+            (
+                EXEMPLAR_METRIC_COLUMN,
+                ValueData::StringValue("histogram_bucket".into()),
+            ),
+            ("le", ValueData::StringValue("1".into())),
+        ] {
+            let index = rows
+                .schema
+                .iter()
+                .position(|c| c.column_name == column)
+                .unwrap();
+            assert_eq!(rows.rows[0].values[index].value_data, Some(value));
         }
     }
 

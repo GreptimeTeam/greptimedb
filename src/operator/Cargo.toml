@@ -23,6 +23,7 @@ workspace = true
 ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
+arrow-schema.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 backon.workspace = true

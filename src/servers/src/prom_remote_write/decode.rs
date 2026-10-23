@@ -14,10 +14,10 @@
 
 //! Decoding of Prometheus remote write protobuf payloads.
 
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashSet};
 
-use api::prom_store::remote::Sample;
+use api::prom_store::remote::{Exemplar, Sample};
 use bytes::Buf;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use pipeline::{ContextReq, GreptimePipelineParams, PipelineContext, PipelineDefinition};
@@ -33,8 +33,8 @@ use crate::error::InternalSnafu;
 use crate::http::event::PipelineIngestRequest;
 use crate::pipeline::run_pipeline;
 use crate::prom_remote_write::row_builder::{PromCtx, TablesBuilder};
-use crate::prom_remote_write::types::PromLabel;
-use crate::prom_remote_write::validation::PromValidationMode;
+use crate::prom_remote_write::types::{PromLabel, RawBytes};
+use crate::prom_remote_write::validation::{PromValidationMode, validate_label_name};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL_ALT_BYTES, DATABASE_LABEL_BYTES, METRIC_NAME_LABEL_BYTES,
@@ -51,6 +51,9 @@ pub(crate) struct PromTimeSeries {
 
     pub(crate) labels: RepeatedField<PromLabel>,
     pub(crate) samples: RepeatedField<Sample>,
+    exemplars: Vec<Exemplar>,
+    label_names: HashSet<RawBytes>,
+    duplicate_labels: bool,
 }
 
 impl Clear for PromTimeSeries {
@@ -64,6 +67,9 @@ impl Clear for PromTimeSeries {
         }
         self.labels.clear();
         self.samples.clear();
+        self.exemplars.clear();
+        self.label_names.clear();
+        self.duplicate_labels = false;
     }
 }
 
@@ -98,6 +104,7 @@ impl PromTimeSeries {
                     return Err(DecodeError::new("delimited length exceeded"));
                 }
 
+                self.duplicate_labels |= !self.label_names.insert(label.name);
                 #[allow(deprecated)]
                 let is_special_label = match label.name {
                     METRIC_NAME_LABEL_BYTES => {
@@ -138,7 +145,12 @@ impl PromTimeSeries {
                 )?;
                 Ok(())
             }
-            3u32 => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
+            3u32 => {
+                let mut exemplar = Exemplar::default();
+                merge(wire_type, &mut exemplar, buf, Default::default())?;
+                self.exemplars.push(exemplar);
+                Ok(())
+            }
             4u32 => Err(DecodeError::new(
                 "remote write v1 native histogram ingestion is unsupported; use remote write v2",
             )),
@@ -154,6 +166,63 @@ impl PromTimeSeries {
         let label_num = self.labels.len();
         let row_num = self.samples.len();
 
+        if !self.exemplars.is_empty() {
+            if self.duplicate_labels || self.table_name.is_empty() {
+                return Err(DecodeError::new(
+                    "exemplar series requires a metric name and unique labels",
+                ));
+            }
+            let inherited = self
+                .labels
+                .iter()
+                .map(|label| {
+                    Ok((
+                        prom_validation_mode
+                            .decode_label_name(label.name)?
+                            .to_string(),
+                        prom_validation_mode.decode_string(label.value)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, DecodeError>>()?;
+            let inherited = crate::exemplar::labels(inherited, false, validate_label_name)
+                .map_err(|error| DecodeError::new(error.to_string()))?;
+            for exemplar in self.exemplars.drain(..) {
+                let observation: crate::error::Result<_> = (|| {
+                    let labels = crate::exemplar::labels(
+                        exemplar
+                            .labels
+                            .into_iter()
+                            .map(|label| (label.name, label.value)),
+                        true,
+                        validate_label_name,
+                    )?;
+                    Ok(crate::exemplar::Exemplar {
+                        metric: self.table_name.clone(),
+                        series_labels: inherited.clone(),
+                        timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
+                        value: exemplar.value,
+                        labels,
+                    })
+                })();
+                let observation = match observation {
+                    Ok(observation) => observation,
+                    Err(_) => {
+                        crate::metrics::EXEMPLARS_DROPPED_TOTAL
+                            .with_label_values(&["prometheus_v1"])
+                            .inc();
+                        continue;
+                    }
+                };
+                table_builders
+                    .exemplars
+                    .entry(self.schema.clone())
+                    .or_default()
+                    .push(observation);
+            }
+        }
+        if row_num == 0 {
+            return Ok(());
+        }
         let prom_ctx = PromCtx {
             schema: self.schema.take(),
             physical_table: self.physical_table.take(),
@@ -237,6 +306,11 @@ impl<'a> PromWriteRequest<'a> {
                             return Err(DecodeError::new("delimited length exceeded"));
                         }
 
+                        if processor.use_pipeline && !self.series.exemplars.is_empty() {
+                            return Err(DecodeError::new(
+                                "Remote Write pipelines with exemplars are unsupported",
+                            ));
+                        }
                         if processor.use_pipeline {
                             processor.consume_series_to_pipeline_map(
                                 &mut self.series,
@@ -465,6 +539,178 @@ mod tests {
                 &data,
                 expected_samples,
                 &expected_rows,
+            );
+        }
+    }
+
+    #[test]
+    fn test_exemplar_decoder_reuse_after_success_and_rejection() {
+        let series = TimeSeries {
+            labels: vec![Label {
+                name: "__name__".into(),
+                value: "metric".into(),
+            }],
+            exemplars: vec![Exemplar {
+                timestamp: -1,
+                value: 0.5,
+                labels: vec![Label {
+                    name: "traceID".into(),
+                    value: "abc".into(),
+                }],
+            }],
+            ..Default::default()
+        };
+        let mut decoder = PromWriteRequest::default();
+        let mut processor = PromSeriesProcessor::default_processor();
+        for _ in 0..3 {
+            let mut invalid = series.clone();
+            let duplicate = invalid.exemplars[0].labels[0].clone();
+            invalid.exemplars[0].labels.push(duplicate);
+            for (series, accepted) in [(series.clone(), true), (invalid, false)] {
+                let request = WriteRequest {
+                    timeseries: vec![series],
+                    ..Default::default()
+                };
+                decoder
+                    .decode(
+                        request.encode_to_vec(),
+                        PromValidationMode::Strict,
+                        &mut processor,
+                    )
+                    .unwrap();
+                if accepted {
+                    assert_eq!(decoder.table_data.exemplars[&None][0].timestamp, -1_000_000);
+                    assert_eq!(decoder.as_row_insert_requests().all_req().count(), 0);
+                } else {
+                    assert!(decoder.table_data.exemplars.is_empty());
+                }
+            }
+            for name in ["__name__", "job"] {
+                let mut invalid = series.clone();
+                invalid.labels.extend([
+                    Label {
+                        name: name.into(),
+                        value: "a".into(),
+                    },
+                    Label {
+                        name: name.into(),
+                        value: "b".into(),
+                    },
+                ]);
+                assert!(
+                    decoder
+                        .decode(
+                            WriteRequest {
+                                timeseries: vec![invalid],
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
+                            PromValidationMode::Strict,
+                            &mut processor
+                        )
+                        .is_err()
+                );
+            }
+            // A pooled decoder must not leak rejected exemplars into its next request.
+            let request = WriteRequest {
+                timeseries: vec![TimeSeries {
+                    labels: series.labels.clone(),
+                    samples: vec![Sample {
+                        timestamp: 2,
+                        value: 1.0,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            decoder
+                .decode(
+                    request.encode_to_vec(),
+                    PromValidationMode::Strict,
+                    &mut processor,
+                )
+                .unwrap();
+            assert!(decoder.table_data.exemplars.is_empty());
+            assert_eq!(decoder.as_row_insert_requests().all_req().count(), 1);
+        }
+        let mut processor = PromSeriesProcessor::default_processor();
+        processor.use_pipeline = true;
+        let request = WriteRequest {
+            timeseries: vec![series],
+            ..Default::default()
+        };
+        assert!(
+            decoder
+                .decode(
+                    request.encode_to_vec(),
+                    PromValidationMode::Strict,
+                    &mut processor
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("pipelines with exemplars")
+        );
+    }
+
+    #[test]
+    fn test_exemplar_decoder_preserves_samples_and_valid_siblings() {
+        let valid = Exemplar {
+            labels: vec![Label {
+                name: "trace_id".into(),
+                value: "abc".into(),
+            }],
+            timestamp: 1,
+            value: 0.5,
+        };
+        for invalid in [
+            Exemplar {
+                labels: vec![valid.labels[0].clone(); 2],
+                ..valid.clone()
+            },
+            Exemplar {
+                labels: vec![Label {
+                    name: "trace_id".into(),
+                    value: "x".repeat(128),
+                }],
+                ..valid.clone()
+            },
+            Exemplar {
+                timestamp: i64::MAX,
+                ..valid.clone()
+            },
+        ] {
+            let request = WriteRequest {
+                timeseries: vec![TimeSeries {
+                    labels: vec![Label {
+                        name: "__name__".into(),
+                        value: "metric".into(),
+                    }],
+                    samples: vec![Sample {
+                        timestamp: 1,
+                        value: 1.0,
+                    }],
+                    exemplars: vec![invalid.clone(), valid.clone(), invalid, valid.clone()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut decoder = PromWriteRequest::default();
+            decoder
+                .decode(
+                    request.encode_to_vec(),
+                    PromValidationMode::Strict,
+                    &mut PromSeriesProcessor::default_processor(),
+                )
+                .unwrap();
+            assert_eq!(decoder.table_data.exemplars[&None].len(), 2);
+            let requests = decoder.as_row_insert_requests();
+            assert_eq!(
+                requests
+                    .ref_all_req()
+                    .flat_map(|r| r.rows.as_ref())
+                    .map(|r| r.rows.len())
+                    .sum::<usize>(),
+                1
             );
         }
     }
