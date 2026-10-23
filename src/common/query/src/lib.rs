@@ -38,6 +38,7 @@ use common_recordbatch::{
 };
 use datafusion::physical_plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
+use snafu::IntoError;
 use sqlparser_derive::{Visit, VisitMut};
 
 /// new Output struct with output data(previously Output) and output meta
@@ -83,17 +84,62 @@ pub struct OutputMeta {
 }
 
 /// Actual storage completion of an already accepted asynchronous write.
-pub struct WriteCompletion(Pin<Box<dyn Future<Output = Result<(), BoxedError>> + Send>>);
+pub struct WriteCompletion(Pin<Box<dyn Future<Output = WriteProgress> + Send>>);
+
+/// Acknowledged rows for one original input, even when another part failed.
+/// Failed or lost acknowledgements do not establish how many rows were persisted.
+#[derive(Debug, Default, Clone)]
+pub struct WriteProgress {
+    pub affected_rows: usize,
+    pub error: Option<Arc<BoxedError>>,
+}
+
+impl WriteProgress {
+    pub fn failed(error: BoxedError) -> Self {
+        Self {
+            affected_rows: 0,
+            error: Some(Arc::new(error)),
+        }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.affected_rows += other.affected_rows;
+        if self.error.is_none() {
+            self.error = other.error;
+        }
+    }
+
+    pub fn into_result(self) -> Result<usize, BoxedError> {
+        match self.error {
+            Some(error) => Err(BoxedError::new(error::StorageWriteSnafu.into_error(error))),
+            None => Ok(self.affected_rows),
+        }
+    }
+}
 
 impl WriteCompletion {
     /// Wraps the storage result without changing how the write is scheduled.
+    /// Success reports zero affected rows; use [`Self::with_progress`] for counted writes.
     pub fn new(completion: impl Future<Output = Result<(), BoxedError>> + Send + 'static) -> Self {
+        Self::with_progress(async move {
+            match completion.await {
+                Ok(()) => WriteProgress::default(),
+                Err(error) => WriteProgress::failed(error),
+            }
+        })
+    }
+
+    pub fn with_progress(completion: impl Future<Output = WriteProgress> + Send + 'static) -> Self {
         Self(Box::pin(completion))
+    }
+
+    pub async fn progress(self) -> WriteProgress {
+        self.0.await
     }
 
     /// Waits for storage success or failure, independently of queue admission.
     pub async fn wait(self) -> Result<(), BoxedError> {
-        self.0.await
+        self.0.await.into_result().map(|_| ())
     }
 }
 
@@ -104,6 +150,20 @@ impl Debug for WriteCompletion {
 }
 
 impl Output {
+    /// Observes every dispatched completion before returning any failure.
+    pub async fn write_progress(self) -> WriteProgress {
+        if self.meta.write_completions.is_empty() {
+            return WriteProgress {
+                affected_rows: self.extract_rows_and_cost().0,
+                error: None,
+            };
+        }
+        let mut progress = WriteProgress::default();
+        for completion in self.meta.write_completions {
+            progress.merge(completion.progress().await);
+        }
+        progress
+    }
     pub fn new_with_affected_rows(affected_rows: OutputRows) -> Self {
         Self {
             data: OutputData::AffectedRows(affected_rows),
