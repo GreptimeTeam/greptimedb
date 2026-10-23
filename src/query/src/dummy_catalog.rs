@@ -485,7 +485,10 @@ impl DummyTableProvider {
             std::thread::available_parallelism().map_or(1, usize::from)
         }
         .min(ranges.len().max(1));
-        let partitions = table::table::scan::assign_partition_ranges(ranges, target);
+        let partitions =
+            crate::optimizer::parallelize_scan::ParallelizeScan::assign_partition_range(
+                ranges, target,
+            );
         let prepared = Arc::new(
             scan_exec
                 .with_new_partitions(partitions, target)
