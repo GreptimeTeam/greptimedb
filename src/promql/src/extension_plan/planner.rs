@@ -102,8 +102,16 @@ fn plan_fused_series(
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
-    if physical_inputs.is_empty() {
-        return Ok(None);
+    // The bindings and the physical inputs are paired by position below, so an input list of another
+    // length is refused before anything is read off it. DataFusion plans every child of an extension
+    // node before it calls here, so its own route always matches this count; a direct call of
+    // `plan_extension` need not.
+    let expected = fused.fused_inputs().len();
+    if physical_inputs.len() != expected {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries binds {expected} inputs, but {} physical inputs were given",
+            physical_inputs.len()
+        )));
     }
     let mut prepared = Vec::new();
     for (index, input) in physical_inputs.iter().enumerate() {

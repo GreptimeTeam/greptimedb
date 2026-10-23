@@ -541,11 +541,8 @@ fn validate_paths<'a>(
 /// partitions, which does not exist yet. Until it does the tree is refused where it can hurt: over
 /// one partition there is nothing to split, so only a tree run over more than one is checked.
 ///
-/// The compiler cannot build a nested window today - [`compile`](crate::promql::native_compile::compile)
-/// requires a range function to apply directly to a selector, `<range function>(<selector>[<range>])`,
-/// and a selector is raw samples - so no tree it produces has a window above a window, and this
-/// check costs no executable query. It is checked because [`FusedSeriesExec::try_new`] accepts any
-/// well-formed tree, and a tree it accepts is a tree it must answer correctly.
+/// The standalone planner declines subqueries, so its admitted trees have no nested window. This
+/// check also protects [`FusedSeriesExec::try_new`] callers that supply a well-formed tree directly.
 fn reject_a_split_logical_series(
     tree: &NativeTree,
     partition_count: usize,

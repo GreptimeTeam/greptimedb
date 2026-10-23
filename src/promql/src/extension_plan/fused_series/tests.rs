@@ -49,6 +49,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -59,6 +60,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
 };
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datafusion::prelude::SessionContext;
 use datatypes::series::frame::{RawLabelMode, pack_raw_series_chunk, raw_series_frame_schema};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
@@ -73,6 +75,7 @@ use super::{
     LabelSets, OutputColumn, POLL_BUDGET, label_set, occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::PromExtensionPlanner;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{NodeMetric, NodePath};
 use crate::native::plan::{
@@ -1982,6 +1985,55 @@ fn the_execution_inputs_must_be_one_per_binding() {
     assert!(
         error.to_string().contains("0 execution inputs were given"),
         "{error}"
+    );
+}
+
+/// The physical inputs of the node must number its bindings, whoever plans it.
+///
+/// DataFusion plans every physical child before it asks for the node, so its own route always
+/// matches the count. A direct call of `plan_extension` need not, and the bindings are paired with
+/// the inputs by position, so a list of another length is a plan error naming both counts instead
+/// of a binding read past its end or an input silently ignored. The inputs here are memory sources,
+/// which this node cannot read as raw series: that they are refused for their count and not for
+/// their type is what shows the count is asked before a child is looked at, since the scan check
+/// would have answered `Ok(None)` for both counts instead.
+#[tokio::test]
+async fn the_physical_inputs_must_number_the_bindings() {
+    let node = fused(rate_tree());
+    let planner = DefaultPhysicalPlanner::default();
+    let session = SessionContext::default();
+    let state = session.state();
+    let planning_ctx = PhysicalPlanningContext::default();
+    for count in [0, 2] {
+        let inputs = (0..count)
+            .map(|_| memory_exec(Vec::new()))
+            .collect::<Vec<_>>();
+        let error = PromExtensionPlanner
+            .plan_extension(&planner, &node, &[], &inputs, &state, &planning_ctx)
+            .await
+            .expect_err("the node binds one input, whatever it was given");
+        assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "binds 1 inputs, but {count} physical inputs were given"
+            )),
+            "{error}"
+        );
+    }
+    let planned = PromExtensionPlanner
+        .plan_extension(
+            &planner,
+            &node,
+            &[],
+            &[memory_exec(Vec::new())],
+            &state,
+            &planning_ctx,
+        )
+        .await
+        .expect("one input is the node's own arity");
+    assert!(
+        planned.is_none(),
+        "a memory source is not a region scan: {planned:?}"
     );
 }
 
