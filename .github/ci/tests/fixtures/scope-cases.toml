@@ -1,0 +1,142 @@
+# Golden cases for the admission gate.
+#
+# `tests/test_ci_scope.py` replays every case through the real classifier,
+# so an edit to `scope-rules.toml` that changes behaviour fails with the case
+# name here. The cases encode intent, not implementation: each one says which
+# suites a kind of change must start.
+#
+# `suites` is a list of globs over suite ids; `["*"]` means every suite and
+# `[]` means none.
+
+[[case]]
+name = "server crate: the whole fuzz fleet except the pruning suite"
+note = "A change to `src/api` reaches every suite that builds the server binary."
+paths = [
+  "src/api/src/lib.rs",
+]
+suites = [
+  "fuzz-standalone/database-and-regular-table",
+  "fuzz-standalone/logical-table",
+  "fuzz-unstable/standalone",
+  "fuzz-distributed/database-and-regular-table",
+  "fuzz-distributed/logical-table",
+  "fuzz-distributed/repartition",
+  "fuzz-chaos/migration",
+  "fuzz-chaos/failover",
+  "fuzz-chaos/repartition",
+  "export-import-v2",
+]
+
+[[case]]
+name = "storage engine: every fuzz suite, including remote-WAL pruning"
+note = "logical-pruning needs engine and DDL code, so an engine change starts it."
+paths = [
+  "src/mito2/src/lib.rs",
+]
+suites = [
+  "fuzz-standalone/*",
+  "fuzz-unstable/*",
+  "fuzz-distributed/*",
+  "fuzz-chaos/*",
+  "export-import-v2",
+]
+
+[[case]]
+name = "in-process DDL code registers the procedures standalone executes"
+paths = [
+  "src/common/meta/src/lib.rs",
+]
+suites = [
+  "fuzz-standalone/*",
+  "fuzz-unstable/*",
+  "fuzz-distributed/*",
+  "fuzz-chaos/*",
+  "export-import-v2",
+  "sqlness-kvbackend/*",
+]
+
+[[case]]
+name = "metasrv only: distributed and chaos families"
+note = "Standalone builds a DdlManager in-process and never links a metasrv."
+paths = [
+  "src/meta-srv/src/discovery/lease.rs",
+]
+suites = [
+  "fuzz-distributed/database-and-regular-table",
+  "fuzz-distributed/logical-table",
+  "fuzz-distributed/repartition",
+  "fuzz-distributed/logical-pruning",
+  "fuzz-chaos/migration",
+  "fuzz-chaos/failover",
+  "fuzz-chaos/repartition",
+  "sqlness-kvbackend/*",
+]
+
+[[case]]
+name = "CLI only touches the export/import path"
+paths = [
+  "src/cli/src/lib.rs",
+]
+suites = [
+  "export-import-v2",
+]
+
+[[case]]
+name = "PromQL crate: no suite"
+note = "rust.yml and the promql sqlness cases own it; the fuzz suites speak SQL."
+paths = [
+  "src/promql/src/lib.rs",
+]
+suites = []
+
+[[case]]
+name = "PromQL module inside the query crate is not fuzzable either"
+note = "`@server` claims `src/query/**`, so the module must be exempt."
+paths = [
+  "src/query/src/promql/src/lib.rs",
+]
+suites = []
+
+[[case]]
+name = "flow engine: no suite"
+paths = [
+  "src/flow/src/lib.rs",
+]
+suites = []
+
+[[case]]
+name = "mixed diff: the PromQL file subtracts nothing"
+note = "The engine change still starts every suite."
+paths = [
+  "src/mito2/src/lib.rs",
+  "src/promql/src/lib.rs",
+]
+suites = [
+  "fuzz-standalone/*",
+  "fuzz-unstable/*",
+  "fuzz-distributed/*",
+  "fuzz-chaos/*",
+  "export-import-v2",
+]
+
+[[case]]
+name = "crate added after the rules were written"
+note = "No suite claims it, so the gate widens instead of skipping everything."
+paths = [
+  "src/brand-new/src/lib.rs",
+]
+suites = ["*"]
+
+[[case]]
+name = "integration harness change"
+paths = [
+  "tests-integration/tests/fuzz.rs",
+]
+suites = ["*"]
+
+[[case]]
+name = "documentation only"
+paths = [
+  "docs/readme.md",
+]
+suites = []

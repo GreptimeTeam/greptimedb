@@ -88,6 +88,8 @@ jobs:
         run: .github/scripts/run-fuzz-targets-test.sh
       - name: Run CI comment-command tests
         run: python3 .github/scripts/tests/test_ci_slash.py
+      - name: Run CI scope gate tests
+        run: python3 .github/ci/tests/test_ci_scope.py
       - name: Run metric snapshot benchmark tests
         run: python3 -m unittest discover -s .github/scripts/tests -p 'test_metric_snapshot*.py'
       - name: Run query-regression Python tooling tests
@@ -102,6 +104,23 @@ jobs:
           python3 tests/perf/test_ci_runner_scripts.py
           python3 tests/perf/test_agent_observability_summary.py
           python3 tests/perf/test_tracesbench_summary.py
+
+  scope-rules:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: CI Scope Rules
+    # Same runner image as the `scope` job in integration.yml: if the rules file
+    # stops parsing there, the gate silently runs every job, so this check exists
+    # to fail the pull request instead.
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Show the interpreter
+        run: python3 -VV
+      - name: Validate .github/ci/scope-rules.toml
+        run: python3 .github/ci/ci_scope_rules.py --check-paths
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
