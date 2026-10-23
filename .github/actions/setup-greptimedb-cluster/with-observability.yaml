@@ -15,9 +15,9 @@ monitoring:
           limits:
             cpu: 500m
             memory: 256Mi
-      datanodeStorage:
-        fs:
-          storageSize: 5Gi
+    datanodeStorage:
+      fs:
+        storageSize: 5Gi
   vector:
     resources:
       requests:
