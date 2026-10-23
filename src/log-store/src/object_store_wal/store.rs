@@ -4024,7 +4024,6 @@ mod tests {
         }
     }
 
-    /// Lists every key under `PREFIX`, in order.
     async fn keys(object_store: &ObjectStore) -> Vec<String> {
         let mut keys = object_store
             .list_with(&format!("{PREFIX}/"))
