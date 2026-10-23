@@ -21,7 +21,7 @@ use std::sync::Arc;
 use datafusion::arrow::array::builder::NullBufferBuilder;
 use datafusion::arrow::array::{Array, Float64Array, UInt32Array};
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::{HistogramBatch, HistogramBatchBuilder};
 use datatypes::series::samples::{
     DenseSamplesRef, HistogramSamples, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -312,7 +312,7 @@ impl GridSeriesBuilder {
     ///
     /// Nothing is reset: not the metric, not the index cursor, not the position order. A caller
     /// that wants a new series calls [`Self::begin_series`].
-    pub fn take_buffered(&mut self, metric: MetricName) -> Result<Option<Series>> {
+    pub fn take_buffered(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         self.collect(metric)
     }
 
@@ -322,12 +322,12 @@ impl GridSeriesBuilder {
     /// The rows share the one buffer per field, so the result costs a span per run and not a row
     /// per position between the runs. This ends the logical series; the next one starts with
     /// [`Self::begin_series`], which is the only reset.
-    pub fn finish(&mut self, metric: MetricName) -> Result<Option<Series>> {
+    pub fn finish(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         self.collect(metric)
     }
 
     /// Turns the buffered rows into one series over the runs they make up.
-    fn collect(&mut self, metric: MetricName) -> Result<Option<Series>> {
+    fn collect(&mut self, metric: SeriesLabels) -> Result<Option<Series>> {
         if self.indices.is_empty() {
             return Ok(None);
         }
@@ -421,7 +421,7 @@ pub(crate) fn render_label_set(labels: &LabelSet) -> String {
 }
 
 /// The label set Prometheus compares, which has no empty values.
-pub(crate) fn label_set(metric: &MetricName) -> LabelSet {
+pub(crate) fn label_set(metric: &SeriesLabels) -> LabelSet {
     let name = metric
         .name()
         .filter(|name| !name.is_empty())

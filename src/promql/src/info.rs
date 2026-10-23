@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 use regex::Regex;
 
@@ -187,7 +187,7 @@ pub fn info(
 
     let width = schema.fields.len();
     let mut result_index: HashMap<LabelSet, usize> = HashMap::new();
-    let mut results: Vec<(MetricName, Vec<Row>)> = Vec::new();
+    let mut results: Vec<(SeriesLabels, Vec<Row>)> = Vec::new();
     let mut added: Vec<(Arc<str>, Arc<str>)> = Vec::new();
     let mut chosen: Vec<usize> = Vec::new();
     for series in base {
@@ -346,7 +346,7 @@ impl FirstError {
 type Signature = (Arc<str>, Vec<Option<Arc<str>>>);
 
 /// The value of each identifying label, `None` where the series does not have it.
-fn identifying_values(metric: &MetricName) -> Vec<Option<Arc<str>>> {
+fn identifying_values(metric: &SeriesLabels) -> Vec<Option<Arc<str>>> {
     IDENTIFYING_LABELS
         .iter()
         .map(|label| {
@@ -361,8 +361,8 @@ fn identifying_values(metric: &MetricName) -> Vec<Option<Arc<str>>> {
 /// Adds the data labels `info` gives a series with labels `base` to `added`; returns the name of
 /// a label another info metric already set to a different value.
 fn add_data_labels(
-    info: &MetricName,
-    base: &MetricName,
+    info: &SeriesLabels,
+    base: &SeriesLabels,
     selector: &InfoSelector,
     added: &mut Vec<(Arc<str>, Arc<str>)>,
 ) -> std::result::Result<(), Arc<str>> {

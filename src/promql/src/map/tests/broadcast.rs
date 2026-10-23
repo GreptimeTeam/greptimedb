@@ -24,7 +24,7 @@ fn scalar(schema: &SeriesSchema, start: usize, samples: Samples) -> Series {
     };
     Series::try_new(
         &scalar_schema,
-        MetricName::try_new(None, vec![]).unwrap(),
+        SeriesLabels::try_new(None, vec![]).unwrap(),
         TimeAxis::Grid(
             GridRange::try_new(schema.eval_grid.clone().unwrap(), start, samples.len()).unwrap(),
         ),
@@ -559,7 +559,7 @@ fn parameters_are_read_per_point_and_missing_ones_drop_the_point() {
             .into(),
             eval_grid: schema.eval_grid.clone(),
         },
-        MetricName::try_new(None, vec![]).unwrap(),
+        SeriesLabels::try_new(None, vec![]).unwrap(),
         TimeAxis::from_grid_spans(
             schema.eval_grid.clone().unwrap(),
             vec![GridSpan::new(2, 2), GridSpan::new(5, 1)],

@@ -36,7 +36,7 @@ use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, SampleRef, Samples, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridSpec};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt};
 use mito_codec::row_converter::{
     DensePrimaryKeyCodec, PrimaryKeyCodec, SortField, SparsePrimaryKeyCodec,
@@ -161,7 +161,7 @@ fn schema_with_fields(names: &[&str]) -> Arc<SeriesSchema> {
     })
 }
 
-fn chunk(read_key: Buffer, metric: Option<MetricName>, final_chunk: bool) -> RawSeriesChunk {
+fn chunk(read_key: Buffer, metric: Option<SeriesLabels>, final_chunk: bool) -> RawSeriesChunk {
     let times = ScalarBuffer::from(vec![100, 200]);
     RawSeriesChunk::try_new(
         &schema(),
@@ -321,7 +321,7 @@ async fn materializes_complete_labels_without_changing_raw_chunks() {
         vec![Poll::Ready(Some(Ok(chunk(
             Buffer::from(vec![1, 2]),
             Some(
-                MetricName::try_new(
+                SeriesLabels::try_new(
                     None,
                     vec![Label {
                         name: Arc::from("x"),
@@ -339,7 +339,7 @@ async fn materializes_complete_labels_without_changing_raw_chunks() {
     assert_eq!(metric.name(), None);
     assert_eq!(metric.get("x"), Some(""));
 
-    let explicit_metric = MetricName::try_new(
+    let explicit_metric = SeriesLabels::try_new(
         Some(Arc::from("explicit_metric")),
         vec![Label {
             name: Arc::from("host"),
@@ -732,13 +732,13 @@ async fn upstream_error_and_decode_error_drop_source_terminally() {
         vec![
             Poll::Ready(Some(Ok(chunk(
                 Buffer::from(vec![3]),
-                Some(MetricName::try_new(None, vec![]).unwrap()),
+                Some(SeriesLabels::try_new(None, vec![]).unwrap()),
                 false,
             )))),
             Poll::Ready(Some(Err(upstream))),
             Poll::Ready(Some(Ok(chunk(
                 Buffer::from(vec![4]),
-                Some(MetricName::try_new(None, vec![]).unwrap()),
+                Some(SeriesLabels::try_new(None, vec![]).unwrap()),
                 true,
             )))),
         ],
@@ -857,14 +857,14 @@ async fn constructor_and_mode_errors_drop_input_without_polling_ahead() {
 
     let malformed_shape = RawSeriesChunk {
         primary_key: Buffer::from(vec![1]),
-        metric: Some(MetricName::try_new(None, vec![]).unwrap()),
+        metric: Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         time: RawTimestamps::try_new(ScalarBuffer::from(vec![100, 200])).unwrap(),
         fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
         is_last: false,
     };
     let malformed_empty_time = RawSeriesChunk {
         primary_key: Buffer::from(vec![2]),
-        metric: Some(MetricName::try_new(None, vec![]).unwrap()),
+        metric: Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         time: RawTimestamps::try_new(ScalarBuffer::from(Vec::<i64>::new())).unwrap(),
         fields: SeriesFields::one(Samples::from_float(Float64Array::from(Vec::<f64>::new()))),
         is_last: false,
@@ -888,7 +888,7 @@ async fn constructor_and_mode_errors_drop_input_without_polling_ahead() {
     for (binding, metric) in [
         (
             source(PrimaryKeyEncoding::Dense),
-            Some(MetricName::try_new(None, vec![]).unwrap()),
+            Some(SeriesLabels::try_new(None, vec![]).unwrap()),
         ),
         (RawLabelSource::Explicit, None),
     ] {

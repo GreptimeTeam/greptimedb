@@ -21,7 +21,7 @@ use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 use super::{
     Grouping, LabelMatcher, MatchOp, SortOrder, absent, absent_labels, limit_ratio, limitk,
@@ -50,7 +50,7 @@ fn schema(points: u64, fields: usize) -> SeriesSchema {
 }
 
 /// Parses `name=value,...`, with `__name__` as the metric name; `-` is no labels.
-fn metric(labels: &str) -> MetricName {
+fn metric(labels: &str) -> SeriesLabels {
     let mut name = None;
     let mut tags = Vec::new();
     for pair in labels.split(',').filter(|pair| *pair != "-") {
@@ -64,7 +64,7 @@ fn metric(labels: &str) -> MetricName {
             });
         }
     }
-    MetricName::try_new(name, tags).unwrap()
+    SeriesLabels::try_new(name, tags).unwrap()
 }
 
 fn dense(points: usize, values: &str) -> Dense {
@@ -81,7 +81,7 @@ fn dense(points: usize, values: &str) -> Dense {
 ///
 /// An *input*, so the holes stay nulls inside one series: the builder would cut them into pieces,
 /// and the operators under test take one series per input.
-fn build(schema: &SeriesSchema, metric: MetricName, dense: &Dense) -> Option<Series> {
+fn build(schema: &SeriesSchema, metric: SeriesLabels, dense: &Dense) -> Option<Series> {
     let start = dense
         .iter()
         .position(|row| row.iter().any(Option::is_some))?;
@@ -472,7 +472,7 @@ fn check_cases(
 }
 
 /// The fixture's label rendering: `name=value` pairs in name order, `-` when empty.
-fn render(metric: &MetricName) -> String {
+fn render(metric: &SeriesLabels) -> String {
     let mut labels: Vec<(String, String)> = metric
         .tags()
         .iter()

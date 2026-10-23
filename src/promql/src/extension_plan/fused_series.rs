@@ -1130,7 +1130,7 @@ fn render_labels(labels: &LabelSet) -> String {
 /// would miss exactly those collisions.
 ///
 /// The key is [`crate::grid_series::label_set`]'s normalization of the final labels rather than
-/// [`datatypes::series::MetricName`] itself: a label with an empty value is no label to
+/// [`datatypes::series::SeriesLabels`] itself: a label with an empty value is no label to
 /// Prometheus, so `{host="h", zone=""}` and `{host="h"}` are one label set and have to be compared
 /// as one. Encoding the tags as they are would file them apart and let one point hold two values.
 ///

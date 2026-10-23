@@ -26,7 +26,7 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{RowCursor, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::union_positions;
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 use crate::go_sort;
 use crate::grid_series::{GridSeriesBuilder, external, owned};
@@ -258,7 +258,7 @@ pub fn limit_ratio(ratio: f64, schema: &SeriesSchema, series: &[Series]) -> Resu
 
 /// Prometheus `HashRatioSampler.SampleOffset`: the xxHash64 of the labels as `stringlabels`
 /// encodes them, each name and value prefixed by its length, over `u64::MAX`.
-fn sample_offset(metric: &MetricName) -> f64 {
+fn sample_offset(metric: &SeriesLabels) -> f64 {
     let mut data = Vec::new();
     for (name, value) in labels_with_name(metric) {
         // Prometheus label sets hold no empty value.
@@ -300,7 +300,7 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
         let value = if count == 1 { value } else { Some(GO_NAN) };
         builder.push(point, &[value])?;
     }
-    let empty = MetricName::try_new(None, Vec::new()).map_err(external)?;
+    let empty = SeriesLabels::try_new(None, Vec::new()).map_err(external)?;
     // Every grid point is written above, with a value or a NaN, so the result is one run over the
     // grid and never empty. A different shape would mean this invariant broke, and returning it
     // silently would hide it.
@@ -328,7 +328,7 @@ pub fn scalar(schema: &SeriesSchema, series: &[Series]) -> Result<Series> {
 pub fn absent(
     schema: &SeriesSchema,
     series: &[Series],
-    labels: MetricName,
+    labels: SeriesLabels,
 ) -> Result<Option<Series>> {
     let points = grid_points(schema, series)?;
     let fields = schema.fields.len();
@@ -387,7 +387,7 @@ pub enum MatchOp {
 /// moving the matchers that narrow the result before those that only subtract from it; that is
 /// the order users see whenever the storage holds data, and the order used here. It changes the
 /// result only when a name has both an equality and another matcher.
-pub fn absent_labels(matchers: &[LabelMatcher]) -> Result<MetricName> {
+pub fn absent_labels(matchers: &[LabelMatcher]) -> Result<SeriesLabels> {
     let must_be_set: Vec<&str> = matchers
         .iter()
         .filter(|matcher| !matcher.matches_empty)
@@ -421,7 +421,7 @@ pub fn absent_labels(matchers: &[LabelMatcher]) -> Result<MetricName> {
         }
     }
     labels.retain(|label| !label.value.is_empty());
-    MetricName::try_new(None, labels).map_err(external)
+    SeriesLabels::try_new(None, labels).map_err(external)
 }
 
 /// Orders the series of an instant result. A range result keeps its order: Prometheus does not
@@ -544,7 +544,7 @@ fn k_param(k: f64, series: usize) -> Result<Option<usize>> {
 /// Label pairs identifying a group; empty values are absent, as in Prometheus.
 type GroupKey = Vec<(Arc<str>, Arc<str>)>;
 
-fn group_key(metric: &MetricName, grouping: &Grouping) -> GroupKey {
+fn group_key(metric: &SeriesLabels, grouping: &Grouping) -> GroupKey {
     let mut key: Vec<_> = labels_with_name(metric)
         .into_iter()
         .filter(|(name, value)| {
@@ -560,7 +560,7 @@ fn group_key(metric: &MetricName, grouping: &Grouping) -> GroupKey {
 }
 
 /// The label pairs of `metric` with `__name__` among them, sorted by name.
-fn labels_with_name(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
+fn labels_with_name(metric: &SeriesLabels) -> Vec<(Arc<str>, Arc<str>)> {
     let mut labels: Vec<_> = metric
         .tags()
         .iter()
@@ -574,7 +574,7 @@ fn labels_with_name(metric: &MetricName) -> Vec<(Arc<str>, Arc<str>)> {
 }
 
 /// Prometheus `labels.Compare`: label pairs in name order, then the shorter set first.
-fn compare_labels(a: &MetricName, b: &MetricName) -> Ordering {
+fn compare_labels(a: &SeriesLabels, b: &SeriesLabels) -> Ordering {
     labels_with_name(a).cmp(&labels_with_name(b))
 }
 

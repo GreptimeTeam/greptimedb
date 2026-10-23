@@ -18,7 +18,7 @@
 use std::sync::{Arc, LazyLock};
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{Series, SeriesSchema};
 use regex::Regex;
 
@@ -146,7 +146,7 @@ pub fn label_join(
 }
 
 /// An empty value removes the label, as Prometheus label sets have no empty values.
-fn set_label(metric: &mut MetricName, name: &str, value: &str) -> Result<()> {
+fn set_label(metric: &mut SeriesLabels, name: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         metric.remove(name);
         return Ok(());

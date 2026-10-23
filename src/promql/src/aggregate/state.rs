@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 
 use crate::aggregate::{
@@ -85,7 +85,7 @@ pub struct AccumulatorState {
 /// where no sample of that field was folded in.
 #[derive(Clone, Debug)]
 pub struct PartialGroup {
-    pub metric: MetricName,
+    pub metric: SeriesLabels,
     pub points: Vec<(usize, Vec<Option<AccumulatorState>>)>,
 }
 

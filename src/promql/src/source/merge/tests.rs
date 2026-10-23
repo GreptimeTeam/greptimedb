@@ -35,7 +35,7 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
 use store_api::codec::PrimaryKeyEncoding;
@@ -1663,7 +1663,7 @@ async fn ordered_input_contract_rejects_bad_key_time_and_finality_transitions() 
             "explicit metric in primary-key mode",
             vec![RawSeriesChunk {
                 primary_key: a.clone(),
-                metric: Some(MetricName::try_new(None, vec![]).unwrap()),
+                metric: Some(SeriesLabels::try_new(None, vec![]).unwrap()),
                 time: RawTimestamps::try_new(ScalarBuffer::from(vec![1])).unwrap(),
                 fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
                 is_last: true,

@@ -19,7 +19,7 @@ use api::v1::SemanticType;
 use common_telemetry::debug;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::series::frame::{LabelDecodeEncoding, LabelDecodeSpec};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use datatypes::value::Value;
 use snafu::{OptionExt, ResultExt};
 use store_api::codec::PrimaryKeyEncoding;
@@ -53,7 +53,7 @@ pub enum LabelProjection {
 /// Decoded labels: either a complete metric name or a possibly partial label vector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DecodedLabels {
-    Complete(MetricName),
+    Complete(SeriesLabels),
     Projected(Vec<Label>),
 }
 
@@ -293,7 +293,7 @@ impl PrimaryKeyLabelDecoder {
 
     /// Decodes labels without modifying or consuming `read_key`.
     ///
-    /// `All` returns a complete [`MetricName`]; `Only` returns a partial vector. Dense
+    /// `All` returns a complete [`SeriesLabels`]; `Only` returns a partial vector. Dense
     /// keys are fully checked against the exact snapshot layout even when decoding only
     /// selected fields. Sparse keys receive a full structural audit before values are read.
     pub fn decode(&mut self, read_key: &[u8]) -> Result<DecodedLabels> {
@@ -353,7 +353,7 @@ impl PrimaryKeyLabelDecoder {
         }
         if *complete {
             Ok(DecodedLabels::Complete(
-                MetricName::try_new(Some(key.metric_name.clone()), values).map_err(|error| {
+                SeriesLabels::try_new(Some(key.metric_name.clone()), values).map_err(|error| {
                     InvalidSparsePrimaryKeySnafu {
                         reason: error.to_string(),
                     }

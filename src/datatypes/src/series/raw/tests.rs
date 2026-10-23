@@ -20,7 +20,7 @@ use arrow::buffer::{Buffer, ScalarBuffer};
 use super::*;
 use crate::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
 use crate::series::time::{EvalGrid, GridSpec};
-use crate::series::{Label, MetricName};
+use crate::series::{Label, SeriesLabels};
 
 fn schema(names: &[&str]) -> SeriesSchema {
     SeriesSchema {
@@ -35,8 +35,8 @@ fn schema(names: &[&str]) -> SeriesSchema {
     }
 }
 
-fn metric() -> MetricName {
-    MetricName::try_new(
+fn metric() -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![Label {
             name: Arc::from("host"),

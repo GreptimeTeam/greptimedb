@@ -47,7 +47,7 @@ use datatypes::series::frame::{
 };
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures_util::Stream;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
@@ -380,7 +380,7 @@ struct SequenceValidator {
     ordering: SeriesOrdering,
     previous_key: Option<Vec<u8>>,
     previous_timestamp: Option<i64>,
-    previous_metric: Option<MetricName>,
+    previous_metric: Option<SeriesLabels>,
     previous_is_last: bool,
 }
 

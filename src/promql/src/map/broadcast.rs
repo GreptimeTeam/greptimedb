@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{FieldSpec, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::TimeAxis;
 
@@ -226,7 +226,7 @@ fn map_grid_scalar(
     schema: &Arc<SeriesSchema>,
     vector: &Series,
     scalar: ScalarSeriesOperand<'_>,
-    metric: MetricName,
+    metric: SeriesLabels,
     calculate: impl Fn(f64, f64, f64) -> Option<f64>,
 ) -> Result<Option<Series>> {
     let vector_time = validate_float_series(schema, vector)?;

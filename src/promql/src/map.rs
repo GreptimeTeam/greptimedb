@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{
     DenseSamplesRef, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
@@ -201,7 +201,7 @@ pub fn constant_series(schema: &SeriesSchema, range: GridRange, scalar: f64) -> 
     ])));
     Series::try_new(
         schema,
-        MetricName::try_new(None, vec![]).map_err(series_error)?,
+        SeriesLabels::try_new(None, vec![]).map_err(series_error)?,
         TimeAxis::Grid(range),
         fields,
     )
@@ -232,31 +232,31 @@ fn map_float_fields(
 /// Prometheus `DropReserved(schema.IsMetadataLabel)` drops the type and unit labels with the
 /// name. Empty values are dropped too: Prometheus has no empty labels, and keeping them would
 /// hide a same-labelset collision from the caller.
-pub(crate) fn drop_metric_name(metric: &MetricName) -> Result<MetricName> {
+pub(crate) fn drop_metric_name(metric: &SeriesLabels) -> Result<SeriesLabels> {
     rebuild_labels(metric, None, |name| {
         !matches!(name, "__type__" | "__unit__")
     })
 }
 
 /// Drops labels with empty values, which Prometheus treats as absent.
-pub(crate) fn drop_empty_labels(metric: &MetricName) -> Result<MetricName> {
+pub(crate) fn drop_empty_labels(metric: &SeriesLabels) -> Result<SeriesLabels> {
     let name = metric.name().filter(|name| !name.is_empty()).map(Arc::from);
     rebuild_labels(metric, name, |_| true)
 }
 
 /// One rebuild: removing labels one by one copies the label array each time.
 fn rebuild_labels(
-    metric: &MetricName,
+    metric: &SeriesLabels,
     name: Option<Arc<str>>,
     keep: impl Fn(&str) -> bool,
-) -> Result<MetricName> {
+) -> Result<SeriesLabels> {
     let tags = metric
         .tags()
         .iter()
         .filter(|label| !label.value.is_empty() && keep(&label.name))
         .cloned()
         .collect();
-    MetricName::try_new(name, tags).map_err(series_error)
+    SeriesLabels::try_new(name, tags).map_err(series_error)
 }
 
 impl MathOp {

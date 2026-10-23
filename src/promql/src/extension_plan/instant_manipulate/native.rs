@@ -18,7 +18,7 @@ use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMil
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema};
 
@@ -197,7 +197,7 @@ impl NativeInstantMapping {
     /// Selects instants against typed samples, then maps only selected values to Arrow.
     pub(crate) fn evaluate(
         &self,
-        metric: &MetricName,
+        metric: &SeriesLabels,
         time: &RawTimestamps,
         fields: &SeriesFields,
     ) -> DataFusionResult<RecordBatch> {
