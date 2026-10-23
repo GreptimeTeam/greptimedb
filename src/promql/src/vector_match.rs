@@ -144,10 +144,8 @@ pub struct BinaryMatching {
 }
 
 /// The values of `fill`, `fill_left` and `fill_right`, which stand in for a sample that has no
-/// match on the other side.
-///
-/// Prometheus applies them after it swaps the operands of `group_right`, so there `fill_left`
-/// stands in for a missing right-hand sample and `fill_right` for a missing left-hand one.
+/// match on the other side: `lhs` for a missing left-hand sample and `rhs` for a missing
+/// right-hand one, as the query writes them, `group_right` included (prometheus/prometheus#19939).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FillValues {
     pub lhs: Option<f64>,
@@ -736,7 +734,16 @@ fn binary_field(
         }
         None => FieldMetadata::default(),
     };
-    let fill = matching.fill;
+    // The walk below fills `rhs` for a missing one-side sample and `lhs` for a missing many-side
+    // one, so under `group_right`, whose one side is the left, the two trade places.
+    let fill = if one_is_left {
+        FillValues {
+            lhs: matching.fill.rhs,
+            rhs: matching.fill.lhs,
+        }
+    } else {
+        matching.fill
+    };
     // Prometheus short-circuits a point where either side is empty, before any check; with a fill
     // value only a point where both are empty.
     let filling = fill.lhs.is_some() || fill.rhs.is_some();

@@ -28,14 +28,16 @@ use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTA
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::version::VersionRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
+use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::bucket::{
-    group_files_into_series_buckets, plan_series_indexes, rounded_bucket_width,
+    group_files_into_series_buckets, plan_series_indexes_with_mode, rounded_bucket_width,
 };
 use crate::series_index::builder::{build_range_index, build_series_index};
 use crate::series_index::catalog::{
     RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path,
     series_catalog_path, store_catalog,
 };
+use crate::series_index::format;
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
 
@@ -91,6 +93,7 @@ impl ReconcileStats {
 
 /// Reconciles indexes for one region snapshot, persists catalogs, then atomically publishes it.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn reconcile_series_indexes(
     worker_id: u32,
     store: ObjectStore,
@@ -100,6 +103,33 @@ pub(crate) async fn reconcile_series_indexes(
     purger: IndexFilePurger,
     enable_range_index: bool,
     allow_builds: bool,
+) -> Result<ReconcileStats> {
+    reconcile_series_indexes_with_mode(
+        worker_id,
+        store,
+        region,
+        requested_bucket_width,
+        now_ms,
+        purger,
+        enable_range_index,
+        allow_builds,
+        false,
+    )
+    .await
+}
+
+/// Manual reconciliation bypasses maintenance eligibility, but not capacity limits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reconcile_series_indexes_with_mode(
+    worker_id: u32,
+    store: ObjectStore,
+    region: MitoRegionRef,
+    requested_bucket_width: Duration,
+    now_ms: i64,
+    purger: IndexFilePurger,
+    enable_range_index: bool,
+    allow_builds: bool,
+    manual: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
     // Use this snapshot throughout reconciliation, even if the region version advances.
@@ -123,6 +153,7 @@ pub(crate) async fn reconcile_series_indexes(
         &mut unpublished,
         enable_range_index,
         allow_builds,
+        manual,
     )
     .await?;
     SERIES_INDEX_RECONCILE_ELAPSED
@@ -184,6 +215,7 @@ async fn build_index_version(
     unpublished: &mut UnpublishedSeriesFiles,
     enable_range_index: bool,
     allow_builds: bool,
+    manual: bool,
 ) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
     let mut stats = ReconcileStats::default();
     let files = version
@@ -208,6 +240,12 @@ async fn build_index_version(
                 group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1))
             })
             .unwrap_or_default(),
+        (true, None) if manual => {
+            let width = i64::try_from(requested_bucket_width.as_secs())
+                .unwrap_or(i64::MAX)
+                .max(1);
+            group_files_into_series_buckets(&files, width, width)
+        }
         (true, None) => {
             debug!(
                 "Deferring series indexes without compaction window, worker: {worker_id}, region: {}",
@@ -240,8 +278,49 @@ async fn build_index_version(
                     .context(crate::error::OpenDalSnafu)?;
             }
         }
+        if manual && reusable && entry.artifact.is_none() {
+            reusable = store
+                .exists(&crate::series_index::catalog::series_index_path(
+                    region.region_id,
+                    entry.index_uuid,
+                ))
+                .await
+                .context(crate::error::OpenDalSnafu)?;
+        }
+        // Manual builds must repair schema changes even when SST coverage is unchanged.
+        if manual
+            && reusable
+            && selected_format == ArtifactFormat::ColumnarSeries
+            && let Some(backend) = &formats.index
+        {
+            let reader = backend.reader(store.clone(), handle.clone()).await?;
+            reusable = format::validate_series_schema(&reader.schema(), &version.metadata).is_ok();
+        }
         if !reusable {
             unusable.insert(entry.index_uuid);
+        }
+    }
+    let mut reusable_samples = HashSet::new();
+    if let Some(backend) = &formats.samples {
+        for (id, handle) in &current.samples {
+            if !visible.contains(id) || handle.entry().artifact.format != backend.format() {
+                continue;
+            }
+            let mut reusable = true;
+            for object in &handle.entry().artifact.objects {
+                reusable &= store
+                    .exists(&object.path)
+                    .await
+                    .context(crate::error::OpenDalSnafu)?;
+            }
+            if manual && reusable && backend.format() == ArtifactFormat::ColumnarSamples {
+                let reader = backend.reader(store.clone(), handle.clone()).await?;
+                reusable =
+                    format::validate_sample_schema(&reader.schema(), &version.metadata).is_ok();
+            }
+            if reusable {
+                reusable_samples.insert(*id);
+            }
         }
     }
     let mut index_buckets = current.index_buckets.clone();
@@ -253,19 +332,40 @@ async fn build_index_version(
             bucket.window_sequences.clear();
         }
     }
-    let plan = plan_series_indexes(buckets, index_buckets, version.options.ttl, now_ms);
+    let plan =
+        plan_series_indexes_with_mode(buckets, index_buckets, version.options.ttl, now_ms, manual);
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
     let mut next = prune_index_version(&current, &visible, &plan.expired_index_ids, &mut stats);
     if !allow_builds {
+        if manual
+            && files.iter().any(|file| {
+                !current.series_indexes.values().any(|handle| {
+                    handle.entry().format() == selected_format
+                        && !unusable.contains(&handle.entry().index_uuid)
+                        && handle
+                            .entry()
+                            .covers_file(file.meta_ref(), region.region_id)
+                }) || (formats.samples.is_some()
+                    && !reusable_samples.contains(&file.file_id().file_id()))
+            })
+        {
+            return crate::error::InvalidRequestSnafu {
+                region_id: region.region_id,
+                reason: "series-index capacity limit prevents complete manual coverage",
+            }
+            .fail();
+        }
         if let Some(next) = &mut next {
             next.index_buckets = plan.index_buckets;
         }
         return Ok((next, stats));
     }
-    if plan.builds.is_empty()
+    if !manual
+        && plan.builds.is_empty()
         && next.is_none()
         && formats.samples.is_none()
+        && current.samples.is_empty()
         && (!enable_range_index || current.range_indexes.len() == visible.len())
     {
         return Ok((None, stats));
@@ -282,22 +382,14 @@ async fn build_index_version(
         index_buckets: Default::default(),
     });
     let index_buckets = plan.index_buckets;
+    if formats.samples.is_none() {
+        stats.removed_samples += samples.len();
+        samples.clear();
+    }
     if let Some(backend) = &formats.samples {
         for file in &files {
             let id = file.file_id().file_id();
-            let reusable = if let Some(handle) = samples.get(&id) {
-                let artifact = &handle.entry().artifact;
-                let mut exists = artifact.format == backend.format();
-                for object in &artifact.objects {
-                    exists &= store
-                        .exists(&object.path)
-                        .await
-                        .context(crate::error::OpenDalSnafu)?;
-                }
-                exists
-            } else {
-                false
-            };
+            let reusable = reusable_samples.contains(&id);
             if reusable {
                 continue;
             }
@@ -314,6 +406,12 @@ async fn build_index_version(
                 unpublished.1.push(handle.clone());
                 samples.insert(id, handle);
                 stats.built_samples += 1;
+            } else if manual {
+                return crate::error::InvalidRequestSnafu {
+                    region_id: region.region_id,
+                    reason: format!("SST {id} has no readable input for samples"),
+                }
+                .fail();
             }
         }
     }
@@ -347,16 +445,32 @@ async fn build_index_version(
     }
     // Cover SSTs outside planned aggregate builds, including skipped buckets.
     if enable_range_index {
-        for file in files {
+        for file in &files {
             let file_id = file.file_id().file_id();
             if range_indexes.contains_key(&file_id) {
                 continue;
             }
-            if let Some(entry) = build_range_index(store, region, version, file).await? {
+            if let Some(entry) = build_range_index(store, region, version, file.clone()).await? {
                 stats.built_range += 1;
                 range_indexes.insert(entry.file_id, entry);
             }
         }
+    }
+    if manual
+        && files.iter().any(|file| {
+            !series_indexes.values().any(|handle| {
+                handle.entry().format() == selected_format
+                    && handle
+                        .entry()
+                        .covers_file(file.meta_ref(), region.region_id)
+            }) || (formats.samples.is_some() && !samples.contains_key(&file.file_id().file_id()))
+        })
+    {
+        return crate::error::InvalidRequestSnafu {
+            region_id: region.region_id,
+            reason: "manual series-index build did not cover every SST",
+        }
+        .fail();
     }
     stats.removed_series = current
         .series_indexes
