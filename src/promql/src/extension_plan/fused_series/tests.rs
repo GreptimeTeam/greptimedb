@@ -912,7 +912,7 @@ fn zone_chunks() -> Vec<RawSeriesChunk> {
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
 const DUPLICATE_LABEL_SET: &str =
-    "the node at root produces two series under the label set [(\"host\", \"web-1\")]";
+    "the node produces two series under the label set [(\"host\", \"web-1\")]";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -1228,14 +1228,26 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
 }
 
 /// Dropping a partially consumed execution releases its live reservation but preserves its peak.
+///
+/// The chunk is four samples from 0 to 180s and the grid starts at 300s, so the window holds it
+/// without settling an output: what the reservation pays for is the retained chunk itself, not a
+/// label-set ledger entry, which is only claimed when a chunk is converted into an output batch.
 #[tokio::test]
 async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
     let schema = frame_schema();
     let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let dropped = Arc::new(AtomicBool::new(false));
     let exec = plan(
         rate_tree(),
-        staged(schema.clone(), move || {
-            Box::pin(StagedStream::new(schema.clone(), vec![partial.clone()]).pending_after(1))
+        staged(schema.clone(), {
+            let dropped = Arc::clone(&dropped);
+            move || {
+                Box::pin(
+                    StagedStream::new(schema.clone(), vec![partial.clone()])
+                        .pending_after(1)
+                        .dropped(&dropped),
+                )
+            }
         }),
     )
     .expect("the runtime executes a rate tree");
@@ -1244,9 +1256,30 @@ async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
         .execute(0, task_context(&pool))
         .expect("the node executes");
 
-    // One unclosed series chunk is accepted; the source then parks before another arrives.
+    // One unclosed series chunk is accepted; the source then parks before another arrives, so the
+    // window holds the chunk it cannot evaluate yet.
     assert!(futures::poll!(stream.next()).is_pending());
+    let held = exec.metrics().expect("the runtime metrics are exported");
+    let current = held
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is exported");
+    let peak = held
+        .sum_by_name("native.p0.root.peak_reserved_bytes")
+        .expect("the peak-bytes gauge is exported");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the partial chunk is retained while the stream is alive: {current:?}"
+    );
+    assert!(
+        matches!(&peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the retained chunk was admitted by the pool: {peak:?}"
+    );
+
     drop(stream);
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the terminated stream still holds its input"
+    );
 
     let metrics = exec.metrics().expect("the runtime metrics are exported");
     let current = metrics
@@ -1255,12 +1288,17 @@ async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
     let peak = metrics
         .sum_by_name("native.p0.root.peak_reserved_bytes")
         .expect("the peak-bytes gauge is exported");
-    assert!(matches!(current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0));
-    assert!(matches!(peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0));
     assert!(
-        pool.reserved() > 0,
-        "plan-level label-set charge is independent"
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "the dropped execution holds nothing: {current:?}"
     );
+    assert!(
+        matches!(&peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the peak is what the execution did, not what it holds: {peak:?}"
+    );
+    // Nothing was converted into an output batch, so no label set was ever claimed and the plan's
+    // ledger was never charged: dropping the execution gives back everything it took.
+    assert_eq!(0, pool.reserved(), "the dropped execution holds no bytes");
 }
 
 /// A tree the runtime does not execute is refused when the execution plan is built.
