@@ -58,7 +58,7 @@
 //! therefore never starts, rather than answering half a query or panicking halfway through one.
 //!
 //! A node that rewrites labels — a window drops the metric name and the empty-valued labels, a map
-//! drops the name, and a binary node drops it for arithmetic and for a `bool` comparison — can turn
+//! drops the name or rewrites a label, and a binary node drops it for arithmetic and for a `bool` comparison — can turn
 //! two distinct input series into one output label set. That pair is legal when the two hold values
 //! at disjoint positions, which is exactly what
 //! [`crate::grid_series::merge_same_labelset`] merges: `is_last` closes the source series whose
@@ -106,17 +106,17 @@ use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, fields_bytes, label_set, merge_same_labelset, owned,
     series_bytes, table_bytes,
 };
-use crate::histogram_eval::evaluate_histograms;
+use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
 use crate::instant_eval::select_instants;
 use crate::map::{
-    ArithmeticOp, Comparison, ComparisonOp, MathOp, ScalarOperand, drop_metric_name,
-    map_arithmetic, map_compare, map_math,
+    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
+    map_compare, map_math,
 };
 use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
 use crate::native::plan::{
-    BoundInstant, BoundScalar, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
+    BoundInstant, BoundScalar, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
     NativeType,
 };
 #[cfg(test)]
@@ -582,8 +582,8 @@ impl NodeBuffer {
 
 /// The positions one node has handed out, per output label set and field.
 ///
-/// A node that rewrites labels — a `Map` dropping the metric name, a `Window` dropping the name
-/// and the empty-valued labels — can turn two input series into one label set, and the node above
+/// A node that rewrites labels — a `Map` dropping the metric name or rewriting a label, a `Window`
+/// dropping the name and the empty-valued labels — can turn two input series into one label set, and the node above
 /// reads the two chunks as one series. What is kept here is which positions of each field were
 /// already handed out under each label set, so a second series onto a set can be refused before
 /// the node above evaluates it.
@@ -816,7 +816,7 @@ fn misaligned_field(
 
 /// What a map node applies.
 struct MapRuntime {
-    ops: Arc<[MathOp]>,
+    ops: Arc<[MapOp]>,
     /// The schema of what the map produces, which is what its input is checked against.
     schema: Arc<SeriesSchema>,
 }
@@ -2149,7 +2149,8 @@ struct NodeRuntime {
     /// the binding is kept per input rather than once for the tree.
     source_schema: Option<Arc<SeriesSchema>>,
     /// What this node has already handed out under each output label set, for a node that rewrites
-    /// labels: a window drops the metric name and the empty-valued labels, a map drops the name.
+    /// labels: a window drops the metric name and the empty-valued labels, a map drops the name or
+    /// rewrites a label.
     emitted: Option<Emitted>,
     /// The input a window collects until its input ends, for a window whose input can hold two
     /// series under one label set; `None` for a window that evaluates its chunks as they arrive,
@@ -2252,7 +2253,11 @@ impl NodeRuntime {
             // the input again.
             let _timer = metrics.timer();
             match self.map.as_ref() {
-                Some(map) => map_chunk(&map.schema, &chunk, &map.ops),
+                // A label change can write a label far larger than the chunk, so each one is
+                // admitted before it is built.
+                Some(map) => map_chunk(&map.schema, &chunk, &map.ops, &mut |bytes| {
+                    self.buffer.grow(bytes)
+                }),
                 None => Err(DataFusionError::Execution(format!(
                     "the node at {path} holds no map"
                 ))),
@@ -2991,8 +2996,8 @@ impl NativeExecutionState {
                         ops: Arc::clone(&op.ops),
                         schema,
                     });
-                    // A map drops the metric name, so it is one of the nodes that can turn two
-                    // series into one label set.
+                    // A map drops the metric name or rewrites a label, so it is one of the nodes
+                    // that can turn two series into one label set.
                     runtime.emitted = Some(Emitted::default());
                 }
                 NativeExpr::Window { input, op } => {
@@ -3149,7 +3154,7 @@ impl NativeExecutionState {
         //
         // A source is a stream of series, each with its own label set, so its output needs no merge:
         // that is what keeps `Input -> Window` streaming and reporting as its input arrives. A map
-        // drops the metric name, so its output can hold two input series under one label set, and
+        // drops the metric name or rewrites a label, so its output can hold two input series under one label set, and
         // every node above it needs the merge. A window collects its input and merges it when its
         // input can hold two series under one label set: reading them as series one after another
         // would end the first in the evaluator before the second arrives, and a window across the
@@ -4172,36 +4177,60 @@ impl NativeExecutor {
 
 /// Maps one chunk with `ops`, keeping its axis and its closing.
 ///
-/// Mapping is point-wise over valued positions: a float chunk keeps the rows it came with, and a
-/// chunk holding native histograms loses the rows only histograms filled, as math skips them; a
-/// position no field fills is not a row of any chunk, and mapping does not invent one. `None` means
-/// the operation emptied every position, which yields no chunk at all
-/// unless this chunk closed its series: a closing chunk is still handed over, holding no position,
-/// because a consumer tells "nothing more here" from "no more input" by that chunk alone.
+/// Mapping is point-wise over valued positions: a float chunk keeps the rows it came with under
+/// math, a chunk holding native histograms loses the rows only histograms filled, as math skips
+/// them, and a histogram function keeps only the rows histograms filled; a position no field fills
+/// is not a row of any chunk, and mapping does not invent one. `None` means the operation emptied
+/// every position, which yields no chunk at all unless this chunk closed its series: a closing
+/// chunk is still handed over, holding no position, because a consumer tells "nothing more here"
+/// from "no more input" by that chunk alone.
+///
+/// `admit` is handed the bytes a label change can write before the change builds them; an error
+/// from it stops the map.
 fn map_chunk(
-    schema: &SeriesSchema,
+    schema: &Arc<SeriesSchema>,
     chunk: &EvaluatedChunk,
-    ops: &[MathOp],
+    ops: &[MapOp],
+    admit: &mut dyn FnMut(usize) -> Result<()>,
 ) -> Result<Option<EvaluatedChunk>> {
     let mut series = chunk.series.clone();
-    for &op in ops {
-        series = match map_math(schema, &series, op)? {
-            Some(mapped) => mapped,
-            // `clamp` with `max < min` is the empty vector, and math skips native histograms, so a
-            // series without a float value has none left: every position it held was decided and
-            // holds no value now, so there is no row to hand over.
-            None => {
-                return if chunk.is_last {
-                    // A map drops the metric name, so the empty series closes under the labels the
-                    // map produces.
-                    let metric = drop_metric_name(&chunk.series.metric)?;
-                    let empty = no_row_series(schema, &chunk.series, metric)?;
-                    EvaluatedChunk::try_new(empty, true).map(Some)
-                } else {
-                    Ok(None)
-                };
+    for (index, op) in ops.iter().enumerate() {
+        let mapped = match op {
+            MapOp::Label(rewrite) => {
+                admit(rewrite.written_bytes(&series.metric))?;
+                rewrite.apply(&mut series.metric)?;
+                continue;
             }
+            MapOp::Math(math) => map_math(schema, &series, *math)?,
+            MapOp::Histogram(function) => map_native_histogram(*function, schema, &series)?,
         };
+        if let Some(mapped) = mapped {
+            series = mapped;
+            continue;
+        }
+        // `clamp` with `max < min` is the empty vector, math skips native histograms and a
+        // histogram function skips floats, so a series left without a value of the kind the
+        // operation reads has none left: every position it held was decided and holds no value
+        // now, so there is no row to hand over.
+        if !chunk.is_last {
+            return Ok(None);
+        }
+        // The closing chunk names the series the map would have produced, so the operations not
+        // run still decide its labels.
+        let mut metric = series.metric.clone();
+        for op in &ops[index..] {
+            match op {
+                MapOp::Label(rewrite) => {
+                    admit(rewrite.written_bytes(&metric))?;
+                    rewrite.apply(&mut metric)?;
+                }
+                MapOp::Math(_) => metric = drop_metric_name(&metric)?,
+                // `simpleHistogramFunc` drops only the name, not the type and unit.
+                MapOp::Histogram(_) => metric.remove("__name__"),
+            }
+        }
+        let empty = no_row_series(schema, &series, metric)?;
+        return EvaluatedChunk::try_new(empty, true).map(Some);
     }
     EvaluatedChunk::try_new(series, chunk.is_last).map(Some)
 }

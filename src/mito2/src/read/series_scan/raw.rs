@@ -287,3 +287,19 @@ pub(crate) fn make_stream(
         inner: Box::pin(stream),
     })
 }
+
+/// Wraps deferred preparation while exposing the scan contract before polling.
+pub(crate) fn from_stream(
+    schema: Arc<SeriesSchema>,
+    label_source: RawLabelSource,
+    ordering: SeriesOrdering,
+    inner: BoxStream<'static, Result<RawSeriesChunk, BoxedError>>,
+) -> SendableRawSeriesStream {
+    Box::pin(RawStream {
+        schema,
+        label_decode_spec: label_decode_spec(&label_source),
+        label_source,
+        ordering,
+        inner,
+    })
+}

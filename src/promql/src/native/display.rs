@@ -29,8 +29,8 @@ use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
 use crate::select::SortOrder;
@@ -101,7 +101,7 @@ fn describe(node: &NativeNode) -> String {
         ),
         NativeExpr::Window { op, .. } => window(op),
         NativeExpr::Map { op, .. } => {
-            let ops: Vec<String> = op.ops.iter().map(math_op).collect();
+            let ops: Vec<String> = op.ops.iter().map(map_op).collect();
             ops.join(", ")
         }
         NativeExpr::Vector { op, .. } => match op {
@@ -246,7 +246,16 @@ fn function(function: RangeFunction) -> String {
     }
 }
 
-/// The PromQL name of a point-wise operation, with the constant arguments it was bound to.
+/// The PromQL call a map operation makes, with the constant arguments it was bound to.
+fn map_op(op: &MapOp) -> String {
+    match op {
+        MapOp::Math(op) => math_op(op),
+        MapOp::Histogram(function) => function.name().to_string(),
+        MapOp::Label(rewrite) => rewrite.to_string(),
+    }
+}
+
+/// The PromQL name of a math function, with the constant arguments it was bound to.
 fn math_op(op: &MathOp) -> String {
     match op {
         MathOp::Abs => "abs".to_string(),

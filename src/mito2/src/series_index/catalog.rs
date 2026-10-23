@@ -58,7 +58,8 @@ pub(crate) struct WindowSequence {
 ///
 /// A published entry must include every series from every SST in the region
 /// contained by its bucket and inclusive file-sequence interval. Query planning
-/// relies on this complete-coverage contract, not on `source_file_ids`.
+/// relies on this complete-coverage contract. Manual builds additionally use exact
+/// `source_file_ids` membership for SSTs without a file sequence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -70,8 +71,8 @@ pub(crate) struct SeriesIndexEntry {
     pub(crate) bucket_start: Timestamp,
     /// Exclusive bucket end.
     pub(crate) bucket_end: Timestamp,
-    /// Source SST IDs retained for debugging only. Compaction can replace these
-    /// files without changing indexed data, so IDs must not determine index reuse.
+    /// Source SST IDs retained for diagnostics and exact coverage of unknown-sequence files. Compaction can replace these
+    /// files without changing indexed data, so known-sequence reuse does not depend on IDs.
     pub(crate) source_file_ids: Vec<FileId>,
     pub(crate) min_file_sequence: u64,
     pub(crate) max_file_sequence: u64,
@@ -104,9 +105,15 @@ impl SeriesIndexEntry {
             && file.time_range.0 <= file.time_range.1
             && self.bucket_start <= file.time_range.0
             && file.time_range.1 < self.bucket_end
-            && file.sequence.is_some_and(|sequence| {
-                self.min_file_sequence <= sequence.get() && sequence.get() <= self.max_file_sequence
-            })
+            && match file.sequence {
+                Some(sequence) => {
+                    self.min_file_sequence <= sequence.get()
+                        && sequence.get() <= self.max_file_sequence
+                }
+                // Manual builds can cover immutable files without sequence metadata.
+                // This is exact membership, never a claim about replacement SSTs.
+                None => self.min_file_sequence == 0 && self.source_file_ids.contains(&file.file_id),
+            }
     }
 }
 

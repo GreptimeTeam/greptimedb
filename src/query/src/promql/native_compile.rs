@@ -27,9 +27,11 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
+//!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
 //!   <expression> <operator> <constant>             e.g. x * 100, x > bool 0
 //!   <constant> <operator> <expression>             e.g. 1 / x, 0 < x
 //!   -<expression>                                  e.g. -x
@@ -39,6 +41,10 @@
 //!                                                  e.g. count (x) by(job)
 //!   quantile(<constant>, <expression>) [(by|without)(<labels>)]
 //!                                                  e.g. quantile(0.9, x) by(job)
+//!   <selector aggregator>(<constant>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. topk(3, x) by(job), limit_ratio(0.5, x)
+//!   count_values(<string>, <expression>) [(by|without)(<labels>)]
+//!                                                  e.g. count_values("v", x)
 //!
 //! <matrix>    <selector>[<range>]<modifiers>       a range selector: raw samples
 //!           | <expression>[<range>:<step>]<modifiers>
@@ -50,7 +56,8 @@
 //! ```
 //!
 //! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
-//! `quantile`, the function names are [`range_signature`]'s and [`math_signature`]'s, and which side
+//! `quantile`, `<selector aggregator>` is `topk`, `bottomk`, `limitk` or `limit_ratio`, the
+//! function names are [`range_signature`]'s and [`math_signature`]'s, and which side
 //! of the matrix a range function's constants go on is [`RangeSignature`]'s: before it for
 //! `quantile_over_time`, after it for `predict_linear` and `double_exponential_smoothing`. A math
 //! function's constants always follow its vector.
@@ -68,10 +75,13 @@
 //! Those shapes become `Input` (raw samples) → `Instant` (the last sample within the statement's
 //! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
 //! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
-//! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
+//! `<expression>` → `Map` (a pointwise math, native histogram or label function over what its
+//! argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
-//! `Scalar` (that constant) and `Aggregate` (one of the nine aggregators that fold a group's values
-//! into one value per grid point, optionally grouped). Everything else is a
+//! `Scalar` (that constant), `Aggregate` (one of the nine aggregators that fold a group's values
+//! into one value per grid point, optionally grouped) and `Vector` (an operation over the whole
+//! vector at each point: a sort, `absent`, a classic histogram function, a selecting aggregator or
+//! `count_values`). Everything else is a
 //! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
 //! because rejecting a query the compiler does not understand is the only honest alternative to
 //! compiling it into something else.
@@ -125,12 +135,13 @@ use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::SeriesSchema;
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{MetricName, SeriesOrdering};
-use promql::histogram_eval::HistogramFunction;
+use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
+use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
@@ -159,13 +170,18 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          is any shape here, so a subquery nests on a grid of its own as in \
                          `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
                          `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
-                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a binary \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a native \
+                         histogram function over any of them (`histogram_count(x)`), a label \
+                         function over any of them \
+                         (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a constant (`2 / (x + 1)`, \
                          `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
                          that folds a group's values into one value per grid point — `sum`, `avg`, \
                          `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
-                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; a \
+                         grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
+                         `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
+                         them, as in `topk(3, x) by(job)` and `count_values(\"v\", x)`; a \
                          sort, `absent` or `histogram_quantile` / `histogram_fraction` over any of \
                          them (`sort_desc(x)`, `absent(x{job=\"a\"})`, \
                          `histogram_quantile(0.9, rate(x[5m]))`); a range function's own \
@@ -469,11 +485,11 @@ fn binary_op(op: &TokenType) -> Option<BinaryOp> {
 /// cannot execute keeps this the one place that says what an aggregate means, so a kernel landing
 /// later changes no binding.
 ///
-/// The rest of the parser's aggregates are a different shape, and are refused with the reason rather
-/// than folded into a kind that would compute something else: `topk`, `bottomk`, `limitk` and
-/// `limit_ratio` select some of the input's series, so they do not report one value per group per
-/// grid point, and `count_values` writes one output label per distinct value rather than folding a
-/// group's values at all.
+/// The rest of the parser's aggregates are a different shape and bind as a vector operation
+/// ([`vector_aggregate`]) rather than as a kind that would compute something else: `topk`,
+/// `bottomk`, `limitk` and `limit_ratio` select some of the input's series, so they do not report
+/// one value per group per grid point, and `count_values` writes one output label per distinct value
+/// rather than folding a group's values at all.
 ///
 /// The grouping is bound in the tree's own terms, because `by` and `without` are not each other's
 /// inverse: `by(job)` keeps `job` and drops every other label, while `without(instance)` keeps every
@@ -515,22 +531,15 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
                 quantile: constant_argument(&op.to_string(), param, 0)?,
             }
         }
-        // A ranking aggregate keeps some of the input's series, so what it reports is not one value
-        // per group per grid point: `topk(3, x)` answers with three series, not with the groups'
-        // folded values.
-        token::T_TOPK | token::T_BOTTOMK | token::T_LIMITK | token::T_LIMIT_RATIO => {
-            return Err(not_implemented(&format!(
-                "the aggregate `{op}` in `{aggregate}`, which selects some of its input's series \
-                 rather than folding each group's values into one value per grid point"
-            )));
-        }
-        // `count_values` folds nothing: it writes one output label per distinct value it saw, which
-        // is a shape no folded value can spell.
-        token::T_COUNT_VALUES => {
-            return Err(not_implemented(&format!(
-                "the aggregate `{op}` in `{aggregate}`, which writes one output label per distinct \
-                 value rather than folding each group's values into one value per grid point"
-            )));
+        // A ranking aggregate keeps some of the input's series, and `count_values` writes one
+        // output label per distinct value: neither folds a group into one value per grid point, so
+        // both read the whole vector in a `Vector` node instead.
+        token::T_TOPK
+        | token::T_BOTTOMK
+        | token::T_LIMITK
+        | token::T_LIMIT_RATIO
+        | token::T_COUNT_VALUES => {
+            return vector_aggregate(context, aggregate);
         }
         // The parser's `aggregate_op` rule lists exactly the fourteen names above, so this arm is
         // an operator this compiler was not taught rather than one it means to fold.
@@ -557,6 +566,55 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
     })
 }
 
+/// Binds `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` as a vector operation over
+/// the expression it aggregates.
+///
+/// The parser gives each of them its parameter: a number for the first four, folded to the constant
+/// it means like a `quantile`, and a string for `count_values`, the label it writes the value to.
+fn vector_aggregate(context: &Context, aggregate: &AggregateExpr) -> Result<NativeNode> {
+    let AggregateExpr {
+        op,
+        expr,
+        param,
+        modifier,
+    } = aggregate;
+    let name = op.to_string();
+    let param = param.as_ref().ok_or_else(|| {
+        not_implemented(&format!(
+            "the aggregate `{op}` in `{aggregate}`, which takes a parameter as its first argument"
+        ))
+    })?;
+    let group = grouping(modifier.as_ref());
+    let bound = match op.id() {
+        token::T_TOPK | token::T_BOTTOMK => BoundVectorOp::TopK {
+            k: constant_argument(&name, param, 0)?,
+            top: op.id() == token::T_TOPK,
+            group,
+        },
+        token::T_LIMITK => BoundVectorOp::LimitK {
+            k: constant_argument(&name, param, 0)?,
+            group,
+        },
+        // `limit_ratio` keeps whole series by their label hash, so a grouping changes nothing.
+        token::T_LIMIT_RATIO => BoundVectorOp::LimitRatio {
+            ratio: constant_argument(&name, param, 0)?,
+        },
+        _ => {
+            let PromExpr::StringLiteral(StringLiteral { val }) = unparen(param) else {
+                return Err(not_implemented(&format!(
+                    "the aggregate `{op}` in `{aggregate}`, whose label `{param}` is not a string \
+                     literal"
+                )));
+            };
+            BoundVectorOp::CountValues {
+                label: Arc::from(val.as_str()),
+                group,
+            }
+        }
+    };
+    vector_call(context, &name, bound, expr)
+}
+
 /// How a `by` or `without` modifier identifies a group, in the tree's own terms.
 ///
 /// The labels keep the order they were written in: a grouping is a set, and the tree records the
@@ -578,10 +636,10 @@ fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
     }
 }
 
-/// Compiles a call: a range function opens a window over the selector it is given, and a math
-/// function maps the value of its first argument.
+/// Compiles a call: a range function opens a window over the selector it is given, and a math,
+/// native histogram or label function maps the value of its first argument.
 ///
-/// The two name lists are disjoint, and a range function is decided first because it binds its own
+/// The name lists are disjoint, and a range function is decided first because it binds its own
 /// window rather than its argument's value. A name in neither list is refused here, which is where
 /// the difference between "this compiler cannot fold this function" and "this name means nothing"
 /// is still visible.
@@ -594,15 +652,29 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
         return vector_call(context, func.name, op, vector);
     }
     // The name is looked up before the call's arguments are read, so a name this compiler has no
-    // kernel for is refused as such whichever argument it was given: `absent(x)` is refused as a
-    // name with no kernel, not as a selector this compiler could not compile.
-    let Some((op, vector)) = math_op(func.name, &args.args)? else {
-        return Err(not_implemented(&format!(
-            "a call to `{}`, which has no native kernel",
-            func.name
-        )));
-    };
-    map_call(context, func.name, op, vector)
+    // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
+    // vector to map, and the rejection names the name rather than describing a vector they never
+    // wrote.
+    if let Some((op, vector)) = math_op(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Math(op), vector);
+    }
+    if let Some(function) = histogram_function(func.name) {
+        let [vector] = args.args.as_slice() else {
+            return Err(not_implemented(&format!(
+                "a call to `{}` with {} argument(s), where it takes its vector",
+                func.name,
+                args.args.len()
+            )));
+        };
+        return map_call(context, func.name, MapOp::Histogram(function), vector);
+    }
+    if let Some((rewrite, vector)) = label_rewrite(func.name, &args.args)? {
+        return map_call(context, func.name, MapOp::Label(Arc::new(rewrite)), vector);
+    }
+    Err(not_implemented(&format!(
+        "a call to `{}`, which has no native kernel",
+        func.name
+    )))
 }
 
 /// Binds a range function over the matrix it is given, and the window that matrix opens.
@@ -652,7 +724,8 @@ fn window_call(
     }
 }
 
-/// Wraps `op` over the value of `vector`, which is the first argument of a math function.
+/// Wraps `op` over the value of `vector`, which is the first argument of a math, native histogram
+/// or label function.
 ///
 /// The output is the input's own type: a pointwise function moves no value to another grid point
 /// and reports one value per field it was given, so the map's schema is the input's allocation
@@ -661,8 +734,8 @@ fn window_call(
 /// with its input's, so a map that allocated an equal grid of its own would validate the same way.
 /// The only comparison by identity is an input node's, whose output has to be the very binding it
 /// was bound to.
-fn map_call(context: &Context, name: &str, op: MathOp, vector: &PromExpr) -> Result<NativeNode> {
-    // A math function is pointwise over a vector, so its first argument has to be one. The parser
+fn map_call(context: &Context, name: &str, op: MapOp, vector: &PromExpr) -> Result<NativeNode> {
+    // A map is pointwise over a vector, so the function's first argument has to be one. The parser
     // checks the same thing and the tree's validation checks the compiled input's type again, but
     // neither can name the argument the client wrote: this is the check that can.
     if vector.value_type() != ValueType::Vector {
@@ -1388,6 +1461,64 @@ fn math_op<'a>(
         ),
     };
     Ok(Some((op, vector)))
+}
+
+/// The native histogram function `name` denotes, or `None` when it is not one.
+///
+/// These read only native histogram samples and drop the float ones, as Prometheus'
+/// `simpleHistogramFunc` does; `histogram_quantile` and `histogram_fraction` also read classic
+/// bucket series and are not listed.
+fn histogram_function(name: &str) -> Option<NativeHistogramFunction> {
+    match name {
+        "histogram_count" => Some(NativeHistogramFunction::Count),
+        "histogram_sum" => Some(NativeHistogramFunction::Sum),
+        "histogram_avg" => Some(NativeHistogramFunction::Avg),
+        "histogram_stddev" => Some(NativeHistogramFunction::StdDev),
+        "histogram_stdvar" => Some(NativeHistogramFunction::StdVar),
+        _ => None,
+    }
+}
+
+/// The label change `label_replace` or `label_join` makes, and the vector it is made to, or `None`
+/// when `name` is neither.
+///
+/// The parser checks the argument types and counts; what is left to check is the arguments'
+/// content, which [`LabelRewrite`] does as Prometheus does at evaluation, so an invalid regular
+/// expression or an empty label name fails the statement here as it would there.
+fn label_rewrite<'a>(
+    name: &str,
+    arguments: &'a [Box<PromExpr>],
+) -> Result<Option<(LabelRewrite, &'a PromExpr)>> {
+    if !matches!(name, "label_replace" | "label_join") {
+        return Ok(None);
+    }
+    let Some((vector, strings)) = arguments.split_first() else {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` with no argument"
+        )));
+    };
+    let strings = strings
+        .iter()
+        .map(|argument| match unparen(argument) {
+            PromExpr::StringLiteral(StringLiteral { val }) => Ok(val.as_str()),
+            other => Err(not_implemented(&format!(
+                "a call to `{name}` whose argument `{other}` is not a string literal"
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let rewrite = match (name, strings.as_slice()) {
+        ("label_replace", [dst, replacement, src, regex]) => {
+            LabelRewrite::replace(dst, replacement, src, regex)?
+        }
+        ("label_join", [dst, separator, src @ ..]) => LabelRewrite::join(dst, separator, src)?,
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `{name}` with {} argument(s)",
+                arguments.len()
+            )));
+        }
+    };
+    Ok(Some((rewrite, vector)))
 }
 
 /// The rejection of a math call that wrote `given` arguments where `signature` takes another count.

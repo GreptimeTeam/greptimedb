@@ -139,7 +139,13 @@ pub(crate) async fn build_series_index(
     let schema = mapper.input_arrow_schema(false);
     for file in &bucket.files {
         let Some((context, mut selection)) = reader_input(region, file.clone()).await? else {
-            continue;
+            return UnexpectedSnafu {
+                reason: format!(
+                    "series-index source SST {} has no readable input",
+                    file.file_id()
+                ),
+            }
+            .fail();
         };
         let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
         sources.push(Box::pin(try_stream! {

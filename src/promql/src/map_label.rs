@@ -15,6 +15,7 @@
 //! `label_replace` and `label_join` over evaluated series, following Prometheus
 //! `evalLabelReplace`, `evalLabelJoin` and `mergeSeriesWithSameLabelset`.
 
+use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use datafusion::error::{DataFusionError, Result};
@@ -36,32 +37,196 @@ mod tests;
 /// of literal characters.
 pub fn label_replace(
     schema: &Arc<SeriesSchema>,
-    mut series: Vec<Series>,
+    series: Vec<Series>,
     dst: &str,
     replacement: &str,
     src: &str,
     regex: &str,
 ) -> Result<Vec<Series>> {
-    let compiled = Regex::new(&format!("^(?s:{regex})$")).map_err(|_| {
-        DataFusionError::Plan(format!(
-            "invalid regular expression in label_replace(): {regex}"
-        ))
-    })?;
-    if dst.is_empty() {
-        return Err(DataFusionError::Plan(
-            "invalid destination label name in label_replace(): ".into(),
-        ));
-    }
-    let mut value = String::new();
+    rewrite_all(
+        schema,
+        series,
+        &LabelRewrite::replace(dst, replacement, src, regex)?,
+    )
+}
+
+/// `label_join(v, dst, separator, src...)`: `dst` is set to the values of `src` joined by
+/// `separator`, an absent label joining as the empty string.
+pub fn label_join(
+    schema: &Arc<SeriesSchema>,
+    series: Vec<Series>,
+    dst: &str,
+    separator: &str,
+    src: &[&str],
+) -> Result<Vec<Series>> {
+    rewrite_all(schema, series, &LabelRewrite::join(dst, separator, src)?)
+}
+
+fn rewrite_all(
+    schema: &Arc<SeriesSchema>,
+    mut series: Vec<Series>,
+    rewrite: &LabelRewrite,
+) -> Result<Vec<Series>> {
     for series in &mut series {
-        let Some(captures) = compiled.captures(series.metric.get(src).unwrap_or_default()) else {
-            continue;
-        };
-        value.clear();
-        expand(&compiled, &captures, replacement, &mut value);
-        set_label(&mut series.metric, dst, &value)?;
+        rewrite.apply(&mut series.metric)?;
     }
     merge_same_labelset(schema, series)
+}
+
+/// The label change of `label_replace` or `label_join`, checked and compiled once and applied to
+/// each series on its own. Series that end up with one label set are the caller's to merge.
+///
+/// Built only through [`Self::replace`] and [`Self::join`], so the expression is anchored and the
+/// label names are checked.
+#[derive(Debug)]
+pub struct LabelRewrite(Change);
+
+#[derive(Debug)]
+enum Change {
+    Replace {
+        dst: Arc<str>,
+        replacement: Arc<str>,
+        src: Arc<str>,
+        /// The expression as written, which `regex` anchors.
+        pattern: Arc<str>,
+        regex: Regex,
+    },
+    Join {
+        dst: Arc<str>,
+        separator: Arc<str>,
+        src: Arc<[Arc<str>]>,
+    },
+}
+
+impl LabelRewrite {
+    /// `label_replace`'s change, failing on an invalid expression or an empty destination.
+    pub fn replace(dst: &str, replacement: &str, src: &str, regex: &str) -> Result<Self> {
+        let compiled = Regex::new(&format!("^(?s:{regex})$")).map_err(|_| {
+            DataFusionError::Plan(format!(
+                "invalid regular expression in label_replace(): {regex}"
+            ))
+        })?;
+        if dst.is_empty() {
+            return Err(DataFusionError::Plan(
+                "invalid destination label name in label_replace(): ".into(),
+            ));
+        }
+        Ok(Self(Change::Replace {
+            dst: Arc::from(dst),
+            replacement: Arc::from(replacement),
+            src: Arc::from(src),
+            pattern: Arc::from(regex),
+            regex: compiled,
+        }))
+    }
+
+    /// `label_join`'s change, failing on an empty source or destination.
+    pub fn join(dst: &str, separator: &str, src: &[&str]) -> Result<Self> {
+        if let Some(src) = src.iter().find(|src| src.is_empty()) {
+            return Err(DataFusionError::Plan(format!(
+                "invalid source label name in label_join(): {src}"
+            )));
+        }
+        if dst.is_empty() {
+            return Err(DataFusionError::Plan(
+                "invalid destination label name in label_join(): ".into(),
+            ));
+        }
+        Ok(Self(Change::Join {
+            dst: Arc::from(dst),
+            separator: Arc::from(separator),
+            src: src.iter().map(|src| Arc::from(*src)).collect(),
+        }))
+    }
+
+    /// An upper bound on the bytes the label this change writes to `metric` takes, read before it
+    /// is built.
+    ///
+    /// The written value can be far larger than the input: `label_join` concatenates its sources,
+    /// listed any number of times, and every `$` reference of a `label_replace` template can expand
+    /// to the whole source value. The bound counts each source once per listing and each `$` as
+    /// one whole source value.
+    pub fn written_bytes(&self, metric: &MetricName) -> usize {
+        let value = |name: &str| metric.get(name).map_or(0, str::len);
+        match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                ..
+            } => {
+                let references = replacement.matches('$').count();
+                dst.len()
+                    .saturating_add(replacement.len())
+                    .saturating_add(references.saturating_mul(value(src)))
+            }
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => src.iter().fold(
+                dst.len()
+                    .saturating_add(separator.len().saturating_mul(src.len())),
+                |total, name| total.saturating_add(value(name)),
+            ),
+        }
+    }
+
+    /// Changes `metric` the way the function changes one series.
+    pub fn apply(&self, metric: &mut MetricName) -> Result<()> {
+        let mut value = String::new();
+        match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                regex,
+                ..
+            } => {
+                let Some(captures) = regex.captures(metric.get(src).unwrap_or_default()) else {
+                    return Ok(());
+                };
+                expand(regex, &captures, replacement, &mut value);
+                set_label(metric, dst, &value)
+            }
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => {
+                for (index, src) in src.iter().enumerate() {
+                    if index > 0 {
+                        value.push_str(separator);
+                    }
+                    value.push_str(metric.get(src).unwrap_or_default());
+                }
+                set_label(metric, dst, &value)
+            }
+        }
+    }
+}
+
+/// The call with its constant arguments, strings in Rust's debug quoting.
+impl fmt::Display for LabelRewrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            Change::Replace {
+                dst,
+                replacement,
+                src,
+                pattern,
+                ..
+            } => write!(
+                f,
+                "label_replace {dst:?} {replacement:?} {src:?} {pattern:?}"
+            ),
+            Change::Join {
+                dst,
+                separator,
+                src,
+            } => write!(f, "label_join {dst:?} {separator:?} {src:?}"),
+        }
+    }
 }
 
 /// Go `regexp.Expand` reads a group name as Unicode letters (L), decimal digits (Nd) and `_`,
@@ -110,39 +275,6 @@ fn expand(regex: &Regex, captures: &regex::Captures<'_>, template: &str, out: &m
         }
     }
     out.push_str(rest);
-}
-
-/// `label_join(v, dst, separator, src...)`: `dst` is set to the values of `src` joined by
-/// `separator`, an absent label joining as the empty string.
-pub fn label_join(
-    schema: &Arc<SeriesSchema>,
-    mut series: Vec<Series>,
-    dst: &str,
-    separator: &str,
-    src: &[&str],
-) -> Result<Vec<Series>> {
-    if let Some(src) = src.iter().find(|src| src.is_empty()) {
-        return Err(DataFusionError::Plan(format!(
-            "invalid source label name in label_join(): {src}"
-        )));
-    }
-    if dst.is_empty() {
-        return Err(DataFusionError::Plan(
-            "invalid destination label name in label_join(): ".into(),
-        ));
-    }
-    let mut value = String::new();
-    for series in &mut series {
-        value.clear();
-        for (index, src) in src.iter().enumerate() {
-            if index > 0 {
-                value.push_str(separator);
-            }
-            value.push_str(series.metric.get(src).unwrap_or_default());
-        }
-        set_label(&mut series.metric, dst, &value)?;
-    }
-    merge_same_labelset(schema, series)
 }
 
 /// An empty value removes the label, as Prometheus label sets have no empty values.
