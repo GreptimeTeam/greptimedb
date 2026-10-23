@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 
 use common_telemetry::debug;
@@ -23,7 +24,6 @@ use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::{DataFusionError, Result};
 use store_api::region_engine::PartitionRange;
 use table::table::scan::RegionScanExec;
-pub use table::table::scan::assign_partition_ranges;
 
 #[derive(Debug)]
 pub struct ParallelizeScan;
@@ -71,7 +71,7 @@ impl ParallelizeScan {
 
                     // assign ranges to each partition
                     let mut partition_ranges =
-                        assign_partition_ranges(ranges, expected_partition_num);
+                        Self::assign_partition_range(ranges, expected_partition_num);
                     debug!(
                         "Assign {total_range_num} ranges to {expected_partition_num} partitions"
                     );
@@ -117,12 +117,64 @@ impl ParallelizeScan {
         Ok(result)
     }
 
-    /// Compatibility wrapper for callers using the optimizer type.
+    /// Distribute [`PartitionRange`]s to each partition.
+    ///
+    /// Currently we assign ranges to partitions according to their rows so each partition
+    /// has similar number of rows. This method always return `expected_partition_num` partitions.
     pub fn assign_partition_range(
-        ranges: Vec<PartitionRange>,
+        mut ranges: Vec<PartitionRange>,
         expected_partition_num: usize,
     ) -> Vec<Vec<PartitionRange>> {
-        assign_partition_ranges(ranges, expected_partition_num)
+        if ranges.is_empty() {
+            // Returns a single partition with no range.
+            return vec![vec![]; expected_partition_num];
+        }
+
+        if ranges.len() == 1 {
+            let mut vec = vec![vec![]; expected_partition_num];
+            vec[0] = ranges;
+            return vec;
+        }
+
+        // Sort ranges by number of rows in descending order.
+        ranges.sort_by_key(|b| std::cmp::Reverse(b.num_rows));
+        let mut partition_ranges = vec![vec![]; expected_partition_num];
+
+        #[derive(Eq, PartialEq)]
+        struct HeapNode {
+            num_rows: usize,
+            partition_idx: usize,
+        }
+
+        impl Ord for HeapNode {
+            fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+                // Reverse for min-heap.
+                self.num_rows.cmp(&other.num_rows).reverse()
+            }
+        }
+
+        impl PartialOrd for HeapNode {
+            fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(other))
+            }
+        }
+
+        let mut part_heap =
+            BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
+                num_rows: 0,
+                partition_idx,
+            }));
+
+        // Assigns the range to the partition with the smallest number of rows.
+        for range in ranges {
+            let mut node = part_heap.pop().unwrap();
+            let partition_idx = node.partition_idx;
+            node.num_rows += range.num_rows;
+            partition_ranges[partition_idx].push(range);
+            part_heap.push(node);
+        }
+
+        partition_ranges
     }
 }
 
