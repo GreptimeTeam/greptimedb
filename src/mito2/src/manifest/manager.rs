@@ -170,6 +170,7 @@ impl RegionManifestManager {
         flushed_entry_id: u64,
         options: RegionManifestOptions,
         sst_format: FormatType,
+        append_mode: bool,
         stats: &ManifestStats,
     ) -> Result<Self> {
         // construct storage
@@ -195,7 +196,7 @@ impl RegionManifestManager {
             RegionChange {
                 metadata: metadata.clone(),
                 sst_format,
-                append_mode: None,
+                append_mode: Some(append_mode),
             },
         );
         let manifest = manifest_builder.try_build()?;
@@ -209,7 +210,7 @@ impl RegionManifestManager {
         let mut actions = vec![RegionMetaAction::Change(RegionChange {
             metadata,
             sst_format,
-            append_mode: None,
+            append_mode: Some(append_mode),
         })];
         if flushed_entry_id > 0 {
             actions.push(RegionMetaAction::Edit(RegionEdit {
@@ -1068,6 +1069,6 @@ mod test {
 
         // get manifest size again
         let manifest_size = manager.manifest_usage();
-        assert_eq!(manifest_size, 1397);
+        assert_eq!(manifest_size, 1398);
     }
 }
