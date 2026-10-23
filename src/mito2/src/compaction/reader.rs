@@ -52,6 +52,8 @@ pub(crate) struct CompactionSstReaderBuilder<'a> {
     pub(crate) filter_deleted: bool,
     pub(crate) time_range: Option<TimestampRange>,
     pub(crate) merge_mode: MergeMode,
+    /// Max number of inputs decoded concurrently ahead of the merge.
+    pub(crate) read_parallelism: usize,
 }
 
 impl CompactionSstReaderBuilder<'_> {
@@ -132,6 +134,7 @@ impl CompactionSstReaderBuilder<'_> {
             .with_json2_rewrite_targets(targets)
             .with_files(self.inputs.to_vec())
             .with_compaction(true)
+            .with_compaction_read_parallelism(self.read_parallelism)
             .with_batch_size(batch_size)
             .with_append_mode(self.append_mode)
             // We use special cache strategy for compaction.
@@ -316,6 +319,7 @@ mod tests {
             filter_deleted: true,
             time_range: None,
             merge_mode: MergeMode::LastRow,
+            read_parallelism: 1,
         }
         .build_flat_sst_reader()
         .await

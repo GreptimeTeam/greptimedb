@@ -36,8 +36,9 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::is_json2_extension_type;
 use object_store::{FuturesAsyncWriter, ObjectStore};
 use parquet::arrow::AsyncArrowWriter;
+use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
-use parquet::file::metadata::KeyValue;
+use parquet::file::metadata::{KeyValue, ParquetMetaData};
 use parquet::file::properties::WriterProperties;
 use smallvec::smallvec;
 use snafu::{OptionExt, ResultExt};
@@ -59,6 +60,7 @@ use crate::sst::parquet::flat_format::{
     FlatWriteFormat, primary_key_column_index, time_index_column_index,
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
+use crate::sst::parquet::parallel_writer::ParallelArrowWriter;
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
     apply_column_compression, apply_float_field_encoding, apply_internal_column_encoding,
@@ -154,11 +156,42 @@ fn split_at_next_series(
     })
 }
 
+/// Arrow writer of the current SST file.
+enum SstArrowWriter<W> {
+    /// Encodes on the writing task.
+    Serial(AsyncArrowWriter<W>),
+    /// Encodes the columns of each row group on blocking tasks.
+    Parallel(ParallelArrowWriter<W>),
+}
+
+impl<W: AsyncFileWriter> SstArrowWriter<W> {
+    async fn write(&mut self, batch: &RecordBatch) -> parquet::errors::Result<()> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.write(batch).await,
+            SstArrowWriter::Parallel(writer) => writer.write(batch).await,
+        }
+    }
+
+    async fn flush(&mut self) -> parquet::errors::Result<()> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.flush().await,
+            SstArrowWriter::Parallel(writer) => writer.flush().await,
+        }
+    }
+
+    async fn close(self) -> parquet::errors::Result<ParquetMetaData> {
+        match self {
+            SstArrowWriter::Serial(writer) => writer.close().await,
+            SstArrowWriter::Parallel(writer) => writer.close().await,
+        }
+    }
+}
+
 /// Parquet SST writer.
 pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathProvider> {
     /// Path provider that creates SST and index file paths according to file id.
     path_provider: P,
-    writer: Option<AsyncArrowWriter<SizeAwareWriter<F::Writer>>>,
+    writer: Option<SstArrowWriter<SizeAwareWriter<F::Writer>>>,
     /// Current active file id.
     current_file: FileId,
     writer_factory: F,
@@ -530,7 +563,7 @@ where
         &mut self,
         schema: &SchemaRef,
         opts: &WriteOptions,
-    ) -> Result<&mut AsyncArrowWriter<SizeAwareWriter<F::Writer>>> {
+    ) -> Result<&mut SstArrowWriter<SizeAwareWriter<F::Writer>>> {
         if let Some(ref mut w) = self.writer {
             Ok(w)
         } else {
@@ -564,9 +597,26 @@ where
                     .await?,
                 self.bytes_written.clone(),
             );
-            let arrow_writer =
-                AsyncArrowWriter::try_new(writer, maybe_wrap_schema(schema)?, Some(writer_props))
-                    .context(WriteParquetSnafu)?;
+            let schema = maybe_wrap_schema(schema)?;
+            let arrow_writer = if opts.encode_parallelism > 1
+                && ParallelArrowWriter::<SizeAwareWriter<F::Writer>>::supports(&writer_props)
+            {
+                SstArrowWriter::Parallel(
+                    ParallelArrowWriter::try_new(
+                        writer,
+                        schema,
+                        writer_props,
+                        opts.encode_parallelism,
+                        opts.encode_runtime,
+                    )
+                    .context(WriteParquetSnafu)?,
+                )
+            } else {
+                SstArrowWriter::Serial(
+                    AsyncArrowWriter::try_new(writer, schema, Some(writer_props))
+                        .context(WriteParquetSnafu)?,
+                )
+            };
             self.writer = Some(arrow_writer);
 
             let indexer = self
