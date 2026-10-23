@@ -57,6 +57,7 @@ runs:
       # Without GT_S3_*, every remote object-store case is skipped and the
       # release only ever exercises the local file backend.
       env:
+        RUST_MIN_STACK: 8388608 # 8 MiB, aligned with Rust CI tests.
         GT_S3_BUCKET: ${{ inputs.aws-ci-test-bucket }}
         GT_S3_REGION: ${{ inputs.aws-region }}
         GT_S3_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
