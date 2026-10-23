@@ -654,11 +654,16 @@ fn an_offset_on_a_bare_selector_keeps_its_sign() {
     }
 }
 
-/// An instant selector's raw scan bounds use its `@` anchor rather than the statement grid.
+/// An anchored instant selection reads one point rather than every grid point, so both edges of its
+/// scan come from the anchor. Taking the lower edge from the grid instead would scan from the
+/// statement's start, which for an anchor before the statement is the wrong side of the data and
+/// for an anchor after it skips the sample the selection reads.
 #[test]
 fn an_anchored_instant_selector_scans_from_its_anchor() {
+    // `x @ 50 offset 2s` with a five-second lookback: the sample is read at 48s, so the window it is
+    // selected from is 43s..=48s even though the statement starts at the epoch.
     let requirement = SelectorRequirement {
-        metric: Some("x".into()),
+        metric: None,
         matchers: promql_parser::label::Matchers::empty(),
         offset_ms: 2_000,
         at_ms: Some(50_000),
@@ -669,6 +674,29 @@ fn an_anchored_instant_selector_scans_from_its_anchor() {
     assert_eq!(
         requirement.raw_scan_bounds().unwrap(),
         (43_000, 48_000, false)
+    );
+
+    // An anchor before the statement scans before it too: the same rule, the other direction. The
+    // grid's own start would have put the lower edge at a time the anchor never reads.
+    let requirement = SelectorRequirement {
+        at_ms: Some(-30_000),
+        ..requirement
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (-37_000, -32_000, false)
+    );
+
+    // A zero lookback closes both edges on the one sample, anchored or not.
+    let requirement = SelectorRequirement {
+        at_ms: Some(50_000),
+        offset_ms: 0,
+        timing: SelectorTiming::Instant { lookback_ms: 0 },
+        ..requirement
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (50_000, 50_000, true)
     );
 }
 
@@ -4666,6 +4694,55 @@ fn subquery_selector_requirements_report_the_inner_scan_hull() {
             scan,
             "query: {query}"
         );
+    }
+}
+
+/// Vector operands bind distinct input nodes at their structural paths, including nested binaries.
+#[test]
+fn vector_binary_inputs_follow_structural_paths() {
+    let schemas = [raw_schema(), raw_schema(), raw_schema()];
+    let metrics = ["x", "y", "z"];
+    let compiled = compile_selectors(
+        &eval_stmt("(x + y) / z"),
+        &|requirement| {
+            let index = metrics
+                .iter()
+                .position(|metric| Some(*metric) == requirement.metric.as_deref())
+                .expect("known metric");
+            Ok(Arc::clone(&schemas[index]))
+        },
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+
+    let expected = [
+        ("root.left.left.input", "x", 0),
+        ("root.left.right.input", "y", 1),
+        ("root.right.input", "z", 2),
+    ];
+    assert_eq!(compiled.inputs.len(), expected.len());
+    let mut tree_inputs = Vec::new();
+    walk(compiled.tree.root(), &mut |node, path| {
+        if let NativeExpr::Input(BoundInput {
+            output: NativeType::Samples(schema),
+            ordering,
+        }) = &node.expr
+        {
+            tree_inputs.push((path.clone(), Arc::clone(schema), *ordering));
+        }
+    });
+    assert_eq!(tree_inputs.len(), expected.len());
+    for (index, ((expected_path, metric, schema_index), bound)) in
+        expected.iter().zip(compiled.inputs.iter()).enumerate()
+    {
+        assert_eq!(bound.path.as_str(), *expected_path);
+        assert_eq!(bound.requirement.metric.as_deref(), Some(*metric));
+        assert!(Arc::ptr_eq(&bound.schema, &schemas[*schema_index]));
+        assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
+        let (tree_path, tree_schema, tree_ordering) = &tree_inputs[index];
+        assert_eq!(tree_path.as_str(), *expected_path);
+        assert!(Arc::ptr_eq(tree_schema, &bound.schema));
+        assert_eq!(*tree_ordering, bound.ordering);
     }
 }
 
