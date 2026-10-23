@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::request::RawSeriesRequest;
-use common_query::series_frame::raw_series_frame_ordering;
+use common_query::series_frame::series_frame_ordering;
 use common_recordbatch::{
     QueryMemoryTracker, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
@@ -36,7 +36,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode};
+use datatypes::series::frame::{FrameLabelMode, LabelDecodeSpec};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
@@ -673,7 +673,8 @@ async fn native_raw_frame_executes_and_decodes_bound_data() {
     assert_eq!(frames[0].schema(), plan.schema());
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema,
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &frames[0],
     )
     .unwrap();
@@ -765,10 +766,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
                 .unwrap()
                 .unwrap();
             let planned_schema = plan.schema();
-            assert_eq!(
-                ordering,
-                raw_series_frame_ordering(&planned_schema).unwrap()
-            );
+            assert_eq!(ordering, series_frame_ordering(&planned_schema).unwrap());
             {
                 let state = state.lock().unwrap();
                 assert_eq!(0, state.raw_calls);
@@ -783,7 +781,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
             );
             assert_eq!(
                 ordering,
-                raw_series_frame_ordering(stream.schema().as_ref()).unwrap()
+                series_frame_ordering(stream.schema().as_ref()).unwrap()
             );
             let frames = stream.try_collect::<Vec<_>>().await.unwrap();
             assert_eq!(usize::from(nonempty), frames.len());
@@ -791,7 +789,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
                 assert_eq!(planned_schema.as_ref(), frame.schema().as_ref());
                 assert_eq!(
                     ordering,
-                    raw_series_frame_ordering(frame.schema().as_ref()).unwrap()
+                    series_frame_ordering(frame.schema().as_ref()).unwrap()
                 );
             }
             let state = state.lock().unwrap();
@@ -839,7 +837,7 @@ async fn planned_and_stream_ordering_mismatches_fail_without_legacy_fallback() {
             .unwrap();
         assert_eq!(
             planned,
-            raw_series_frame_ordering(plan.schema().as_ref()).unwrap()
+            series_frame_ordering(plan.schema().as_ref()).unwrap()
         );
         state.lock().unwrap().stream_ordering = Some(actual);
         let error = plan
@@ -1171,7 +1169,8 @@ async fn error_after_emitted_frame_is_not_replayed() {
     assert_eq!(frame.schema(), plan.schema());
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         plan.series_schema(),
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &frame,
     )
     .unwrap();
@@ -1354,7 +1353,8 @@ async fn tracked_native_frame_holds_and_releases_quota_on_cancel() {
     assert_eq!(
         datatypes::series::frame::unpack_raw_series_frame(
             plan.series_schema(),
-            RawLabelMode::Explicit,
+            FrameLabelMode::Explicit,
+            None,
             &frame,
         )
         .unwrap()[0]
@@ -1484,7 +1484,7 @@ async fn raw_series_admission_captures_scanner_ordering_before_execution() {
             .unwrap();
         assert_eq!(plan.raw_series_ordering(), ordering);
         assert_eq!(
-            raw_series_frame_ordering(plan.schema().as_ref()).unwrap(),
+            series_frame_ordering(plan.schema().as_ref()).unwrap(),
             ordering
         );
         {

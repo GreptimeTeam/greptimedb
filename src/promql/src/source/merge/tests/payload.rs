@@ -19,8 +19,8 @@ use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
-    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
-    raw_series_frame_ordering, unpack_raw_series,
+    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series, series_frame_ordering,
+    unpack_raw_series,
 };
 use datatypes::arrow::array::{Array, Float64Array, ListArray, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
@@ -263,7 +263,7 @@ async fn merges_typed_multifield_payload_through_frame_and_label_roundtrip() {
     // declares, since the merge only accepts inputs that declare one layout.
     ensure_frame_matches_label_source(framed.schema().as_ref(), &label_source(1)).unwrap();
     assert_eq!(
-        raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        series_frame_ordering(framed.schema().as_ref()).unwrap(),
         frame_ordering,
         "the packed frame declares the merge's ordering"
     );

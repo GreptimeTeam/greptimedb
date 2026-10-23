@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use arrow::buffer::ScalarBuffer;
 use once_cell::sync::OnceCell;
+use serde::{Deserialize, Serialize};
 use snafu::OptionExt;
 
 use crate::error::{InvalidSeriesSnafu, Result};
@@ -25,7 +26,12 @@ use crate::error::{InvalidSeriesSnafu, Result};
 mod tests;
 
 /// Value description of a non-empty, fixed-step evaluation grid.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// The serde form is the wire form a series frame writes under `greptime.series.grid`: field names
+/// in declaration order, no optional members. Two nodes compare that text byte for byte, so the
+/// only place that spells it is a series frame's own grid metadata entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GridSpec {
     /// First evaluation timestamp in milliseconds.
     pub start_ms: i64,

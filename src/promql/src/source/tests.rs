@@ -1073,8 +1073,7 @@ async fn materializes_labels_from_a_frame_with_no_supplied_binding() {
         );
         let framed = pack_raw_series(raw).unwrap();
         assert_eq!(
-            datatypes::series::frame::raw_series_frame_label_decode(framed.schema().as_ref())
-                .unwrap(),
+            datatypes::series::frame::series_frame_label_decode(framed.schema().as_ref()).unwrap(),
             Some(description.clone()),
             "{encoding:?}: the frame schema is the producer's only label statement"
         );

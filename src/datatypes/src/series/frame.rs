@@ -12,14 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Finite Arrow batches for raw series chunks. Field names preserve the logical series schema in order.
+//! One Arrow frame family for raw and evaluated series chunks.
 //!
-//! Packing accumulates bounded multi-row batches: [`RawSeriesChunkCursor`] walks one validated
-//! chunk and [`RawSeriesFrameBuilder`] emits rows directly as Arrow arrays once a row or estimated
-//! byte bound is reached. Decoding reuses one prepared schema per stream through
-//! [`RawSeriesFrameDecoder`]. Column layout, metadata, and wire strings stay on the frozen `v1`
-//! contract; a key-encoded frame additionally declares a versioned [`LabelDecodeSpec`] so its
-//! labels can be decoded from the received schema alone.
+//! A frame carries the same thing whichever sample shape it holds: one row per chunk of one series,
+//! with that series' identity, its finality, its time axis, and one column of samples per logical
+//! field. Field names preserve the logical series schema in order. What varies is declared rather
+//! than inferred, because the receiver of a frame has no scanner, region, or planning context to
+//! infer it from:
+//!
+//! | Content | Identity | Time | Producer |
+//! | --- | --- | --- | --- |
+//! | `raw` | `key` | `timestamps` | a storage raw-series scan |
+//! | `raw` | `explicit` | `timestamps` | a raw input whose labels are already decoded |
+//! | `evaluated` | `explicit` | `grid_spans` | a compute node's evaluated output |
+//!
+//! Any other combination is rejected here, because no producer can mean it: an evaluated value's
+//! labels may be rewritten by the computation that produced it, so an evaluated frame cannot claim
+//! a storage key as its identity, and raw samples have no evaluation grid to be addressed on.
+//!
+//! Packing accumulates bounded multi-row batches: [`SeriesFrameCursor`] walks one validated chunk
+//! and [`SeriesFrameBuilder`] emits rows directly as Arrow arrays once a row or estimated byte bound
+//! is reached. Decoding reuses one prepared
+//! schema per stream through [`SeriesFrameDecoder`]. Column layout, metadata, and wire strings stay
+//! on the frozen `v2` contract; a key-encoded frame additionally declares a versioned
+//! [`LabelDecodeSpec`] so its labels can be decoded from the received schema alone, and an evaluated
+//! frame declares its [`GridSpec`] once instead of repeating timestamps.
 //!
 //! # Label decode description versioning
 //!
@@ -61,7 +78,7 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, Float64Array, Int64Array, ListArray, StringArray,
-    StructArray, UInt32Array,
+    StructArray, UInt32Array, UInt64Array,
 };
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::compute::concat;
@@ -74,8 +91,9 @@ use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::histogram::{HistogramBatch, fields as histogram_fields};
 use crate::series::raw::{RawSeriesChunk, RawTimestamps};
 use crate::series::samples::{
-    DenseSamplesRef, FieldSpec, HistogramSamples, Samples, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, HistogramSamples, Samples, Series, SeriesFields, SeriesSchema,
 };
+use crate::series::time::{EvalGrid, GridRun, GridSpan, GridSpec, TimeAxis};
 use crate::series::{Label, SeriesLabels, invalid_series};
 
 const LAYOUT: &str = "greptime.series.layout";
@@ -85,17 +103,105 @@ const TIME: &str = "greptime.series.time";
 const GRID: &str = "greptime.series.grid";
 /// Metadata key of the versioned label decode description carried by key-encoded frames.
 const LABEL_DECODE: &str = "greptime.series.label_decode";
+/// Metadata key of the producer ordering, written by the streaming layer rather than here.
+const ORDERING: &str = "greptime.series.ordering";
+
+/// Every `greptime.series.*` key a frame this revision writes may carry.
+///
+/// [`ORDERING`] is a stream-level declaration this module neither writes nor reads; it is listed so
+/// that a reserved key nobody checks is refused here instead of travelling as dead metadata.
+const RESERVED_KEYS: [&str; 7] = [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE, ORDERING];
+
+/// The only layout this revision writes and reads.
+///
+/// A frame declaring any other value is refused instead of decoded: the sample representation of an
+/// unreleased format is not worth a second decoder, and silently guessing would turn a format change
+/// into wrong values.
+pub const FRAME_LAYOUT_VERSION: &str = "v2";
 
 /// Version of the label decode description this revision writes and reads.
+///
+/// This is independent of [`FRAME_LAYOUT_VERSION`]: the description versions its own text, which a
+/// reader refuses to guess at, while the layout versions the column and metadata set around it.
 pub const LABEL_DECODE_VERSION: u32 = 1;
 
-/// Whether a raw frame carries only the complete key or explicit metric labels as well.
+/// What one frame's rows hold: raw samples with their own timestamps, or evaluated samples
+/// addressed on the grid the frame declares.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RawLabelMode {
-    /// Labels remain encoded solely in `read_key`.
+pub enum FrameContent {
+    /// Samples read from storage, each row carrying the timestamps it was read at.
+    Raw,
+    /// Values computed on an evaluation grid, each row carrying the grid positions it holds.
+    Evaluated,
+}
+
+impl FrameContent {
+    /// The `greptime.series.content` text of this content.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Evaluated => "evaluated",
+        }
+    }
+
+    /// Parses a `greptime.series.content` value this revision implements.
+    const fn parse(text: &str) -> Option<Self> {
+        match text.as_bytes() {
+            b"raw" => Some(Self::Raw),
+            b"evaluated" => Some(Self::Evaluated),
+            _ => None,
+        }
+    }
+
+    /// The `greptime.series.time` text this content's rows are addressed by.
+    ///
+    /// Time mode is a function of content and never an independent choice: raw samples carry their
+    /// own timestamps and evaluated ones sit on a grid, so a frame has no way to hold one without
+    /// the other. Writing it as a derived text rather than a second enum keeps the two from ever
+    /// disagreeing.
+    const fn time_text(self) -> &'static str {
+        match self {
+            Self::Raw => "timestamps",
+            Self::Evaluated => "grid_spans",
+        }
+    }
+
+    /// The struct member a row's time column carries for this content.
+    const fn time_member(self) -> &'static str {
+        match self {
+            Self::Raw => "timestamps",
+            Self::Evaluated => "spans",
+        }
+    }
+}
+
+/// How a frame names the series of its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameLabelMode {
+    /// Identity is only the encoded storage key in `read_key`, decoded through the frame's own
+    /// [`LabelDecodeSpec`].
     Key,
-    /// Complete metric name and ordinary labels are present in the frame.
+    /// The complete metric name and ordinary labels are present in the frame as well.
     Explicit,
+}
+
+impl FrameLabelMode {
+    /// The `greptime.series.labels` text of this mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Explicit => "explicit",
+        }
+    }
+
+    /// Parses a `greptime.series.labels` value this revision implements.
+    const fn parse(text: &str) -> Option<Self> {
+        match text.as_bytes() {
+            b"key" => Some(Self::Key),
+            b"explicit" => Some(Self::Explicit),
+            _ => None,
+        }
+    }
 }
 
 /// Primary-key encoding of the labels a key-encoded frame carries.
@@ -148,7 +254,7 @@ pub struct LabelDecodeTag {
 /// a silent fallback.
 ///
 /// It is JSON-encoded in one schema metadata entry, always through
-/// [`raw_series_frame_schema_with_label_decode`], so both the producing and the expecting side of a
+/// [`series_frame_schema`], so both the producing and the expecting side of a
 /// `greptime.series.*` exact metadata comparison see byte-identical text. The text is
 /// self-describing but not a general interchange format: readers reject unknown fields here only
 /// at this structure's own levels, while [`LabelDecodeColumn::physical_type`] is decoded by
@@ -188,7 +294,7 @@ pub struct LabelDecodeSpec {
 impl LabelDecodeSpec {
     /// Puts the order-insensitive part of the description in its canonical order.
     ///
-    /// [`raw_series_frame_schema_with_label_decode`] applies this to a copy before serializing, and
+    /// [`series_frame_schema`] applies this to a copy before serializing, and
     /// so does the description a binding derives (in `common_query::series_frame`), so both sides of
     /// a text comparison produce the same bytes and a reader can compare descriptions structurally.
     /// `primary_key` is deliberately untouched: its order is the encoding order.
@@ -253,27 +359,76 @@ impl LabelDecodeSpec {
     }
 }
 
-/// Builds the typed schema for a raw frame, preserving logical field names and order.
+/// Builds the one frame schema family: raw or evaluated, keyed or explicit.
 ///
-/// This is the column layout shared with the frame builder and decoder; it deliberately carries no
-/// label decode description. A key-encoded stream must be declared through
-/// [`raw_series_frame_schema_with_label_decode`], which refuses such a layout without one.
-pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Result<SchemaRef> {
-    if schema.eval_grid.is_some() {
-        return invalid_series("raw series schema cannot have an evaluation grid");
-    }
+/// Everything the wire states is derived from the two things a producer actually holds. The
+/// evaluation grid comes from `schema.eval_grid`, where a schema without one describes raw samples
+/// and a schema with one describes values addressed on that grid, so content and time mode can never
+/// contradict the columns they describe. `labels` decides identity, and with it whether the frame
+/// carries the `name`/`labels` columns: a key frame keeps its labels encoded in `read_key` and must
+/// declare the [`LabelDecodeSpec`] that decodes them, while an explicit frame carries complete
+/// labels and must not declare one.
+///
+/// This is the only place the reserved `greptime.series.*` text is written, so a producer and a
+/// reader cannot spell one frame two ways.
+pub fn series_frame_schema(
+    schema: &SeriesSchema,
+    labels: FrameLabelMode,
+    decode: Option<&LabelDecodeSpec>,
+) -> Result<SchemaRef> {
     if schema.fields.is_empty() {
-        return invalid_series("raw series schema must have fields");
+        return invalid_series("series frame schema must have fields");
+    }
+    let content = match &schema.eval_grid {
+        Some(_) => FrameContent::Evaluated,
+        None => FrameContent::Raw,
+    };
+    match (labels, decode) {
+        (FrameLabelMode::Key, None) => {
+            return Err(err(
+                "key-encoded frames must carry a label decode description",
+            ));
+        }
+        (FrameLabelMode::Explicit, Some(_)) => {
+            return Err(err(
+                "explicit-label frames carry no label decode description",
+            ));
+        }
+        (FrameLabelMode::Key, Some(_)) | (FrameLabelMode::Explicit, None) => {}
+    }
+    if content == FrameContent::Evaluated && labels == FrameLabelMode::Key {
+        return Err(err(
+            "an evaluated frame names its series by label, not by a storage key",
+        ));
     }
     let list = |ty, nullable| DataType::List(Arc::new(Field::new("item", ty, nullable)));
-    let time = DataType::Struct(
-        vec![Field::new(
-            "timestamps",
-            list(DataType::Int64, false),
-            false,
-        )]
-        .into(),
-    );
+    let time = match content {
+        FrameContent::Raw => DataType::Struct(
+            vec![Field::new(
+                "timestamps",
+                list(DataType::Int64, false),
+                false,
+            )]
+            .into(),
+        ),
+        FrameContent::Evaluated => DataType::Struct(
+            vec![Field::new(
+                "spans",
+                list(
+                    DataType::Struct(
+                        vec![
+                            Field::new("start", DataType::UInt64, false),
+                            Field::new("len", DataType::UInt64, false),
+                        ]
+                        .into(),
+                    ),
+                    false,
+                ),
+                false,
+            )]
+            .into(),
+        ),
+    };
     let hist = DataType::Struct(
         vec![
             Field::new("indices", list(DataType::UInt32, true), false),
@@ -298,12 +453,19 @@ pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Res
         .map(|field| Field::new(field.name.as_ref(), payload.clone(), false))
         .collect();
     let mut columns = vec![
-        Field::new("read_key", DataType::Binary, false),
+        // A key frame *is* its key, so the column is required. An explicit frame names its series
+        // by label and keeps the column for the runtime chunk's own contract: a raw chunk still
+        // carries the key it was read under, an evaluated one carries none.
+        Field::new(
+            "read_key",
+            DataType::Binary,
+            labels == FrameLabelMode::Explicit,
+        ),
         Field::new("is_last", DataType::Boolean, false),
         Field::new("time", time, false),
         Field::new("fields", DataType::Struct(fields), false),
     ];
-    if mode == RawLabelMode::Explicit {
+    if labels == FrameLabelMode::Explicit {
         columns.push(Field::new("name", DataType::Utf8, true));
         columns.push(Field::new(
             "labels",
@@ -320,189 +482,294 @@ pub fn raw_series_frame_schema(schema: &SeriesSchema, mode: RawLabelMode) -> Res
             false,
         ));
     }
-    let metadata = [
-        (LAYOUT.to_string(), "v1".to_string()),
-        (CONTENT.to_string(), "raw".to_string()),
-        (
-            LABELS.to_string(),
-            match mode {
-                RawLabelMode::Key => "key",
-                RawLabelMode::Explicit => "explicit",
-            }
-            .to_string(),
-        ),
-        (TIME.to_string(), "timestamps".to_string()),
-    ]
-    .into_iter()
-    .collect();
-    Ok(Arc::new(Schema::new_with_metadata(columns, metadata)))
-}
-
-/// Builds the typed schema for a raw frame together with its label decode description.
-///
-/// The description is written only for [`RawLabelMode::Key`], where labels stay encoded in
-/// `read_key`; explicit-label frames carry complete labels and must not declare one. Both
-/// directions are enforced here so a frame cannot claim a label layout it does not describe.
-pub fn raw_series_frame_schema_with_label_decode(
-    schema: &SeriesSchema,
-    mode: RawLabelMode,
-    decode: Option<&LabelDecodeSpec>,
-) -> Result<SchemaRef> {
-    match (mode, decode) {
-        (RawLabelMode::Key, None) => {
-            return Err(err(
-                "key-encoded raw frames must carry a label decode description",
-            ));
-        }
-        (RawLabelMode::Explicit, Some(_)) => {
-            return Err(err("explicit raw frames carry no label decode description"));
-        }
-        (RawLabelMode::Key, Some(_)) | (RawLabelMode::Explicit, None) => {}
+    let mut metadata = vec![
+        (LAYOUT.to_string(), FRAME_LAYOUT_VERSION.to_string()),
+        (CONTENT.to_string(), content.as_str().to_string()),
+        (LABELS.to_string(), labels.as_str().to_string()),
+        (TIME.to_string(), content.time_text().to_string()),
+    ];
+    if let Some(grid) = &schema.eval_grid {
+        metadata.push((GRID.to_string(), grid_text(grid.spec())?));
     }
-    let layout = raw_series_frame_schema(schema, mode)?;
-    let Some(decode) = decode else {
-        return Ok(layout);
-    };
-    // Writing is faithful: the description records what the producer declares, and nothing is
-    // rewritten or dropped. The one exception is the order of `logical_tags`, which carries no
-    // meaning to a decoder and which this text nevertheless has to fix so two producers of the same
-    // labels write the same bytes; a copy is canonicalized and the caller's value is untouched. A
-    // description this revision cannot honour is rejected when it is read, which is the only
-    // direction a consumer can rely on.
-    let mut canonical = decode.clone();
-    canonical.canonicalize();
-    let encoded = serde_json::to_string(&canonical)
-        .map_err(|e| err(format!("cannot encode label decode description: {e}")))?;
-    let mut metadata = layout.metadata().clone();
-    metadata.insert(LABEL_DECODE.to_string(), encoded);
+    if let Some(decode) = decode {
+        // Writing is faithful: the description records what the producer declares, and nothing is
+        // rewritten or dropped. The one exception is the order of `logical_tags`, which carries no
+        // meaning to a decoder and which this text nevertheless has to fix so two producers of the
+        // same labels write the same bytes; a copy is canonicalized and the caller's value is
+        // untouched.
+        //
+        // What is not accepted is a description this revision would refuse to read. A frame is worth
+        // writing only if it can be decoded, so the same check runs here: a duplicate key column, a
+        // logical tag naming no listed column, or a description of an unknown version is refused at
+        // the producer rather than when the frame reaches its consumer, where the producer is no
+        // longer in a position to fix it.
+        let mut canonical = decode.clone();
+        canonical.canonicalize();
+        canonical.validate()?;
+        metadata.push((
+            LABEL_DECODE.to_string(),
+            serde_json::to_string(&canonical)
+                .map_err(|e| err(format!("cannot encode label decode description: {e}")))?,
+        ));
+    }
     Ok(Arc::new(Schema::new_with_metadata(
-        layout.fields().clone(),
-        metadata,
+        columns,
+        metadata.into_iter().collect(),
     )))
 }
 
-/// Recovers the label decode description a raw frame schema declares.
+/// Builds the typed schema for a raw frame, refusing a series schema with an evaluation grid.
+///
+/// A key frame is unreadable without its description, so this constructor serves explicit-label
+/// frames only; a caller that holds a binding declares through [`series_frame_schema`].
+pub fn raw_series_frame_schema(schema: &SeriesSchema, labels: FrameLabelMode) -> Result<SchemaRef> {
+    if schema.eval_grid.is_some() {
+        return invalid_series("raw series schema cannot have an evaluation grid");
+    }
+    match labels {
+        FrameLabelMode::Key => Err(err(
+            "raw key frames must declare a label decode description",
+        )),
+        FrameLabelMode::Explicit => series_frame_schema(schema, labels, None),
+    }
+}
+
+/// The canonical `greptime.series.grid` text of one grid.
+///
+/// Field order is the struct's declaration order and the text is compact, so two producers of the
+/// same grid write the same bytes; nothing else in the tree spells this text.
+fn grid_text(spec: GridSpec) -> Result<String> {
+    serde_json::to_string(&spec).map_err(|e| err(format!("cannot encode evaluation grid: {e}")))
+}
+
+/// Parses one `greptime.series.grid` text back into a validated, deferrable grid.
+///
+/// Validation is [`GridSpec::try_new`]'s plus the unknown-field refusal serde performs, so a frame
+/// cannot declare a grid this revision would compute differently. The timestamps themselves stay
+/// unmaterialized until a consumer asks for them.
+fn parse_grid(text: &str) -> Result<Arc<EvalGrid>> {
+    let spec: GridSpec = serde_json::from_str(text)
+        .map_err(|e| err(format!("cannot decode evaluation grid: {e}")))?;
+    Ok(Arc::new(EvalGrid::try_deferred(spec)?))
+}
+
+/// A frame schema's reserved declarations, parsed and cross-checked.
+///
+/// The three facts a receiver needs are not independent - the content decides the time mode, the
+/// label mode decides whether a description must be present, and only an evaluated frame may name a
+/// grid - so they are parsed together and every contradictory combination is refused instead of one
+/// side of it being picked.
+#[derive(Clone, Debug)]
+pub struct SeriesFrameDeclaration {
+    series: SeriesSchema,
+    labels: FrameLabelMode,
+    label_decode: Option<LabelDecodeSpec>,
+}
+
+impl SeriesFrameDeclaration {
+    /// Parses and cross-checks one frame schema.
+    pub fn parse(schema: &Schema) -> Result<Self> {
+        for key in schema.metadata().keys() {
+            if key.starts_with("greptime.series.") && !RESERVED_KEYS.contains(&key.as_str()) {
+                return Err(err(format!(
+                    "frame declares unknown reserved metadata {key}"
+                )));
+            }
+        }
+        if schema.metadata().get(LAYOUT).map(String::as_str) != Some(FRAME_LAYOUT_VERSION) {
+            return Err(err(format!("frame declares no known {LAYOUT} value")));
+        }
+        let content = schema
+            .metadata()
+            .get(CONTENT)
+            .and_then(|text| FrameContent::parse(text))
+            .ok_or_else(|| err(format!("frame declares no known {CONTENT} value")))?;
+        let labels = schema
+            .metadata()
+            .get(LABELS)
+            .and_then(|text| FrameLabelMode::parse(text))
+            .ok_or_else(|| err(format!("frame declares no known {LABELS} value")))?;
+        // Time mode is read as the content's own text: a frame whose time column is addressed the
+        // other way contradicts itself, and there is no third time mode to fall back to.
+        if schema.metadata().get(TIME).map(String::as_str) != Some(content.time_text()) {
+            return Err(err(format!(
+                "frame declares no {TIME} value this content can carry"
+            )));
+        }
+        if content == FrameContent::Evaluated && labels == FrameLabelMode::Key {
+            return Err(err(
+                "an evaluated frame names its series by label, not by a storage key",
+            ));
+        }
+        let grid = match (content, schema.metadata().get(GRID)) {
+            (FrameContent::Raw, None) => None,
+            (FrameContent::Raw, Some(_)) => {
+                return Err(err("a raw frame cannot declare an evaluation grid"));
+            }
+            (FrameContent::Evaluated, None) => {
+                return Err(err("an evaluated frame must declare its evaluation grid"));
+            }
+            (FrameContent::Evaluated, Some(text)) => Some(parse_grid(text)?),
+        };
+        let label_decode = match schema.metadata().get(LABEL_DECODE) {
+            None => None,
+            Some(text) => {
+                let decode: LabelDecodeSpec = serde_json::from_str(text)
+                    .map_err(|e| err(format!("cannot decode label decode description: {e}")))?;
+                decode.validate()?;
+                Some(decode)
+            }
+        };
+        match (labels, &label_decode) {
+            (FrameLabelMode::Key, None) => {
+                return Err(err(
+                    "key-encoded frames must carry a label decode description",
+                ));
+            }
+            (FrameLabelMode::Explicit, Some(_)) => {
+                return Err(err(
+                    "explicit-label frames carry no label decode description",
+                ));
+            }
+            (FrameLabelMode::Key, Some(_)) | (FrameLabelMode::Explicit, None) => {}
+        }
+        let fields = schema
+            .fields()
+            .iter()
+            .find(|field| field.name() == "fields")
+            .ok_or_else(|| err("frame declares no fields column"))?;
+        let DataType::Struct(members) = fields.data_type() else {
+            return Err(err("frame fields column is not a struct"));
+        };
+        if members.is_empty() {
+            return Err(err("series frame schema must have fields"));
+        }
+        let declared_time = schema
+            .fields()
+            .iter()
+            .find(|field| field.name() == "time")
+            .ok_or_else(|| err("frame declares no time column"))?;
+        let DataType::Struct(time_members) = declared_time.data_type() else {
+            return Err(err("frame time column is not a struct"));
+        };
+        if time_members.len() != 1 || time_members[0].name() != content.time_member() {
+            return Err(err(
+                "frame time column does not match its declared time mode",
+            ));
+        }
+        Ok(Self {
+            series: SeriesSchema {
+                fields: members
+                    .iter()
+                    .map(|member| FieldSpec {
+                        name: Arc::from(member.name().as_str()),
+                    })
+                    .collect(),
+                eval_grid: grid,
+            },
+            labels,
+            label_decode,
+        })
+    }
+
+    /// The logical fields and evaluation grid the frame declares.
+    pub fn series(&self) -> &SeriesSchema {
+        &self.series
+    }
+
+    /// What the frame's rows hold.
+    pub fn content(&self) -> FrameContent {
+        match self.series.eval_grid {
+            Some(_) => FrameContent::Evaluated,
+            None => FrameContent::Raw,
+        }
+    }
+
+    /// How the frame names its series.
+    pub fn labels(&self) -> FrameLabelMode {
+        self.labels
+    }
+
+    /// The label decode description the frame declares, present exactly for key identity.
+    pub fn label_decode(&self) -> Option<&LabelDecodeSpec> {
+        self.label_decode.as_ref()
+    }
+}
+
+/// Recovers the label decode description a frame schema declares.
 ///
 /// Returns `None` for an explicit-label frame, which must not declare one. A key-encoded frame must
 /// declare one, so a missing description is an error rather than a reason to reuse a caller-side
-/// binding. A present description is parsed strictly: an unknown version, a missing or unknown
-/// field at this structure's own levels, a type mismatch, or a description whose logical tags do
-/// not name listed key columns is an error, never a silent default. Only the description's own
-/// levels reject unknown fields; [`LabelDecodeColumn::physical_type`] is a
-/// [`ConcreteDataType`] and accepts whatever that type's own serde accepts.
-pub fn raw_series_frame_label_decode(schema: &Schema) -> Result<Option<LabelDecodeSpec>> {
-    let mode = match schema.metadata().get(LABELS).map(String::as_str) {
-        Some("key") => RawLabelMode::Key,
-        Some("explicit") => RawLabelMode::Explicit,
-        _ => return Err(err("raw frame schema declares no known label mode")),
-    };
-    let decode = match schema.metadata().get(LABEL_DECODE) {
-        None => None,
-        Some(encoded) => {
-            let decode: LabelDecodeSpec = serde_json::from_str(encoded)
-                .map_err(|e| err(format!("malformed label decode description: {e}")))?;
-            decode.validate()?;
-            Some(decode)
-        }
-    };
-    match (mode, &decode) {
-        (RawLabelMode::Key, None) => Err(err(
-            "key-encoded raw frame declares no label decode description",
-        )),
-        (RawLabelMode::Explicit, Some(_)) => Err(err(
-            "explicit raw frame declares a label decode description",
-        )),
-        (RawLabelMode::Key, Some(_)) | (RawLabelMode::Explicit, None) => Ok(decode),
+/// binding; [`series_frame_schema`] and [`SeriesFrameDeclaration::parse`] enforce that both ways.
+pub fn series_frame_label_decode(schema: &Schema) -> Result<Option<LabelDecodeSpec>> {
+    Ok(SeriesFrameDeclaration::parse(schema)?.label_decode)
+}
+
+/// The two declarations the encoder and decoder dispatch on.
+///
+/// A frame's time mode follows from its content and its identity is the label mode, so those two
+/// are all that has to travel next to the column layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FrameShape {
+    content: FrameContent,
+    labels: FrameLabelMode,
+}
+
+impl FrameShape {
+    fn of(schema: &SeriesSchema, labels: FrameLabelMode) -> Self {
+        let content = match schema.eval_grid {
+            Some(_) => FrameContent::Evaluated,
+            None => FrameContent::Raw,
+        };
+        Self { content, labels }
     }
 }
 
-/// Reconstructs the series schema a raw frame declares.
+/// Bounded multi-row builder for finite series frame batches.
 ///
-/// A raw frame names its payload fields by name only: every member of the `fields` struct carries
-/// the same payload type ([`raw_series_frame_schema`]), and [`SeriesSchema`] holds nothing else per
-/// field. The reconstruction is therefore exact rather than a projection — the declared names in
-/// declared order, and no evaluation grid, which a raw frame cannot carry.
-///
-/// The reserved layout, content, and time metadata are checked here together with the absence of an
-/// evaluation grid, so a frame this revision cannot read is rejected instead of being silently
-/// interpreted as the current layout.
-pub fn raw_series_frame_series_schema(schema: &Schema) -> Result<SeriesSchema> {
-    for (key, expected) in [(LAYOUT, "v1"), (CONTENT, "raw"), (TIME, "timestamps")] {
-        if schema.metadata().get(key).map(String::as_str) != Some(expected) {
-            return Err(err(format!("raw frame declares no known {key} value")));
-        }
-    }
-    if schema
-        .metadata()
-        .keys()
-        .any(|key| key == GRID || key.starts_with("greptime.series.grid."))
-    {
-        return Err(err("raw series schema cannot have an evaluation grid"));
-    }
-    let fields = schema
-        .fields()
-        .iter()
-        .find(|field| field.name() == "fields")
-        .ok_or_else(|| err("raw frame declares no fields column"))?;
-    let DataType::Struct(members) = fields.data_type() else {
-        return Err(err("raw frame fields column is not a struct"));
-    };
-    if members.is_empty() {
-        return Err(err("raw series schema must have fields"));
-    }
-    Ok(SeriesSchema {
-        fields: members
-            .iter()
-            .map(|member| FieldSpec {
-                name: Arc::from(member.name().as_str()),
-            })
-            .collect(),
-        eval_grid: None,
-    })
-}
-
-/// Bounded multi-row builder for finite raw frame batches.
-///
-/// Rows accumulate until the row limit or the estimated byte limit is reached; the next
-/// [`RawSeriesChunkCursor::append_to`] call then emits them as one batch. `max_bytes` is stored as
-/// the effective group cap `min(requested, i32::MAX)`, and each row carries a measure that
-/// dominates every cumulative Arrow offset domain, so any admitted group can be encoded. The
-/// measure is an internal work estimate, not an exact IPC size and not a resident-memory cap: one
-/// individually representable row that exceeds the requested cap is still accepted and emitted
-/// alone, because that slice cannot be split into smaller legal rows.
-pub struct RawSeriesFrameBuilder {
+/// Rows accumulate until the row limit or the estimated byte limit is reached; the next cursor call
+/// then emits them as one batch. `max_bytes` is stored as the effective group cap
+/// `min(requested, i32::MAX)`, and each row carries a measure that dominates every cumulative Arrow
+/// offset domain, so any admitted group can be encoded. The measure is an internal work estimate, not
+/// an exact IPC size and not a resident-memory cap: one individually representable row that exceeds
+/// the requested cap is still accepted and emitted alone, because that slice cannot be split into
+/// smaller legal rows.
+pub struct SeriesFrameBuilder {
     schema: SeriesSchema,
     frame_schema: SchemaRef,
-    mode: RawLabelMode,
+    shape: FrameShape,
     max_rows: usize,
     max_bytes: usize,
-    rows: Vec<RawFrameRow>,
+    rows: Vec<FrameRow>,
     bytes: usize,
 }
 
-impl RawSeriesFrameBuilder {
+impl SeriesFrameBuilder {
     /// Default maximum rows in one packed batch when no explicit bound is needed.
     pub const DEFAULT_MAX_ROWS: usize = 256;
     /// Default maximum estimated encoded bytes in one packed batch when no explicit bound is
     /// needed.
     pub const DEFAULT_MAX_BYTES: usize = 1024 * 1024;
 
-    /// Creates an empty builder for the given schema, label mode, and nonzero bounds.
+    /// Creates an empty builder for the given schema, identity declaration, and nonzero bounds.
     ///
-    /// The frame schema is built once here and reused for every emitted batch.
+    /// The frame schema is built once here and reused for every emitted batch. It declares
+    /// everything the rows carry except the stream's producer ordering, which only the streaming
+    /// layer knows and adds when it declares the batch.
     pub fn try_new(
         schema: &SeriesSchema,
-        mode: RawLabelMode,
+        labels: FrameLabelMode,
+        decode: Option<&LabelDecodeSpec>,
         max_rows: usize,
         max_bytes: usize,
     ) -> Result<Self> {
         if max_rows == 0 || max_bytes == 0 {
-            return invalid_series("raw series frame limits must be nonzero");
+            return invalid_series("series frame limits must be nonzero");
         }
         Ok(Self {
             schema: schema.clone(),
-            frame_schema: raw_series_frame_schema(schema, mode)?,
-            mode,
+            frame_schema: series_frame_schema(schema, labels, decode)?,
+            shape: FrameShape::of(schema, labels),
             max_rows,
             max_bytes: max_bytes.min(i32::MAX as usize),
             rows: Vec::new(),
@@ -520,7 +787,7 @@ impl RawSeriesFrameBuilder {
         if self.rows.is_empty() {
             return Ok(None);
         }
-        let batch = encode_rows(&self.frame_schema, self.mode, &self.rows)?;
+        let batch = encode_rows(&self.frame_schema, self.shape, &self.rows)?;
         self.rows.clear();
         self.bytes = 0;
         Ok(Some(batch))
@@ -536,7 +803,7 @@ impl RawSeriesFrameBuilder {
     /// An empty builder accepts any individually measured row; a group total that would overflow
     /// or exceed the cap flushes the buffered rows before this row is consumed, never dropping or
     /// splitting the row.
-    fn accepts(&self, row: &RawFrameRow) -> bool {
+    fn accepts(&self, row: &FrameRow) -> bool {
         self.rows.is_empty()
             || (self.bytes < self.max_bytes
                 && self.rows.len() < self.max_rows
@@ -547,29 +814,98 @@ impl RawSeriesFrameBuilder {
     }
 
     /// Buffers one individually measured row.
-    fn push(&mut self, row: RawFrameRow) -> Result<()> {
+    fn push(&mut self, row: FrameRow) -> Result<()> {
         self.bytes = add_checked(self.bytes, row.bytes)?;
         self.rows.push(row);
         Ok(())
     }
+
+    /// Checks that a cursor walks the same fields, identity, and time of what this builder encodes.
+    ///
+    /// The grid is compared by its specification rather than by whether one is present: a cursor
+    /// holding positions on one grid and a builder encoding them under another would write the same
+    /// numbers meaning different instants, and nothing downstream could tell. Two grids with equal
+    /// bounds are the same grid, so they compare equal however they were allocated.
+    fn matches(&self, schema: &SeriesSchema, shape: FrameShape) -> Result<()> {
+        let same_fields = schema.fields.len() == self.schema.fields.len()
+            && schema
+                .fields
+                .iter()
+                .zip(self.schema.fields.iter())
+                .all(|(left, right)| left.name == right.name);
+        let same_grid = match (&schema.eval_grid, &self.schema.eval_grid) {
+            (None, None) => true,
+            (Some(left), Some(right)) => left.spec() == right.spec(),
+            _ => false,
+        };
+        if shape != self.shape || !same_grid || !same_fields {
+            return invalid_series("series frame cursor and builder schema mismatch");
+        }
+        Ok(())
+    }
 }
 
-/// One validated chunk walked segment by segment into a bounded builder.
-pub struct RawSeriesChunkCursor {
+/// One validated chunk walked into a bounded builder, one row at a time.
+///
+/// The two sample shapes differ only in how a row's positions are addressed and where its identity
+/// comes from, so one cursor serves both: a raw chunk is walked segment by segment over the
+/// timestamps it carries, an evaluated chunk run by run over the grid positions it holds. Each row is
+/// measured once and retried after a flush, so a flush error never consumes input.
+pub struct SeriesFrameCursor {
     schema: SeriesSchema,
-    mode: RawLabelMode,
+    shape: FrameShape,
+    walk: ChunkWalk,
+    pending: Option<FrameRow>,
+}
+
+/// Where a cursor is in the chunk it walks.
+enum ChunkWalk {
+    /// A raw chunk: one timestamp per row of samples.
+    Raw(RawWalk),
+    /// An evaluated chunk: absolute grid positions, carried as runs.
+    Evaluated(EvaluatedWalk),
+}
+
+/// The walk state of one raw chunk.
+///
+/// The chunk's fields are walked segment by segment, so a row never spans two segments of one field
+/// and no per-row temporary vectors are allocated.
+struct RawWalk {
     chunk: RawSeriesChunk,
+    /// The dense segment each field is being read from.
+    segments: Vec<usize>,
+    /// How much of each field's current segment has been consumed.
+    offsets: Vec<usize>,
+    /// How many timestamps have been consumed.
+    pos: usize,
+}
+
+/// The walk state of one evaluated chunk.
+///
+/// The runs are collected once, so a row is one intersection of a run with a sample segment and the
+/// walk never re-derives the runs per row. A chunk that carries no position keeps a single `closing`
+/// flag: it still owes one row, and that row is what tells its consumer the chain ended.
+struct EvaluatedWalk {
+    series: Series,
+    is_last: bool,
+    /// The runs of carried rows, in absolute grid order and never empty.
+    runs: Vec<GridRun>,
+    /// The run being read.
+    run: usize,
+    /// How much of the current run has been consumed.
+    offset: usize,
+    /// The dense segment each field is being read from.
     segments: Vec<usize>,
     offsets: Vec<usize>,
-    pos: usize,
-    pending: Option<RawFrameRow>,
+    /// Whether the one row a chunk without positions still owes is yet to be emitted.
+    closing: bool,
 }
 
-impl RawSeriesChunkCursor {
-    /// Validates one public chunk's shape and label mode once, taking ownership of it.
-    pub fn try_new(
+impl SeriesFrameCursor {
+    /// Validates one public raw chunk's shape and label mode once, taking ownership of it.
+    pub fn try_new_raw(
         schema: &SeriesSchema,
-        mode: RawLabelMode,
+        mode: FrameLabelMode,
         chunk: RawSeriesChunk,
     ) -> Result<Self> {
         let RawSeriesChunk {
@@ -581,18 +917,64 @@ impl RawSeriesChunkCursor {
         } = chunk;
         let chunk = RawSeriesChunk::try_new(schema, primary_key, metric, time, fields, is_last)?;
         match (mode, &chunk.metric) {
-            (RawLabelMode::Key, None) | (RawLabelMode::Explicit, Some(_)) => {}
+            (FrameLabelMode::Key, None) | (FrameLabelMode::Explicit, Some(_)) => {}
             _ => return invalid_series("raw chunk label mode does not match frame mode"),
         }
         let segments = vec![0usize; chunk.fields.len()];
         let offsets = vec![0usize; chunk.fields.len()];
         Ok(Self {
             schema: schema.clone(),
-            mode,
-            chunk,
-            segments,
-            offsets,
-            pos: 0,
+            shape: FrameShape::of(schema, mode),
+            walk: ChunkWalk::Raw(RawWalk {
+                chunk,
+                segments,
+                offsets,
+                pos: 0,
+            }),
+            pending: None,
+        })
+    }
+
+    /// Validates one evaluated chunk against the frame's schema, grid, and finality rules.
+    ///
+    /// A chunk that carries no position is legal only when it closes its series: it is how a
+    /// consumer tells "nothing more here" from "no more input", and a chain of empty chunks that
+    /// close nothing would never make progress. It still occupies one frame row, because dropping it
+    /// would drop the finality it exists to carry.
+    pub fn try_new_evaluated(schema: &SeriesSchema, series: Series, is_last: bool) -> Result<Self> {
+        if schema.eval_grid.is_none() {
+            return invalid_series("an evaluated chunk needs a schema with an evaluation grid");
+        }
+        let series = Series::try_new(
+            schema,
+            series.metric.clone(),
+            series.time.clone(),
+            series.fields.clone(),
+        )?;
+        if series.time.grid().is_none() {
+            return invalid_series("an evaluated chunk must be addressed on a grid");
+        }
+        if series.time.is_empty() && !is_last {
+            return invalid_series("an evaluated chunk without positions must close its series");
+        }
+        // The runs are the only runs this chunk carries, so collecting them once is what keeps the
+        // walk from re-deriving them per row; a maximal run is merged by the axis itself.
+        let runs: Vec<GridRun> = series.time.runs().collect();
+        let segments = vec![0usize; series.fields.len()];
+        let offsets = vec![0usize; series.fields.len()];
+        Ok(Self {
+            schema: schema.clone(),
+            shape: FrameShape::of(schema, FrameLabelMode::Explicit),
+            walk: ChunkWalk::Evaluated(EvaluatedWalk {
+                closing: runs.is_empty(),
+                series,
+                is_last,
+                runs,
+                run: 0,
+                offset: 0,
+                segments,
+                offsets,
+            }),
             pending: None,
         })
     }
@@ -602,11 +984,8 @@ impl RawSeriesChunkCursor {
     /// `None` means the cursor is exhausted; calling again returns `None` without touching the
     /// builder. The single pending row is measured once by [`Self::next_row`] and retried after the
     /// buffered rows are emitted.
-    pub fn append_to(
-        &mut self,
-        builder: &mut RawSeriesFrameBuilder,
-    ) -> Result<Option<RecordBatch>> {
-        self.compatible(builder)?;
+    pub fn append_to(&mut self, builder: &mut SeriesFrameBuilder) -> Result<Option<RecordBatch>> {
+        builder.matches(&self.schema, self.shape)?;
         loop {
             let row = match self.pending.take() {
                 Some(row) => row,
@@ -623,7 +1002,7 @@ impl RawSeriesChunkCursor {
                 self.pending = Some(row);
                 let batch = builder
                     .flush()?
-                    .ok_or_else(|| err("raw frame builder rejected a row without buffered rows"))?;
+                    .ok_or_else(|| err("frame builder rejected a row without buffered rows"))?;
                 return Ok(Some(batch));
             }
             builder.push(row)?;
@@ -635,64 +1014,153 @@ impl RawSeriesChunkCursor {
         }
     }
 
-    /// The cursor and builder must describe the same fields and label mode.
-    fn compatible(&self, builder: &RawSeriesFrameBuilder) -> Result<()> {
-        let same_fields = self.schema.fields.len() == builder.schema.fields.len()
-            && self
-                .schema
-                .fields
-                .iter()
-                .zip(builder.schema.fields.iter())
-                .all(|(left, right)| left.name == right.name);
-        if self.mode != builder.mode
-            || self.schema.eval_grid.is_some() != builder.schema.eval_grid.is_some()
-            || !same_fields
-        {
-            return invalid_series("raw frame cursor and builder schema mismatch");
+    /// Builds and measures the next row, or `None` when the chunk is exhausted.
+    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+        match &mut self.walk {
+            ChunkWalk::Raw(walk) => walk.next_row(),
+            ChunkWalk::Evaluated(walk) => walk.next_row(),
         }
-        Ok(())
     }
+}
 
-    /// Builds and measures the next union-of-segment row, or `None` when the chunk is exhausted.
+impl RawWalk {
+    /// Builds the next row, or `None` when the chunk is exhausted.
     ///
-    /// The chunk fields are walked three times so no per-row temporary vectors are allocated; the
-    /// offsets advance only after the row measure succeeded.
-    fn next_row(&mut self) -> Result<Option<RawFrameRow>> {
-        if self.pos >= self.chunk.time.len() {
+    /// The chunk fields are walked twice: once to find how many positions every field can cover, and
+    /// once to slice them. A row does collect one slice per field, so the saving here is not
+    /// allocation-free rows but no row spanning two segments of one field, which is what keeps the
+    /// slice arithmetic per row a single offset. The offsets advance only after the row measure
+    /// succeeded.
+    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+        let Self {
+            chunk,
+            segments,
+            offsets,
+            pos,
+        } = self;
+        if *pos >= chunk.time.len() {
             return Ok(None);
         }
-        let time_axis = self.chunk.time.as_buffer();
-        let mut take = time_axis.len() - self.pos;
-        for (index, field) in self.chunk.fields.iter().enumerate() {
-            let part = segment(field, self.segments[index])?;
-            take = take.min(part.len().saturating_sub(self.offsets[index]));
+        let time_axis = chunk.time.as_buffer();
+        let mut take = time_axis.len() - *pos;
+        for (index, field) in chunk.fields.iter().enumerate() {
+            let part = segment(field, segments[index])?;
+            take = take.min(part.len().saturating_sub(offsets[index]));
         }
         if take == 0 {
             return invalid_series("empty sample segment");
         }
-        let mut samples = Vec::with_capacity(self.chunk.fields.len());
-        for (index, field) in self.chunk.fields.iter().enumerate() {
-            let part = segment(field, self.segments[index])?;
-            samples.push(part.slice(self.offsets[index], take)?);
+        let mut samples = Vec::with_capacity(chunk.fields.len());
+        for (index, field) in chunk.fields.iter().enumerate() {
+            let part = segment(field, segments[index])?;
+            samples.push(part.slice(offsets[index], take)?);
         }
-        let mut row = RawFrameRow {
-            primary_key: self.chunk.primary_key.clone(),
-            metric: self.chunk.metric.clone(),
-            is_last: self.chunk.is_last && self.pos + take == self.chunk.time.len(),
-            times: time_axis.slice(self.pos, take),
+        let mut row = FrameRow {
+            key: Some(chunk.primary_key.clone()),
+            metric: chunk.metric.clone(),
+            is_last: chunk.is_last && *pos + take == chunk.time.len(),
+            time: RowTime::Timestamps(time_axis.slice(*pos, take)),
             samples,
             bytes: 0,
         };
         row.bytes = measure_row(&row)?;
-        self.pos += take;
-        for (index, field) in self.chunk.fields.iter().enumerate() {
-            let length = segment(field, self.segments[index])?.len();
-            self.offsets[index] += take;
-            if self.offsets[index] == length {
-                self.segments[index] += 1;
-                self.offsets[index] = 0;
+        *pos += take;
+        for (index, field) in chunk.fields.iter().enumerate() {
+            let length = segment(field, segments[index])?.len();
+            offsets[index] += take;
+            if offsets[index] == length {
+                segments[index] += 1;
+                offsets[index] = 0;
             }
         }
+        Ok(Some(row))
+    }
+}
+
+impl EvaluatedWalk {
+    /// Builds the next row, or `None` when the chunk is exhausted.
+    ///
+    /// A row covers one `(run of carried positions, sample segment)` intersection, which is why its
+    /// positions are always one span: the holes between runs are not rows, so nothing is ever filled
+    /// in for a grid position the chunk does not hold. The `is_last` a producer declared is carried
+    /// by the chunk's final row only, so a consumer that sees it knows the chain ended exactly there.
+    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+        let Self {
+            series,
+            is_last,
+            runs,
+            run,
+            offset,
+            segments,
+            offsets,
+            closing,
+        } = self;
+        if *closing {
+            *closing = false;
+            // A chunk that carries no position still owes its consumer one row: the row that says the
+            // chain ends here. It holds no grid position and no sample, and each field is kept as the
+            // producer built it - an empty float stays float, an empty histogram stays histogram - so a
+            // decoder sees an empty closing chunk of the same payload kind rather than a missing one or
+            // one silently converted.
+            let mut samples = Vec::with_capacity(series.fields.len());
+            for field in series.fields.iter() {
+                samples.push(field.clone());
+            }
+            let mut row = FrameRow {
+                key: None,
+                metric: Some(series.metric.clone()),
+                is_last: *is_last,
+                time: RowTime::Spans(Vec::new()),
+                samples,
+                bytes: 0,
+            };
+            row.bytes = measure_row(&row)?;
+            return Ok(Some(row));
+        }
+        let Some(current) = runs.get(*run) else {
+            return Ok(None);
+        };
+        let remaining = current.len - *offset;
+        let mut take = remaining;
+        for (index, field) in series.fields.iter().enumerate() {
+            let part = segment(field, segments[index])?;
+            take = take.min(part.len().saturating_sub(offsets[index]));
+        }
+        if take == 0 {
+            return invalid_series("empty sample segment");
+        }
+        let row_offset = current.row + *offset;
+        let mut samples = Vec::with_capacity(series.fields.len());
+        for (index, field) in series.fields.iter().enumerate() {
+            let part = segment(field, segments[index])?;
+            samples.push(part.slice(offsets[index], take)?);
+        }
+        let mut row = FrameRow {
+            key: None,
+            metric: Some(series.metric.clone()),
+            is_last: *is_last && *run + 1 == runs.len() && take == remaining,
+            time: RowTime::Spans(vec![GridSpan::new(current.position + *offset, take)]),
+            samples,
+            bytes: 0,
+        };
+        row.bytes = measure_row(&row)?;
+        *offset += take;
+        if *offset == current.len {
+            *run += 1;
+            *offset = 0;
+        }
+        for (index, field) in series.fields.iter().enumerate() {
+            let length = segment(field, segments[index])?.len();
+            offsets[index] += take;
+            if offsets[index] == length {
+                segments[index] += 1;
+                offsets[index] = 0;
+            }
+        }
+        debug_assert!(
+            row_offset + take <= series.time.len(),
+            "an evaluated row exceeds the axis it walks"
+        );
         Ok(Some(row))
     }
 }
@@ -708,19 +1176,21 @@ fn segment(field: &Samples, index: usize) -> Result<&Samples> {
 /// Packs one raw chunk, retaining the `Vec<RecordBatch>` compatibility signature.
 ///
 /// The chunk packs into bounded multi-row batches; callers that need streaming behavior should
-/// drive [`RawSeriesChunkCursor`] and [`RawSeriesFrameBuilder`] directly instead of collecting.
+/// drive [`SeriesFrameCursor`] and [`SeriesFrameBuilder`] directly instead of collecting.
 pub fn pack_raw_series_chunk(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
+    decode: Option<&LabelDecodeSpec>,
     chunk: &RawSeriesChunk,
 ) -> Result<Vec<RecordBatch>> {
-    let mut builder = RawSeriesFrameBuilder::try_new(
+    let mut builder = SeriesFrameBuilder::try_new(
         schema,
         mode,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
-        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        decode,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )?;
-    let mut cursor = RawSeriesChunkCursor::try_new(schema, mode, chunk.clone())?;
+    let mut cursor = SeriesFrameCursor::try_new_raw(schema, mode, chunk.clone())?;
     let mut batches = Vec::new();
     while let Some(batch) = cursor.append_to(&mut builder)? {
         batches.push(batch);
@@ -731,15 +1201,51 @@ pub fn pack_raw_series_chunk(
     Ok(batches)
 }
 
-/// One pending output row: a complete key with one dense sample slice per field and its checked
-/// encoded-size measure.
-struct RawFrameRow {
-    primary_key: Buffer,
+/// One pending output row: one chunk's identity, finality, time slice, and one dense sample slice per
+/// field, with its checked encoded-size measure.
+///
+/// This is the codec's own row, not a third runtime chunk type: `RawSeriesChunk` and `Series` are
+/// what a producer and a consumer see, and this is what the encoder writes between them.
+struct FrameRow {
+    /// The encoded storage key. A raw row always carries the key it was read under, a key-encoded
+    /// frame names its series only by it, and an evaluated row has none.
+    key: Option<Buffer>,
+    /// Complete labels, present exactly for explicit identity.
     metric: Option<SeriesLabels>,
+    /// Whether this row closes the chunk chain it belongs to.
     is_last: bool,
-    times: ScalarBuffer<i64>,
+    /// The positions this row's samples are addressed at.
+    time: RowTime,
     samples: Vec<Samples>,
     bytes: usize,
+}
+
+/// How one row addresses the time of its samples.
+enum RowTime {
+    /// The timestamps of this row's samples, strictly increasing within the row.
+    Timestamps(ScalarBuffer<i64>),
+    /// Runs of absolute grid positions, ordered, non-overlapping, and never zero length.
+    Spans(Vec<GridSpan>),
+}
+
+impl RowTime {
+    /// How many grid positions or timestamps this row's samples cover.
+    ///
+    /// The sum is checked because this is the first place a decoded row's positions are counted, and
+    /// a frame can name spans whose lengths overflow `usize` long before any span is validated
+    /// against the grid it claims to sit on. Adding them up unchecked would panic on a hostile frame
+    /// in a debug build and wrap in a release build, both before the grid check that should have
+    /// refused it.
+    fn len(&self) -> Result<usize> {
+        match self {
+            Self::Timestamps(timestamps) => Ok(timestamps.len()),
+            Self::Spans(spans) => spans.iter().try_fold(0usize, |total, span| {
+                total
+                    .checked_add(span.len())
+                    .ok_or_else(|| err("grid span length overflow"))
+            }),
+        }
+    }
 }
 
 /// Per-row encoded-size measure, computed once per row when the cursor produces it.
@@ -749,11 +1255,19 @@ struct RawFrameRow {
 /// A group total of `min(max_bytes, i32::MAX)` therefore guarantees that all Arrow offsets and
 /// lengths stay representable, without tracking a separate offset counter. This is a bound used
 /// for batching work, not the exact encoded size.
-fn measure_row(row: &RawFrameRow) -> Result<usize> {
-    checked_offset(row.primary_key.len())?;
-    checked_offset(row.times.len())?;
-    let mut bytes = add_checked(ROW_CHARGE, row.primary_key.len())?;
-    bytes = add_checked(bytes, mul_checked(row.times.len(), 8)?)?;
+fn measure_row(row: &FrameRow) -> Result<usize> {
+    let key_len = row.key.as_ref().map(Buffer::len).unwrap_or(0);
+    checked_offset(key_len)?;
+    checked_offset(row.time.len()?)?;
+    let mut bytes = add_checked(ROW_CHARGE, key_len)?;
+    bytes = match &row.time {
+        RowTime::Timestamps(timestamps) => add_checked(bytes, mul_checked(timestamps.len(), 8)?)?,
+        // Two `u64` per span, plus the list's own offsets and validity.
+        RowTime::Spans(spans) => add_checked(
+            add_checked(bytes, mul_checked(spans.len(), SPAN_CHARGE)?)?,
+            mul_checked(spans.len(), 2)?,
+        )?,
+    };
     for samples in &row.samples {
         bytes = add_checked(bytes, FIELD_CHARGE)?;
         match samples
@@ -846,11 +1360,7 @@ fn histogram_charge(values: &HistogramSamples) -> Result<usize> {
 /// complete table, including unreferenced entries; many segments referencing one large table can
 /// therefore repeat that table in the encoded batch. A single constituent child array is reused
 /// by clone (sharing its buffers); multiple constituents are concatenated, which copies.
-fn encode_rows(
-    schema: &SchemaRef,
-    mode: RawLabelMode,
-    rows: &[RawFrameRow],
-) -> Result<RecordBatch> {
+fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Result<RecordBatch> {
     let count = rows.len();
     let DataType::Struct(time_fields) = schema.field(2).data_type() else {
         return invalid_series("time schema mismatch");
@@ -861,17 +1371,72 @@ fn encode_rows(
     let DataType::Struct(field_types) = schema.field(3).data_type() else {
         return invalid_series("fields schema mismatch");
     };
-    let mut time_lengths = Vec::with_capacity(count);
-    let mut time_parts: Vec<ArrayRef> = Vec::with_capacity(count);
-    for row in rows {
-        time_lengths.push(row.times.len());
-        time_parts.push(Arc::new(Int64Array::new(row.times.clone(), None)));
-    }
-    let time_child = materialize_parts(&time_parts, || {
-        Ok(Arc::new(Int64Array::new_null(0)) as ArrayRef)
-    })?;
-    let times = list_array(&time_lengths, time_child, time_item.as_ref().clone(), None)?;
-    let time = struct_array(time_fields.clone(), vec![Arc::new(times)])?;
+    let time = match shape.content {
+        FrameContent::Raw => {
+            let mut time_lengths = Vec::with_capacity(count);
+            let mut time_parts: Vec<ArrayRef> = Vec::with_capacity(count);
+            for row in rows {
+                let RowTime::Timestamps(timestamps) = &row.time else {
+                    return invalid_series("a raw frame row carries grid positions");
+                };
+                time_lengths.push(timestamps.len());
+                time_parts.push(Arc::new(Int64Array::new(timestamps.clone(), None)));
+            }
+            let time_child = materialize_parts(&time_parts, || {
+                Ok(Arc::new(Int64Array::new_null(0)) as ArrayRef)
+            })?;
+            let times = list_array(&time_lengths, time_child, time_item.as_ref().clone(), None)?;
+            struct_array(time_fields.clone(), vec![Arc::new(times)])?
+        }
+        FrameContent::Evaluated => {
+            let DataType::Struct(span_fields) = time_item.data_type() else {
+                return invalid_series("grid span schema mismatch");
+            };
+            let mut span_lengths = Vec::with_capacity(count);
+            let mut starts = Vec::new();
+            let mut lengths = Vec::new();
+            for row in rows {
+                let RowTime::Spans(spans) = &row.time else {
+                    return invalid_series("an evaluated frame row carries timestamps");
+                };
+                span_lengths.push(spans.len());
+                for span in spans {
+                    starts.push(u64::try_from(span.start()).map_err(|_| {
+                        err("a grid position does not fit the frame's unsigned span")
+                    })?);
+                    lengths.push(u64::try_from(span.len()).map_err(|_| {
+                        err("a grid span length does not fit the frame's unsigned span")
+                    })?);
+                }
+            }
+            // A batch with no span at all still needs a typed child, so the empty case is spelled
+            // out instead of being left to whatever `concat` does with nothing.
+            let span_struct = if starts.is_empty() {
+                struct_array(
+                    span_fields.clone(),
+                    vec![
+                        Arc::new(UInt64Array::new_null(0)),
+                        Arc::new(UInt64Array::new_null(0)),
+                    ],
+                )?
+            } else {
+                struct_array(
+                    span_fields.clone(),
+                    vec![
+                        Arc::new(UInt64Array::from(starts)),
+                        Arc::new(UInt64Array::from(lengths)),
+                    ],
+                )?
+            };
+            let spans = list_array(
+                &span_lengths,
+                Arc::new(span_struct),
+                time_item.as_ref().clone(),
+                None,
+            )?;
+            struct_array(time_fields.clone(), vec![Arc::new(spans)])?
+        }
+    };
 
     let mut empty_table: Option<ArrayRef> = None;
     let mut field_arrays = Vec::with_capacity(field_types.len());
@@ -990,14 +1555,14 @@ fn encode_rows(
     let fields = struct_array(field_types.clone(), field_arrays)?;
 
     let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(binary_array(rows)?),
+        Arc::new(binary_array(rows, shape)?),
         Arc::new(BooleanArray::from(
             rows.iter().map(|row| row.is_last).collect::<Vec<_>>(),
         )),
         Arc::new(time),
         Arc::new(fields),
     ];
-    if mode == RawLabelMode::Explicit {
+    if shape.labels == FrameLabelMode::Explicit {
         columns.push(Arc::new(
             rows.iter()
                 .map(|row| row.metric.as_ref().and_then(SeriesLabels::name))
@@ -1045,28 +1610,55 @@ fn encode_rows(
     ))
 }
 
-/// Row-level binary keys; keys are copied exactly like the previous single-row encoder.
-fn binary_array(rows: &[RawFrameRow]) -> Result<BinaryArray> {
+/// Row-level binary keys.
+///
+/// A raw row always carries the key its chunk was read under, so the column is complete and
+/// non-null for a key frame and for a raw explicit frame alike; only an evaluated row has none, and
+/// it is a null entry rather than an empty key. A null and `b""` stay distinct, because the second is
+/// a key a producer could hold and the first is the absence of one.
+fn binary_array(rows: &[FrameRow], shape: FrameShape) -> Result<BinaryArray> {
     let mut offsets = Vec::with_capacity(rows.len() + 1);
     let mut total = 0usize;
+    let mut valid = Vec::with_capacity(rows.len());
     offsets.push(0);
     for row in rows {
-        total = add_checked(total, row.primary_key.len())?;
+        match (&row.key, shape) {
+            (Some(key), _) => {
+                total = add_checked(total, key.len())?;
+                valid.push(true);
+            }
+            (None, shape) if shape.content == FrameContent::Raw => {
+                // `RawSeriesChunk` still carries the key it was read under, and an explicit frame
+                // only adds the decoded labels beside it. Dropping the key would lose the identity
+                // a consumer of the raw chunk needs.
+                return invalid_series("a raw frame row carries no key");
+            }
+            (None, _) => valid.push(false),
+        }
         offsets.push(checked_offset(total)?);
     }
     let mut values = Vec::with_capacity(total);
     for row in rows {
-        values.extend_from_slice(row.primary_key.as_slice());
+        if let Some(key) = &row.key {
+            values.extend_from_slice(key.as_slice());
+        }
     }
+    let nulls = if valid.iter().all(|valid| *valid) {
+        None
+    } else {
+        validity(&valid)
+    };
     arrow(BinaryArray::try_new(
         OffsetBuffer::new(ScalarBuffer::from(offsets)),
         Buffer::from_vec(values),
-        None,
+        nulls,
     ))
 }
 
 /// Per-row charge for key/time/nullable overhead shared by every row.
 const ROW_CHARGE: usize = 64;
+/// Per-span charge for the two 64-bit coordinates one grid span carries.
+const SPAN_CHARGE: usize = 16;
 /// Per-field charge for the payload struct, nested list and validity overhead.
 const FIELD_CHARGE: usize = 64;
 /// Conservative per-table-row charge: the fixed fourteen-column histogram schema has seven
@@ -1149,172 +1741,298 @@ fn mul_checked(len: usize, width: usize) -> Result<usize> {
 }
 
 /// Reuses one prepared frame schema while decoding all batches of a stream.
-pub struct RawSeriesFrameDecoder {
+///
+/// The decoder is built from the schema a consumer expects and then checks every batch against it:
+/// the reserved declarations are compared as text, the column layout as Arrow fields, and every row
+/// on its own. A batch that disagrees anywhere is an error rather than a partial decode, because a
+/// receiver has no way to tell which half of a contradictory frame is the true one.
+pub struct SeriesFrameDecoder {
     schema: SeriesSchema,
-    mode: RawLabelMode,
+    shape: FrameShape,
     expected: SchemaRef,
 }
 
-impl RawSeriesFrameDecoder {
-    /// Builds the expected frame schema once from the series schema and label mode.
-    pub fn try_new(schema: &SeriesSchema, mode: RawLabelMode) -> Result<Self> {
+impl SeriesFrameDecoder {
+    /// Builds the expected frame schema once from the series schema and identity declaration.
+    pub fn try_new(
+        schema: &SeriesSchema,
+        labels: FrameLabelMode,
+        decode: Option<&LabelDecodeSpec>,
+    ) -> Result<Self> {
         Ok(Self {
             schema: schema.clone(),
-            mode,
-            expected: raw_series_frame_schema(schema, mode)?,
+            shape: FrameShape::of(schema, labels),
+            expected: series_frame_schema(schema, labels, decode)?,
         })
     }
 
+    /// Decodes all rows of one batch as raw chunks.
+    pub fn decode_raw(&self, batch: &RecordBatch) -> Result<Vec<RawSeriesChunk>> {
+        if self.shape.content != FrameContent::Raw {
+            return invalid_series("a raw frame decoder cannot read an evaluated frame");
+        }
+        let rows = self.decode_rows(batch)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let RowTime::Timestamps(timestamps) = row.time else {
+                return invalid_series("a raw frame row carries grid positions");
+            };
+            let key = row
+                .key
+                .ok_or_else(|| err("a raw frame row carries no key"))?;
+            let time = RawTimestamps::try_new(timestamps)?;
+            let fields = SeriesFields::try_from_vec(row.samples)?;
+            out.push(RawSeriesChunk::try_new(
+                &self.schema,
+                key,
+                row.metric,
+                time,
+                fields,
+                row.is_last,
+            )?);
+        }
+        Ok(out)
+    }
+
+    /// Decodes all rows of one batch as evaluated series and their finality.
+    ///
+    /// The pair is what a compute consumer needs and nothing more: the values on their absolute grid
+    /// positions, and whether this chunk closed the chain. A row that carries no position is kept, so
+    /// a closing chunk with no value still reaches the consumer that has to see it.
+    pub fn decode_evaluated(&self, batch: &RecordBatch) -> Result<Vec<(Series, bool)>> {
+        if self.shape.content != FrameContent::Evaluated {
+            return invalid_series("an evaluated frame decoder cannot read a raw frame");
+        }
+        let grid = self
+            .schema
+            .eval_grid
+            .clone()
+            .ok_or_else(|| err("an evaluated frame needs an evaluation grid"))?;
+        let rows = self.decode_rows(batch)?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let RowTime::Spans(spans) = row.time else {
+                return invalid_series("an evaluated frame row carries timestamps");
+            };
+            let metric = row
+                .metric
+                .ok_or_else(|| err("an evaluated frame row carries no labels"))?;
+            let time = TimeAxis::from_grid_spans(grid.clone(), spans)?;
+            // A row that covers no position is the closing chunk's shape and nothing else. The
+            // streaming validator refuses one that closes nothing, but this decoder is public and a
+            // caller driving it directly must not be handed a chunk it could never have produced
+            // either: an empty chunk that opens a chain carries no value and no finality, so no
+            // consumer could act on it.
+            if time.is_empty() && !row.is_last {
+                return invalid_series(
+                    "an evaluated chunk without positions must close its series",
+                );
+            }
+            let fields = SeriesFields::try_from_vec(row.samples)?;
+            out.push((
+                Series::try_new(&self.schema, metric, time, fields)?,
+                row.is_last,
+            ));
+        }
+        Ok(out)
+    }
+
     /// Decodes all rows of one batch, checking its reserved metadata, declared fields, and rows.
-    pub fn decode(&self, batch: &RecordBatch) -> Result<Vec<RawSeriesChunk>> {
-        decode_raw_series_frame(&self.schema, self.mode, &self.expected, batch)
+    fn decode_rows(&self, batch: &RecordBatch) -> Result<Vec<FrameRow>> {
+        let actual = batch.schema();
+        for key in [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE] {
+            if actual.metadata().get(key) != self.expected.metadata().get(key) {
+                return invalid_series("frame metadata mismatch");
+            }
+        }
+        // The same reservation rule the declaration parser applies, because a frame's protocol
+        // legality must not depend on which entry point reads it: a reserved key nobody checks would
+        // travel as dead metadata here while being refused a layer up.
+        for key in actual.metadata().keys() {
+            if key.starts_with("greptime.series.") && !RESERVED_KEYS.contains(&key.as_str()) {
+                return invalid_series("frame declares unknown reserved metadata");
+            }
+        }
+        if actual.fields() != self.expected.fields() {
+            return invalid_series("frame schema mismatch");
+        }
+        let cols = batch.columns();
+        let keys = down::<BinaryArray>(&cols[0], "read_key")?;
+        let lasts = down::<BooleanArray>(&cols[1], "is_last")?;
+        let time_struct = down::<StructArray>(&cols[2], "time")?;
+        let fs = down::<StructArray>(&cols[3], "fields")?;
+        let (names, labels) = if self.shape.labels == FrameLabelMode::Explicit {
+            (
+                Some(down::<StringArray>(&cols[4], "name")?),
+                Some(down::<ListArray>(&cols[5], "labels")?),
+            )
+        } else {
+            (None, None)
+        };
+        let mut out = Vec::with_capacity(batch.num_rows());
+        for row in 0..batch.num_rows() {
+            if lasts.is_null(row) || time_struct.is_null(row) || fs.is_null(row) {
+                return invalid_series("null required frame parent");
+            }
+            match self.shape.labels {
+                FrameLabelMode::Key => {
+                    if keys.is_null(row) {
+                        return invalid_series("null required frame parent");
+                    }
+                }
+                // An explicit row names its series by label; the key column is the raw chunk's own
+                // contract, and an evaluated row has none at all.
+                FrameLabelMode::Explicit => {
+                    if self.shape.content == FrameContent::Raw && keys.is_null(row) {
+                        return invalid_series("a raw explicit frame row carries no key");
+                    }
+                    if self.shape.content == FrameContent::Evaluated && !keys.is_null(row) {
+                        return invalid_series("an evaluated frame row carries a storage key");
+                    }
+                }
+            }
+            let time = match self.shape.content {
+                FrameContent::Raw => {
+                    let times = down::<ListArray>(time_struct.column(0), "timestamps")?;
+                    if times.is_null(row) {
+                        return invalid_series("null required raw frame parent");
+                    }
+                    let values = times.value(row);
+                    let tv = down::<Int64Array>(&values, "timestamp values")?;
+                    if tv.null_count() != 0 {
+                        return invalid_series("null timestamp");
+                    }
+                    RowTime::Timestamps(tv.values().clone())
+                }
+                FrameContent::Evaluated => {
+                    let typed = down::<ListArray>(time_struct.column(0), "spans")?;
+                    if typed.is_null(row) {
+                        return invalid_series("null required evaluated frame parent");
+                    }
+                    let values = typed.value(row);
+                    let span_struct = down::<StructArray>(&values, "spans")?;
+                    if span_struct.null_count() != 0 {
+                        return invalid_series("null grid span");
+                    }
+                    let starts = down::<UInt64Array>(span_struct.column(0), "span starts")?;
+                    let lengths = down::<UInt64Array>(span_struct.column(1), "span lengths")?;
+                    if starts.null_count() != 0 || lengths.null_count() != 0 {
+                        return invalid_series("null grid span bound");
+                    }
+                    let mut spans = Vec::with_capacity(starts.len());
+                    for index in 0..starts.len() {
+                        let start = usize::try_from(starts.value(index))
+                            .map_err(|_| err("grid span start exceeds the supported range"))?;
+                        let len = usize::try_from(lengths.value(index))
+                            .map_err(|_| err("grid span length exceeds the supported range"))?;
+                        if len == 0 {
+                            return invalid_series("grid spans must not be empty");
+                        }
+                        spans.push(GridSpan::new(start, len));
+                    }
+                    RowTime::Spans(spans)
+                }
+            };
+            let positions = time.len()?;
+            let metric = match (names, labels) {
+                (None, None) => None,
+                (Some(ns), Some(ls)) => {
+                    if ls.is_null(row) {
+                        return invalid_series("null labels list");
+                    }
+                    let label_values = ls.value(row);
+                    let label_struct = down::<StructArray>(&label_values, "labels")?;
+                    if label_struct.null_count() != 0 {
+                        return invalid_series("null label struct element");
+                    }
+                    let ln = down::<StringArray>(label_struct.column(0), "label names")?;
+                    let lv = down::<StringArray>(label_struct.column(1), "label values")?;
+                    if ln.null_count() != 0 || lv.null_count() != 0 {
+                        return invalid_series("null label element");
+                    }
+                    let tags = (0..ln.len())
+                        .map(|i| Label {
+                            name: Arc::from(ln.value(i)),
+                            value: Arc::from(lv.value(i)),
+                        })
+                        .collect();
+                    Some(SeriesLabels::try_new(
+                        (!ns.is_null(row)).then(|| Arc::from(ns.value(row))),
+                        tags,
+                    )?)
+                }
+                _ => return invalid_series("incomplete explicit label columns"),
+            };
+            let mut decoded = Vec::with_capacity(fs.num_columns());
+            for col in fs.columns() {
+                let payload = down::<StructArray>(col, "field payload")?;
+                if payload.is_null(row) {
+                    return invalid_series("null field payload");
+                }
+                let floats_list = down::<ListArray>(payload.column(0), "float values")?;
+                let hist = down::<StructArray>(payload.column(1), "histogram payload")?;
+                let has_float = !floats_list.is_null(row);
+                let has_hist = !hist.is_null(row);
+                if !has_float && !has_hist {
+                    return invalid_series("field has neither float nor histogram payload");
+                }
+                let floats = if has_float {
+                    down::<Float64Array>(&floats_list.value(row), "float values")?.clone()
+                } else {
+                    Float64Array::new_null(0)
+                };
+                if has_float && floats.len() != positions {
+                    return invalid_series("float payload length mismatch");
+                }
+                let samples = if !has_hist {
+                    Samples::from_float(floats)
+                } else {
+                    let inds = down::<ListArray>(hist.column(0), "histogram indices")?;
+                    let tables = down::<ListArray>(hist.column(1), "histogram table")?;
+                    if inds.is_null(row) || tables.is_null(row) {
+                        return invalid_series("null histogram indices or table");
+                    }
+                    let indices =
+                        down::<UInt32Array>(&inds.value(row), "histogram indices")?.clone();
+                    if indices.len() != positions {
+                        return invalid_series("histogram index length mismatch");
+                    }
+                    let table = down::<StructArray>(&tables.value(row), "histogram table")?.clone();
+                    let batch = Arc::new(HistogramBatch::try_from_arrow(table)?);
+                    if has_float {
+                        Samples::try_from_mixed(floats, HistogramSamples::try_new(indices, batch)?)?
+                    } else {
+                        Samples::try_from_histogram(indices, batch)?
+                    }
+                };
+                decoded.push(samples);
+            }
+            let key = if keys.is_null(row) {
+                None
+            } else {
+                Some(binary_slice(keys, row)?)
+            };
+            out.push(FrameRow {
+                key,
+                metric,
+                is_last: lasts.value(row),
+                time,
+                samples: decoded,
+                bytes: 0,
+            });
+        }
+        Ok(out)
     }
 }
 
-/// Decodes all rows of a raw frame; any malformed row makes the entire call fail.
+/// Decodes all rows of one raw frame; any malformed row makes the entire call fail.
 pub fn unpack_raw_series_frame(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
+    decode: Option<&LabelDecodeSpec>,
     batch: &RecordBatch,
 ) -> Result<Vec<RawSeriesChunk>> {
-    RawSeriesFrameDecoder::try_new(schema, mode)?.decode(batch)
-}
-
-fn decode_raw_series_frame(
-    schema: &SeriesSchema,
-    mode: RawLabelMode,
-    expected: &SchemaRef,
-    batch: &RecordBatch,
-) -> Result<Vec<RawSeriesChunk>> {
-    let actual = batch.schema();
-    for key in [LAYOUT, CONTENT, LABELS, TIME] {
-        if actual.metadata().get(key) != expected.metadata().get(key) {
-            return invalid_series("raw frame metadata mismatch");
-        }
-    }
-    if actual
-        .metadata()
-        .keys()
-        .any(|key| key == GRID || key.starts_with("greptime.series.grid."))
-        || actual.fields() != expected.fields()
-    {
-        return invalid_series("raw frame schema mismatch");
-    }
-    let cols = batch.columns();
-    let keys = down::<BinaryArray>(&cols[0], "read_key")?;
-    let lasts = down::<BooleanArray>(&cols[1], "is_last")?;
-    let time_struct = down::<StructArray>(&cols[2], "time")?;
-    let times = down::<ListArray>(time_struct.column(0), "timestamps")?;
-    let fs = down::<StructArray>(&cols[3], "fields")?;
-    let (names, labels) = if mode == RawLabelMode::Explicit {
-        (
-            Some(down::<StringArray>(&cols[4], "name")?),
-            Some(down::<ListArray>(&cols[5], "labels")?),
-        )
-    } else {
-        (None, None)
-    };
-    let mut out = Vec::with_capacity(batch.num_rows());
-    for row in 0..batch.num_rows() {
-        if keys.is_null(row)
-            || lasts.is_null(row)
-            || time_struct.is_null(row)
-            || times.is_null(row)
-            || fs.is_null(row)
-        {
-            return invalid_series("null required raw frame parent");
-        }
-        let timestamp_values = times.value(row);
-        let tv = down::<Int64Array>(&timestamp_values, "timestamp values")?;
-        if tv.null_count() != 0 {
-            return invalid_series("null timestamp");
-        }
-        let time = tv.values().clone();
-        let metric = match (names, labels) {
-            (None, None) => None,
-            (Some(ns), Some(ls)) => {
-                if ls.is_null(row) {
-                    return invalid_series("null labels list");
-                }
-                let label_values = ls.value(row);
-                let label_struct = down::<StructArray>(&label_values, "labels")?;
-                if label_struct.null_count() != 0 {
-                    return invalid_series("null label struct element");
-                }
-                let ln = down::<StringArray>(label_struct.column(0), "label names")?;
-                let lv = down::<StringArray>(label_struct.column(1), "label values")?;
-                if ln.null_count() != 0 || lv.null_count() != 0 {
-                    return invalid_series("null label element");
-                }
-                let tags = (0..ln.len())
-                    .map(|i| Label {
-                        name: Arc::from(ln.value(i)),
-                        value: Arc::from(lv.value(i)),
-                    })
-                    .collect();
-                Some(SeriesLabels::try_new(
-                    (!ns.is_null(row)).then(|| Arc::from(ns.value(row))),
-                    tags,
-                )?)
-            }
-            _ => return invalid_series("incomplete explicit label columns"),
-        };
-        let mut decoded = Vec::with_capacity(fs.num_columns());
-        for col in fs.columns() {
-            let payload = down::<StructArray>(col, "field payload")?;
-            if payload.is_null(row) {
-                return invalid_series("null field payload");
-            }
-            let floats_list = down::<ListArray>(payload.column(0), "float values")?;
-            let hist = down::<StructArray>(payload.column(1), "histogram payload")?;
-            let has_float = !floats_list.is_null(row);
-            let has_hist = !hist.is_null(row);
-            if !has_float && !has_hist {
-                return invalid_series("field has neither float nor histogram payload");
-            }
-            let floats = if has_float {
-                down::<Float64Array>(&floats_list.value(row), "float values")?.clone()
-            } else {
-                Float64Array::new_null(0)
-            };
-            if has_float && floats.len() != time.len() {
-                return invalid_series("float payload length mismatch");
-            }
-            let samples = if !has_hist {
-                Samples::from_float(floats)
-            } else {
-                let inds = down::<ListArray>(hist.column(0), "histogram indices")?;
-                let tables = down::<ListArray>(hist.column(1), "histogram table")?;
-                if inds.is_null(row) || tables.is_null(row) {
-                    return invalid_series("null histogram indices or table");
-                }
-                let indices = down::<UInt32Array>(&inds.value(row), "histogram indices")?.clone();
-                if indices.len() != time.len() {
-                    return invalid_series("histogram index length mismatch");
-                }
-                let table = down::<StructArray>(&tables.value(row), "histogram table")?.clone();
-                let batch = Arc::new(HistogramBatch::try_from_arrow(table)?);
-                if has_float {
-                    Samples::try_from_mixed(floats, HistogramSamples::try_new(indices, batch)?)?
-                } else {
-                    Samples::try_from_histogram(indices, batch)?
-                }
-            };
-            decoded.push(samples);
-        }
-        let fields = SeriesFields::try_from_vec(decoded)?;
-        let key = binary_slice(keys, row)?;
-        let raw_time = RawTimestamps::try_new(time)?;
-        out.push(RawSeriesChunk::try_new(
-            schema,
-            key,
-            metric,
-            raw_time,
-            fields,
-            lasts.value(row),
-        )?);
-    }
-    Ok(out)
+    SeriesFrameDecoder::try_new(schema, mode, decode)?.decode_raw(batch)
 }
 
 fn binary_slice(array: &BinaryArray, row: usize) -> Result<Buffer> {
