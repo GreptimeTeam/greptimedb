@@ -22,8 +22,15 @@ use super::*;
 fn observe_ignores_rejected_classic_histogram_windows() {
     let window = SEMANTIC_GRAPH_WINDOW_NANOS;
     let resource = ResourceMetrics {
+        resource: Some(
+            otel_arrow_rust::proto::opentelemetry::resource::v1::Resource {
+                attributes: vec![kv("service.name", "api")],
+                ..Default::default()
+            },
+        ),
         scope_metrics: vec![ScopeMetrics {
             metrics: vec![Metric {
+                name: "latency".into(),
                 data: Some(metric::Data::Histogram(Histogram {
                     data_points: vec![
                         HistogramDataPoint {
@@ -55,12 +62,34 @@ fn observe_ignores_rejected_classic_histogram_windows() {
         }],
         ..Default::default()
     };
-    let mut data = ResourceInfoData::default();
-    data.observe(&[kv("service.name", "api")], &resource);
-
-    let windows = data.rows.values().next().unwrap();
+    let conversion = crate::otlp::metrics::to_grpc_insert_requests(
+        otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest {
+            resource_metrics: vec![resource],
+        },
+        &mut session::protocol_ctx::OtlpMetricCtx { resource_info: true, ..Default::default() },
+    ).unwrap();
     assert_eq!(
-        vec![window + 1, 4 * window + 1],
-        windows.values().copied().collect::<Vec<_>>()
+        (
+            conversion.outcome.accepted_data_points,
+            conversion.outcome.rejected_data_points
+        ),
+        (2, 1)
+    );
+    let descriptors = conversion.resource_info.unwrap();
+    let rows = descriptors.inserts[0].rows.as_ref().unwrap();
+    let timestamp = rows
+        .schema
+        .iter()
+        .position(|c| c.column_name == greptime_timestamp())
+        .unwrap();
+    assert_eq!(
+        vec![
+            Some(ValueData::TimestampMillisecondValue(window / 1_000_000)),
+            Some(ValueData::TimestampMillisecondValue(4 * window / 1_000_000))
+        ],
+        rows.rows
+            .iter()
+            .map(|r| r.values[timestamp].value_data.clone())
+            .collect::<Vec<_>>()
     );
 }
