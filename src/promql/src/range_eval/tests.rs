@@ -4663,3 +4663,80 @@ fn smoothed_waits_for_the_sample_after_a_point_its_chunk_ended_on() {
         "smoothed delta at 61s",
     );
 }
+
+/// `delta(m[2s] smoothed)` with a 3s lookback at 61s: floats at 59s and 61s, then `histogram` at
+/// `histogram_ts`, either as one chunk or with the histogram in a closing chunk of its own.
+fn smoothed_delta_with_histogram(
+    histogram_ts: i64,
+    one_chunk: bool,
+) -> datafusion::error::Result<Vec<EvaluatedChunk>> {
+    let window = RangeWindow {
+        range_ms: 2_000,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: Some(RangeModifier::Smoothed { lookback_ms: 3_000 }),
+    };
+    let schema = raw_schema(1);
+    let mut evaluator = RangeEvaluator::try_new(
+        &schema,
+        grid(61_000, 1_000, 1),
+        window,
+        RangeFunction::Delta,
+    )
+    .unwrap();
+    let floats: Vec<Row> = vec![(59_000, vec![Some(2.0)]), (61_000, vec![Some(4.0)])];
+    let histogram = histogram_chunk(&schema, 1, histogram_ts);
+    let pieces = if one_chunk {
+        let float_chunk = chunk(&floats, 1, 0, false);
+        let field = Samples::try_from_chunks(vec![
+            float_chunk.fields.as_slice()[0].clone(),
+            histogram.fields.as_slice()[0].clone(),
+        ])
+        .unwrap();
+        let time =
+            RawTimestamps::try_new(ScalarBuffer::from(vec![59_000, 61_000, histogram_ts])).unwrap();
+        vec![
+            RawSeriesChunk::try_new(
+                &schema,
+                float_chunk.primary_key.clone(),
+                float_chunk.metric.clone(),
+                time,
+                SeriesFields::try_from_vec(vec![field]).unwrap(),
+                true,
+            )
+            .unwrap(),
+        ]
+    } else {
+        let mut closing = histogram;
+        closing.is_last = true;
+        vec![chunk(&floats, 1, 0, false), closing]
+    };
+    let mut chunks = Vec::new();
+    for piece in &pieces {
+        chunks.extend(evaluator.push(piece)?);
+    }
+    Ok(chunks)
+}
+
+/// The smoothed point at 61s is decided by the float at 61s, before a histogram at 62s inside its
+/// extended window arrives. The histogram is still refused, however the input is chunked, rather
+/// than refused in one chunk and swallowed after the point was handed over in another.
+#[test]
+fn a_smoothed_window_refuses_a_histogram_whatever_the_chunking() {
+    for one_chunk in [true, false] {
+        let error = smoothed_delta_with_histogram(62_000, one_chunk).unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "one chunk: {one_chunk}: {error}"
+        );
+    }
+}
+
+/// A histogram past the extended window of every point is not read by any of them, so it is
+/// accepted: the 61s window with a 3s lookback reads up to 64s.
+#[test]
+fn a_histogram_outside_every_smoothed_window_is_accepted() {
+    for one_chunk in [true, false] {
+        smoothed_delta_with_histogram(65_000, one_chunk).unwrap();
+    }
+}

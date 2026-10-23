@@ -1065,6 +1065,20 @@ impl RangeEvaluator {
                         self.window.offset_ms
                     ))
                 })?;
+            // Refused here rather than when a point is evaluated: a smoothed point can be decided
+            // before the rest of its window arrives, so whether a later histogram is seen would
+            // depend on how the input is chunked.
+            if let Some(modifier) = self.window.modifier
+                && row
+                    .iter()
+                    .any(|sample| matches!(sample, SampleRef::Histogram(_)))
+                && self.decided_window_reads(shifted)
+            {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "the {} range modifier over native histogram samples",
+                    modifier.name()
+                )));
+            }
             for (field, sample) in self.fields.iter_mut().zip(&row) {
                 match sample {
                     SampleRef::Missing => {}
@@ -1086,6 +1100,34 @@ impl RangeEvaluator {
             }
         }
         Ok(())
+    }
+
+    /// Whether a sample at `timestamp` on the evaluation timeline lies in the window of a point
+    /// this evaluator decides: a window ending at `E` reads `(E - range - before, E + after]`, and
+    /// only the first point's window is read when the result is replayed.
+    fn decided_window_reads(&self, timestamp: i64) -> bool {
+        let (before, after) = self.window.modifier.map_or((0, 0), |modifier| {
+            (
+                i128::from(modifier.before_ms()),
+                i128::from(modifier.after_ms()),
+            )
+        });
+        let spec = self.grid.spec();
+        let ends = match self.replay {
+            Replay::PerPoint => i128::from(spec.len),
+            Replay::Once | Replay::EveryPoint => 1,
+        };
+        let (start, step) = (i128::from(spec.start_ms), i128::from(spec.step_ms));
+        // The window ends that read the sample are those in `[timestamp - after, timestamp +
+        // range + before)`; the first grid point at or after the lower bound decides.
+        let lowest = i128::from(timestamp) - after;
+        let highest = i128::from(timestamp) + i128::from(self.window.range_ms) + before;
+        let first = if lowest <= start {
+            0
+        } else {
+            (lowest - start + step - 1) / step
+        };
+        first < ends && start + first * step < highest
     }
 
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
@@ -1332,14 +1374,6 @@ impl RowEvaluator<'_> {
             let histograms = &field.histograms[field.histogram_head..];
             let histograms = &histograms
                 [..histograms.partition_point(|(timestamp, _)| *timestamp <= window_end)];
-            if let Some(modifier) = self.modifier
-                && !histograms.is_empty()
-            {
-                return Err(DataFusionError::NotImplemented(format!(
-                    "the {} range modifier over native histogram samples",
-                    modifier.name()
-                )));
-            }
             row.push(match self.function {
                 Some(function) if !histograms.is_empty() => histogram::evaluate(
                     function,
