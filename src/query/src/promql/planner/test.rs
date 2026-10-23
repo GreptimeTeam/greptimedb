@@ -38,7 +38,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{Extension, col};
+use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use promql::extension_plan::{FusedSeries, HistogramFold};
@@ -1748,6 +1748,22 @@ async fn build_native_fused_plan_with_provider(
     .unwrap()
 }
 
+fn find_metric_physical_scan(plan: &LogicalPlan) -> Option<datafusion::logical_expr::TableScan> {
+    match plan {
+        LogicalPlan::Extension(Extension { node }) => node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .and_then(|fused| match fused.inputs().first() {
+                Some(LogicalPlan::TableScan(scan)) => Some(scan.clone()),
+                _ => None,
+            }),
+        _ => plan
+            .inputs()
+            .into_iter()
+            .find_map(find_metric_physical_scan),
+    }
+}
+
 fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     if let LogicalPlan::Extension(Extension { node }) = plan
         && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
@@ -1881,16 +1897,61 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
 }
 
-/// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
-/// A metric-engine logical table keeps the existing plan.
-///
-/// A logical table reads through its physical region, which is a mito scanner, but the planner
-/// only reaches this node with a bare scan when that physical table could not be resolved: the
-/// ordinary rewrite puts a `__table_id` filter and an alias in between. Such a table's `TableInfo`
-/// also carries no `append_mode`, so the preflight's own check could not be made here. Both are
-/// reasons the engine is not on the route's whitelist, and this test pins that it falls back.
+/// Metric logical scans retain their table-id restriction on the direct fused scan input.
 #[tokio::test]
-async fn native_fused_metric_engine_table_falls_back() {
+async fn native_fused_metric_engine_table_is_accepted() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await,
+    )
+    .await;
+    let legacy = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        false,
+        build_test_table_provider_with_tsid(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&native).is_some(),
+        "{}",
+        native.display_indent()
+    );
+    assert!(
+        legacy
+            .display_indent()
+            .to_string()
+            .contains("PromRangeManipulate")
+    );
+    let scan = find_metric_physical_scan(&native).expect("fused route keeps physical scan");
+    assert!(scan.filters.iter().any(|filter| {
+        *filter
+            == datafusion::logical_expr::Expr::Column(datafusion_common::Column::new(
+                Some(datafusion_common::TableReference::bare("phy")),
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            ))
+            .eq(datafusion::logical_expr::lit(1024u32))
+    }));
+    assert!(
+        scan.filters
+            .iter()
+            .any(|filter| format!("{filter:?}").contains("timestamp"))
+    );
+}
+
+/// A metric table without logical-table metadata declines to the legacy plan.
+#[tokio::test]
+async fn native_fused_metric_table_without_logical_metadata_falls_back() {
     let native = build_native_fused_plan_with_provider(
         "rate(some_metric[5m])",
         true,
@@ -1907,7 +1968,7 @@ async fn native_fused_metric_engine_table_falls_back() {
         .await,
     )
     .await;
-    let without_flag = build_native_fused_plan_with_provider(
+    let legacy = build_native_fused_plan_with_provider(
         "rate(some_metric[5m])",
         false,
         build_test_table_provider_with_options(
@@ -1923,14 +1984,10 @@ async fn native_fused_metric_engine_table_falls_back() {
         .await,
     )
     .await;
-    assert!(
-        find_fused_series(&native).is_none(),
-        "a metric-engine table must not reach the native route"
-    );
+    assert!(find_fused_series(&native).is_none());
     assert_eq!(
         native.display_indent().to_string(),
-        without_flag.display_indent().to_string(),
-        "a metric-engine table must keep the existing plan"
+        legacy.display_indent().to_string()
     );
 }
 

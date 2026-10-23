@@ -30,11 +30,12 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -45,6 +46,9 @@ use promql_parser::parser::{
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+};
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile, statement_grid};
@@ -62,7 +66,7 @@ use crate::promql::planner::PromPlanner;
 /// [`QueryOptions::experimental_native_promql`]: crate::options::QueryOptions::experimental_native_promql
 /// [`remote_dyn_filter_pushdown_enabled_from_extensions`]:
 ///     crate::options::remote_dyn_filter_pushdown_enabled_from_extensions
-pub(crate) const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
+pub const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 
 /// Whether `query_ctx` asks for the native fused-series route.
 ///
@@ -160,12 +164,41 @@ impl PromPlanner {
         // instead would let the two paths disagree about the columns they read.
         let table_ref = self.table_ref()?;
         let mut input = self.create_table_scan_plan(table_ref.clone()).await?;
-        // The node reads the region scan itself, so the plan below it has to *be* that scan: a
-        // filter, a projection or a `__tsid` rewrite in between produces a different physical
-        // child, and the physical layer cannot reach through it. Declining here, while the logical
-        // plan is still this method's to choose, is what keeps such a query on the existing path.
-        let LogicalPlan::TableScan(scan) = &input else {
-            return Ok(None);
+        let logical_scan = metric_scan_and_table_id(&input);
+        let has_verified_metric_rewrite = logical_scan.is_some();
+        let scan = match logical_scan {
+            Some((mut scan, predicate, table_id)) => {
+                let logical_provider = self
+                    .table_provider
+                    .resolve_table(table_ref.clone())
+                    .await
+                    .context(crate::promql::error::CatalogSnafu)?;
+                let logical_table = self.table_from_source(&logical_provider)?;
+                let meta = &logical_table.table_info().meta;
+                if meta.engine != METRIC_ENGINE_NAME
+                    || !meta
+                        .options
+                        .extra_options
+                        .contains_key(LOGICAL_TABLE_METADATA_KEY)
+                    || logical_table.table_info().ident.table_id != table_id
+                {
+                    return Ok(None);
+                }
+                // The physical scan bypasses logical-region request transformation, so preserve
+                // the validated logical-table restriction as a pushed-down scan predicate.
+                scan.filters.push(predicate);
+                input = LogicalPlan::TableScan(scan.clone());
+                scan
+            }
+            None => {
+                if self.ctx.use_tsid {
+                    return Ok(None);
+                }
+                match &input {
+                    LogicalPlan::TableScan(scan) => scan.clone(),
+                    _ => return Ok(None),
+                }
+            }
         };
         let table = self.table_from_source(&scan.source)?;
         let table_meta = &table.table_info().meta;
@@ -174,7 +207,9 @@ impl PromPlanner {
         // planning error, not a fallback. So the engine is checked here, where the existing plan is
         // still the answer. A file-engine table is the concrete case: its scanner is a
         // `SinglePartitionScanner`, which leaves `raw_series_schema` at the default `None`.
-        if !supports_native_raw_series(&table_meta.engine) {
+        if !supports_native_raw_series(&table_meta.engine)
+            || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
+        {
             return Ok(None);
         }
         // The region's raw-series preflight refuses these, and the physical layer turns that refusal into an error, so decline this route here instead.
@@ -379,29 +414,45 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
     }
 }
 
-/// Whether `engine` can serve raw series frames to the node this route builds.
+/// Whether `engine` can serve raw series frames to the fused-series node.
 ///
-/// A whitelist, not a probe: the logical planner cannot ask a region what its scanner supports
-/// without reading the table, and a false negative only costs the query its native route.
-///
-/// Mito's series scanner implements the raw path.
-///
-/// The metric engine is deliberately absent. A logical metric table does read through its physical
-/// region, which is a mito scanner, but the planner reaches this node with a bare scan only when it
-/// could not resolve that physical table: the ordinary rewrite puts a `__table_id` filter and an
-/// alias between the scan and this node, which the bare-scan check above already refuses. A logical
-/// table whose physical table is missing is not a table this route can serve - its `TableInfo`
-/// carries no `append_mode` either, so the preflight's own check could not be made here - and
-/// naming the engine would admit exactly that unverifiable case.
-///
-/// Every other engine in the workspace leaves `raw_series_schema` at its default `None`: a
-/// file-engine table, for one, is read by a `SinglePartitionScanner` that cannot frame a series.
-///
-/// This is deliberately not [`supports_pk_dictionary_encoding`]: that answers a different question.
-///
-/// [`supports_pk_dictionary_encoding`]: table::table::scan
+/// A whitelist avoids probing a region from logical planning; declining only costs the native route.
 fn supports_native_raw_series(engine: &str) -> bool {
-    matches!(engine, MITO_ENGINE | MITO2_ENGINE)
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
+}
+
+/// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`.
+fn metric_scan_and_table_id(
+    plan: &LogicalPlan,
+) -> Option<(datafusion::logical_expr::TableScan, Expr, u32)> {
+    let plan = match plan {
+        LogicalPlan::Projection(projection) => projection.input.as_ref(),
+        plan => plan,
+    };
+    let plan = match plan {
+        LogicalPlan::SubqueryAlias(alias) => alias.input.as_ref(),
+        plan => plan,
+    };
+    let LogicalPlan::Filter(filter) = plan else {
+        return None;
+    };
+    let Expr::BinaryExpr(binary) = &filter.predicate else {
+        return None;
+    };
+    if binary.op != datafusion::logical_expr::Operator::Eq
+        || !matches!(binary.left.as_ref(), Expr::Column(column) if column.name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+    {
+        return None;
+    }
+    let Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(table_id)), _) =
+        binary.right.as_ref()
+    else {
+        return None;
+    };
+    let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
+        return None;
+    };
+    Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
 fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
