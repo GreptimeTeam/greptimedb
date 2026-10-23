@@ -21,6 +21,7 @@ use common_telemetry::error;
 use operator::error::{ComputeArrowSnafu, Result, UnexpectedSnafu};
 use operator::insert::Inserter;
 use operator::metrics::DIST_INGEST_ROW_COUNT;
+use operator::write_dispatcher::WriteAttribution;
 use snafu::ResultExt;
 use table::metadata::TableInfoRef;
 
@@ -72,11 +73,19 @@ async fn send_batch(batch: &Batch, inserter: &Inserter) -> Result<(TableInfoRef,
         .build()
     })?;
     let combined = combine_batches(batch.submissions.iter().map(|pending| &pending.batch))?;
+    let mut attribution = WriteAttribution::default();
+    for pending in &batch.submissions {
+        attribution.extend(WriteAttribution::new(
+            pending.batch.num_rows(),
+            pending.ctx.write_progress().cloned(),
+        ));
+    }
     let affected_rows = inserter
         .flush_bulk_batch(
             first.table_info.clone(),
             combined.clone(),
             first.ctx.clone(),
+            attribution,
         )
         .await?;
     validate_affected_rows(batch.total_rows, affected_rows)?;

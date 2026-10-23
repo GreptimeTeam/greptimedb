@@ -4074,13 +4074,23 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
     let mut router = make_router(context.frontend());
     for round in 0..2 {
         let timestamp = 1_000 + round * 10_000;
-        let mut labels = vec![("__name__", "lifecycle_histogram"), ("job", "api")];
+        let mut labels = vec![
+            ("__name__", "lifecycle_histogram"),
+            ("job", "api"),
+            ("service.name", "api"),
+            ("区域", "西"),
+        ];
         if round == 1 {
             // Exercise schema evolution after the first SST already exists.
             labels.push(("zone", "east"));
         }
         let sample = remote_write_v2::request_with_labels_and_samples(
-            vec![("__name__", "lifecycle_sample"), ("job", "api")],
+            vec![
+                ("__name__", "lifecycle_sample"),
+                ("job", "api"),
+                ("service.name", "api"),
+                ("区域", "西"),
+            ],
             vec![Sample {
                 value: 42.0,
                 timestamp,
@@ -4105,7 +4115,7 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
             }],
         );
         // Create the scalar table first, then add histogram storage to its physical table.
-        for request in [sample, histograms] {
+        for (request, samples, histograms) in [(sample, "1", "0"), (histograms, "0", "1")] {
             let response = router
                 .clone()
                 .oneshot(
@@ -4123,6 +4133,14 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
                 .await
                 .unwrap();
             assert_eq!(
+                response.headers()["X-Prometheus-Remote-Write-Samples-Written"],
+                samples
+            );
+            assert_eq!(
+                response.headers()["X-Prometheus-Remote-Write-Histograms-Written"],
+                histograms
+            );
+            assert_eq!(
                 response.status(),
                 204,
                 "{:?}",
@@ -4131,6 +4149,11 @@ async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool)
         }
 
         let expected = snapshot(context.frontend()).await;
+        for table in &expected {
+            assert!(
+                table.contains("service.name") && table.contains("区域") && table.contains("西")
+            );
+        }
         assert!(expected[1].contains("9007199254740993"), "{}", expected[1]);
         // Rebuild before flushing, including after adding fields to the physical
         // schema: recovery must retain the columns filled into bulk writes.

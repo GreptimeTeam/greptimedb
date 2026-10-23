@@ -37,6 +37,7 @@ use store_api::storage::{RegionId, RegionNumber, TableId};
 use table::metadata::TableInfo;
 
 use crate::error::{self, Result, SplitDeleteSnafu, SplitInsertSnafu};
+use crate::write_dispatcher::{WriteAttribution, write_row_count};
 
 /// Loads table routing rules and converts rows to region write requests.
 pub struct Partitioner<'a> {
@@ -83,6 +84,101 @@ impl<'a> Partitioner<'a> {
 }
 
 impl TablePartitioner {
+    pub(crate) fn rebuild_attributed_write(
+        &self,
+        request: RegionRequest,
+        table_info: &TableInfo,
+        attribution: WriteAttribution,
+    ) -> Result<Vec<(RegionRequest, WriteAttribution)>> {
+        if !attribution.is_tracked() {
+            return Ok(self
+                .rebuild_write_requests(request, table_info)?
+                .into_iter()
+                .map(|request| (request, WriteAttribution::default()))
+                .collect());
+        }
+        let RegionRequest { header, body } = request;
+        if let Some(Body::BulkInsert(bulk)) = body {
+            return Ok(self
+                .rebuild_bulk_insert_request(bulk, table_info, attribution)?
+                .into_iter()
+                .map(|(body, attribution)| {
+                    (
+                        RegionRequest {
+                            header: header.clone(),
+                            body: Some(body),
+                        },
+                        attribution,
+                    )
+                })
+                .collect());
+        }
+        self.rebuild_write_requests(RegionRequest { header, body }, table_info)?
+            .into_iter()
+            .map(|request| {
+                let attribution = attribution
+                    .for_rows(write_row_count(&request))
+                    .map_err(BoxedError::new)
+                    .context(error::ExternalSnafu)?;
+                Ok((request, attribution))
+            })
+            .collect()
+    }
+
+    pub fn partition_attributed_bulk_requests(
+        &self,
+        batch: RecordBatch,
+        skip_wal: bool,
+        attribution: WriteAttribution,
+    ) -> Result<Vec<(BulkInsertRequest, WriteAttribution)>> {
+        if !attribution.is_tracked() {
+            return Ok(self
+                .partition_bulk_insert_requests(batch, None, skip_wal)?
+                .into_iter()
+                .map(|request| (request, WriteAttribution::default()))
+                .collect());
+        }
+        let masks = self
+            .rule
+            .split_record_batch(&batch)
+            .context(SplitInsertSnafu)?;
+        self.build_attributed_bulk_requests(batch, masks, None, skip_wal, attribution)
+    }
+
+    fn build_attributed_bulk_requests(
+        &self,
+        batch: RecordBatch,
+        masks: HashMap<RegionNumber, RegionMask>,
+        original_ipc: Option<ArrowIpc>,
+        skip_wal: bool,
+        attribution: WriteAttribution,
+    ) -> Result<Vec<(BulkInsertRequest, WriteAttribution)>> {
+        let mut by_region = masks
+            .iter()
+            .filter(|(_, mask)| !mask.select_none())
+            .map(|(region, mask)| {
+                Ok((
+                    *region,
+                    attribution
+                        .filter(mask)
+                        .map_err(BoxedError::new)
+                        .context(error::ExternalSnafu)?,
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+        self.build_bulk_insert_requests(batch, masks, original_ipc, skip_wal)?
+            .into_iter()
+            .map(|request| {
+                let attribution = by_region
+                    .remove(&RegionId::from_u64(request.region_id).region_number())
+                    .context(error::UnexpectedSnafu {
+                        violated: "Missing write ownership after partitioning",
+                    })?;
+                Ok((request, attribution))
+            })
+            .collect()
+    }
+
     /// Reads a table's partition rule and expression versions into one routing snapshot.
     pub async fn try_new(
         partition_manager: &PartitionRuleManager,
@@ -119,7 +215,11 @@ impl TablePartitioner {
         })? {
             Body::Inserts(inserts) => self.rebuild_insert_requests(inserts)?,
             Body::Deletes(deletes) => self.rebuild_delete_requests(deletes)?,
-            Body::BulkInsert(bulk) => self.rebuild_bulk_insert_request(bulk, table_info)?,
+            Body::BulkInsert(bulk) => self
+                .rebuild_bulk_insert_request(bulk, table_info, WriteAttribution::default())?
+                .into_iter()
+                .map(|(body, _)| body)
+                .collect(),
             _ => {
                 return error::UnexpectedSnafu {
                     violated: "Only writes can be rebuilt",
@@ -278,10 +378,11 @@ impl TablePartitioner {
         &self,
         bulk: BulkInsertRequest,
         table_info: &TableInfo,
-    ) -> Result<Vec<Body>> {
+        attribution: WriteAttribution,
+    ) -> Result<Vec<(Body, WriteAttribution)>> {
         let region_id = RegionId::from_u64(bulk.region_id);
         if self.is_partition_expr_unchanged(region_id, bulk.partition_expr_version) {
-            return Ok(vec![Body::BulkInsert(bulk)]);
+            return Ok(vec![(Body::BulkInsert(bulk), attribution)]);
         }
         let bulk_insert_request::Body::ArrowIpc(ipc) =
             bulk.body.context(error::UnexpectedSnafu {
@@ -296,10 +397,23 @@ impl TablePartitioner {
             .rule
             .split_record_batch(routing_batch.as_ref().unwrap_or(&batch))
             .context(SplitInsertSnafu)?;
-        Ok(self
-            .build_bulk_insert_requests(batch, masks, Some(ipc), bulk.skip_wal)?
+        let writes = if attribution.is_tracked() {
+            self.build_attributed_bulk_requests(
+                batch,
+                masks,
+                Some(ipc),
+                bulk.skip_wal,
+                attribution,
+            )?
+        } else {
+            self.build_bulk_insert_requests(batch, masks, Some(ipc), bulk.skip_wal)?
+                .into_iter()
+                .map(|request| (request, WriteAttribution::default()))
+                .collect()
+        };
+        Ok(writes
             .into_iter()
-            .map(Body::BulkInsert)
+            .map(|(request, attribution)| (Body::BulkInsert(request), attribution))
             .collect())
     }
 

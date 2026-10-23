@@ -27,6 +27,7 @@ pub(in crate::batcher::table) struct PendingBatch {
     pub ctx: QueryContextRef,
     pub response_tx: oneshot::Sender<Result<(), Arc<Error>>>,
     pub _permit: Arc<OwnedSemaphorePermit>,
+    pub _completion: Option<session::write_progress::PendingWrite>,
 }
 
 pub(in crate::batcher::table) fn notify_batches(
@@ -59,6 +60,7 @@ mod tests {
                 let (response_tx, response_rx) = oneshot::channel();
                 let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
                 batches.push(PendingBatch {
+                    _completion: None,
                     table_info: Arc::new(new_test_table_info(1, "t", [0].into_iter())),
                     batch: RecordBatch::try_new(
                         schema,

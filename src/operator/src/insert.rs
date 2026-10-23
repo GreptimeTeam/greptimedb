@@ -904,8 +904,11 @@ impl Inserter {
         // Dropping the caller stops retries without abandoning in-flight writes.
         let cancellation = CancellationToken::new();
         let _guard = cancellation.clone().drop_guard();
+        let progress = ctx.write_progress().cloned();
         let affected_rows = common_runtime::spawn_global(async move {
-            dispatcher.execute(writes, None, Some(&cancellation)).await
+            dispatcher
+                .execute_with_progress(writes, None, Some(&cancellation), progress)
+                .await
         })
         .await
         .context(JoinTaskSnafu)?
