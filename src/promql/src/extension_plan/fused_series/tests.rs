@@ -60,7 +60,11 @@ use datafusion::physical_plan::{
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
 };
 use datafusion::prelude::SessionContext;
-use datatypes::series::frame::{RawLabelMode, pack_raw_series_chunk, raw_series_frame_schema};
+use datatypes::prelude::ConcreteDataType;
+use datatypes::series::frame::{
+    FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeSpec,
+    LabelDecodeTag, pack_raw_series_chunk, raw_series_frame_schema, series_frame_schema,
+};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
@@ -385,12 +389,36 @@ fn binding(tree: &NativeTree) -> FusedSeriesBinding {
 
 /// The schema of a frame carrying series of `schema` with their labels explicit.
 fn frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
-    raw_series_frame_schema(schema, RawLabelMode::Explicit).expect("explicit labels are a frame")
+    raw_series_frame_schema(schema, FrameLabelMode::Explicit).expect("explicit labels are a frame")
 }
 
 /// The schema of a frame carrying these series, which is what the node declares as its input.
 fn frame_schema() -> SchemaRef {
     frame_schema_of(&raw_schema())
+}
+
+/// The description a frame with its labels encoded in a dense [`HOST`] key declares.
+fn host_label_decode() -> LabelDecodeSpec {
+    LabelDecodeSpec {
+        version: LABEL_DECODE_VERSION,
+        metric_name: METRIC.to_string(),
+        encoding: LabelDecodeEncoding::Dense,
+        primary_key: vec![LabelDecodeColumn {
+            column_id: 1,
+            name: HOST.to_string(),
+            physical_type: ConcreteDataType::string_datatype(),
+        }],
+        logical_tags: vec![LabelDecodeTag {
+            column_id: 1,
+            name: HOST.to_string(),
+        }],
+    }
+}
+
+/// The schema of a frame carrying series of `schema` whose labels are encoded in their key.
+fn keyed_frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
+    series_frame_schema(schema, FrameLabelMode::Key, Some(&host_label_decode()))
+        .expect("key labels are a frame")
 }
 
 /// The columns this node produces: the field, the tags and the grid timestamps.
@@ -728,7 +756,7 @@ fn metric(labels: &[(&str, &str)], name: Option<&str>) -> SeriesLabels {
 
 /// One frame batch carrying `chunk` of `schema`, packed by the scan's own encoder.
 fn frame_of(schema: &SeriesSchema, chunk: &RawSeriesChunk) -> RecordBatch {
-    let mut batches = pack_raw_series_chunk(schema, RawLabelMode::Explicit, chunk)
+    let mut batches = pack_raw_series_chunk(schema, FrameLabelMode::Explicit, None, chunk)
         .expect("a chunk of this schema packs into a frame");
     assert_eq!(1, batches.len(), "one small chunk is one frame batch");
     batches.remove(0)
@@ -1395,8 +1423,7 @@ async fn a_pending_boundary_loses_no_rows() {
 /// before the first batch, not when the missing labels reach the output.
 #[test]
 fn a_frame_whose_labels_are_encoded_is_rejected_when_the_plan_is_built() {
-    let keyed =
-        raw_series_frame_schema(&raw_schema(), RawLabelMode::Key).expect("key labels are a frame");
+    let keyed = keyed_frame_schema_of(&raw_schema());
     let error = plan(rate_tree(), memory_exec_with(keyed, Vec::new()))
         .expect_err("the frames carry no labels to read tags from");
     assert!(
@@ -1408,18 +1435,19 @@ fn a_frame_whose_labels_are_encoded_is_rejected_when_the_plan_is_built() {
 /// A frame that carries an evaluation grid is refused when the plan is built.
 ///
 /// A frame holds raw series: its rows are samples, not grid positions, and the grid every output
-/// row is addressed on is the tree's own. A schema that declares a grid is one this node would
-/// read positions out of, so it is refused rather than decoded. The source below is one partition,
-/// which is the shape the node accepts, so what refuses the plan here is the frame's own
-/// declaration and not the node's partition count: the refusal has to name the grid.
+/// row is addressed on is the tree's own. A frame that declares a grid is one whose rows this node
+/// would read as positions on it, so the shared decoder refuses it rather than reading samples out
+/// of it. The source below is one partition, which is the shape the node accepts, so what refuses
+/// the plan here is the frame's own declaration and not the node's partition count: the refusal has
+/// to name the frame.
 #[test]
 fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
-    let mut metadata = frame_schema().metadata().clone();
-    metadata.insert("greptime.series.grid".to_string(), "v1".to_string());
-    let gridded = Arc::new(Schema::new_with_metadata(
-        frame_schema().fields().clone(),
-        metadata,
-    ));
+    let gridded_schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(grid()),
+    });
+    let gridded = series_frame_schema(&gridded_schema, FrameLabelMode::Explicit, None)
+        .expect("a grid is a frame");
     // One empty partition: every check but the frame's passes.
     let source = memory_exec_with(gridded, Vec::new());
     assert_eq!(
@@ -1430,7 +1458,7 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     let error = plan(rate_tree(), source).expect_err("the frame declares a grid");
     let message = error_chain(&error);
     assert!(
-        message.contains("raw series schema cannot have an evaluation grid"),
+        message.contains("expected a raw frame, found an evaluated one"),
         "refused for another reason: {message}"
     );
     assert!(
@@ -1451,7 +1479,9 @@ fn a_frame_of_another_series_schema_is_rejected_when_the_plan_is_built() {
     let error = plan(rate_tree(), memory_exec_with(other, Vec::new()))
         .expect_err("the tree's input reads one field");
     assert!(
-        error.to_string().contains("raw frame"),
+        error
+            .to_string()
+            .contains("frame fields do not match the expected series schema"),
         "refused for another reason: {error}"
     );
 }

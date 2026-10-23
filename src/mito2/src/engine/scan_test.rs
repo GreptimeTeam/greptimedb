@@ -5093,7 +5093,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
     assert_eq!(raw_visible, visible);
 
     // Exercise the production table physical consumer over a fresh real Mito scanner.
-    use common_query::series_frame::{raw_series_frame_ordering, unpack_raw_series};
+    use common_query::series_frame::{series_frame_ordering, unpack_raw_series};
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::ExecutionPlan;
     use table::table::scan::RegionScanExec;
@@ -5127,7 +5127,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
         .unwrap();
     // Unpack under the frame's own declaration. A legacy producer declares `KeyThenTime`, and
     // only that declaration makes the decoder check that keys increase.
-    let frame_ordering = raw_series_frame_ordering(native_frames.schema().as_ref()).unwrap();
+    let frame_ordering = series_frame_ordering(native_frames.schema().as_ref()).unwrap();
     assert_eq!(
         SeriesOrdering::KeyThenTime,
         frame_ordering,
@@ -5233,9 +5233,7 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
 /// `promql::source::merge::tests::rejects_unsupported_ordering_and_empty_input_without_polling`.
 #[tokio::test]
 async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
-    use common_query::series_frame::{
-        pack_raw_series, raw_series_frame_ordering, unpack_raw_series,
-    };
+    use common_query::series_frame::{pack_raw_series, series_frame_ordering, unpack_raw_series};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::SeriesSchema;
     use store_api::region_engine::{BoundTag, QueryScanContext, RawLabelSource};
@@ -5374,7 +5372,7 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
         chunks,
     )))
     .unwrap();
-    let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
+    let ordering = series_frame_ordering(packed.schema().as_ref()).unwrap();
     assert_eq!(SeriesOrdering::Contiguous, ordering);
     let validated = unpack_raw_series(packed, Some(schema))
         .unwrap()
@@ -6560,7 +6558,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
     assert_eq!(vec![(2, 20.0)], output_values);
 
     // Validate the typed integer gate through RegionScanExec's actual physical consumer.
-    use common_query::series_frame::{raw_series_frame_ordering, unpack_raw_series};
+    use common_query::series_frame::{series_frame_ordering, unpack_raw_series};
     use datafusion::execution::TaskContext;
     use datafusion::physical_plan::ExecutionPlan;
     use datatypes::series::SeriesOrdering;
@@ -6597,7 +6595,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
         .execute(0, Arc::new(TaskContext::default()))
         .unwrap();
     // Unpack under the frame's own declaration so the decoder checks the legacy key order.
-    let ordering = raw_series_frame_ordering(frames.schema().as_ref()).unwrap();
+    let ordering = series_frame_ordering(frames.schema().as_ref()).unwrap();
     assert_eq!(
         SeriesOrdering::KeyThenTime,
         ordering,
@@ -6655,7 +6653,7 @@ async fn test_mito_raw_series_int64_predicate_uses_original_precision() {
     let empty_frames = empty_plan
         .execute(0, Arc::new(TaskContext::default()))
         .unwrap();
-    let empty_ordering = raw_series_frame_ordering(empty_frames.schema().as_ref()).unwrap();
+    let empty_ordering = series_frame_ordering(empty_frames.schema().as_ref()).unwrap();
     assert_eq!(
         SeriesOrdering::KeyThenTime,
         empty_ordering,

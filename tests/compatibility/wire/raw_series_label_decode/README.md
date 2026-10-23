@@ -1,13 +1,14 @@
 # Raw-series label decode description compatibility
 
-`v1_metadata.json` is a hand-authored, frozen set of Arrow schema metadata maps
-for the v1 raw-series frame. It records the established layout/content/labels/
-time metadata plus the new `greptime.series.label_decode` entry, whose value is a
-JSON label decode description with an explicit `version`. The Rust unit test
-parses these literal maps through `raw_series_frame_label_decode`; the fixture is
-not produced by the schema builder. `v1_physical_types.json`, described under
+`v2_metadata.json` is a hand-authored, frozen set of Arrow schema metadata maps
+for the v2 series frame. It records the established layout/content/labels/time
+metadata plus the `greptime.series.label_decode` entry, whose value is a JSON
+label decode description with an explicit `version`. The Rust unit test parses
+these literal maps through `series_frame_label_decode`; the fixture is not
+produced by the schema builder. `v1_physical_types.json`, described under
 [Physical types](#physical-types), is the one generated fixture here: it records
-the serde text of every `ConcreteDataType` variant.
+the serde text of every `ConcreteDataType` variant, which the frame layout version
+does not change, so it keeps its original name.
 
 Run the focused check:
 
@@ -21,6 +22,17 @@ wire form with a mixed physical type set, that a logical tag must name a listed 
 column, and that the reader rejects a key frame without a description, an explicit
 frame that declares one, an unknown version, a missing or unknown field, a wrong
 field type, and a non-JSON value.
+
+It also pins the declarations the unified frame family refuses. Layout is now
+`v2`: a frame declaring `v1` or any other value is refused, and so is a
+`greptime.series.*` key this revision does not register. The three modes are not
+independent - `content` fixes `time`, and `labels` decides whether a description
+must be present - so `content = evaluated` with `time = timestamps`, `content =
+evaluated` with `labels = key`, and `content = raw` with a
+`greptime.series.grid` are all contradictions and are refused rather than
+half-trusted. An evaluated frame is therefore always `explicit` + `grid_spans` and
+always declares its grid; a raw frame is always `timestamps` and never declares
+one.
 
 A timestamp-typed tag column has its own case in the crate's unit tests rather
 than here, so this fixture stays a single fixed layout.

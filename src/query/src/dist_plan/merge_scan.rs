@@ -1423,7 +1423,7 @@ mod tests {
     };
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
-    use datatypes::series::frame::{self, RawLabelMode};
+    use datatypes::series::frame::{self, FrameLabelMode};
     use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
     use datatypes::series::samples::{
         DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema,
@@ -3361,7 +3361,8 @@ mod tests {
     async fn merge_scan_remote_schema_identity_rejects_empty_raw_frame_metadata_mismatch() {
         let region_id = RegionId::new(1024, 1);
         let raw = raw_test_series_schema();
-        let frame = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let decode = raw_test_label_decode();
+        let frame = frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&decode)).unwrap();
         let metadata = frame.metadata().clone();
         let mut cases = Vec::new();
         for (key, value) in [
@@ -3428,7 +3429,7 @@ mod tests {
             label_decode_spec, raw_series_frame_schema_with_ordering,
         };
         use datatypes::series::SeriesOrdering;
-        use datatypes::series::frame::raw_series_frame_label_decode;
+        use datatypes::series::frame::series_frame_label_decode;
 
         let raw = raw_test_series_schema();
         // Two bindings that are equal but not the same allocation: the expectation and the
@@ -3503,13 +3504,34 @@ mod tests {
         spaced_metadata.insert(key.to_string(), spaced_text);
         let spaced = ArrowSchema::new_with_metadata(expected.fields().clone(), spaced_metadata);
         assert_eq!(
-            raw_series_frame_label_decode(&spaced)
+            series_frame_label_decode(&spaced)
                 .unwrap()
                 .map(|decode| decode.version),
             Some(1),
             "the spaced text is still a valid description"
         );
         assert!(validate_remote_schema(&expected, &spaced, "test").is_err());
+    }
+
+    /// The key layout a key frame over [`raw_test_series_schema`] declares.
+    ///
+    /// A key-encoded frame cannot be declared without the description that decodes its key, and the
+    /// merge-scan tests never decode a key with it, so it only has to be self-consistent.
+    fn raw_test_label_decode() -> frame::LabelDecodeSpec {
+        frame::LabelDecodeSpec {
+            version: frame::LABEL_DECODE_VERSION,
+            metric_name: "cpu_usage".to_string(),
+            encoding: frame::LabelDecodeEncoding::Dense,
+            primary_key: vec![frame::LabelDecodeColumn {
+                column_id: 1,
+                name: "host".to_string(),
+                physical_type: ConcreteDataType::string_datatype(),
+            }],
+            logical_tags: vec![frame::LabelDecodeTag {
+                column_id: 1,
+                name: "host".to_string(),
+            }],
+        }
     }
 
     fn raw_test_series_schema() -> SeriesSchema {
@@ -3531,8 +3553,9 @@ mod tests {
     async fn merge_scan_remote_schema_identity_rejects_later_raw_frame_inner_metadata_mismatch() {
         let region_id = RegionId::new(1024, 1);
         let raw = raw_test_series_schema();
-        let mode = RawLabelMode::Key;
-        let frame = frame::raw_series_frame_schema(&raw, mode).unwrap();
+        let mode = FrameLabelMode::Key;
+        let decode = raw_test_label_decode();
+        let frame = frame::series_frame_schema(&raw, mode, Some(&decode)).unwrap();
         let mut changed_metadata = frame.metadata().clone();
         changed_metadata.insert("greptime.series.marker".to_string(), "changed".to_string());
         let changed_schema = Arc::new(ArrowSchema::new_with_metadata(
@@ -3554,13 +3577,22 @@ mod tests {
             )
             .unwrap()
         };
-        let first = frame::pack_raw_series_chunk(&raw, mode, &chunk([1.0, 2.0], [10, 20], false))
-            .unwrap()
-            .remove(0);
-        let mut second =
-            frame::pack_raw_series_chunk(&raw, mode, &chunk([3.0, 4.0], [30, 40], true))
-                .unwrap()
-                .remove(0);
+        let first = frame::pack_raw_series_chunk(
+            &raw,
+            mode,
+            Some(&decode),
+            &chunk([1.0, 2.0], [10, 20], false),
+        )
+        .unwrap()
+        .remove(0);
+        let mut second = frame::pack_raw_series_chunk(
+            &raw,
+            mode,
+            Some(&decode),
+            &chunk([3.0, 4.0], [30, 40], true),
+        )
+        .unwrap()
+        .remove(0);
         second = DfRecordBatch::try_new(changed_schema, second.columns().to_vec()).unwrap();
         let advertised = Arc::new(Schema::try_from(frame.clone()).unwrap());
         let first = RecordBatch::from_df_record_batch(advertised.clone(), first);
@@ -3578,7 +3610,7 @@ mod tests {
         );
         let mut stream = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
         let emitted = stream.next().await.unwrap().unwrap();
-        let decoded = frame::unpack_raw_series_frame(&raw, mode, &emitted).unwrap();
+        let decoded = frame::unpack_raw_series_frame(&raw, mode, Some(&decode), &emitted).unwrap();
         assert_eq!(decoded[0].time.timestamp(0), Some(10));
         assert!(matches!(
             decoded[0].fields.get(0).unwrap().sample(0),
@@ -3593,7 +3625,9 @@ mod tests {
     async fn merge_scan_remote_schema_identity_rejects_raw_frame_field_metadata_mismatch() {
         let region_id = RegionId::new(1024, 1);
         let raw = raw_test_series_schema();
-        let expected = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let expected =
+            frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&raw_test_label_decode()))
+                .unwrap();
         let frame_metadata = expected.metadata().clone();
         let fields = expected.fields().to_vec();
         let mut field_cases = Vec::new();
@@ -3678,7 +3712,9 @@ mod tests {
     async fn merge_scan_remote_schema_identity_preserves_valid_raw_frame_payload() {
         let region_id = RegionId::new(1024, 1);
         let raw = raw_test_series_schema();
-        let expected_frame = frame::raw_series_frame_schema(&raw, RawLabelMode::Key).unwrap();
+        let decode = raw_test_label_decode();
+        let expected_frame =
+            frame::series_frame_schema(&raw, FrameLabelMode::Key, Some(&decode)).unwrap();
         let mut expected_metadata = expected_frame.metadata().clone();
         expected_metadata.insert("application.note".to_string(), "expected".to_string());
         let expected = Arc::new(ArrowSchema::new_with_metadata(
@@ -3702,7 +3738,8 @@ mod tests {
             true,
         )
         .unwrap();
-        let packed = frame::pack_raw_series_chunk(&raw, RawLabelMode::Key, &chunk).unwrap();
+        let packed =
+            frame::pack_raw_series_chunk(&raw, FrameLabelMode::Key, Some(&decode), &chunk).unwrap();
         let inner = packed.into_iter().next().unwrap();
         let original_columns = inner.columns().to_vec();
         let batch = RecordBatch::from_df_record_batch(remote_schema.clone(), inner);
@@ -3722,7 +3759,8 @@ mod tests {
         for (original, returned) in original_columns.iter().zip(result[0].columns()) {
             assert!(Arc::ptr_eq(original, returned));
         }
-        let decoded = frame::unpack_raw_series_frame(&raw, RawLabelMode::Key, &result[0]);
+        let decoded =
+            frame::unpack_raw_series_frame(&raw, FrameLabelMode::Key, Some(&decode), &result[0]);
         let decoded = decoded.unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].primary_key.as_slice(), &[1, 2, 3]);
