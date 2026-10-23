@@ -20,6 +20,7 @@ pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
 pub(crate) mod parquet_page;
+pub(crate) mod range_result;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -59,6 +60,7 @@ use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::parquet_page::ParquetPageCache;
+use crate::cache::range_result::RangeResultCache;
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
     CompressObjectSnafu, DecompressObjectSnafu, InvalidMetadataSnafu, InvalidParquetSnafu,
@@ -143,6 +145,16 @@ impl RangeResultMemoryLimiter {
             #[cfg(test)]
             waited_acquires: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Tries to reserve staging memory without waiting for other collectors.
+    pub(crate) fn try_acquire_owned(
+        &self,
+        bytes: usize,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let permits = bytes.div_ceil(self.permit_bytes).max(1);
+        let permits = u32::try_from(permits).ok()?;
+        self.semaphore.clone().try_acquire_many_owned(permits).ok()
     }
 
     #[cfg(test)]
@@ -991,8 +1003,25 @@ impl CacheStrategy {
         }
     }
 
+    /// Returns the shared range-result cache for normal queries.
+    pub(crate) fn range_result_cache(&self) -> Option<&RangeResultCache> {
+        match self {
+            Self::EnableAll(manager) => manager.range_result_cache.as_ref(),
+            Self::Compaction(_) | Self::Disabled => None,
+        }
+    }
+
+    pub(crate) fn range_result_load_limiter(&self) -> Option<&Arc<RangeResultMemoryLimiter>> {
+        let Self::EnableAll(manager) = self else {
+            return None;
+        };
+        manager.range_result_cache.as_ref()?;
+        Some(&manager.range_result_load_memory_limiter)
+    }
+
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -1015,15 +1044,6 @@ impl CacheStrategy {
         match self {
             CacheStrategy::EnableAll(cache_manager) => {
                 Some(cache_manager.range_result_memory_limiter())
-            }
-            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
-        }
-    }
-
-    pub(crate) fn range_result_cache_size(&self) -> Option<usize> {
-        match self {
-            CacheStrategy::EnableAll(cache_manager) => {
-                Some(cache_manager.range_result_cache_size())
             }
             CacheStrategy::Compaction(_) | CacheStrategy::Disabled => None,
         }
@@ -1121,7 +1141,10 @@ pub struct CacheManager {
     selector_result_cache: Option<SelectorResultCache>,
     /// Cache for range scan outputs in flat format.
     range_result_cache: Option<RangeResultCache>,
+    /// Bounds optional full-result collection separately from concat scratch memory.
+    range_result_load_memory_limiter: Arc<RangeResultMemoryLimiter>,
     /// Configured capacity for range scan outputs in flat format.
+    #[cfg(test)]
     range_result_cache_size: u64,
     /// Shared memory limiter for async range-result cache tasks.
     range_result_memory_limiter: Arc<RangeResultMemoryLimiter>,
@@ -1502,21 +1525,18 @@ impl CacheManager {
         &self,
         key: &RangeScanCacheKey,
     ) -> Option<Arc<RangeScanCacheValue>> {
-        self.range_result_cache
-            .as_ref()
-            .and_then(|cache| update_hit_miss(cache.get(key), RANGE_RESULT_TYPE))
+        let cache = self.range_result_cache.as_ref()?;
+        update_hit_miss(cache.get(key), RANGE_RESULT_TYPE)
     }
 
     /// Puts range scan result into cache.
+    #[cfg(test)]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
         result: Arc<RangeScanCacheValue>,
     ) {
         if let Some(cache) = &self.range_result_cache {
-            CACHE_BYTES
-                .with_label_values(&[RANGE_RESULT_TYPE])
-                .add(range_result_cache_weight(&key, &result).into());
             cache.insert(key, result);
         }
     }
@@ -1530,6 +1550,7 @@ impl CacheManager {
         &self.range_result_memory_limiter
     }
 
+    #[cfg(test)]
     pub(crate) fn range_result_cache_size(&self) -> usize {
         self.range_result_cache_size as usize
     }
@@ -1785,21 +1806,8 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let range_result_cache = (self.range_result_cache_size != 0).then(|| {
-            Cache::builder()
-                .max_capacity(self.range_result_cache_size)
-                .weigher(range_result_cache_weight)
-                .eviction_listener(move |k, v, cause| {
-                    let size = range_result_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[RANGE_RESULT_TYPE])
-                        .sub(size.into());
-                    CACHE_EVICTION
-                        .with_label_values(&[RANGE_RESULT_TYPE, removal_cause_str(cause)])
-                        .inc();
-                })
-                .build()
-        });
+        let range_result_cache = (self.range_result_cache_size != 0)
+            .then(|| RangeResultCache::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
@@ -1811,6 +1819,11 @@ impl CacheManagerBuilder {
             puffin_metadata_cache: Some(Arc::new(puffin_metadata_cache)),
             selector_result_cache,
             range_result_cache,
+            range_result_load_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
+                self.range_result_cache_size as usize,
+                RANGE_RESULT_CONCAT_MEMORY_PERMIT.as_bytes() as usize,
+            )),
+            #[cfg(test)]
             range_result_cache_size: self.range_result_cache_size,
             range_result_memory_limiter: Arc::new(RangeResultMemoryLimiter::new(
                 self.range_result_cache_size as usize,
@@ -1840,10 +1853,6 @@ fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
 
 fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
     (mem::size_of_val(k) + v.estimated_size()) as u32
-}
-
-fn range_result_cache_weight(k: &RangeScanCacheKey, v: &Arc<RangeScanCacheValue>) -> u32 {
-    (k.estimated_size() + v.estimated_size()) as u32
 }
 
 /// Updates cache hit/miss metrics.
@@ -2036,8 +2045,6 @@ type SstDecodedMetaCache = common_cache::Cache<SstDecodedMetaKey, Arc<SstMetaLoa
 type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
 type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
-/// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Cache<RangeScanCacheKey, Arc<RangeScanCacheValue>>;
 
 #[cfg(test)]
 mod tests {

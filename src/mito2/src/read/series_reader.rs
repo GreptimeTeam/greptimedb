@@ -31,9 +31,7 @@ use crate::error::InvalidRequestSnafu;
 use crate::error::{JoinSnafu, Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::pruner::PartitionPruner;
-use crate::read::range_cache::{
-    build_series_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
-};
+use crate::read::range_cache::{build_series_range_cache_key, get_or_load_range_result};
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
     PartitionMetrics, SplitRecordBatchStream, compute_average_batch_size,
@@ -375,16 +373,35 @@ async fn build_series_partition_range(
     let range = filter.range;
     let cache_key = filter
         .enable_range_cache
-        .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range))
+        .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range, &partition_pruner))
         .flatten();
-    if let Some(key) = cache_key.as_ref() {
-        if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
-            part_metrics.inc_range_cache_hit();
-            return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
-        }
-        part_metrics.inc_range_cache_miss();
+    let strategy = stream_ctx.input.cache_strategy.clone();
+    let metrics = part_metrics.clone();
+    let build = || {
+        build_uncached_series_partition_range(
+            stream_ctx,
+            part_range,
+            filter,
+            codec,
+            partition_pruner,
+            part_metrics,
+        )
+    };
+    if let Some(key) = cache_key {
+        get_or_load_range_result(&strategy, key, &metrics, build).await
+    } else {
+        build().await
     }
+}
 
+async fn build_uncached_series_partition_range(
+    stream_ctx: Arc<StreamContext>,
+    part_range: PartitionRange,
+    filter: MetricSeriesFilter,
+    codec: SparsePrimaryKeyCodec,
+    partition_pruner: Arc<PartitionPruner>,
+    part_metrics: PartitionMetrics,
+) -> Result<(BoxedRecordBatchStream, usize)> {
     let range_meta = &stream_ctx.ranges[part_range.identifier];
     let split_batch_size = should_split_flat_batches_for_merge(&stream_ctx, range_meta);
     let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
@@ -480,15 +497,6 @@ async fn build_series_partition_range(
         compute_parallel_channel_size(estimated_batch_size),
     )
     .await?;
-    let stream = match cache_key {
-        Some(key) => cache_flat_range_stream(
-            stream,
-            stream_ctx.input.cache_strategy.clone(),
-            key,
-            part_metrics,
-        ),
-        None => stream,
-    };
     Ok((stream, estimated_batch_size))
 }
 
