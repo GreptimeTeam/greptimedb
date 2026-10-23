@@ -21,13 +21,15 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
 use futures::AsyncWriteExt;
 use object_store::ObjectStore;
+use smallvec::smallvec;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 use crate::access_layer::{
-    FilePathProvider, Metrics, OperationType, RegionFilePathFactory, SstInfoArray, SstWriteRequest,
-    TempFileCleaner, WriteCachePathProvider, WriteType, new_fs_cache_store,
+    EncodedSstIndexRequest, FilePathProvider, Metrics, OperationType, RegionFilePathFactory,
+    SstInfoArray, SstWriteRequest, TempFileCleaner, WriteCachePathProvider, WriteType,
+    new_fs_cache_store,
 };
 use crate::cache::file_cache::{FileCache, FileCacheRef, FileType, IndexKey, IndexValue};
 use crate::cache::manifest_cache::ManifestCache;
@@ -35,11 +37,11 @@ use crate::error::{self, Result};
 use crate::metrics::UPLOAD_BYTES_TOTAL;
 use crate::region::opener::RegionLoadCacheTask;
 use crate::sst::file::RegionFileId;
-use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
-use crate::sst::parquet::WriteOptions;
+use crate::sst::index::{IndexOutput, IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::parquet::writer::ParquetWriter;
+use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 /// Wraps the remote object store used by write cache uploads.
@@ -173,13 +175,16 @@ impl WriteCache {
     }
 
     /// Put encoded SST data to the cache and upload to the remote object store.
+    ///
+    /// Builds the SST's indexes from `data` when `index` is set and uploads them with the SST.
     pub(crate) async fn put_and_upload_sst(
         &self,
         data: &bytes::Bytes,
         region_file_id: RegionFileId,
         upload_request: SstUploadRequest,
         write_buffer_size: ReadableSize,
-    ) -> Result<Metrics> {
+        index: Option<EncodedSstIndexRequest>,
+    ) -> Result<(Metrics, IndexOutput)> {
         let region_id = region_file_id.region_id();
         let file_id = region_file_id.file_id();
         let mut metrics = Metrics::new(WriteType::Flush);
@@ -204,32 +209,76 @@ impl WriteCache {
 
         metrics.write_batch = cache_start.elapsed();
 
+        let mut sst_info = SstInfo {
+            file_id,
+            ..Default::default()
+        };
+        if let Some(index) = index {
+            let start = Instant::now();
+            let builder = index.indexer_builder(
+                self.build_puffin_manager(),
+                true,
+                self.intermediate_manager.clone(),
+            );
+            match build_index_from_parquet_bytes(&builder, region_file_id, data).await {
+                Ok(output) => sst_info.index_metadata = output,
+                Err(e) => {
+                    self.remove(parquet_key).await;
+                    return Err(e);
+                }
+            }
+            metrics.update_index = start.elapsed();
+        }
+
         // Upload to remote store
+        let remote_store = &upload_request.remote_store;
+        let mut upload_tracker = UploadTracker::new(region_id);
         let upload_start = Instant::now();
         let remote_path = upload_request
             .dest_path_provider
             .build_sst_file_path(region_file_id);
-
-        if let Err(e) = self
+        let mut result = self
             .upload(
                 parquet_key,
                 &remote_path,
-                &upload_request.remote_store,
+                remote_store,
                 UploadOptions {
                     // `put_and_upload_sst` is only used by the flush path.
                     op_type: OperationType::Flush,
                     write_buffer_size,
                 },
             )
-            .await
-        {
-            // Clean up cache on failure
-            self.remove(parquet_key).await;
-            return Err(e);
+            .await;
+        metrics.upload_parquet = upload_start.elapsed();
+
+        if result.is_ok() && sst_info.index_metadata.file_size > 0 {
+            upload_tracker.push_uploaded_file(remote_path);
+            let puffin_key = IndexKey::new(region_id, file_id, FileType::Puffin(0));
+            let puffin_path = upload_request
+                .dest_path_provider
+                .build_index_file_path(region_file_id);
+            let start = Instant::now();
+            result = self
+                .upload(
+                    puffin_key,
+                    &puffin_path,
+                    remote_store,
+                    UploadOptions {
+                        op_type: OperationType::Flush,
+                        write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
+                    },
+                )
+                .await;
+            metrics.upload_puffin = start.elapsed();
         }
 
-        metrics.upload_parquet = upload_start.elapsed();
-        Ok(metrics)
+        if let Err(e) = result {
+            upload_tracker
+                .clean(&smallvec![sst_info], &self.file_cache, remote_store)
+                .await;
+            return Err(e);
+        }
+        Ok((metrics, sst_info.index_metadata))
     }
 
     /// Returns the intermediate manager of the write cache.

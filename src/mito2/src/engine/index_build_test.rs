@@ -2297,8 +2297,9 @@ impl SstReadCounter {
 
 #[rstest::rstest]
 #[tokio::test]
-async fn test_sync_flush_indexes_encoded_bulk_parts(
-    #[values(false, true)] disable_inverted_on_flush: bool,
+async fn test_flush_indexes_encoded_bulk_parts(
+    #[values(false, true)] async_without_flush_indexes: bool,
+    #[values(false, true)] write_cache: bool,
 ) {
     let sst_bytes_read = Arc::new(AtomicUsize::new(0));
     let counter = sst_bytes_read.clone();
@@ -2312,19 +2313,27 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         }))
         .build()
         .unwrap();
-    let mut env = TestEnv::with_prefix("test_sync_flush_indexes_encoded_bulk_parts_")
+    let mut env = TestEnv::with_prefix("test_flush_indexes_encoded_bulk_parts_")
         .await
         .with_mock_layer(layer);
-    let listener = Arc::new(IndexBuildListener::default());
     let mut config = MitoConfig {
         default_flat_format: true,
         min_compaction_interval: Duration::from_secs(3600),
         ..Default::default()
     };
     assert_eq!(config.index.build_mode, IndexBuildMode::Sync);
-    if disable_inverted_on_flush {
+    if async_without_flush_indexes {
+        config.index.build_mode = IndexBuildMode::Async;
         config.inverted_index.create_on_flush = Mode::Disable;
     }
+    if write_cache {
+        config = config.enable_write_cache(
+            env.data_home().join("write_cache").display().to_string(),
+            ReadableSize::mb(32),
+            None,
+        );
+    }
+    let listener = Arc::new(IndexBuildListener::default());
     let engine = env
         .create_engine_with(config, None, Some(listener.clone()), None)
         .await;
@@ -2345,7 +2354,7 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         .insert_option("memtable.bulk.merge_threshold", "2")
         .insert_option("memtable.bulk.encode_row_threshold", "1")
         .build_with_index();
-    if !disable_inverted_on_flush {
+    if !async_without_flush_indexes {
         // `build_with_index` only adds inverted indexes on tags; also cover a skipping index.
         let field = request
             .column_metadatas
@@ -2385,9 +2394,10 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
     flush_region(&engine, region_id, None).await;
 
     let files = current_file_metas(&engine, region_id).await;
-    if disable_inverted_on_flush {
-        // Only inverted indexes are configured and they are disabled on flush, so the builds
-        // have nothing to create. They must stop before reading the rows of the SSTs.
+    assert!(!files.is_empty());
+    if async_without_flush_indexes {
+        // Async mode builds indexes after flush. Only inverted indexes are configured and they
+        // are disabled on flush, so the builds must stop before reading the rows of the SSTs.
         let total_size: usize = files.iter().map(|f| f.file_size as usize).sum();
         // Stopping the engine waits for scheduled index builds.
         engine.stop().await.unwrap();
@@ -2398,25 +2408,24 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         return;
     }
 
-    let version = engine.get_region(region_id).unwrap().version();
-    let indexed = async {
-        loop {
-            let files = current_file_metas(&engine, region_id).await;
-            if files.iter().all(|f| {
-                f.is_index_consistent_with_region(
-                    &version.metadata.column_metadatas,
-                    &version.options.index_options,
-                )
-            }) {
-                return files;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    };
-    let files = tokio::time::timeout(Duration::from_secs(10), indexed)
-        .await
-        .expect("flushed encoded parts have no index");
-    assert!(listener.begin_count() > 0);
+    // Sync mode builds the indexes from the encoded bytes in memory during flush.
+    assert_eq!(0, sst_bytes_read.load(Ordering::Relaxed));
+    assert_eq!(0, listener.begin_count());
     assert!(files.iter().all(|f| f.inverted_index_available()));
     assert!(files.iter().all(|f| f.bloom_filter_index_available()));
+    let access_layer = engine.get_region(region_id).unwrap().access_layer.clone();
+    for file in &files {
+        let index_path = location::index_file_path(
+            access_layer.table_dir(),
+            RegionIndexId::new(RegionFileId::new(region_id, file.file_id), 0),
+            access_layer.path_type(),
+        );
+        assert!(
+            access_layer
+                .object_store()
+                .exists(&index_path)
+                .await
+                .unwrap()
+        );
+    }
 }

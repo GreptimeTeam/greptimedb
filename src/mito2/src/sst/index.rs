@@ -35,12 +35,14 @@ use std::sync::Arc;
 
 use arrow_schema::extension::ExtensionType;
 use bloom_filter::creator::BloomFilterIndexer;
+use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::Json2ExtensionType;
 use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
@@ -57,8 +59,8 @@ use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, Error, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
-    RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, ComputeArrowSnafu, Error, JoinSnafu, ReadDataPartSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
@@ -82,7 +84,7 @@ use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
-use crate::sst::parquet::SstInfo;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, SstInfo};
 use crate::worker::WorkerListener;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -440,6 +442,53 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.puffin_manager = Some(self.puffin_manager.clone());
         indexer
     }
+}
+
+/// Builds the indexes of an SST from its encoded parquet bytes.
+///
+/// Encoded bulk parts are flushed without passing through [ParquetWriter], so their indexes
+/// are built from the bytes still in memory instead of reading the uploaded SST back.
+///
+/// [ParquetWriter]: crate::sst::parquet::writer::ParquetWriter
+pub(crate) async fn build_index_from_parquet_bytes(
+    builder: &IndexerBuilderImpl,
+    region_file_id: RegionFileId,
+    data: &Bytes,
+) -> Result<IndexOutput> {
+    let reader_builder =
+        ParquetRecordBatchReaderBuilder::try_new(data.clone()).context(ReadDataPartSnafu)?;
+    let row_group_size = reader_builder
+        .metadata()
+        .row_groups()
+        .first()
+        .map(|row_group| row_group.num_rows() as usize)
+        .filter(|size| *size > 0);
+    let mut indexer = builder.build(region_file_id, 0, row_group_size).await;
+    if indexer.is_empty() {
+        return Ok(IndexOutput::default());
+    }
+
+    let reader = match reader_builder
+        .with_batch_size(DEFAULT_READ_BATCH_SIZE)
+        .build()
+        .context(ReadDataPartSnafu)
+    {
+        Ok(reader) => reader,
+        Err(e) => {
+            indexer.abort().await;
+            return Err(e);
+        }
+    };
+    for batch in reader {
+        match batch.context(ComputeArrowSnafu) {
+            Ok(batch) => indexer.update_flat(&batch).await,
+            Err(e) => {
+                indexer.abort().await;
+                return Err(e);
+            }
+        }
+    }
+    Ok(indexer.finish().await)
 }
 
 impl IndexerBuilderImpl {
