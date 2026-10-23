@@ -4034,3 +4034,181 @@ async fn test_open_overwrite_compaction_window_with_format(flat_format: bool) {
         );
     }
 }
+
+async fn receive_region_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<RegionId>) -> RegionId {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timed out waiting for worker progress")
+        .expect("worker event channel closed")
+}
+
+/// Holds admitted automatic units before I/O while observing real worker progress.
+struct AutomaticBatchGate {
+    starts: tokio::sync::mpsc::UnboundedSender<RegionId>,
+    flushes: tokio::sync::mpsc::UnboundedSender<RegionId>,
+    picks: std::sync::Mutex<HashMap<RegionId, usize>>,
+    resume: Semaphore,
+}
+
+#[async_trait]
+impl EventListener for AutomaticBatchGate {
+    async fn on_compaction_pick_begin(&self, region_id: RegionId) {
+        *self.picks.lock().unwrap().entry(region_id).or_default() += 1;
+    }
+
+    async fn on_compaction_unit_merge_begin(&self, region_id: RegionId, _: u64) {
+        let _ = self.starts.send(region_id);
+        self.resume.acquire().await.unwrap().forget();
+    }
+
+    fn on_flush_success(&self, region_id: RegionId) {
+        let _ = self.flushes.send(region_id);
+    }
+}
+
+struct AutomaticBatchGuard(Arc<AutomaticBatchGate>);
+
+impl Drop for AutomaticBatchGuard {
+    fn drop(&mut self) {
+        self.0.resume.add_permits(100);
+    }
+}
+
+#[rstest::rstest]
+#[case::single_region(1)]
+#[case::different_workers(2)]
+#[tokio::test]
+async fn test_automatic_units_share_engine_capacity_and_wait_for_batch_exit(
+    #[case] region_count: u32,
+) {
+    let (starts, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let (flushes, mut flushed) = tokio::sync::mpsc::unbounded_channel();
+    let gate = Arc::new(AutomaticBatchGate {
+        starts,
+        flushes,
+        picks: Default::default(),
+        resume: Semaphore::new(0),
+    });
+    let guard = AutomaticBatchGuard(gate.clone());
+    let time = Arc::new(MockTimeProvider::new(1000));
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with_time(
+            MitoConfig {
+                num_workers: 2,
+                max_background_compactions: 4,
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            None,
+            Some(gate.clone()),
+            time.clone(),
+        )
+        .await;
+    let regions: Vec<_> = (0..region_count)
+        .map(|n| RegionId::new(60 + n, 1))
+        .collect();
+    let mut schemas = HashMap::new();
+    for &region_id in &regions {
+        env.get_schema_metadata_manager()
+            .register_region_table_info(
+                region_id.table_id(),
+                "automatic_batch",
+                "test_catalog",
+                "test_schema",
+                None,
+                env.get_kv_backend(),
+            )
+            .await;
+        let create = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.time_window", "1h")
+            .insert_option("compaction.twcs.trigger_file_num", "4")
+            .insert_option("compaction.twcs.inactive_window_trigger_file_num", "4")
+            .build();
+        let columns = crate::test_util::rows_schema(&create);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        for window in 0..4 {
+            for _ in 0..4 {
+                put_and_flush(
+                    &engine,
+                    region_id,
+                    &columns,
+                    window * 3600..window * 3600 + 2,
+                )
+                .await;
+                assert_eq!(region_id, receive_region_event(&mut flushed).await);
+            }
+        }
+        schemas.insert(region_id, columns);
+    }
+    time.set_now(3_601_000);
+    // The first region can occupy all four slots, rather than remaining at P=1.
+    let first = regions[0];
+    put_and_flush(&engine, first, &schemas[&first], 0..2).await;
+    for _ in 0..4 {
+        assert_eq!(first, receive_region_event(&mut started).await);
+    }
+    assert_eq!(first, receive_region_event(&mut flushed).await);
+    if region_count == 2 {
+        let second = regions[1];
+        put_and_flush(&engine, second, &schemas[&second], 0..2).await;
+        assert_eq!(second, receive_region_event(&mut flushed).await);
+    }
+    // New flushes add a fifth window, but must not repick while this batch is blocked.
+    for _ in 0..4 {
+        put_and_flush(&engine, first, &schemas[&first], 4 * 3600..4 * 3600 + 2).await;
+        assert_eq!(first, receive_region_event(&mut flushed).await);
+    }
+    assert_eq!(1, gate.picks.lock().unwrap()[&first]);
+    assert!(started.try_recv().is_err());
+    // One exit is insufficient to repick the first region. A different worker can
+    // use the returned slot; if it had its own pool it would already have started.
+    gate.resume.add_permits(1);
+    if region_count == 2 {
+        assert_eq!(regions[1], receive_region_event(&mut started).await);
+        assert!(started.try_recv().is_err());
+        assert_eq!(1, gate.picks.lock().unwrap()[&first]);
+    }
+    drop(guard);
+    let mut followup_starts = HashMap::new();
+    for _ in 0..(1 + (region_count - 1) * 3) {
+        *followup_starts
+            .entry(receive_region_event(&mut started).await)
+            .or_insert(0) += 1;
+    }
+    assert_eq!(Some(&1), followup_starts.get(&first));
+    if region_count == 2 {
+        assert_eq!(Some(&3), followup_starts.get(&regions[1]));
+    }
+    assert!(gate.picks.lock().unwrap()[&first] >= 2);
+    // Manual waiters join after the automatic cycle. Completion checks actual
+    // manifest publication and the queued fifth-window follow-up, not just starts.
+    for &region_id in &regions {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            engine.handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest::default()),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let region = engine.get_region(region_id).unwrap();
+        assert!(region.version().ssts.levels()[0].files.is_empty());
+        let stream = engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let rows = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            if region_id == first { 10 } else { 8 },
+            rows.iter().map(|b| b.num_rows()).sum::<usize>()
+        );
+    }
+    engine.stop().await.unwrap();
+}

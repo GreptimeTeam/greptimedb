@@ -20,7 +20,9 @@ use store_api::storage::RegionId;
 
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
-use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
+use crate::compaction::scheduler::{
+    CompactionCoordinator, CompactionCost, CompactionScheduler, CompactionTransition, ReadyUnit,
+};
 use crate::compaction::task::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
 use crate::error::{self, Error};
@@ -42,6 +44,8 @@ struct UnitExecution {
 /// A request's local units. All transitions run on the owning region worker.
 #[derive(Debug)]
 pub(crate) struct LocalCompaction {
+    coordinator: Arc<CompactionCoordinator>,
+    region_id: RegionId,
     /// All pending and submitted units, retained until task exit. Tasks own their input leases.
     /// Keyed by each unit's execution plan ID, allocated from the scheduler's `next_plan_id`;
     /// it equals `CompactionExecution::plan_id()` and the `plan_id` in unit notifications.
@@ -67,6 +71,7 @@ impl LocalCompaction {
                 _ => {}
             }
         }
+        self.coordinator.cancel_pending(self.region_id);
         result
     }
 
@@ -121,6 +126,8 @@ impl CompactionScheduler {
         reserved: CompactingFiles,
     ) -> CompactionPhase {
         let mut local = LocalCompaction {
+            coordinator: self.coordinator.clone(),
+            region_id: region.region_id,
             units: HashMap::new(),
             pending: VecDeque::new(),
             parallelism: region.max_parallelism.max(1),
@@ -149,6 +156,11 @@ impl CompactionScheduler {
                 request_sender: self.request_sender.clone(),
                 listener: self.listener.clone(),
                 estimated_memory_bytes: unit.estimated_memory_bytes(),
+                cost: Arc::new(CompactionCost::new(
+                    unit.inputs
+                        .iter()
+                        .fold(0u64, |sum, f| sum.saturating_add(f.size())),
+                )),
                 unit,
                 memory_manager: self.memory_manager.clone(),
                 memory_policy: self.memory_policy,
@@ -183,6 +195,8 @@ impl CompactionScheduler {
                 return;
             };
             let id = task.execution.plan_id();
+            let state = task.state.clone();
+            let cost = task.cost.clone();
             let sender = self.request_sender.clone();
             let completion = Box::pin(async move {
                 let _ = sender
@@ -200,7 +214,9 @@ impl CompactionScheduler {
                 drop(task);
                 INFLIGHT_COMPACTION_COUNT.dec();
             });
-            if let Err(err) = self.scheduler.schedule_with_completion(job, completion)
+            if let Err(err) = self
+                .coordinator
+                .schedule(region_id, ReadyUnit::new(state, cost, job, completion))
                 && let Some(local) = self.local_units_mut(region_id)
             {
                 local.finish(id, Err(Arc::new(err)));
@@ -243,15 +259,15 @@ impl CompactionScheduler {
         if !local.units.contains_key(&id) {
             return CompactionTransition::NoAction;
         }
-        local.finish(
-            id,
-            Err(Arc::new(
-                error::UnexpectedSnafu {
-                    reason: "Compaction unit exited without a terminal notification",
-                }
-                .build(),
-            )),
-        );
+        let missing_result = if local.units[&id].state.is_cancelled() {
+            error::CompactionCancelledSnafu.build()
+        } else {
+            error::UnexpectedSnafu {
+                reason: "Compaction unit exited without a terminal notification",
+            }
+            .build()
+        };
+        local.finish(id, Err(Arc::new(missing_result)));
         local.units.remove(&id);
         self.dispatch_local_units(region_id);
         self.finish_local_units(region_id, manifest, schemas).await
@@ -309,6 +325,11 @@ mod tests {
             })
             .collect();
         let mut local = LocalCompaction {
+            coordinator: Arc::new(CompactionCoordinator::new(
+                Arc::new(crate::test_util::scheduler_util::VecScheduler::default()),
+                2,
+            )),
+            region_id: RegionId::from_u64(1),
             units,
             pending: VecDeque::new(),
             parallelism: 2,
