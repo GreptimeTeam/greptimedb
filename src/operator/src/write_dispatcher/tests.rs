@@ -684,6 +684,7 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
             attribution: Default::default(),
             peer: Arc::new(Peer::new(1, "peer")),
             request: Arc::new(build_insert_request(&[1])),
+            owners: None,
         }))
     };
     for (name, attempts, retries, expected) in [
@@ -1091,6 +1092,152 @@ fn request_parts(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 
 #[tokio::test]
 async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
+    for (kind, tracked) in [
+        (WriteKind::Insert, false),
+        (WriteKind::Delete, false),
+        (WriteKind::BulkInsert, false),
+        (WriteKind::BulkInsert, true),
+    ] {
+        let old_server = RegionTestServer::start().await;
+        let new_server = RegionTestServer::start().await;
+        old_server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
+        let backend = test_util::prepare_mocked_backend().await;
+        test_util::create_partition_rule_manager(backend.clone()).await;
+        update_table_leader(&backend, &old_server.peer).await;
+        let (partition_manager, table_info_cache, registry, catalog_manager) =
+            create_routing_caches(backend.clone());
+        let table_info = table_info_cache.get(1).await.unwrap().unwrap();
+        let (_, old_versions) = partition_manager
+            .find_table_partition_rule(&table_info)
+            .await
+            .unwrap();
+        let manager = TableRouteManager::new(backend.clone());
+        let current = manager
+            .table_route_storage()
+            .get_with_raw_bytes(1)
+            .await
+            .unwrap()
+            .unwrap();
+        let old_routes = current.region_routes().unwrap();
+        let replaced = old_routes
+            .iter()
+            .find(|route| route.region.id.region_number() == 2)
+            .unwrap();
+        let mut routes = old_routes
+            .iter()
+            .filter(|route| route.region.id.region_number() != 2)
+            .cloned()
+            .collect::<Vec<_>>();
+        for (region, lower, upper) in [(4, 10, 30), (5, 30, 50)] {
+            let mut route = replaced.clone();
+            route.region.id = RegionId::new(1, region);
+            route.leader_peer = Some(new_server.peer.clone());
+            route.region.partition_expr = PartitionExpr::new(
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::GtEq,
+                    Operand::Value(datatypes::value::Value::Int32(lower)),
+                )),
+                RestrictedOp::And,
+                Operand::Expr(PartitionExpr::new(
+                    Operand::Column("a".to_string()),
+                    RestrictedOp::Lt,
+                    Operand::Value(datatypes::value::Value::Int32(upper)),
+                )),
+            )
+            .as_json_str()
+            .unwrap();
+            routes.push(route);
+        }
+        let invalidator = Arc::new(RecordingCacheInvalidator {
+            calls: Mutex::default(),
+            inner: Some(registry),
+            route_update: Mutex::new(Some((backend, current.update(routes).unwrap()))),
+            ..Default::default()
+        });
+        let clients = Arc::new(NodeClients::new(ChannelConfig::default()));
+        let dispatcher = WriteDispatcher::new(clients, partition_manager.clone()).with_retry(
+            build_retry_options(2),
+            catalog_manager,
+            invalidator.clone(),
+        );
+        if tracked {
+            new_server.fail_region(5, [RetryHint::NonRetryable]);
+            let progress = dispatcher
+                .dispatch_tracked(
+                    vec![
+                        TrackedWrite {
+                            request: build_partitioned_request(kind, 1, old_versions[&1], &[70]),
+                            owners: vec![0],
+                        },
+                        TrackedWrite {
+                            request: build_partitioned_request(
+                                kind,
+                                2,
+                                old_versions[&2],
+                                &[20, 40],
+                            ),
+                            owners: vec![0, 1],
+                        },
+                    ],
+                    2,
+                )
+                .await;
+            assert_eq!(
+                progress.iter().map(|p| p.affected_rows).collect::<Vec<_>>(),
+                [2, 0]
+            );
+            assert!(progress[0].error.is_none());
+            assert!(progress[1].error.is_some());
+        } else {
+            let response = dispatcher
+                .dispatch(vec![
+                    build_partitioned_request(kind, 1, old_versions[&1], &[70]),
+                    build_partitioned_request(kind, 2, old_versions[&2], &[20, 40]),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(response.affected_rows, 3, "{kind:?}");
+        }
+        assert_eq!(
+            old_server.attempt_counts(),
+            HashMap::from([
+                (RegionId::new(1, 1).as_u64(), 1),
+                (RegionId::new(1, 2).as_u64(), 1),
+            ]),
+            "{kind:?}"
+        );
+        let (_, versions) = partition_manager
+            .find_table_partition_rule(&table_info)
+            .await
+            .unwrap();
+        let mut writes = new_server
+            .service
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(request_parts)
+            .collect::<Vec<_>>();
+        writes.sort_by_key(|write| write.0);
+        assert_eq!(
+            writes,
+            vec![(4, versions[&4], vec![20]), (5, versions[&5], vec![40])],
+            "{kind:?}"
+        );
+        assert_eq!(
+            *invalidator.calls.lock().unwrap(),
+            vec![
+                vec![CacheIdent::TableId(1)],
+                vec![CacheIdent::TableName(TableName::new(
+                    "greptime", "public", "table_1"
+                ))],
+            ]
+        );
+    }
+}
+#[tokio::test]
+async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh_attributed() {
     for (kind, fail_repartitioned) in [
         (WriteKind::Insert, false),
         (WriteKind::Delete, false),
@@ -1978,4 +2125,46 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
             .is_err()
     );
     assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 1);
+}
+
+#[tokio::test]
+async fn test_exemplar_progress_retains_success_and_unknown_acknowledgements() {
+    for retries in [0, 1] {
+        let server = RegionTestServer::start().await;
+        server.service.rejections.lock().unwrap().insert(
+            RegionId::new(1, 2).as_u64(),
+            (0..=retries)
+                .map(|_| Status::unavailable("acknowledgement lost"))
+                .collect(),
+        );
+        let dispatcher = server.create_dispatcher(retries).await;
+        let progress = dispatcher
+            .dispatch_tracked(
+                vec![
+                    TrackedWrite {
+                        request: build_insert_request(&[1]),
+                        owners: vec![0],
+                    },
+                    TrackedWrite {
+                        request: build_insert_request(&[2]),
+                        owners: vec![0],
+                    },
+                    TrackedWrite {
+                        request: build_insert_request(&[1]),
+                        owners: vec![1],
+                    },
+                ],
+                2,
+            )
+            .await;
+        assert_eq!(progress[0].affected_rows, 1);
+        assert!(progress[0].error.is_some());
+        assert_eq!(progress[1].affected_rows, 1);
+        assert!(progress[1].error.is_none());
+        assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 2);
+        assert_eq!(
+            server.attempt_counts()[&RegionId::new(1, 2).as_u64()],
+            retries + 1
+        );
+    }
 }

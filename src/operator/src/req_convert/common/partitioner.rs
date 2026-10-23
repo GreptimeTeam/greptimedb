@@ -179,6 +179,146 @@ impl TablePartitioner {
             .collect()
     }
 
+    /// Keeps process-local row ownership aligned when a failed write is repartitioned.
+    pub(crate) fn rebuild_tracked_write_requests(
+        &self,
+        request: RegionRequest,
+        table_info: &TableInfo,
+        owners: Option<Vec<usize>>,
+    ) -> Result<Vec<(RegionRequest, Option<Vec<usize>>)>> {
+        let Some(owners) = owners else {
+            return Ok(self
+                .rebuild_write_requests(request, table_info)?
+                .into_iter()
+                .map(|request| (request, None))
+                .collect());
+        };
+        let RegionRequest { header, body } = request;
+        if let Some(Body::BulkInsert(bulk)) = body {
+            let region_id = RegionId::from_u64(bulk.region_id);
+            if self.is_partition_expr_unchanged(region_id, bulk.partition_expr_version) {
+                return Ok(vec![(
+                    RegionRequest {
+                        header,
+                        body: Some(Body::BulkInsert(bulk)),
+                    },
+                    Some(owners),
+                )]);
+            }
+            let bulk_insert_request::Body::ArrowIpc(ipc) =
+                bulk.body.context(error::UnexpectedSnafu {
+                    violated: "Cannot rebuild a bulk insert without Arrow IPC data",
+                })?;
+            let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                .and_then(|mut decoder| {
+                    decoder.try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                })
+                .map_err(BoxedError::new)
+                .context(error::ExternalSnafu)?;
+            let routing = self.restore_partition_tags(&batch, table_info)?;
+            let masks = self
+                .rule
+                .split_record_batch(routing.as_ref().unwrap_or(&batch))
+                .context(SplitInsertSnafu)?;
+            return self
+                .build_tracked_bulk_insert_requests(batch, masks, owners, bulk.skip_wal)
+                .map(|requests| {
+                    requests
+                        .into_iter()
+                        .map(|(request, owners)| {
+                            (
+                                RegionRequest {
+                                    header: header.clone(),
+                                    body: Some(Body::BulkInsert(request)),
+                                },
+                                Some(owners),
+                            )
+                        })
+                        .collect()
+                });
+        }
+        let owner = owners.first().copied().context(error::UnexpectedSnafu {
+            violated: "Missing row ownership",
+        })?;
+        ensure!(
+            owners.iter().all(|value| *value == owner),
+            error::UnexpectedSnafu {
+                violated: "Mixed row ownership requires Arrow batching"
+            }
+        );
+        self.rebuild_write_requests(RegionRequest { header, body }, table_info)?
+            .into_iter()
+            .map(|request| {
+                let count = match &request.body {
+                    Some(Body::Inserts(inserts)) => inserts
+                        .requests
+                        .iter()
+                        .filter_map(|r| r.rows.as_ref())
+                        .map(|r| r.rows.len())
+                        .sum(),
+                    _ => {
+                        return error::UnexpectedSnafu {
+                            violated: "Unsupported tracked write",
+                        }
+                        .fail();
+                    }
+                };
+                Ok((request, Some(vec![owner; count])))
+            })
+            .collect()
+    }
+
+    pub(crate) fn partition_tracked_bulk_insert_requests(
+        &self,
+        batch: RecordBatch,
+        owners: Vec<usize>,
+        skip_wal: bool,
+    ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
+        let masks = self
+            .rule
+            .split_record_batch(&batch)
+            .context(SplitInsertSnafu)?;
+        self.build_tracked_bulk_insert_requests(batch, masks, owners, skip_wal)
+    }
+
+    fn build_tracked_bulk_insert_requests(
+        &self,
+        batch: RecordBatch,
+        masks: HashMap<RegionNumber, RegionMask>,
+        owners: Vec<usize>,
+        skip_wal: bool,
+    ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
+        ensure!(
+            owners.len() == batch.num_rows(),
+            error::UnexpectedSnafu {
+                violated: "Write ownership does not match row count"
+            }
+        );
+        let mut selected = HashMap::new();
+        for (region, mask) in &masks {
+            selected.insert(
+                RegionId::new(self.table_id, *region).as_u64(),
+                owners
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, owner)| mask.array().value(index).then_some(*owner))
+                    .collect::<Vec<_>>(),
+            );
+        }
+        self.build_bulk_insert_requests(batch, masks, None, skip_wal)?
+            .into_iter()
+            .map(|request| {
+                let owners =
+                    selected
+                        .remove(&request.region_id)
+                        .context(error::UnexpectedSnafu {
+                            violated: "Missing partition ownership",
+                        })?;
+                Ok((request, owners))
+            })
+            .collect()
+    }
+
     /// Reads a table's partition rule and expression versions into one routing snapshot.
     pub async fn try_new(
         partition_manager: &PartitionRuleManager,

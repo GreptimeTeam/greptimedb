@@ -15,6 +15,8 @@
 mod attribution;
 mod options;
 pub use attribution::WriteAttribution;
+mod progress;
+pub use progress::TrackedWrite;
 #[cfg(test)]
 mod tests;
 
@@ -266,6 +268,7 @@ impl WriteDispatcher {
                         peer,
                         request: Arc::new(request),
                         attribution,
+                        owners: None,
                     },
                     histogram,
                 )
@@ -410,6 +413,7 @@ impl WriteDispatcher {
                             peer: Arc::clone(&peer),
                             attribution: direct_attribution(&request, progress.cloned()),
                             request: Arc::new(request),
+                            owners: None,
                         });
                         attempts.push(WriteAttempt::Failed { error, request });
                     }
@@ -426,6 +430,7 @@ impl WriteDispatcher {
                             peer: Arc::clone(&peer),
                             attribution: direct_attribution(&request, progress.cloned()),
                             request: Arc::new(request),
+                            owners: None,
                         });
                         WriteAttempt::Failed {
                             error: BatchRequestSnafu.into_error(Arc::clone(&error)),
@@ -465,6 +470,7 @@ pub(crate) struct RoutedWrite {
     peer: PeerRef,
     request: Arc<RegionRequest>,
     attribution: WriteAttribution,
+    owners: Option<Vec<usize>>,
 }
 
 impl WriteRetry {
@@ -645,13 +651,28 @@ impl WriteRetry {
                 partitioners.get(&table_id).context(UnexpectedSnafu {
                     err_msg: "Refreshed write has no partition snapshot",
                 })?;
-            let requests = partitioner
-                .rebuild_attributed_write(request, table_info, write.attribution)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            rebuilt_requests.extend(requests);
+            if let Some(owners) = write.owners {
+                let requests = partitioner
+                    .rebuild_tracked_write_requests(request, table_info, Some(owners))
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                rebuilt_requests.extend(requests.into_iter().map(|(request, owners)| {
+                    ((request, WriteAttribution::default()), owners)
+                }));
+            } else {
+                let requests = partitioner
+                    .rebuild_attributed_write(request, table_info, write.attribution)
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                rebuilt_requests.extend(requests.into_iter().map(|request| (request, None)));
+            }
         }
-        self.prepare(rebuilt_requests).await
+        let (requests, owners): (Vec<_>, Vec<_>) = rebuilt_requests.into_iter().unzip();
+        let mut writes = self.prepare(requests).await?;
+        for (write, owners) in writes.iter_mut().zip(owners) {
+            write.owners = owners;
+        }
+        Ok(writes)
     }
 
     async fn prepare(
@@ -674,6 +695,7 @@ impl WriteRetry {
                     peer: get_peer(&peers, region)?,
                     request: Arc::new(request),
                     attribution,
+                    owners: None,
                 })
             })
             .collect()

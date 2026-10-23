@@ -575,10 +575,31 @@ impl Inserter {
         };
         let mut affected_rows = 0;
         let mut meta = OutputMeta::new_with_cost(write_cost as _);
+        let mut first_error = None;
         for result in results {
-            let output = result?;
-            affected_rows += output.extract_rows_and_cost().0;
-            meta.write_completions.extend(output.meta.write_completions);
+            match result {
+                Ok(output) => {
+                    affected_rows += output.extract_rows_and_cost().0;
+                    meta.write_completions.extend(output.meta.write_completions);
+                }
+                Err(error) if ctx.confirmed_writes() => {
+                    meta.write_completions
+                        .push(common_query::WriteCompletion::with_progress(async move {
+                            common_query::WriteProgress::failed(common_error::ext::BoxedError::new(
+                                error,
+                            ))
+                        }));
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            for completion in meta.write_completions {
+                let _ = completion.wait().await;
+            }
+            return Err(error);
         }
         Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
     }
@@ -856,6 +877,42 @@ impl Inserter {
         )?;
 
         let dispatcher = self.write_dispatcher.clone();
+        if ctx.confirmed_writes() {
+            let writes = normal_requests
+                .requests
+                .into_iter()
+                .map(|request| {
+                    let rows = request.rows.as_ref().map_or(0, |rows| rows.rows.len());
+                    crate::write_dispatcher::TrackedWrite {
+                        request: request_factory.build_insert(RegionInsertRequests {
+                            requests: vec![request],
+                        }),
+                        owners: vec![0; rows],
+                    }
+                })
+                .collect();
+            let progress = dispatcher
+                .dispatch_tracked(writes, 1)
+                .await
+                .into_iter()
+                .fold(
+                    common_query::WriteProgress::default(),
+                    |mut result, part| {
+                        result.merge(part);
+                        result
+                    },
+                );
+            crate::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(progress.affected_rows as u64);
+            let mut meta = OutputMeta::new_with_cost(write_cost as _);
+            let rows = progress.affected_rows;
+            meta.write_completions
+                .push(common_query::WriteCompletion::with_progress(async move {
+                    progress
+                }));
+            return Ok(Output::new(OutputData::AffectedRows(rows), meta));
+        }
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
         // Dropping the caller stops retries without abandoning in-flight writes.

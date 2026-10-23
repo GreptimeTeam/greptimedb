@@ -99,6 +99,9 @@ pub struct QueryContext {
     /// Process-local storage acknowledgements; never accepted from a wire context.
     #[builder(setter(skip))]
     write_progress: Option<Arc<WriteProgress>>,
+    /// Preserve storage acknowledgements for protocol-level partial-write accounting.
+    #[builder(setter(skip))]
+    confirmed_writes: bool,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -301,6 +304,15 @@ impl QueryContext {
         self.write_progress = Some(progress);
     }
 
+    pub fn with_confirmed_writes(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.confirmed_writes = true;
+        ctx
+    }
+
+    pub fn confirmed_writes(&self) -> bool {
+        self.confirmed_writes
+    }
     /// Forks this context with an independent snapshot of mutable session data.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields
@@ -776,6 +788,7 @@ impl QueryContextBuilder {
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
             write_progress: None,
+            confirmed_writes: false,
             logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),

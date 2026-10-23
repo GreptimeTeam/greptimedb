@@ -33,9 +33,11 @@ use common_batcher::flush_limiter::FlushLimiter;
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use common_batcher::request_limiter::RequestLimiter;
 use common_batcher::worker_registry::WorkerRegistry;
+use common_error::ext::BoxedError;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::{Output, WriteCompletion, WriteProgress};
 use common_time::timestamp::TimeUnit;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -279,6 +281,23 @@ impl LogicalTablePendingRowsBatcher {
     where
         F: Future<Output = Result<T>> + Send,
     {
+        let (output, prepared) = self
+            .submit_output_with(requests, ctx, after_prepare)
+            .await?;
+        Ok((output.extract_rows_and_cost().0 as u64, prepared))
+    }
+
+    /// Retains completion even when the batching policy acknowledges queue admission.
+    pub async fn submit_output_with<T, F>(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        after_prepare: impl FnOnce(RowInsertRequests) -> F,
+    ) -> Result<(Output, T)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
+        let confirmed = ctx.confirmed_writes();
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
@@ -287,7 +306,7 @@ impl LogicalTablePendingRowsBatcher {
         };
         let prepared = after_prepare(requests).await?;
         if total_rows == 0 {
-            return Ok((0, prepared));
+            return Ok((Output::new_with_affected_rows(0), prepared));
         }
 
         // Flushes dispatch directly to datanodes, so admit once before enqueueing.
@@ -358,24 +377,30 @@ impl LogicalTablePendingRowsBatcher {
             }
         }
 
-        if self.pending_rows_batch_sync {
-            let result = {
-                let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-                    .with_label_values(&["submit_wait_flush_result"])
-                    .start_timer();
-                response_rx
-                    .await
-                    .map_err(|_| error::BatcherChannelClosedSnafu.build())?
-            };
-            result
-                .context(error::SubmitBatchSnafu)
-                .map(|()| (total_rows as u64, prepared))
+        let completion = async move {
+            let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_wait_flush_result"])
+                .start_timer();
+            response_rx.await.unwrap_or_else(|_| {
+                WriteProgress::failed(BoxedError::new(error::BatcherChannelClosedSnafu.build()))
+            })
+        };
+        let mut output = Output::new_with_affected_rows(total_rows);
+        if self.pending_rows_batch_sync && !confirmed {
+            completion
+                .await
+                .into_result()
+                .context(error::ExecuteGrpcQuerySnafu)?;
         } else {
             if let Some(progress) = progress {
                 progress.mark_accepted();
             }
-            Ok((total_rows as u64, prepared))
+            output
+                .meta
+                .write_completions
+                .push(WriteCompletion::with_progress(completion));
         }
+        Ok((output, prepared))
     }
 }
 
