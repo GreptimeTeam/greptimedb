@@ -61,7 +61,8 @@ pub(crate) struct MutableInner {
     timezone: Timezone,
     query_timeout: Option<Duration>,
     read_preference: ReadPreference,
-    /// Last procedure ID successfully returned by a statement in this session.
+    /// Latest procedure ID recorded during statement execution, before
+    /// `post_execute` hooks and protocol transmission.
     last_procedure_id: Option<String>,
     /// Request-level WAL policy for ordinary inserts.
     skip_wal: bool,

@@ -35,8 +35,10 @@ struct ProcedureStateJson {
     error: Option<String>,
 }
 
-/// Queries procedure state by its ID, or the last ID returned in the session.
-/// The session ID is read at execution time and is not changed by state lookups.
+/// Queries procedure state using an explicit procedure ID, or the latest
+/// procedure ID recorded in the Session.
+/// The zero-argument form reads the procedure ID from the Session at execution
+/// time. State lookups do not update the recorded procedure ID.
 #[admin_fn(
     name = ProcedureStateFunction,
     display_name = procedure_state,
@@ -104,6 +106,7 @@ fn signature() -> Signature {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field};
@@ -113,6 +116,7 @@ mod tests {
     use super::*;
     use crate::function::FunctionContext;
     use crate::function_factory::ScalarFunctionFactory;
+    use crate::state::FunctionState;
 
     #[test]
     fn test_procedure_state_misc() {
@@ -155,6 +159,39 @@ mod tests {
             let result = procedure_state(handler, ctx, &params).await;
             assert_eq!(result.is_ok(), succeeds, "{params:?}: {result:?}");
             assert_eq!(ctx.last_procedure_id().as_deref(), Some("session-id"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_procedure_state_zero_arg_rows() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let context = FunctionContext {
+            state: Arc::new(FunctionState::mock_with_procedure_state_counter(
+                calls.clone(),
+            )),
+            ..Default::default()
+        };
+        context
+            .query_ctx
+            .set_last_procedure_id("session-id".to_string());
+        let factory: ScalarFunctionFactory = ProcedureStateFunction::factory().into();
+        let function = factory.provide(context);
+        let f = function.as_async().unwrap();
+
+        for number_rows in [0, 1, 2] {
+            calls.store(0, Ordering::Relaxed);
+            let args = datafusion_expr::ScalarFunctionArgs {
+                args: vec![],
+                arg_fields: vec![],
+                return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+                number_rows,
+                config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+            };
+            let ColumnarValue::Array(result) = f.invoke_async_with_args(args).await.unwrap() else {
+                panic!("expected array output");
+            };
+            assert_eq!(result.len(), number_rows);
+            assert_eq!(calls.load(Ordering::Relaxed), number_rows);
         }
     }
 

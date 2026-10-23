@@ -34,7 +34,16 @@ impl FunctionState {
     /// Create a mock [`FunctionState`] for test.
     #[cfg(any(test, feature = "testing"))]
     pub fn mock() -> Self {
+        Self::mock_with_procedure_state_counter(Default::default())
+    }
+
+    /// Creates a mock state that counts procedure state queries.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn mock_with_procedure_state_counter(
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         use api::v1::meta::{ProcedureStatus, ReconcileRequest};
         use async_trait::async_trait;
@@ -55,7 +64,9 @@ impl FunctionState {
         use table::table_name::TableName;
 
         use crate::handlers::{FlowServiceHandler, ProcedureServiceHandler, TableMutationHandler};
-        struct MockProcedureServiceHandler;
+        struct MockProcedureServiceHandler {
+            calls: Arc<AtomicUsize>,
+        }
         struct MockTableMutationHandler;
         struct MockFlowServiceHandler;
         const ROWS: usize = 42;
@@ -83,6 +94,7 @@ impl FunctionState {
             }
 
             async fn query_procedure_state(&self, _pid: &str) -> Result<ProcedureStateResponse> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
                 Ok(ProcedureStateResponse {
                     status: ProcedureStatus::Done.into(),
                     error: "OK".to_string(),
@@ -219,7 +231,7 @@ impl FunctionState {
         Self {
             plugins: Plugins::default(),
             table_mutation_handler: Some(Arc::new(MockTableMutationHandler)),
-            procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler)),
+            procedure_service_handler: Some(Arc::new(MockProcedureServiceHandler { calls })),
             flow_service_handler: Some(Arc::new(MockFlowServiceHandler)),
         }
     }

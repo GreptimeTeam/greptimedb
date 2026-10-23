@@ -30,6 +30,7 @@ use servers::error::{CollectRecordbatchSnafu, Result as ServerResult};
 use servers::query_handler::sql::SqlQueryHandler;
 use session::Session;
 use session::context::Channel;
+use sqlx::{Connection, Executor, Row, Statement};
 use tests_integration::cluster::GreptimeDbClusterBuilder;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
 use tests_integration::test_util::{execute_sql, execute_sql_and_expect};
@@ -284,6 +285,129 @@ async fn test_truncate_wait_and_timeout(distributed: bool) {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[rstest::rstest]
+#[case::mysql("MYSQL_SERVER", "mysql")]
+#[case::postgres("POSTGRES_SERVER", "postgres")]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_procedure_state_prepared(#[case] server_name: &str, #[case] protocol: &str) {
+    let instance = GreptimeDbStandaloneBuilder::new("procedure_state_prepared")
+        .build()
+        .await;
+    let mut opts = instance.opts.clone();
+    opts.http.addr = "127.0.0.1:0".into();
+    opts.grpc.bind_addr = "127.0.0.1:0".into();
+    opts.mysql.addr = "127.0.0.1:0".into();
+    opts.postgres.addr = "127.0.0.1:0".into();
+    let mut servers =
+        frontend::server::Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+    servers.start_all().await.unwrap();
+    sqlx::any::install_default_drivers();
+    let mut connection = sqlx::AnyConnection::connect(&format!(
+        "{protocol}://{}/public",
+        servers.addr(server_name).unwrap()
+    ))
+    .await
+    .unwrap();
+    for table in ["prepared_async", "prepared_sync"] {
+        connection
+            .execute(format!("CREATE TABLE {table} (ts TIMESTAMP TIME INDEX)").as_str())
+            .await
+            .unwrap();
+    }
+
+    // Prepare once, before any ID exists, and reuse the same statement below.
+    let statement = connection
+        .prepare("SELECT procedure_state() AS state")
+        .await
+        .unwrap()
+        .to_owned();
+    let manager = &instance.procedure_manager;
+    let id: String = connection
+        .fetch_one("TRUNCATE TABLE prepared_async WITH (wait=false)")
+        .await
+        .unwrap()
+        .get(0);
+    let mut completed = manager
+        .procedure_watcher(ProcedureId::parse_str(&id).unwrap())
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), watcher::wait(&mut completed))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared_state(&mut connection, &statement).await, "Done");
+
+    let table_id = instance
+        .fe_instance()
+        .catalog_manager()
+        .table("greptime", "public", "prepared_async", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info()
+        .table_id();
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut blocker = manager
+        .submit(ProcedureWithId::with_random_id(Box::new(
+            HoldTruncateTableLock {
+                table_id,
+                started: started.clone(),
+                release: release.clone(),
+            },
+        )))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), started.notified())
+        .await
+        .unwrap();
+    let new_id: String = connection
+        .fetch_one("TRUNCATE TABLE prepared_async WITH (wait=false)")
+        .await
+        .unwrap()
+        .get(0);
+    assert_ne!(id, new_id);
+    let mut pending = manager
+        .procedure_watcher(ProcedureId::parse_str(&new_id).unwrap())
+        .unwrap();
+    // A is Done and B is Running, so retaining A cannot pass this assertion.
+    assert_eq!(prepared_state(&mut connection, &statement).await, "Running");
+    connection
+        .execute("TRUNCATE TABLE prepared_sync WITH (wait=true)")
+        .await
+        .unwrap();
+    assert_eq!(prepared_state(&mut connection, &statement).await, "Running");
+
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        watcher::wait(&mut blocker).await.unwrap();
+        watcher::wait(&mut pending).await.unwrap();
+    })
+    .await
+    .unwrap();
+    // The ID stays B; only its state changes between executions.
+    assert_eq!(prepared_state(&mut connection, &statement).await, "Done");
+    connection.close().await.unwrap();
+    servers.shutdown_all().await.unwrap();
+}
+
+async fn prepared_state(
+    connection: &mut sqlx::AnyConnection,
+    statement: &sqlx::any::AnyStatement<'_>,
+) -> String {
+    let state: String = statement
+        .query()
+        .fetch_one(connection)
+        .await
+        .unwrap()
+        .get(0);
+    serde_json::from_str::<serde_json::Value>(&state).unwrap()["status"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 async fn run_sql(
