@@ -73,7 +73,7 @@ use super::{
     occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
-use crate::native::execute::{NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
     NativeExpr, NativeNode, NativeTree, NativeType,
@@ -1000,14 +1000,17 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
     );
     let samples = series_samples(1.0);
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            METRIC,
-            metric(&[(HOST, "web-1")], Some(METRIC)),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                METRIC,
+                metric(&[(HOST, "web-1")], Some(METRIC)),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the first series is a legal raw chunk");
     assert!(
         execution
@@ -1017,14 +1020,17 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
         "the first series is answered"
     );
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            "http_errors_total",
-            metric(&[(HOST, "web-1")], Some("http_errors_total")),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                "http_errors_total",
+                metric(&[(HOST, "web-1")], Some("http_errors_total")),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the second series is a legal raw chunk");
     let error = execution
         .next_chunk()
