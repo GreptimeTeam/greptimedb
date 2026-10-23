@@ -38,7 +38,7 @@ use crate::region_server::RegionServer;
 /// These are recognized by reserved table names and mapped to providers.
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
-enum InternalTableKind {
+pub(crate) enum InternalTableKind {
     InspectSstManifest,
     InspectSstStorage,
     InspectSstIndexMeta,
