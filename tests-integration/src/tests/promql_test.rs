@@ -1810,7 +1810,12 @@ async fn native_tql_output(instance: &Arc<Instance>, sql: &str, enabled: bool) -
 }
 
 async fn native_output_text(output: Output) -> String {
-    output.data.pretty_print().await
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("query returns record batches"),
+    };
+    batches.pretty_print().unwrap()
 }
 
 async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
@@ -1834,14 +1839,19 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
             )
             .unwrap();
             let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
-            let values = batch
+            let value_columns = batch
                 .columns()
                 .iter()
-                .find(|column| column.data_type() == &DataType::Float64)
-                .expect("native/legacy result has one Float64 value column")
+                .filter(|column| column.data_type() == &DataType::Float64)
+                .collect::<Vec<_>>();
+            assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
+            let values = value_columns[0]
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
+            assert_eq!(timestamps.null_count(), 0);
+            assert_eq!(hosts.null_count(), 0);
+            assert_eq!(values.null_count(), 0);
             (0..batch.num_rows())
                 .map(|row| {
                     (
@@ -1860,64 +1870,31 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
 fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     use datafusion::physical_plan::metrics::MetricValue;
 
-    let mut stack = vec![plan.clone()];
-    let mut fused_nodes = 0;
-    let mut scan_partition_counts = Vec::new();
-    let mut values_by_partition = [0_u64; 4];
-    while let Some(node) = stack.pop() {
-        if node.name().contains("FusedSeriesExec") {
-            fused_nodes += 1;
-            scan_partition_counts.push(
-                node.children()
-                    .first()
-                    .map(|child| child.output_partitioning().partition_count())
-                    .unwrap_or(0),
-            );
-            assert_eq!(
-                node.output_partitioning().partition_count(),
-                4,
-                "fused output must retain four partitions"
-            );
-        }
-        if let Some(metrics) = node.metrics() {
-            for metric in metrics.iter() {
-                if metric.value().name().contains("native.root.output_values") {
-                    if let MetricValue::Count { count, .. } = metric.value() {
-                        if let Some(partition) = metric.partition()
-                            && let Some(value) = values_by_partition.get_mut(partition)
-                        {
-                            *value += count.value() as u64;
-                        }
-                    }
-                }
-            }
-        }
-        stack.extend(node.children().into_iter().cloned());
-    }
-    assert_eq!(fused_nodes, 1, "expected one fused execution node");
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.output_partitioning().partition_count(), 4);
     assert_eq!(
-        scan_partition_counts,
-        [4],
+        plan.children()[0].output_partitioning().partition_count(),
+        4,
         "fused scan must have four partitions"
     );
+    let mut values_by_partition = [0_u64; 4];
+    for metric in plan.metrics().expect("fused plan metrics").iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+            && let Some(partition) = metric.partition()
+            && let Some(value) = values_by_partition.get_mut(partition)
+        {
+            *value += count.value() as u64;
+        }
+    }
     assert!(
         values_by_partition.iter().all(|value| *value > 0),
         "every native execution partition must produce values: {values_by_partition:?}"
     );
 }
 
-fn execution_plan_names(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut stack = vec![plan.clone()];
-    while let Some(node) = stack.pop() {
-        names.push(node.name().to_string());
-        stack.extend(node.children().into_iter().cloned());
-    }
-    names
-}
-
 async fn native_test_instance(
-    name: &str,
+    builder: GreptimeDbStandaloneBuilder,
 ) -> (
     crate::standalone::GreptimeDbStandalone,
     Arc<NativePlanObserver>,
@@ -1930,7 +1907,7 @@ async fn native_test_instance(
         experimental_native_promql: true,
         ..Default::default()
     };
-    let standalone = GreptimeDbStandaloneBuilder::new(name)
+    let standalone = builder
         .with_plugin(plugins)
         .with_query_options(options)
         .build()
@@ -1941,7 +1918,11 @@ async fn native_test_instance(
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_executes_fused_node_and_matches_legacy() {
     common_telemetry::init_default_ut_logging();
-    let (standalone, observer) = native_test_instance("native_promql_fused_e2e").await;
+    let mut mito_config = mito2::config::MitoConfig::default();
+    mito_config.experimental_series_scan_v2 = true;
+    let builder =
+        GreptimeDbStandaloneBuilder::new("native_promql_fused_e2e").with_mito_config(mito_config);
+    let (standalone, observer) = native_test_instance(builder).await;
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
@@ -1985,7 +1966,10 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_explain_and_analyze_execute_fused_plan() {
     common_telemetry::init_default_ut_logging();
-    let (standalone, _observer) = native_test_instance("native_promql_explain_analyze_e2e").await;
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_explain_analyze_e2e",
+    ))
+    .await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, "CREATE TABLE native_explain (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_explain VALUES (0, 'a', 2)", QueryContext::arc()).await;
     for (statement, enabled) in [
@@ -1995,24 +1979,33 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
         ("TQL ANALYZE VERBOSE (0, 0, '1s') native_explain", true),
         ("TQL EXPLAIN (0, 0, '1s') native_explain", false),
     ] {
+        observer.clear();
         let output = native_tql_output(&instance, statement, enabled).await;
         let text = native_output_text(output).await;
-        if enabled {
-            assert!(
-                text.contains("FusedSeriesExec"),
-                "expected native physical tree for {statement}: {text}"
-            );
-        } else {
-            assert!(
-                !text.contains("FusedSeriesExec"),
-                "flag-off EXPLAIN unexpectedly has native plan: {text}"
-            );
-        }
         if statement.contains("ANALYZE") && enabled {
-            assert!(
-                text.contains("output_values"),
-                "ANALYZE must report executed native metrics: {text}"
-            );
+            assert!(text.contains("FusedSeriesExec"));
+            assert!(text.contains("output_values"));
+            let plan = observer.take();
+            let output_values = plan
+                .metrics()
+                .expect("fused plan metrics")
+                .iter()
+                .filter_map(|metric| match metric.value() {
+                    datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                        if name.as_ref() == "native.root.output_values" =>
+                    {
+                        Some(count.value())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>();
+            assert_eq!(output_values, 1, "ANALYZE executes the fused series");
+        } else if statement.contains("EXPLAIN") && enabled {
+            assert!(text.contains("FusedSeries: native_explain"));
+            assert!(text.contains("MergeScanExec"));
+            assert!(!text.contains("FusedSeriesExec"));
+        } else if !enabled {
+            assert!(!text.contains("FusedSeries:"));
         }
     }
 }
@@ -2020,7 +2013,10 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_view_fallback_preserves_native_hint() {
     common_telemetry::init_default_ut_logging();
-    let (standalone, observer) = native_test_instance("native_promql_view_fallback_e2e").await;
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_view_fallback_e2e",
+    ))
+    .await;
     let instance = standalone.fe_instance().clone();
     execute_all(&instance, "CREATE TABLE native_view_source (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_view_source VALUES (0, 'a', 2)", QueryContext::arc()).await;
     let ctx = native_query_context(true, 4);
@@ -2061,7 +2057,10 @@ async fn native_promql_view_fallback_preserves_native_hint() {
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_metric_logical_tables_are_isolated() {
     common_telemetry::init_default_ut_logging();
-    let (standalone, observer) = native_test_instance("native_promql_metric_isolation_e2e").await;
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_isolation_e2e",
+    ))
+    .await;
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
@@ -2086,9 +2085,9 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         QueryContext::arc(),
     )
     .await;
-    for (table, host, value, foreign_host) in [
-        ("native_metric_a", "only_a", 1.0, "only_b"),
-        ("native_metric_b", "only_b", 2.0, "only_a"),
+    for (table, host, value) in [
+        ("native_metric_a", "only_a", 1.0),
+        ("native_metric_b", "only_b", 2.0),
     ] {
         let sql = format!("TQL EVAL (1, 1, '1s') rate({table}[2s])");
         observer.clear();
@@ -2098,10 +2097,5 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
         assert_eq!(native_rows, legacy_rows);
-        assert!(
-            native_rows
-                .iter()
-                .all(|(_, row_host, _)| row_host != foreign_host)
-        );
     }
 }
