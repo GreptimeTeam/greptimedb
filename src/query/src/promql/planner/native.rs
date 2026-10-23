@@ -35,11 +35,11 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
-use datafusion_expr::Expr;
+use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
-use promql::native::plan::reads_across_series;
+use promql::extension_plan::{FusedSeries, FusedSeriesBinding, VectorSelect};
+use promql::native::plan::{BoundVectorOp, NativeExpr, NativeNode, reads_across_series};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
@@ -92,6 +92,9 @@ const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::KeyThenTime;
 impl PromPlanner {
     /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
     ///
+    /// A statement whose root is a ranking over a tree that reads one series at a time is planned as
+    /// a [`VectorSelect`] over such a prefix instead; see the whole-vector guard below.
+    ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
     /// that computes something the reader did not write. Everything else about the node comes from
@@ -104,7 +107,8 @@ impl PromPlanner {
     /// happens are a shape the compiler refuses (`DataFusionError::NotImplemented`, which names
     /// what it found) and a query this route cannot bind faithfully — more than one selector, a
     /// label matcher the bare scan below the node would not apply, an `__field__` matcher that
-    /// narrows the field set, a missing table, a native histogram field, or an unusable grid.
+    /// narrows the field set, a missing table, a native histogram field, an unusable grid, or a
+    /// whole-vector root that is not a ranking over a per-series prefix of one `Float64` field.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -303,7 +307,26 @@ impl PromPlanner {
         // one executor per scan partition. Declining here is the only place that still works: once
         // the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
         // declining to push it down would leave a node the physical layer must build anyway.
-        if reads_across_series(tree.root()) {
+        //
+        // The one shape whose whole-vector part is only the outermost node — a ranking over a
+        // tree that reads one series at a time — is still offered: each partition evaluates that
+        // prefix on its own series, and the ranking over the gathered series needs the whole
+        // vector. It is admitted only when the resolved input supplies exactly one `Float64`
+        // field, because what a partition hands up names one value per grid position. Everything
+        // else is declined here, before any node of this route exists, so the fallback is the plan
+        // the existing planner would have built without any part of this one.
+        //
+        // The frames are numbered by the producer's local partition index, and every region starts
+        // that numbering at zero, so a ranked statement is admitted only for a table whose DDL
+        // leaves it one region: no partition expression. A partitioned table is declined even when
+        // it happens to hold one region today, because the region list is not part of logical
+        // planning; the per-series route above is unaffected.
+        let ranked = reads_across_series(tree.root());
+        if ranked
+            && (!ranks_a_per_series_prefix(tree.root())
+                || !single_float_field(input.schema(), &fields)
+                || !table_meta.partition_key_indices.is_empty())
+        {
             return Ok(None);
         }
 
@@ -318,18 +341,35 @@ impl PromPlanner {
             tags: tags.clone(),
         };
         let output_schema = fused_output_schema(&fields, &tags, &time_index)?;
-        let node = FusedSeries::try_new(
-            Arc::from(prom_expr.to_string()),
-            tree,
-            binding,
-            input,
-            output_schema,
-        )
-        .context(DataFusionPlanningSnafu)?;
+        let node: Arc<dyn UserDefinedLogicalNode> = if ranked {
+            // A ranking over a per-series prefix: the prefix leaves each partition as evaluated
+            // frames, and the node above them ranks across the gathered series. A shape the node
+            // refuses is this route declining it, exactly as the compiler's `NotImplemented` is.
+            match VectorSelect::try_new(
+                Arc::from(prom_expr.to_string()),
+                tree,
+                binding,
+                input,
+                output_schema,
+            ) {
+                Ok(node) => Arc::new(node),
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            }
+        } else {
+            Arc::new(
+                FusedSeries::try_new(
+                    Arc::from(prom_expr.to_string()),
+                    tree,
+                    binding,
+                    input,
+                    output_schema,
+                )
+                .context(DataFusionPlanningSnafu)?,
+            )
+        };
 
-        Ok(Some(LogicalPlan::Extension(Extension {
-            node: Arc::new(node),
-        })))
+        Ok(Some(LogicalPlan::Extension(Extension { node })))
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -397,9 +437,9 @@ fn fused_output_schema(
 
 /// The one selector `expr` folds, if it names exactly one.
 ///
-/// The walk follows the grammar the native compiler accepts — a call, a range selector, a selector
-/// and parentheses — and stops at every other shape, because a shape the compiler cannot compile
-/// needs no selector resolved. Two distinct selectors are not one input, and a tree built over the
+/// The walk follows the grammar the native compiler accepts — a call, an aggregate, a range
+/// selector, a selector and parentheses — and stops at every other shape, because a shape the
+/// compiler cannot compile needs no selector resolved. Two distinct selectors are not one input, and a tree built over the
 /// wrong one of them would evaluate a window the query did not write.
 fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
     match expr {
@@ -410,8 +450,43 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
             .args
             .iter()
             .find_map(|arg| selector_range_millis(arg)),
+        // A ranking's range is the range of the vector it ranks: `topk(2, rate(x[5m]))` reads the
+        // same five minutes `rate(x[5m])` does, and the scan has to cover it. The parameter is a
+        // constant in every shape that reaches here, and one that carried a selector is not one
+        // input to begin with.
+        PromExpr::Aggregate(aggregate) => selector_range_millis(&aggregate.expr),
         _ => None,
     }
+}
+
+/// Whether `node` is one ranking over a tree that reads one series at a time.
+///
+/// `topk` and `bottomk` are the whole-vector operations that answer with their input's own series
+/// and values, so they are the only ones that can sit above a per-series prefix. `limitk` and
+/// `limit_ratio` pick whole series by an input order or a label hash, a `sort` answers with an
+/// order only an instant result shows, `absent` reads no input at all and `count_values` writes a
+/// label — those remain whole-vector evaluations the existing planner performs.
+fn ranks_a_per_series_prefix(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Vector {
+            input,
+            op: BoundVectorOp::TopK { .. },
+        } => !reads_across_series(input),
+        _ => false,
+    }
+}
+
+/// Whether the resolved input supplies exactly one field and that field is `Float64`.
+///
+/// Counting is not enough: the consumer above the prefix carries one float value per grid
+/// position, so a second field has nowhere to go, and a field of another type is a value the
+/// frame cannot carry. The type is read off the resolved input the scan was built from, by the
+/// field names the selector context resolved, rather than assumed from the logical column.
+fn single_float_field(schema: &DFSchemaRef, fields: &[String]) -> bool {
+    let [only] = fields else {
+        return false;
+    };
+    PromPlanner::field_column_type(schema, only) == Some(&ArrowDataType::Float64)
 }
 
 /// Whether `engine` can serve raw series frames to the fused-series node.
@@ -474,6 +549,15 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
             for arg in &call.args.args {
                 collect_selectors(arg, out);
             }
+        }
+        // An aggregate names its vector in its second argument, and the parameter a ranking takes
+        // is an expression too: `topk(scalar(x), y)` reads two inputs, so it is counted here
+        // rather than mistaken for one.
+        PromExpr::Aggregate(aggregate) => {
+            if let Some(param) = &aggregate.param {
+                collect_selectors(param, out);
+            }
+            collect_selectors(&aggregate.expr, out);
         }
         _ => {}
     }

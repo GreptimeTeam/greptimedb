@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -23,14 +24,24 @@ use common_base::Plugins;
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::sorts::sort::SortExec;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+    SendableRecordBatchStream,
+};
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
-use datatypes::arrow::compute::cast;
+use datatypes::arrow::compute::{SortOptions, cast};
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
+use futures::{StreamExt, TryStreamExt};
 use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
@@ -39,6 +50,7 @@ use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
+use table::table::scan::SeriesScanExec;
 
 use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
@@ -1760,37 +1772,240 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
 }
 
 #[derive(Default)]
-struct NativePlanObserver(Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>);
+struct NativePlanObserver {
+    fused: Mutex<Option<Arc<dyn ExecutionPlan>>>,
+    ranked: Mutex<Option<Arc<dyn ExecutionPlan>>>,
+    gate_fused: bool,
+    gate: Mutex<Option<Arc<PartitionGate>>>,
+}
 
 impl NativePlanObserver {
-    fn clear(&self) {
-        *self.0.lock().unwrap() = None;
+    /// An observer that also holds every fused execution partition behind one test barrier.
+    fn with_partition_gate() -> Arc<Self> {
+        Arc::new(Self {
+            gate_fused: true,
+            ..Self::default()
+        })
     }
 
-    fn take(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
-        self.0
+    fn clear(&self) {
+        *self.fused.lock().unwrap() = None;
+        *self.ranked.lock().unwrap() = None;
+        *self.gate.lock().unwrap() = None;
+    }
+
+    fn take(&self) -> Arc<dyn ExecutionPlan> {
+        self.fused
             .lock()
             .unwrap()
             .take()
             .expect("native fused plan was captured")
+    }
+
+    fn take_topk(&self) -> Arc<dyn ExecutionPlan> {
+        self.ranked
+            .lock()
+            .unwrap()
+            .take()
+            .expect("native ranking plan was captured")
+    }
+
+    fn take_gate(&self) -> Arc<PartitionGate> {
+        self.gate
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the native fused gate was installed")
     }
 }
 
 impl PhysicalPlanWrapper for NativePlanObserver {
     fn wrap(
         &self,
-        origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        origin: Arc<dyn ExecutionPlan>,
         _ctx: session::context::QueryContextRef,
-    ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
-        let mut stack = vec![origin.clone()];
+    ) -> Arc<dyn ExecutionPlan> {
+        // The gate wraps the real fused node instead of replacing it: the node kept for the metrics
+        // is the execution that computes them, and its own scan child is left untouched.
+        let plan = if self.gate_fused {
+            let gate = Arc::new(PartitionGate::new(4));
+            let (plan, installed) = gate_native_fused(origin, Arc::clone(&gate));
+            if installed {
+                *self.gate.lock().unwrap() = Some(gate);
+            }
+            plan
+        } else {
+            origin
+        };
+        let mut stack = vec![plan.clone()];
         while let Some(node) = stack.pop() {
-            if node.name() == "FusedSeriesExec" {
-                *self.0.lock().unwrap() = Some(node);
-                break;
+            match node.name() {
+                "FusedSeriesExec" => *self.fused.lock().unwrap() = Some(node.clone()),
+                "VectorSelectExec" => *self.ranked.lock().unwrap() = Some(node.clone()),
+                _ => {}
             }
             stack.extend(node.children().into_iter().cloned());
         }
-        origin
+        plan
+    }
+}
+
+/// A test barrier shared by the four execution partitions of one fused node.
+///
+/// Each partition arrives only after it has computed its own first output batch, so a plan that
+/// drains its partitions one after another times out instead of passing a count-only assertion.
+struct PartitionGate {
+    barrier: tokio::sync::Barrier,
+    timeout: Duration,
+    arrived: AtomicUsize,
+    partitions: usize,
+}
+
+impl PartitionGate {
+    fn new(partitions: usize) -> Self {
+        Self {
+            barrier: tokio::sync::Barrier::new(partitions),
+            timeout: Duration::from_secs(10),
+            arrived: AtomicUsize::new(0),
+            partitions,
+        }
+    }
+
+    async fn wait(&self) -> DataFusionResult<()> {
+        self.arrived.fetch_add(1, AtomicOrdering::SeqCst);
+        match tokio::time::timeout(self.timeout, self.barrier.wait()).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(DataFusionError::Execution(format!(
+                "only {} of {} native fused partitions produced a first batch concurrently",
+                self.arrived.load(AtomicOrdering::SeqCst),
+                self.partitions
+            ))),
+        }
+    }
+
+    fn arrived(&self) -> usize {
+        self.arrived.load(AtomicOrdering::SeqCst)
+    }
+}
+
+/// Replaces the fused node with a gated wrapper over it, leaving the rest of the plan alone.
+fn gate_native_fused(
+    plan: Arc<dyn ExecutionPlan>,
+    gate: Arc<PartitionGate>,
+) -> (Arc<dyn ExecutionPlan>, bool) {
+    if plan.name() == "FusedSeriesExec" {
+        let gated = Arc::new(NativeFusedGateExec { child: plan, gate }) as Arc<dyn ExecutionPlan>;
+        return (gated, true);
+    }
+    let children = plan.children().into_iter().cloned().collect::<Vec<_>>();
+    if children.is_empty() {
+        return (plan, false);
+    }
+    let mut installed = false;
+    let rewritten = children
+        .iter()
+        .map(|child| {
+            let (child, child_installed) = gate_native_fused(Arc::clone(child), Arc::clone(&gate));
+            installed |= child_installed;
+            child
+        })
+        .collect::<Vec<_>>();
+    if !installed {
+        return (plan, false);
+    }
+    (
+        plan.with_new_children(rewritten)
+            .expect("the test gate rebuilds the plan above the fused node"),
+        true,
+    )
+}
+
+/// The test-only wrapper that holds one real fused partition until every partition has computed a
+/// first batch.
+struct NativeFusedGateExec {
+    child: Arc<dyn ExecutionPlan>,
+    gate: Arc<PartitionGate>,
+}
+
+impl std::fmt::Debug for NativeFusedGateExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFusedGateExec").finish()
+    }
+}
+
+impl DisplayAs for NativeFusedGateExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeFusedGateExec")
+    }
+}
+
+impl ExecutionPlan for NativeFusedGateExec {
+    fn name(&self) -> &str {
+        "NativeFusedGateExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.child.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.child]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        self.child.apply_expressions(f)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let [child] = <[Arc<dyn ExecutionPlan>; 1]>::try_from(children).map_err(|children| {
+            DataFusionError::Plan(format!(
+                "NativeFusedGateExec requires exactly one child, got {}",
+                children.len()
+            ))
+        })?;
+        Ok(Arc::new(Self {
+            child,
+            gate: Arc::clone(&self.gate),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<datafusion::execution::TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let child = Arc::clone(&self.child);
+        let gate = Arc::clone(&self.gate);
+        let schema = self.child.schema();
+        // The first batch is computed before the barrier: an error or an empty partition is
+        // reported as such and never counts as an arrival.
+        let first_then_rest = futures::stream::once(async move {
+            let mut input = child.execute(partition, context)?;
+            let first = match input.next().await {
+                Some(Ok(batch)) => batch,
+                Some(Err(error)) => return Err(error),
+                None => {
+                    return Err(DataFusionError::Execution(format!(
+                        "fused partition {partition} produced no first batch for the test barrier"
+                    )));
+                }
+            };
+            gate.wait().await?;
+            Ok::<_, DataFusionError>(
+                futures::stream::iter([Ok::<_, DataFusionError>(first)]).chain(input),
+            )
+        })
+        .try_flatten();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            first_then_rest,
+        )))
     }
 }
 
@@ -1867,6 +2082,40 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     rows
 }
 
+fn native_metric_count(plan: &Arc<dyn ExecutionPlan>, name: &str) -> usize {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    plan.metrics()
+        .map(|metrics| {
+            metrics
+                .iter()
+                .filter_map(|metric| match metric.value() {
+                    MetricValue::Count {
+                        name: metric_name,
+                        count,
+                    } if metric_name.as_ref() == name => Some(count.value()),
+                    _ => None,
+                })
+                .sum()
+        })
+        .unwrap_or_default()
+}
+
+fn collect_plan_nodes(plan: Arc<dyn ExecutionPlan>, nodes: &mut Vec<Arc<dyn ExecutionPlan>>) {
+    nodes.push(Arc::clone(&plan));
+    for child in plan.children() {
+        collect_plan_nodes(Arc::clone(child), nodes);
+    }
+}
+
+fn contains_plan_node(plan: &Arc<dyn ExecutionPlan>, name: &str) -> bool {
+    plan.name() == name
+        || plan
+            .children()
+            .into_iter()
+            .any(|child| contains_plan_node(child, name))
+}
+
 fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     use datafusion::physical_plan::metrics::MetricValue;
 
@@ -1899,7 +2148,27 @@ async fn native_test_instance(
     crate::standalone::GreptimeDbStandalone,
     Arc<NativePlanObserver>,
 ) {
-    let observer = Arc::new(NativePlanObserver::default());
+    native_test_instance_with_observer(builder, Arc::new(NativePlanObserver::default())).await
+}
+
+/// The same fixture with a barrier around the real fused node, so its four partitions must all
+/// compute a first batch before any of them continues.
+async fn native_test_instance_with_gate(
+    builder: GreptimeDbStandaloneBuilder,
+) -> (
+    crate::standalone::GreptimeDbStandalone,
+    Arc<NativePlanObserver>,
+) {
+    native_test_instance_with_observer(builder, NativePlanObserver::with_partition_gate()).await
+}
+
+async fn native_test_instance_with_observer(
+    builder: GreptimeDbStandaloneBuilder,
+    observer: Arc<NativePlanObserver>,
+) -> (
+    crate::standalone::GreptimeDbStandalone,
+    Arc<NativePlanObserver>,
+) {
     let plugins = Plugins::new();
     let wrapper: PhysicalPlanWrapperRef = observer.clone();
     plugins.insert(wrapper);
@@ -2101,4 +2370,347 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
         assert_eq!(native_rows, legacy_rows);
     }
+}
+
+/// A global `topk` must keep the two winners of the whole vector while its prefix still runs as
+/// four real, non-empty execution partitions of one region.
+///
+/// The barrier sits on the fused node's own output: a partition arrives only after it computed its
+/// first batch, so a plan that drains its partitions one after another fails instead of passing on
+/// a count. The winners are the independent maxima of all sixteen series, so a per-partition
+/// ranking or a local maximum cannot produce them.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_global_topk_preserves_four_real_prefix_partitions() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let builder = GreptimeDbStandaloneBuilder::new("native_promql_global_topk_e2e")
+        .with_mito_config(mito_config);
+    let (standalone, observer) = native_test_instance_with_gate(builder).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_topk_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_topk (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_topk_phy')"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Sixteen real series, seven samples each: sample `t` holds `scale * t`, so `rate` over any
+    // five-minute window is exactly the series' scale.
+    let mut values = Vec::with_capacity(16 * 7);
+    for scale in 1..=16u32 {
+        for timestamp_sec in [0_i64, 60, 120, 180, 240, 300, 360] {
+            values.push(format!(
+                "('{}', {timestamp_sec}, {})",
+                (b'a' + (scale as u8 - 1)) as char,
+                scale as f64 * timestamp_sec as f64
+            ));
+        }
+    }
+    execute_all(
+        &instance,
+        &format!(
+            "INSERT INTO native_topk (host, ts, val) VALUES {}",
+            values.join(", ")
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = PromQuery {
+        query: "topk(2, rate(native_topk[5m]))".to_string(),
+        start: "300".to_string(),
+        end: "360".to_string(),
+        step: "60s".to_string(),
+        ..PromQuery::default()
+    };
+    observer.clear();
+    let native = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let native_rows = native_result_rows(native).await;
+
+    // The global half: one output partition, an ordered frame input, and no local `fetch k`.
+    let ranked = observer.take_topk();
+    assert_eq!(ranked.name(), "VectorSelectExec");
+    assert_eq!(ranked.output_partitioning().partition_count(), 1);
+    let required = ranked.required_input_ordering();
+    assert_eq!(required.len(), 1);
+    let required = required[0]
+        .as_ref()
+        .expect("the ranking requires an ordered input");
+    // One hard requirement, two keys: producer, then the frame ordinal.
+    let keys = required.first();
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert!(keys[0].expr.to_string().contains("producer"), "{}", keys[0]);
+    assert_eq!(
+        keys[0].options,
+        Some(SortOptions {
+            descending: false,
+            nulls_first: false,
+        })
+    );
+    assert!(
+        keys[1].expr.to_string().contains("frame_ordinal"),
+        "{}",
+        keys[1]
+    );
+    assert!(
+        format!("{:?}", ranked.input_distribution_requirements()).contains("SinglePartition"),
+        "{:?}",
+        ranked.input_distribution_requirements()
+    );
+    // The frames reach the ranking as one stream ordered by producer and then ordinal. The
+    // optimizer may keep the single coalesce-and-sort pair or split it into per-partition sorts
+    // merged by a `SortPreservingMergeExec`, so the ordering is read off the child's properties
+    // and every sort in that subtree is checked for a fetch.
+    let ordered = ranked.children()[0].clone();
+    assert_eq!(
+        1,
+        ordered.properties().output_partitioning().partition_count(),
+        "the ranking reads one global ordered stream"
+    );
+    let ordering = ordered
+        .properties()
+        .output_ordering()
+        .unwrap_or_else(|| panic!("the frames reach the ranking ordered: {}", ordered.name()));
+    let keys = ordering
+        .iter()
+        .map(|sort| sort.expr.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(2, keys.len(), "{keys:?}");
+    assert!(keys[0].contains("producer"), "{keys:?}");
+    assert!(keys[1].contains("frame_ordinal"), "{keys:?}");
+    assert!(
+        ordering.iter().all(|sort| sort.options
+            == SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        "{ordering}"
+    );
+    let mut stack = vec![ordered];
+    let mut sorts = 0;
+    while let Some(plan) = stack.pop() {
+        if let Some(sort) = plan.downcast_ref::<SortExec>() {
+            sorts += 1;
+            assert!(
+                sort.fetch().is_none(),
+                "a global ranking must not read a fetch limit"
+            );
+        }
+        stack.extend(plan.children().into_iter().cloned());
+    }
+    assert!(
+        sorts > 0,
+        "the frames are ordered by a sort below the ranking"
+    );
+    let display = datafusion::physical_plan::displayable(ranked.as_ref())
+        .indent(false)
+        .to_string();
+    assert!(
+        display.contains("VectorSelectExec: topk(2, rate(native_topk[5m]))"),
+        "{display}"
+    );
+    assert!(display.contains("root Vector topk 2 by []"), "{display}");
+    assert!(
+        display.contains("input Input evaluated samples, contiguous"),
+        "{display}"
+    );
+    assert!(!display.contains("fetch="), "no local fetch k: {display}");
+    let mut ranked_nodes = Vec::new();
+    collect_plan_nodes(Arc::clone(&ranked), &mut ranked_nodes);
+    assert_eq!(
+        ranked_nodes
+            .iter()
+            .filter(|plan| plan.name() == "VectorSelectExec")
+            .count(),
+        1,
+        "one global ranking node"
+    );
+    assert_eq!(
+        ranked_nodes
+            .iter()
+            .filter(|plan| plan.name() == "FusedSeriesExec")
+            .count(),
+        0,
+        "the region prefix is behind the opaque merge scan"
+    );
+    let merge_scans = ranked_nodes
+        .iter()
+        .filter(|plan| plan.name() == "MergeScanExec")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(merge_scans.len(), 1, "one region boundary");
+    let merge_scan = merge_scans[0]
+        .downcast_ref::<MergeScanExec>()
+        .expect("the region boundary is a region scan");
+    assert_eq!(
+        merge_scan.regions().len(),
+        1,
+        "the fixture reads exactly one region: {:?}",
+        merge_scan.regions()
+    );
+    assert_eq!(
+        merge_scan.sub_stage_metrics().len(),
+        1,
+        "exactly one region executed: {:?}",
+        merge_scan.regions()
+    );
+    // The global ranking answered the whole vector: it closed exactly the two series it kept, even
+    // though the prefix handed it sixteen.
+    assert_eq!(
+        native_metric_count(&ranked, "native.root.completed_series"),
+        2,
+        "the ranking kept two series out of the sixteen the prefix produced"
+    );
+
+    // The prefix half: the real fused node, four non-empty partitions, over the real series scan
+    // and with nothing coalesced between them.
+    let prefix = observer.take();
+    assert_eq!(prefix.name(), "FusedSeriesExec");
+    assert_four_native_partitions(&prefix);
+    let scan = prefix.children()[0].clone();
+    // The optimizer may wrap the scan in DataFusion's cooperative fairness node, which inherits
+    // its input's partitioning and only changes the scheduling type: the real scan is under it.
+    let mut scan = scan;
+    while scan.name() == "CooperativeExec" {
+        scan = scan.children()[0].clone();
+    }
+    assert_eq!(scan.name(), "SeriesScanExec");
+    assert!(
+        scan.downcast_ref::<SeriesScanExec>().is_some(),
+        "the fused node reads the real series scan"
+    );
+    assert_eq!(scan.output_partitioning().partition_count(), 4);
+    assert!(!contains_plan_node(&prefix, "CoalescePartitionsExec"));
+    let gate = observer.take_gate();
+    assert_eq!(
+        gate.arrived(),
+        4,
+        "all four fused partitions computed a first batch before any continued"
+    );
+
+    // The ranking is checked against the same window ranked by nothing: the whole vector, computed
+    // by the per-series route, ordered by value at each grid point. Taking its own top two is an
+    // answer this node cannot influence, so a per-partition or partial ranking cannot match it.
+    let unranked = PromQuery {
+        query: "rate(native_topk[5m])".to_string(),
+        ..query.clone()
+    };
+    let unranked_rows = native_result_rows(
+        instance
+            .do_promql_query(&unranked, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    let mut hosts = unranked_rows
+        .iter()
+        .map(|(_, host, _)| host.as_str())
+        .collect::<Vec<_>>();
+    hosts.sort_unstable();
+    hosts.dedup();
+    assert_eq!(
+        16,
+        hosts.len(),
+        "the unranked window answers every series, so its top two mean something"
+    );
+    let mut timestamps = unranked_rows
+        .iter()
+        .map(|(timestamp, _, _)| *timestamp)
+        .collect::<Vec<_>>();
+    timestamps.sort_unstable();
+    timestamps.dedup();
+    let mut expected = Vec::new();
+    for timestamp in &timestamps {
+        let mut at_point = unranked_rows
+            .iter()
+            .filter(|(point, _, _)| point == timestamp)
+            .cloned()
+            .collect::<Vec<_>>();
+        at_point.sort_by(|left, right| right.2.total_cmp(&left.2).then(left.1.cmp(&right.1)));
+        at_point.truncate(2);
+        expected.extend(at_point);
+    }
+    expected.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    assert_eq!(
+        native_rows, expected,
+        "the ranking keeps exactly the two largest values of each grid point"
+    );
+    let mut winners = expected
+        .iter()
+        .map(|(_, host, _)| host.clone())
+        .collect::<Vec<_>>();
+    winners.sort_unstable();
+    winners.dedup();
+    assert_eq!(
+        vec!["o".to_string(), "p".to_string()],
+        winners,
+        "the winners are the two largest scales"
+    );
+
+    let legacy_rows = native_result_rows(
+        instance
+            .do_promql_query(&query, native_query_context(false, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(native_rows, expected);
+    assert_eq!(
+        native_rows, legacy_rows,
+        "the native global ranking must answer exactly what the existing planner does"
+    );
+
+    // The executed plans, not a string-only rendering: `ANALYZE` runs the same node tree and the
+    // observer keeps both halves of it, and `EXPLAIN` names the logical ranking over its prefix.
+    observer.clear();
+    let analyze_text = native_output_text(
+        native_tql_output(
+            &instance,
+            "TQL ANALYZE (300, 360, '60s') topk(2, rate(native_topk[5m]))",
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert!(analyze_text.contains("VectorSelectExec"), "{analyze_text}");
+    assert!(analyze_text.contains("FusedSeriesExec"), "{analyze_text}");
+    assert_eq!(observer.take_topk().name(), "VectorSelectExec");
+    assert_eq!(observer.take().name(), "FusedSeriesExec");
+
+    observer.clear();
+    let explain_text = native_output_text(
+        native_tql_output(
+            &instance,
+            "TQL EXPLAIN (300, 360, '60s') topk(2, rate(native_topk[5m]))",
+            true,
+        )
+        .await,
+    )
+    .await;
+    assert!(
+        explain_text.contains("VectorSelect: topk(2, rate(native_topk[5m]))"),
+        "{explain_text}"
+    );
+    assert!(
+        explain_text.contains("FusedSeries: evaluated frames for topk(2, rate(native_topk[5m]))"),
+        "{explain_text}"
+    );
 }

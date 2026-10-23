@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{FusedSeries, SeriesDivide};
+use promql::extension_plan::{FusedSeries, SeriesDivide, VectorSelect};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -114,7 +114,8 @@ pub struct DistPlannerAnalyzer {
     ///
     /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
     /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. In
-    /// process, a root `FusedSeries` plan travels as a `LogicalPlan` instead and skips that gate;
+    /// process, a native root plan - a root `FusedSeries`, or a root `VectorSelect` over the
+    /// per-series prefix it ranks - travels as a `LogicalPlan` instead and skips that gate;
     /// other plans retain the ordinary encoding checks.
     ///
     /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
@@ -446,9 +447,9 @@ struct PlanRewriter {
     /// Used by [`PlanRewriter::should_expand`] to skip the per-node encoding check.
     ///
     /// Used for the ordinary standalone fast path when the root plan is encodable. It is not
-    /// needed when the root itself is the in-process `FusedSeries` exception.
+    /// needed when the root itself is the in-process native exception.
     whole_plan_encodable: bool,
-    /// In-process transport skips the encodability gate only when the rewritten root itself is FusedSeries.
+    /// In-process transport skips the encodability gate only when the rewritten root is a native plan.
     skip_encodability_gate: bool,
     /// Current level in the tree
     level: usize,
@@ -505,8 +506,31 @@ struct PlanRewriter {
     new_child_plan: Option<LogicalPlan>,
 }
 
-fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
-    matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
+/// Whether `plan` is a native root: the shape an in-process engine hands to a region as a
+/// `LogicalPlan` as it was planned.
+///
+/// A root `FusedSeries` is such a plan. So is a root `VectorSelect` that ranks a per-series prefix,
+/// i.e. one whose one input is the `FusedSeries` over the scan it reads: the ranking stays on the
+/// frontend and that prefix is what a region builds.
+///
+/// The check is by exact shape and not by name, so a wrapper around either node, or one whose
+/// child is not the one a region builds it from, keeps the ordinary encoding checks.
+fn is_in_process_native_plan(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::Extension(extension) = plan else {
+        return false;
+    };
+    if extension.node.as_any().is::<FusedSeries>() {
+        return true;
+    }
+    if !extension.node.as_any().is::<VectorSelect>() {
+        return false;
+    }
+    matches!(
+        extension.node.inputs().as_slice(),
+        [LogicalPlan::Extension(prefix)]
+            if prefix.node.as_any().is::<FusedSeries>()
+                && matches!(prefix.node.inputs().as_slice(), [LogicalPlan::TableScan(_)])
+    )
 }
 
 impl PlanRewriter {
@@ -518,7 +542,7 @@ impl PlanRewriter {
             _ => plan,
         };
         let skip_encodability_gate =
-            in_process_region_transport && is_fused_series_plan(native_root);
+            in_process_region_transport && is_in_process_native_plan(native_root);
         Self {
             // Preserve the ordinary whole-plan fast path unless this is the in-process root
             // exception: no node in that tree needs an encoding check.
@@ -559,7 +583,7 @@ impl PlanRewriter {
         // When the root does not encode, the plan holds at least one node that has to stay
         // on the frontend and only the per-node check locates it.
         //
-        // For the in-process root `FusedSeries` exception, encodability says nothing about where
+        // For the in-process native root exception, encodability says nothing about where
         // a node may run, and asking it would cut the plan at the first node with no serializer
         // branch before `check_plan` could decide. Skipping it only removes a reason to expand: every
         // check below still runs, and a node they call `NonCommutative`/`Unimplemented`/

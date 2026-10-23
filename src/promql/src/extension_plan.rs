@@ -14,6 +14,7 @@
 
 mod absent;
 mod empty_metric;
+mod evaluated_frame;
 mod fused_series;
 mod histogram_fold;
 mod instant_manipulate;
@@ -25,6 +26,7 @@ mod series_divide;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
+mod vector_select;
 
 pub use absent::{Absent, AbsentExec, AbsentStream};
 use common_query::native_histogram::{SUM_FIELD, native_histogram_value_type};
@@ -49,6 +51,7 @@ pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulate
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
+pub use vector_select::VectorSelect;
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;
 
