@@ -69,6 +69,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let catchup_regions = self.catchup_regions.clone();
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
+        let node_lease = self.node_lease.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -78,6 +79,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match task.run().await {
                 Ok(_) => {
                     if request.set_writable {
+                        // The region takes writes under the node lease until its next Leader
+                        // grant.
+                        node_lease.seed(&region.leader_deadline);
                         region.set_role(RegionRole::Leader);
                         // Finalize leadership: persist backfilled metadata.
                         if let Err(err) = region

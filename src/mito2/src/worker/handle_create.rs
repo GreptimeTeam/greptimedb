@@ -94,6 +94,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             hook.on_region_opened(region_id, &region.metadata()).await;
         }
 
+        // The region takes writes under the node lease until its first Leader grant.
+        self.node_lease.seed(&region.leader_deadline);
         // Insert the MitoRegion into the RegionMap.
         self.register_region(region);
         if let Some(state) = &self.series_index_task_state {

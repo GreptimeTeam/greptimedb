@@ -71,8 +71,8 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, NodeLease, OpeningRegions, OpeningRegionsRef,
+    RegionMap, RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -155,6 +155,7 @@ pub(crate) struct WorkerGroup {
     file_ref_manager: FileReferenceManagerRef,
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
+    node_lease: Arc<NodeLease>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -241,6 +242,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        let node_lease = Arc::new(NodeLease::default());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -269,6 +271,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    node_lease: node_lease.clone(),
                 }
                 .start()
             })
@@ -283,6 +286,7 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            node_lease,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -385,6 +389,10 @@ impl WorkerGroup {
 
     pub(crate) fn gc_limiter(&self) -> GcLimiterRef {
         self.gc_limiter.clone()
+    }
+
+    pub(crate) fn node_lease(&self) -> &NodeLease {
+        &self.node_lease
     }
 
     /// Get worker for specific `region_id`.
@@ -491,6 +499,7 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        let node_lease = Arc::new(NodeLease::default());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -518,6 +527,7 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    node_lease: node_lease.clone(),
                 }
                 .start()
             })
@@ -532,6 +542,7 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            node_lease,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -628,6 +639,7 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    node_lease: Arc<NodeLease>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -728,6 +740,7 @@ impl<S: LogStore> WorkerStarter<S> {
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
             plugins: self.plugins,
+            node_lease: self.node_lease,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -1055,6 +1068,7 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
+    node_lease: Arc<NodeLease>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1558,6 +1572,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_write_stall();
+        }
+    }
+
+    /// A batch of writes is appended to the WAL.
+    pub(crate) async fn on_write_wal_end(&self) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_write_wal_end().await;
         }
     }
 
