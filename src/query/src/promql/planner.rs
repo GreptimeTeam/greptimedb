@@ -5507,16 +5507,19 @@ impl PromPlanner {
 
     /// Whether every field column carries a type the region's raw series preflight serves.
     ///
-    /// That preflight accepts numeric columns and native histograms only, so anything else - a
-    /// string, a boolean, a timestamp - has no raw framing. A route that offered it would fail
-    /// after the logical plan is fixed; declining keeps the existing plan.
+    /// The preflight decides on `ConcreteDataType::is_numeric`, which excludes the decimals, so
+    /// the Arrow type is converted rather than asked: Arrow's own `is_numeric` includes
+    /// `Decimal128`/`Decimal256` (and `Float16`, which has no column type here), and a decimal
+    /// field would then pass here and fail once the logical plan is fixed. Anything else - a
+    /// string, a boolean, a timestamp - has no raw framing either.
     fn field_columns_are_raw_series_servable(
         schema: &DFSchemaRef,
         field_columns: &[String],
     ) -> bool {
         field_columns.iter().all(|field| {
             Self::field_column_type(schema, field).is_some_and(|data_type| {
-                data_type.is_numeric() || data_type == &Self::native_histogram_arrow_type()
+                datatypes::prelude::ConcreteDataType::from_arrow_type(data_type).is_numeric()
+                    || data_type == &Self::native_histogram_arrow_type()
             })
         })
     }

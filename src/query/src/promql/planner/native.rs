@@ -30,7 +30,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use common_catalog::consts::{MITO_ENGINE, MITO2_ENGINE};
+use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
@@ -385,15 +385,23 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
 /// Whether `engine` can serve raw series frames to the node this route builds.
 ///
 /// A whitelist, not a probe: the logical planner cannot ask a region what its scanner supports
-/// without reading the table, and a false negative only costs the query its native route. Mito's
-/// series scanner implements the raw path; every other engine in the workspace leaves
-/// `raw_series_schema` at its default `None`, so only those two are named. This is deliberately not
-/// [`supports_pk_dictionary_encoding`]: that answers a different question and includes the metric
-/// engine, whose logical tables a bare scan cannot reach anyway.
+/// without reading the table, and a false negative only costs the query its native route.
+///
+/// Mito's series scanner implements the raw path. The metric engine is named too because a logical
+/// region reads through its physical region and hands back that same scanner - its own raw-series
+/// test is `test_raw_series_scan_uses_logical_metric_route_and_bound_metadata` - and the ordinary
+/// metric rewrite puts a filter and an alias between the scan and this node, which the bare-scan
+/// check above already refuses. A logical table reaches that check with a bare scan only when the
+/// physical table cannot be resolved, and there the logical scan is served by the same scanner.
+///
+/// Every other engine in the workspace leaves `raw_series_schema` at its default `None`: a
+/// file-engine table, for one, is read by a `SinglePartitionScanner` that cannot frame a series.
+///
+/// This is deliberately not [`supports_pk_dictionary_encoding`]: that answers a different question.
 ///
 /// [`supports_pk_dictionary_encoding`]: table::table::scan
 fn supports_native_raw_series(engine: &str) -> bool {
-    matches!(engine, MITO_ENGINE | MITO2_ENGINE)
+    matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
 
 /// Whether any node of `tree` reads the whole input vector at a point rather than one series.
