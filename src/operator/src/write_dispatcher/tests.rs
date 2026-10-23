@@ -630,6 +630,7 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
         failure(Some(RoutedWrite {
             peer: Arc::new(Peer::new(1, "peer")),
             request: Arc::new(build_insert_request(&[1])),
+            owners: None,
         }))
     };
     for (name, attempts, retries, expected) in [
@@ -1037,7 +1038,12 @@ fn request_parts(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 
 #[tokio::test]
 async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
-    for kind in [WriteKind::Insert, WriteKind::Delete, WriteKind::BulkInsert] {
+    for (kind, tracked) in [
+        (WriteKind::Insert, false),
+        (WriteKind::Delete, false),
+        (WriteKind::BulkInsert, false),
+        (WriteKind::BulkInsert, true),
+    ] {
         let old_server = RegionTestServer::start().await;
         let new_server = RegionTestServer::start().await;
         old_server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
@@ -1101,14 +1107,44 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             catalog_manager,
             invalidator.clone(),
         );
-        let response = dispatcher
-            .dispatch(vec![
-                build_partitioned_request(kind, 1, old_versions[&1], &[70]),
-                build_partitioned_request(kind, 2, old_versions[&2], &[20, 40]),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(response.affected_rows, 3, "{kind:?}");
+        if tracked {
+            new_server.fail_region(5, [RetryHint::NonRetryable]);
+            let progress = dispatcher
+                .dispatch_tracked(
+                    vec![
+                        TrackedWrite {
+                            request: build_partitioned_request(kind, 1, old_versions[&1], &[70]),
+                            owners: vec![0],
+                        },
+                        TrackedWrite {
+                            request: build_partitioned_request(
+                                kind,
+                                2,
+                                old_versions[&2],
+                                &[20, 40],
+                            ),
+                            owners: vec![0, 1],
+                        },
+                    ],
+                    2,
+                )
+                .await;
+            assert_eq!(
+                progress.iter().map(|p| p.affected_rows).collect::<Vec<_>>(),
+                [2, 0]
+            );
+            assert!(progress[0].error.is_none());
+            assert!(progress[1].error.is_some());
+        } else {
+            let response = dispatcher
+                .dispatch(vec![
+                    build_partitioned_request(kind, 1, old_versions[&1], &[70]),
+                    build_partitioned_request(kind, 2, old_versions[&2], &[20, 40]),
+                ])
+                .await
+                .unwrap();
+            assert_eq!(response.affected_rows, 3, "{kind:?}");
+        }
         assert_eq!(
             old_server.attempt_counts(),
             HashMap::from([
@@ -1900,4 +1936,46 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
             .is_err()
     );
     assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 1);
+}
+
+#[tokio::test]
+async fn test_exemplar_progress_retains_success_and_unknown_acknowledgements() {
+    for retries in [0, 1] {
+        let server = RegionTestServer::start().await;
+        server.service.rejections.lock().unwrap().insert(
+            RegionId::new(1, 2).as_u64(),
+            (0..=retries)
+                .map(|_| Status::unavailable("acknowledgement lost"))
+                .collect(),
+        );
+        let dispatcher = server.create_dispatcher(retries).await;
+        let progress = dispatcher
+            .dispatch_tracked(
+                vec![
+                    TrackedWrite {
+                        request: build_insert_request(&[1]),
+                        owners: vec![0],
+                    },
+                    TrackedWrite {
+                        request: build_insert_request(&[2]),
+                        owners: vec![0],
+                    },
+                    TrackedWrite {
+                        request: build_insert_request(&[1]),
+                        owners: vec![1],
+                    },
+                ],
+                2,
+            )
+            .await;
+        assert_eq!(progress[0].affected_rows, 1);
+        assert!(progress[0].error.is_some());
+        assert_eq!(progress[1].affected_rows, 1);
+        assert!(progress[1].error.is_none());
+        assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 2);
+        assert_eq!(
+            server.attempt_counts()[&RegionId::new(1, 2).as_u64()],
+            retries + 1
+        );
+    }
 }
