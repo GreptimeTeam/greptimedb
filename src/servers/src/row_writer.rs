@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ahash::{HashMap as AHashMap, HashMapExt};
-use api::helper::encode_json_value;
+use api::helper::{ColumnDataTypeWrapper, encode_json_value};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
@@ -33,6 +33,8 @@ use common_time::timestamp::TimeUnit;
 use common_time::timestamp::TimeUnit::Nanosecond;
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
 use datatypes::json::JsonSettings;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::Value as DataValue;
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -352,7 +354,7 @@ pub fn write_json(
     )
 }
 
-pub(crate) fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
+pub(crate) fn build_json2_column_schema(name: impl ToString) -> Result<ColumnSchema> {
     let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::new_v2())));
     let mut options = ColumnOptions::default();
     options.options.insert(
@@ -365,13 +367,23 @@ pub(crate) fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
             .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
     }
 
-    ColumnSchema {
+    Ok(ColumnSchema {
         column_name: name.to_string(),
         datatype: ColumnDataType::Json as i32,
         semantic_type: SemanticType::Field as i32,
+        datatype_extension: ColumnDataTypeWrapper::try_from(ConcreteDataType::json2(
+            JsonNativeType::Null,
+        ))
+        .map_err(|error| {
+            InternalSnafu {
+                err_msg: error.to_string(),
+            }
+            .build()
+        })?
+        .into_parts()
+        .1,
         options: Some(options),
-        ..Default::default()
-    }
+    })
 }
 
 /// Encodes a JSON2 field without constructing its column schema.
