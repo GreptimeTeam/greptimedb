@@ -377,6 +377,13 @@ impl ProcedureExecutor for MetaClient {
             .context(meta_error::ExternalSnafu)
     }
 
+    async fn drain_node(&self, _ctx: &ExecutorContext, datanode_id: u64) -> MetaResult<String> {
+        self.drain_node(datanode_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(meta_error::ExternalSnafu)
+    }
+
     async fn reconcile(
         &self,
         _ctx: &ExecutorContext,
@@ -842,6 +849,11 @@ impl MetaClient {
                 request.timeout,
             )
             .await
+    }
+
+    /// Submit a procedure to drain all leader regions from a datanode.
+    pub async fn drain_node(&self, datanode_id: u64) -> Result<String> {
+        self.procedure_client()?.drain_node(datanode_id).await
     }
 
     /// Reconcile the procedure state.

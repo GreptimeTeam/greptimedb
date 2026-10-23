@@ -103,6 +103,19 @@ impl ProcedureServiceHandler for ProcedureServiceOperator {
             .map(|pid| String::from_utf8_lossy(&pid.key).to_string()))
     }
 
+    async fn drain_node(
+        &self,
+        query_ctx: QueryContextRef,
+        datanode_id: u64,
+    ) -> QueryResult<String> {
+        let executor_context = to_executor_context(query_ctx, TriggerReason::Manual);
+        self.procedure_executor
+            .drain_node(&executor_context, datanode_id)
+            .await
+            .map_err(BoxedError::new)
+            .context(query_error::ProcedureServiceSnafu)
+    }
+
     async fn reconcile(&self, request: ReconcileRequest) -> QueryResult<Option<String>> {
         Ok(self
             .procedure_executor
@@ -218,6 +231,13 @@ mod tests {
             _: &ExecutorContext,
             _: MigrateRegionRequest,
         ) -> common_meta::error::Result<MigrateRegionResponse> {
+            unimplemented!()
+        }
+        async fn drain_node(
+            &self,
+            _: &ExecutorContext,
+            _: u64,
+        ) -> common_meta::error::Result<String> {
             unimplemented!()
         }
         async fn reconcile(
