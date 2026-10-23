@@ -68,3 +68,47 @@ create table json2_set_append_mode_false (
 alter table json2_set_append_mode_false set 'append_mode' = 'false';
 
 drop table json2_set_append_mode_false;
+
+-- JSON2 requires flat SST output even when append mode is enabled.
+create table json2_primary_key_format (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'primary_key'
+);
+
+create table json2_alter_primary_key_format (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'memtable.type' = 'bulk'
+);
+
+insert into json2_alter_primary_key_format values (1, '{"a": 1}');
+
+alter table json2_alter_primary_key_format set 'sst_format' = 'primary_key';
+
+show create table json2_alter_primary_key_format;
+
+insert into json2_alter_primary_key_format values (2, '{"a": 2}');
+
+admin flush_table('json2_alter_primary_key_format');
+
+select ts, json_get(j, 'a') from json2_alter_primary_key_format order by ts;
+
+drop table json2_alter_primary_key_format;
+
+create table json2_add_to_primary_key_format (
+    ts timestamp time index
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'primary_key'
+);
+
+alter table json2_add_to_primary_key_format add column j json2;
+
+show create table json2_add_to_primary_key_format;
+
+drop table json2_add_to_primary_key_format;
