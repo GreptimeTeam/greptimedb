@@ -31,12 +31,14 @@
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::BinaryMatching;
 
 /// What one node produces.
@@ -255,6 +257,36 @@ pub struct BoundAggregate {
     pub stage: AggregateStage,
 }
 
+/// An operator over the whole input vector at each grid point: one that keeps some of the input's
+/// samples with their series' labels and values, orders the series, reports where none is present,
+/// reads a classic histogram from its bucket series, or counts the samples sharing a value.
+///
+/// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
+/// field.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundVectorOp {
+    /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
+    TopK { k: f64, top: bool, group: Grouping },
+    /// `limitk`: the first `k` series of each group that hold a sample, in input order.
+    LimitK { k: f64, group: Grouping },
+    /// `limit_ratio`: the series whose label hash falls in the ratio; it keeps whole series, so it
+    /// has no grouping.
+    LimitRatio { ratio: f64 },
+    /// `sort`, `sort_desc`, `sort_by_label` and `sort_by_label_desc`: the input's series in another
+    /// order, which only an instant result shows. `sort` and `sort_desc` also drop histogram
+    /// samples, in a range result too.
+    Sort(SortOrder),
+    /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
+    /// what the compiler derives from the argument's matchers.
+    Absent { labels: MetricName },
+    /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
+    /// series that share its labels, so this too reads the whole vector at a point.
+    Histogram(HistogramFunction),
+    /// `count_values(label, v)`: how many samples of each group share a value, under a label set
+    /// per value. It writes a label per distinct value, which an aggregate's fixed groups cannot.
+    CountValues { label: Arc<str>, group: Grouping },
+}
+
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
 #[derive(Clone, Debug)]
 pub enum NativeExpr {
@@ -281,6 +313,11 @@ pub enum NativeExpr {
     Aggregate {
         input: Box<NativeNode>,
         op: BoundAggregate,
+    },
+    /// An operation over the whole input vector at each grid point.
+    Vector {
+        input: Box<NativeNode>,
+        op: BoundVectorOp,
     },
     /// A binary operation between two inputs, with its matching rules.
     ///
@@ -422,6 +459,20 @@ impl NativeNode {
                 ensure_samples(&self.output, "a map")?;
                 ensure_same_fields(&input.output, &self.output, "a map")?;
                 ensure_grid(&self.output, input_grid, "a map")?;
+            }
+            NativeExpr::Vector { input, .. } => {
+                input.validate()?;
+                // A vector operation keeps the input's fields and grid, so it consumes and produces
+                // the same evaluated vector.
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a vector operation consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                ensure_samples(&self.output, "a vector operation")?;
+                ensure_same_fields(&input.output, &self.output, "a vector operation")?;
+                ensure_grid(&self.output, input_grid, "a vector operation")?;
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;

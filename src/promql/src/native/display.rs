@@ -22,16 +22,18 @@
 use std::fmt::{self, Write};
 use std::sync::Arc;
 
-use datatypes::series::SeriesOrdering;
 use datatypes::series::time::EvalGrid;
+use datatypes::series::{MetricName, SeriesOrdering};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The header line of every tree.
@@ -102,6 +104,33 @@ fn describe(node: &NativeNode) -> String {
             let ops: Vec<String> = op.ops.iter().map(math_op).collect();
             ops.join(", ")
         }
+        NativeExpr::Vector { op, .. } => match op {
+            BoundVectorOp::TopK { k, top, group } => format!(
+                "{} {k} {}",
+                if *top { "topk" } else { "bottomk" },
+                grouping(group)
+            ),
+            BoundVectorOp::LimitK { k, group } => format!("limitk {k} {}", grouping(group)),
+            BoundVectorOp::LimitRatio { ratio } => format!("limit_ratio {ratio}"),
+            BoundVectorOp::Sort(order) => match order {
+                SortOrder::Asc => "sort".to_string(),
+                SortOrder::Desc => "sort_desc".to_string(),
+                SortOrder::ByLabel(labels) => format!("sort_by_label [{}]", label_list(labels)),
+                SortOrder::ByLabelDesc(labels) => {
+                    format!("sort_by_label_desc [{}]", label_list(labels))
+                }
+            },
+            BoundVectorOp::Absent { labels } => format!("absent {{{}}}", label_pairs(labels)),
+            BoundVectorOp::Histogram(HistogramFunction::Quantile(quantile)) => {
+                format!("histogram_quantile {quantile}")
+            }
+            BoundVectorOp::Histogram(HistogramFunction::Fraction { lower, upper }) => {
+                format!("histogram_fraction {lower} {upper}")
+            }
+            BoundVectorOp::CountValues { label, group } => {
+                format!("count_values {label:?} {}", grouping(group))
+            }
+        },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} [{}] {}",
             aggregate_kind(op.kind),
@@ -243,6 +272,7 @@ fn math_op(op: &MathOp) -> String {
         MathOp::Clamp { min, max } => format!("clamp {min} {max}"),
         MathOp::ClampMin { min } => format!("clamp_min {min}"),
         MathOp::ClampMax { max } => format!("clamp_max {max}"),
+        MathOp::Date(function) => function.name().to_string(),
     }
 }
 
@@ -265,6 +295,30 @@ fn binary_op(op: BinaryOp) -> &'static str {
     }
 }
 
+/// The labels of `metric` as `name="value"` pairs, the metric name first.
+fn label_pairs(metric: &MetricName) -> String {
+    metric
+        .name()
+        .map(|name| format!("__name__={name:?}"))
+        .into_iter()
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={:?}", tag.name, tag.value)),
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A grouping as `by [labels]` or `without [labels]`.
+fn grouping(group: &Grouping) -> String {
+    match group {
+        Grouping::By(labels) => format!("by [{}]", label_list(labels)),
+        Grouping::Without(labels) => format!("without [{}]", label_list(labels)),
+    }
+}
+
 /// What kind of node this is, as its line names it.
 fn kind(expr: &NativeExpr) -> &'static str {
     match expr {
@@ -274,6 +328,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Aggregate { .. } => "Aggregate",
+        NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
     }
 }
