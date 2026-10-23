@@ -41,6 +41,47 @@ pub use self::timestamp::timestamp_scalar_value;
 use crate::error::{Result, ToArrowScalarSnafu};
 use crate::filter::predicate::SimplePredicate;
 
+/// Conservative pruning over partially known metadata. Each scan stage supplies
+/// only the columns it knows; missing columns and unsupported predicates cannot
+/// exclude a candidate. Complete SQL predicates must still run after pruning.
+#[derive(Debug, Clone, Default)]
+pub struct PruningFilter {
+    filters: Arc<[SimpleFilterEvaluator]>,
+}
+
+impl PruningFilter {
+    /// Compiles supported conjuncts once for reuse across scan stages. OR is
+    /// never split: an unknown alternative might match the candidate.
+    pub fn new(expressions: &[Expr]) -> Self {
+        fn compile(expr: &Expr, filters: &mut Vec<SimpleFilterEvaluator>) {
+            if let Expr::BinaryExpr(binary) = expr
+                && binary.op == Operator::And
+            {
+                compile(&binary.left, filters);
+                compile(&binary.right, filters);
+            } else if let Some(filter) = SimpleFilterEvaluator::try_new(expr) {
+                filters.push(filter);
+            }
+        }
+        let mut filters = Vec::new();
+        for expression in expressions {
+            compile(expression, &mut filters);
+        }
+        Self {
+            filters: filters.into(),
+        }
+    }
+
+    /// Returns false only when known metadata proves a conjunct cannot match.
+    /// `None` means unavailable metadata, distinct from a known SQL NULL scalar.
+    pub fn matches(&self, mut value: impl FnMut(&str) -> Option<ScalarValue>) -> bool {
+        self.filters.iter().all(|filter| {
+            value(filter.column_name())
+                .is_none_or(|value| filter.evaluate_scalar(&value).unwrap_or(true))
+        })
+    }
+}
+
 /// Evaluates supported single-column predicates with precompiled regular expressions.
 /// Compound predicates preserve SQL null semantics until conversion to a scan mask.
 #[derive(Debug, Clone)]

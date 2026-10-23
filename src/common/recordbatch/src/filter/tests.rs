@@ -70,3 +70,40 @@ fn test_nullable_boolean_predicate_becomes_scan_mask() {
         boolean_array_to_scan_mask(&predicate)
     );
 }
+
+#[test]
+fn test_pruning_filter_partial_metadata() {
+    use datafusion_common::ScalarValue;
+
+    use crate::filter::PruningFilter;
+
+    let node = col("node_id").eq(lit(7u64));
+    let path = col("file_path").eq(lit("table/region/file.parquet"));
+    let filters = PruningFilter::new(&[node.clone().and(path.clone())]);
+    assert!(!filters.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(8)))));
+    assert!(filters.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(7)))));
+    assert!(!filters.matches(|name| {
+        (name == "file_path").then(|| ScalarValue::Utf8(Some("other/file.parquet".into())))
+    }));
+    assert!(filters.matches(|name| {
+        (name == "file_path").then(|| ScalarValue::Utf8(Some("table/region/file.parquet".into())))
+    }));
+    // Unknown alternatives cannot be discarded from OR, nor extracted from NOT.
+    let disjunction = PruningFilter::new(&[node.clone().or(path.clone())]);
+    assert!(
+        disjunction.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(8))))
+    );
+    let negation = PruningFilter::new(&[datafusion::logical_expr::Expr::Not(Box::new(
+        node.and(path),
+    ))]);
+    assert!(negation.matches(|_| None));
+    // Unsupported LIKE remains a residual even when its column is available.
+    let residual = PruningFilter::new(&[col("file_path").like(lit("table/%"))]);
+    assert!(residual.matches(|_| Some(ScalarValue::Utf8(Some("other/file".into())))));
+    // Missing metadata differs from known NULL; type errors conservatively pass.
+    let null_filter = PruningFilter::new(&[col("node_id").is_not_null()]);
+    assert!(null_filter.matches(|_| None));
+    assert!(!null_filter.matches(|_| Some(ScalarValue::UInt64(None))));
+    let typed = PruningFilter::new(&[col("node_id").eq(lit(7u64))]);
+    assert!(typed.matches(|_| Some(ScalarValue::Utf8(Some("invalid".into())))));
+}
