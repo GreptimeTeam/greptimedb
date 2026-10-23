@@ -30,7 +30,7 @@ use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, RowCursor, SampleRef, Series, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRunPair, GridSpan, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 use crate::grid_series::{GridSample, GridSeriesBuilder, METADATA_LABELS, external, owned};
 use crate::histogram_eval::float_histogram::FloatHistogram;
@@ -306,7 +306,7 @@ const SORT_ROW_BYTES: usize =
 
 /// One row of the merge's table, charged the same way.
 const MERGE_SLOT_BYTES: usize =
-    2 * std::mem::size_of::<(GroupKey, (MetricName, Vec<(usize, usize, GridSample)>))>();
+    2 * std::mem::size_of::<(GroupKey, (SeriesLabels, Vec<(usize, usize, GridSample)>))>();
 
 /// One row of the builder's histogram table: the scalar columns and the seven list offsets.
 const HISTOGRAM_ROW_BYTES: usize = 4 * std::mem::size_of::<f64>()
@@ -462,7 +462,7 @@ fn field_metadata_bytes(
 
 /// The series of `operand` with the most labels: the widest label set one pairing of its field can
 /// build.
-fn widest_metric<'a>(operand: &'a Operand<'_>) -> Option<&'a MetricName> {
+fn widest_metric<'a>(operand: &'a Operand<'_>) -> Option<&'a SeriesLabels> {
     operand
         .series
         .iter()
@@ -482,8 +482,8 @@ fn widest_metric<'a>(operand: &'a Operand<'_>) -> Option<&'a MetricName> {
 /// it, and a pairing whose axes share no position still pays it, because the label set is built
 /// before the axes are intersected.
 fn pair_bytes(
-    many: &MetricName,
-    one: &MetricName,
+    many: &SeriesLabels,
+    one: &SeriesLabels,
     matching: &BinaryMatching,
     include: &[Arc<str>],
 ) -> usize {
@@ -516,8 +516,8 @@ fn pair_bytes(
 }
 
 /// The label text `result_metric` copies from the one side: the value of every included label it
-/// sets, and the name of a label it inserts, since `MetricName::set` copies that as well.
-fn copied_bytes(one: &MetricName, include: &[Arc<str>]) -> usize {
+/// sets, and the name of a label it inserts, since `SeriesLabels::set` copies that as well.
+fn copied_bytes(one: &SeriesLabels, include: &[Arc<str>]) -> usize {
     include
         .iter()
         .fold(0usize, |bytes, name| match one.get(name) {
@@ -530,7 +530,7 @@ fn copied_bytes(one: &MetricName, include: &[Arc<str>]) -> usize {
 
 /// The key `key_of` files a result label set under: every label with a value and the name, each
 /// charged twice for the growth of the key's `Vec`, plus the name string it copies.
-fn result_key_bytes(metric: &MetricName) -> usize {
+fn result_key_bytes(metric: &SeriesLabels) -> usize {
     metric
         .tags()
         .len()
@@ -541,7 +541,7 @@ fn result_key_bytes(metric: &MetricName) -> usize {
 
 /// The bytes one result label set keeps once a row is filed under it: the label list and the
 /// copied strings `result_metric` leaves behind, its key and its entry in the result table.
-fn result_set_bytes(metric: &MetricName, one: &MetricName, include: &[Arc<str>]) -> usize {
+fn result_set_bytes(metric: &SeriesLabels, one: &SeriesLabels, include: &[Arc<str>]) -> usize {
     metric
         .tags()
         .len()
@@ -592,7 +592,7 @@ fn merge_bytes(
 /// `group_key` copies an `on(...)` value with `Arc::from` and shares the `Arc` of an
 /// `ignoring(...)` label, so only `on(...)` adds string bytes. The pairs are charged twice because
 /// the key is collected into a `Vec` that grows by doubling.
-fn match_key_bytes(metric: &MetricName, labels: &MatchingLabels) -> usize {
+fn match_key_bytes(metric: &SeriesLabels, labels: &MatchingLabels) -> usize {
     match labels {
         MatchingLabels::On(names) => {
             names
@@ -615,7 +615,7 @@ fn match_key_bytes(metric: &MetricName, labels: &MatchingLabels) -> usize {
 
 /// The bytes `render` writes for a label set built from `metric`: each label as `name="value"`,
 /// the braces and separators between them, and the metric's name.
-fn label_text_bytes(metric: &MetricName) -> usize {
+fn label_text_bytes(metric: &SeriesLabels) -> usize {
     let named = metric
         .name()
         .map_or(0, |name| name.len().saturating_add(10));
@@ -1040,7 +1040,7 @@ impl Pairs<'_> {
     fn apply(
         &mut self,
         group: usize,
-        metric: &MetricName,
+        metric: &SeriesLabels,
         point: usize,
         many_value: SampleRef<'_>,
         one_value: SampleRef<'_>,
@@ -1101,7 +1101,7 @@ impl Pairs<'_> {
 }
 
 /// The labels Prometheus gives a fill sample: the match group of the sample it pairs with.
-fn metric_of(key: &GroupKey) -> Result<MetricName> {
+fn metric_of(key: &GroupKey) -> Result<SeriesLabels> {
     let mut name = None;
     let mut labels = Vec::with_capacity(key.len());
     for (label, value) in key {
@@ -1114,7 +1114,7 @@ fn metric_of(key: &GroupKey) -> Result<MetricName> {
             });
         }
     }
-    MetricName::try_new(name, labels).map_err(external)
+    SeriesLabels::try_new(name, labels).map_err(external)
 }
 
 fn earliest_error(errors: Vec<(usize, u8, String)>) -> Result<()> {
@@ -1250,7 +1250,7 @@ fn merge_fields(
         budget.phase(merge_bytes(merge.0, sets, width, merge.1, merge.2))?;
     }
     // Per label set: the metric and its `(point, field, value)` samples.
-    type Merged = (MetricName, Vec<(usize, usize, GridSample)>);
+    type Merged = (SeriesLabels, Vec<(usize, usize, GridSample)>);
     let mut merged: HashMap<GroupKey, Merged> = HashMap::new();
     for (field, results) in fields.into_iter().enumerate() {
         for (key, rows) in results.series {
@@ -1325,7 +1325,7 @@ fn same_grid(lhs: &SeriesSchema, rhs: &SeriesSchema) -> Result<Arc<EvalGrid>> {
 /// Prometheus.
 type GroupKey = Vec<(Arc<str>, Arc<str>)>;
 
-fn group_key(metric: &MetricName, labels: &MatchingLabels) -> GroupKey {
+fn group_key(metric: &SeriesLabels, labels: &MatchingLabels) -> GroupKey {
     let mut key: GroupKey = match labels {
         MatchingLabels::On(names) => names
             .iter()
@@ -1346,7 +1346,7 @@ fn group_key(metric: &MetricName, labels: &MatchingLabels) -> GroupKey {
     key
 }
 
-fn key_of(metric: &MetricName) -> GroupKey {
+fn key_of(metric: &SeriesLabels) -> GroupKey {
     let mut key = group_key(metric, &MatchingLabels::Ignoring(Vec::new()));
     if let Some(name) = metric.name() {
         key.insert(0, (Arc::from("__name__"), Arc::from(name)));
@@ -1424,12 +1424,12 @@ fn overlap(
 }
 
 fn result_metric(
-    many: &MetricName,
-    one: &MetricName,
+    many: &SeriesLabels,
+    one: &SeriesLabels,
     matching: &BinaryMatching,
     include: &[Arc<str>],
     drop_name: bool,
-) -> Result<MetricName> {
+) -> Result<SeriesLabels> {
     let mut metric = many.clone();
     if drop_name {
         metric.remove_all(&METADATA_LABELS);
@@ -1675,7 +1675,7 @@ struct Results {
 /// Rows in arrival order: their points, the match group each came from, and their values;
 /// `None` is a match the operator filtered.
 struct ResultRows {
-    metric: MetricName,
+    metric: SeriesLabels,
     points: Vec<usize>,
     groups: Vec<usize>,
     values: Vec<Option<GridSample>>,
@@ -1707,7 +1707,7 @@ impl Results {
     /// payload is charged here, where the value is retained, and never per grid point of a float.
     fn insert(
         &mut self,
-        metric: &MetricName,
+        metric: &SeriesLabels,
         group: usize,
         point: usize,
         value: Option<GridSample>,

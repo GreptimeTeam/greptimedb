@@ -64,7 +64,7 @@ use datatypes::series::frame::{RawLabelMode, pack_raw_series_chunk, raw_series_f
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
@@ -669,7 +669,7 @@ fn no_values(rows: &[(i64, f64)]) -> Vec<Option<f64>> {
 fn chunk_of(
     schema: &SeriesSchema,
     key: &str,
-    metric: MetricName,
+    metric: SeriesLabels,
     times: &[i64],
     values: Vec<Vec<Option<f64>>>,
     last: bool,
@@ -712,8 +712,8 @@ fn series_chunk(host: &str, rows: &[(i64, f64)], last: bool) -> RawSeriesChunk {
 }
 
 /// The metric these tests read, with `labels` on it and the name given.
-fn metric(labels: &[(&str, &str)], name: Option<&str>) -> MetricName {
-    MetricName::try_new(
+fn metric(labels: &[(&str, &str)], name: Option<&str>) -> SeriesLabels {
+    SeriesLabels::try_new(
         name.map(Arc::from),
         labels
             .iter()
@@ -1688,7 +1688,7 @@ fn a_chunk_of_several_runs_converts_its_own_rows_only() {
     .expect("the spans are increasing and inside the grid");
     let chunk = EvaluatedChunk::try_new(
         Series {
-            metric: MetricName::try_new(Some(Arc::from(METRIC)), Vec::new())
+            metric: SeriesLabels::try_new(Some(Arc::from(METRIC)), Vec::new())
                 .expect("one metric name is a legal identity"),
             time: axis,
             fields: SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
@@ -2405,7 +2405,7 @@ fn a_claim_compares_label_sets_without_empty_values() {
     labels.attach(&pool);
     let axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 5)])
         .expect("one run over the whole grid");
-    let series_of = |metric: MetricName| Series {
+    let series_of = |metric: SeriesLabels| Series {
         metric,
         time: axis.clone(),
         fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; 5]))),

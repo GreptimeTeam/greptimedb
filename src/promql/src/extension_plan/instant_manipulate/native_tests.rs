@@ -23,7 +23,7 @@ use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datatypes::arrow::buffer::ScalarBuffer;
 use datatypes::series::raw::RawTimestamps;
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 use super::*;
 
@@ -72,7 +72,7 @@ fn series_schema() -> Arc<SeriesSchema> {
     })
 }
 
-fn metric(zone: Option<&str>) -> MetricName {
+fn metric(zone: Option<&str>) -> SeriesLabels {
     let labels = zone
         .map(|value| {
             vec![Label {
@@ -81,7 +81,7 @@ fn metric(zone: Option<&str>) -> MetricName {
             }]
         })
         .unwrap_or_default();
-    MetricName::try_new(None, labels).unwrap()
+    SeriesLabels::try_new(None, labels).unwrap()
 }
 
 /// The ordered, deliberately non-lexical field names of the multifloat regression.

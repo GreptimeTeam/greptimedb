@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use super::{Label, MetricName};
+use super::{Label, SeriesLabels};
 
 fn label(name: &str, value: &str) -> Label {
     Label {
@@ -25,7 +25,7 @@ fn label(name: &str, value: &str) -> Label {
 
 #[test]
 fn metric_name_sorts_labels_and_rejects_ambiguous_identity() {
-    let metric = MetricName::try_new(
+    let metric = SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![label("zone", "west"), label("host", "node-1")],
     )
@@ -34,18 +34,18 @@ fn metric_name_sorts_labels_and_rejects_ambiguous_identity() {
     assert_eq!(metric.tags()[0].name.as_ref(), "host");
     assert_eq!(metric.tags()[1].name.as_ref(), "zone");
 
-    assert!(MetricName::try_new(None, vec![label("x", "1"), label("x", "2")]).is_err());
-    assert!(MetricName::try_new(None, vec![label("__name__", "cpu")]).is_err());
+    assert!(SeriesLabels::try_new(None, vec![label("x", "1"), label("x", "2")]).is_err());
+    assert!(SeriesLabels::try_new(None, vec![label("__name__", "cpu")]).is_err());
 }
 
 #[test]
 fn metric_identity_uses_contents_and_distinguishes_absent_from_empty() {
-    let one = MetricName::try_new(
+    let one = SeriesLabels::try_new(
         Some(Arc::from(String::from("cpu"))),
         vec![label("empty", ""), label("host", "a")],
     )
     .unwrap();
-    let same = MetricName::try_new(
+    let same = SeriesLabels::try_new(
         Some(Arc::from(String::from("cpu"))),
         vec![label("host", "a"), label("empty", "")],
     )
@@ -58,7 +58,7 @@ fn metric_identity_uses_contents_and_distinguishes_absent_from_empty() {
 
 #[test]
 fn metric_name_edits_retain_shared_labels_and_labels_are_copy_on_write() {
-    let mut metric = MetricName::try_new(
+    let mut metric = SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![label("host", "a"), label("zone", "west")],
     )
@@ -89,7 +89,7 @@ fn metric_name_edits_retain_shared_labels_and_labels_are_copy_on_write() {
 
 #[test]
 fn keep_only_and_remove_all_handle_metric_name_and_ordinary_labels() {
-    let mut metric = MetricName::try_new(
+    let mut metric = SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![label("host", "a"), label("zone", "west")],
     )

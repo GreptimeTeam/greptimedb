@@ -19,7 +19,7 @@ use arrow::compute::concat;
 use snafu::OptionExt;
 
 use crate::error::{InvalidSeriesSnafu, Result};
-use crate::series::MetricName;
+use crate::series::SeriesLabels;
 use crate::series::histogram::{HistogramBatch, HistogramView};
 use crate::series::time::{EvalGrid, TimeAxis};
 
@@ -678,7 +678,7 @@ pub struct SeriesSchema {
 /// A validated metric, time axis, and aligned fields.
 #[derive(Clone, Debug)]
 pub struct Series {
-    pub metric: MetricName,
+    pub metric: SeriesLabels,
     pub time: TimeAxis,
     pub fields: SeriesFields,
 }
@@ -686,7 +686,7 @@ impl Series {
     /// Construct after validating schema, field lengths, and strictly increasing timestamps.
     pub fn try_new(
         schema: &SeriesSchema,
-        metric: MetricName,
+        metric: SeriesLabels,
         time: TimeAxis,
         fields: SeriesFields,
     ) -> Result<Self> {

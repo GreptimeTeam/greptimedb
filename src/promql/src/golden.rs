@@ -21,7 +21,7 @@ use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 
 type Points = Vec<(usize, f64)>;
 
@@ -31,7 +31,7 @@ pub(crate) struct Case {
     pub(crate) schema: Arc<SeriesSchema>,
     pub(crate) series: Vec<Series>,
     pub(crate) scalar: Option<Series>,
-    pub(crate) result: Vec<(MetricName, Points)>,
+    pub(crate) result: Vec<(SeriesLabels, Points)>,
 }
 
 /// Parses a fixture of `case`/`expr`/`grid`/`series`/`scalar`/`result`/`end` blocks.
@@ -94,7 +94,7 @@ pub(crate) fn cases(text: &str) -> Vec<Case> {
     cases
 }
 
-fn parse_metric(labels: &str) -> MetricName {
+fn parse_metric(labels: &str) -> SeriesLabels {
     let mut name = None;
     let mut tags = Vec::new();
     for label in labels
@@ -111,7 +111,7 @@ fn parse_metric(labels: &str) -> MetricName {
             });
         }
     }
-    MetricName::try_new(name, tags).unwrap()
+    SeriesLabels::try_new(name, tags).unwrap()
 }
 
 fn parse_points(points: &str) -> Points {
@@ -132,7 +132,7 @@ pub(crate) fn hex(bits: &str) -> f64 {
 }
 
 /// Builds the trimmed series Eval produces: from the first to the last point, nulls between.
-fn grid_series(schema: &SeriesSchema, metric: MetricName, points: &Points) -> Option<Series> {
+fn grid_series(schema: &SeriesSchema, metric: SeriesLabels, points: &Points) -> Option<Series> {
     let (&(start, _), &(last, _)) = points.first().zip(points.last())?;
     let mut values = vec![None; last - start + 1];
     for &(index, value) in points {
@@ -329,7 +329,7 @@ pub(crate) fn close(a: f64, b: f64) -> bool {
 /// A label set as name/value pairs, the way the fixtures name one.
 type LabelKey = Vec<(String, String)>;
 
-fn label_key(metric: &MetricName) -> LabelKey {
+fn label_key(metric: &SeriesLabels) -> LabelKey {
     let mut key = metric
         .tags()
         .iter()

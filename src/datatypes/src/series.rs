@@ -55,14 +55,20 @@ pub struct Label {
     pub value: Arc<str>,
 }
 
-/// A metric name and its name-sorted ordinary labels.
+/// The PromQL-visible labels of one series: an optional metric name (`__name__`)
+/// plus its name-sorted ordinary labels.
+///
+/// The metric name is only the `__name__` value (see [`Self::name`]); this type is
+/// the whole label set a PromQL series shows. It is neither a canonical
+/// matching/grouping identity (matching drops `__name__` and compares the remaining
+/// labels canonically) nor a storage identity (read key / primary key).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MetricName {
+pub struct SeriesLabels {
     name: Option<Arc<str>>,
     tags: Arc<[Label]>,
 }
 
-impl MetricName {
+impl SeriesLabels {
     /// Creates a metric name, sorting labels and rejecting duplicates or `__name__` tags.
     pub fn try_new(name: Option<Arc<str>>, mut tags: Vec<Label>) -> Result<Self> {
         tags.sort_unstable_by(|a, b| a.name.cmp(&b.name));

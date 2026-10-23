@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::arrow::array::Float64Array;
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::{GridSpan, TimeAxis};
 
@@ -506,7 +506,7 @@ pub fn aggregate_quantile(
         .collect();
     // Members keep input order, the order Prometheus appends to its per-step heap.
     let mut group_index = HashMap::new();
-    let mut groups: Vec<(MetricName, Vec<&Series>)> = Vec::new();
+    let mut groups: Vec<(SeriesLabels, Vec<&Series>)> = Vec::new();
     for series in input {
         let metric = grouping.apply(&series.metric)?;
         let index = *group_index.entry(label_key(&metric)).or_insert_with(|| {
@@ -670,7 +670,7 @@ pub fn count_values(
 }
 
 /// Counts per point and field: one series per label set, a count of 0 being no sample.
-type Counts = Vec<(MetricName, BTreeMap<usize, Vec<f64>>)>;
+type Counts = Vec<(SeriesLabels, BTreeMap<usize, Vec<f64>>)>;
 
 fn count_series(schema: &Arc<SeriesSchema>, groups: Counts) -> Result<Vec<Series>> {
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
@@ -729,7 +729,7 @@ impl Grouping<'_> {
     }
 
     /// Prometheus `generateGroupingLabels`; empty values are dropped as absent labels.
-    fn apply(self, input: &MetricName) -> Result<MetricName> {
+    fn apply(self, input: &SeriesLabels) -> Result<SeriesLabels> {
         let mut metric = input.clone();
         match self {
             Self::By(labels) => metric.keep_only(labels),
@@ -744,7 +744,7 @@ impl Grouping<'_> {
 
 type LabelKey = Vec<(Arc<str>, Arc<str>)>;
 
-fn metric_bytes(metric: &MetricName) -> usize {
+fn metric_bytes(metric: &SeriesLabels) -> usize {
     metric
         .name()
         .map_or(0, str::len)
@@ -761,10 +761,10 @@ fn metric_bytes(metric: &MetricName) -> usize {
                 .len()
                 .saturating_mul(std::mem::size_of::<(Arc<str>, Arc<str>)>()),
         )
-        .saturating_add(std::mem::size_of::<MetricName>())
+        .saturating_add(std::mem::size_of::<SeriesLabels>())
 }
 
-fn grouping_workspace_bytes(metric: &MetricName) -> usize {
+fn grouping_workspace_bytes(metric: &SeriesLabels) -> usize {
     metric_bytes(metric)
         .saturating_add(
             metric
@@ -843,7 +843,7 @@ fn grouping_bytes(grouping: Grouping<'_>) -> usize {
         .sum::<usize>()
 }
 
-fn label_key(metric: &MetricName) -> LabelKey {
+fn label_key(metric: &SeriesLabels) -> LabelKey {
     let mut labels = Vec::with_capacity(metric.tags().len() + 1);
     if let Some(name) = metric.name() {
         labels.push((Arc::from("__name__"), Arc::from(name)));
@@ -862,7 +862,7 @@ fn label_key(metric: &MetricName) -> LabelKey {
 const BLOCK_POINTS: usize = 64;
 
 struct Group {
-    metric: MetricName,
+    metric: SeriesLabels,
     /// Keyed by absolute grid index / `BLOCK_POINTS`; each block holds one state per field for
     /// each of its points, point by point.
     blocks: BTreeMap<usize, Box<[FloatState]>>,
