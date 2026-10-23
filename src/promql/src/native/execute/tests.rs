@@ -172,6 +172,7 @@ fn window_with(
                     range_ms,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid,
                 output_grid: Arc::clone(&output_grid),
@@ -195,6 +196,7 @@ fn window_over_fields(count: usize, output_grid: Arc<EvalGrid>) -> NativeNode {
                     range_ms: 1,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(&output_grid),
@@ -833,6 +835,7 @@ fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
             range_ms: 300_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -947,6 +950,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 120_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -976,6 +980,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 240_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )

@@ -946,6 +946,7 @@ fn window_selection(
                     range_ms,
                     offset_ms,
                     anchor_ms,
+                    modifier: None,
                 },
                 // The input is raw samples, so it has no grid of its own.
                 input_grid: None,
@@ -1024,6 +1025,7 @@ fn subquery_window(
         range_ms,
         offset_ms,
         anchor_ms,
+        modifier: None,
     };
     let child_spec = subquery_grid(context.grid.spec(), window, step_ms)?.ok_or_else(|| {
         not_implemented(&format!(

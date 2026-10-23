@@ -196,9 +196,13 @@ fn aggregate_kind(kind: AggregateKind) -> String {
 /// A window: what it runs, over which range, and where it lands.
 fn window(op: &BoundWindow) -> String {
     format!(
-        "{} [{}ms] offset {} anchor {} on grid {}",
+        "{} [{}ms]{} offset {} anchor {} on grid {}",
         function(op.function),
         op.window.range_ms,
+        match op.window.modifier {
+            Some(modifier) => format!(" {} lookback {}ms", modifier.name(), modifier.before_ms()),
+            None => String::new(),
+        },
         op.window.offset_ms,
         match op.window.anchor_ms {
             Some(anchor_ms) => anchor_ms.to_string(),
