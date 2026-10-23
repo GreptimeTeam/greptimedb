@@ -497,7 +497,9 @@ mod test {
     use datatypes::schema::ColumnSchema;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RangeManipulate};
+    use promql::extension_plan::{
+        FusedOutputFormat, FusedSeries, FusedSeriesBinding, RangeManipulate,
+    };
     use promql_parser::parser;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -1614,6 +1616,7 @@ mod test {
                     binding,
                     input,
                     output_schema,
+                    FusedOutputFormat::PlainRows,
                 )
                 .unwrap(),
             ),

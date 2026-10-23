@@ -31,7 +31,10 @@
 //! chunk, carrying the series' encoded key, its finality, its timestamps and its fields, plus the
 //! complete labels when the frame is explicit — with each series' rows contiguous and its
 //! timestamps ascending, which is what the caller's [`SeriesOrdering`] names. The output is one
-//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column.
+//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column -
+//! unless the plan was built for [`FusedOutputFormat::SeriesFrame`], which hands the same evaluated
+//! chunks over as the unified series frame instead of flattening them into rows. Which of the two a
+//! node answers in is fixed by the plan, not by the run.
 //! Everything the tree cannot do is rejected when the execution plan is built, not when the first
 //! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
 //! was not compiled against, or an output schema the conversion cannot classify.
@@ -45,15 +48,17 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
+use common_query::series_frame::{
+    ensure_frame_matches_label_source, pack_evaluated_series, unpack_raw_series,
+};
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{
@@ -68,6 +73,7 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{FrameLabelMode, SeriesFrameBuilder, SeriesFrameCursor};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::EvalGrid;
@@ -78,7 +84,7 @@ use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{self, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::plan::{NativeExpr, NativeTree, NativeType};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
@@ -97,6 +103,86 @@ const METRIC_NAME: &str = "__name__";
 /// for. The budget makes that a poll that yields instead, and the waker makes sure it is polled
 /// again, so nothing is lost by stopping early.
 const POLL_BUDGET: usize = 64;
+
+/// The two formats this node hands its answer over in, fixed when the plan is built.
+///
+/// The choice is part of the plan rather than of the run: it decides the node's output schema, so it
+/// has to be part of the node's identity, its `EXPLAIN` text and its equality with another node -
+/// two plans that answer the same rows in different formats are not the same plan.
+///
+/// [`PlainRows`](Self::PlainRows) is the row table a query returns: the grid timestamps, one column
+/// per series field and one per declared tag. [`SeriesFrame`](Self::SeriesFrame) is the unified
+/// evaluated series frame ([`datatypes::series::frame`]), which keeps each series' labels and its
+/// sparse grid positions instead of flattening them into rows. The row table is what production
+/// queries use; the frame exists for a consumer that needs to tell series and positions apart, and
+/// is not reachable from a query yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FusedOutputFormat {
+    /// One row per carried grid position: the timestamps, the fields and the declared tags.
+    PlainRows,
+    /// One evaluated series frame batch per bounded group of chunks, per series.
+    SeriesFrame,
+}
+
+impl FusedOutputFormat {
+    /// How `EXPLAIN` spells this format, when the text has to say more than the query.
+    const fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::PlainRows => None,
+            Self::SeriesFrame => Some("series_frame"),
+        }
+    }
+}
+
+/// The evaluated schema of the tree's output, which a [`FusedOutputFormat::SeriesFrame`] output is
+/// encoded from.
+///
+/// The tree's own root is the authority on it, not the schema the input was scanned with and not the
+/// tags the binding declares: a label rewrite or an aggregate changes what the result names, and a
+/// frame that carried the input's schema would describe a series that no longer exists.
+///
+/// Only samples on an evaluation grid can be framed. Aggregate state is a contribution to a later
+/// merge rather than a value, and a scalar has no series to name, so neither can be written as the
+/// float samples an evaluated frame carries; the refusal happens while the plan is built, so a plan
+/// that is built is a plan that runs.
+fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
+    match &tree.root().output {
+        NativeType::Samples(schema) if schema.eval_grid.is_some() => Ok(Arc::clone(schema)),
+        NativeType::Samples(_) => Err(DataFusionError::Plan(
+            "FusedSeries cannot output a series frame of a tree whose output is raw samples: an \
+             evaluated frame carries positions on the statement's grid"
+                .to_string(),
+        )),
+        NativeType::AggregateState(_) => Err(DataFusionError::Plan(
+            "FusedSeries cannot output a series frame of a tree whose root is aggregate state: \
+             partial state is a contribution to a later merge, not a value, and writing it as \
+             evaluated float samples would disguise it as one"
+                .to_string(),
+        )),
+        NativeType::Scalar(_) => Err(DataFusionError::Plan(
+            "FusedSeries cannot output a series frame of a tree whose root is a scalar: a scalar \
+             has no series to name, so it cannot be written as evaluated float samples"
+                .to_string(),
+        )),
+    }
+}
+
+/// The schema a [`FusedOutputFormat::SeriesFrame`] output declares for `schema`.
+///
+/// It is the codec's own declaration of an evaluated frame - the layout, the grid metadata and the
+/// ordering it promises - asked for rather than spelled a second time here: packing an empty stream
+/// is how this layer reads that declaration back, and nothing about it is derived from the input or
+/// from the binding.
+fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
+    let declared =
+        pack_evaluated_series(Box::pin(futures::stream::empty()), Arc::new(schema.clone()))
+            .map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "FusedSeries cannot declare a series frame output: {error}"
+                ))
+            })?;
+    Ok(declared.schema())
+}
 
 /// What the tree's input was compiled against, and how its output columns are named.
 ///
@@ -123,12 +209,15 @@ pub struct FusedSeriesBinding {
     /// the output has to be able to tell that a range function dropped the name, which needs a name
     /// to drop. The physical node takes the names from the frames, which carry each series' own.
     pub metric_name: Option<Arc<str>>,
-    /// The output column holding the grid timestamps.
+    /// The output column holding the grid timestamps, in a row-table output.
     pub time_index: String,
     /// The logical tag names the output carries, read from each series' labels.
     ///
     /// [`METRIC_NAME`] is special: it is resolved to the series' metric name instead of a column,
-    /// which is how a reader sees that a range function dropped it.
+    /// which is how a reader sees that a range function dropped it. A series frame carries the
+    /// complete labels of each series rather than these columns, so it reads neither this list nor
+    /// [`time_index`](Self::time_index); both stay on the binding because a plan that has not fixed
+    /// its format yet still has to describe the row table it could answer in.
     pub tags: Vec<String>,
 }
 
@@ -231,8 +320,10 @@ pub struct FusedSeries {
     binding: FusedSeriesBinding,
     /// The plan producing the input series.
     input: LogicalPlan,
-    /// The columns this node produces.
+    /// The columns this node produces, in the shape [`format`](Self::format) asks for.
     output_schema: DFSchemaRef,
+    /// Which of the two formats this node answers in, fixed when the plan is built.
+    format: FusedOutputFormat,
 }
 
 impl FusedSeries {
@@ -242,13 +333,27 @@ impl FusedSeries {
     }
 
     /// Creates the node, checking that `tree` is legal against `binding`.
+    ///
+    /// `output_schema` is the row table the node answers in, and is what
+    /// [`format`](FusedOutputFormat::PlainRows) declares. A
+    /// [`SeriesFrame`](FusedOutputFormat::SeriesFrame) output has no rows to describe, so its
+    /// schema is the codec's own declaration for the tree's evaluated output and is derived here;
+    /// a tree whose root the frame cannot carry is refused now, while the plan is built.
     pub fn try_new(
         promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
         input: LogicalPlan,
         output_schema: DFSchemaRef,
+        format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
+        let output_schema = match format {
+            FusedOutputFormat::PlainRows => output_schema,
+            FusedOutputFormat::SeriesFrame => {
+                let schema = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+                Arc::new(DFSchema::try_from(schema)?)
+            }
+        };
         validate_binding(&tree, &binding)?;
         Ok(Self {
             promql,
@@ -256,7 +361,13 @@ impl FusedSeries {
             binding,
             input,
             output_schema,
+            format,
         })
+    }
+
+    /// Which format this node answers in.
+    pub fn format(&self) -> FusedOutputFormat {
+        self.format
     }
 
     /// The PromQL text this node was compiled from.
@@ -298,6 +409,7 @@ impl FusedSeries {
             output_schema,
             self.binding.time_index.clone(),
             self.binding.tags.clone(),
+            self.format,
         )?))
     }
 }
@@ -322,7 +434,14 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeries: {}", self.promql)
+        // The row table is what a reader expects of the node, so a plain-rows plan says nothing
+        // extra about it; a frame output is named, because the text is the only place a reader can
+        // see that the same query answers something other than rows.
+        write!(f, "FusedSeries: {}", self.promql)?;
+        if let Some(format) = self.format.as_str() {
+            write!(f, " (output: {format})")?;
+        }
+        Ok(())
     }
 
     fn with_exprs_and_inputs(
@@ -343,6 +462,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             binding: self.binding.clone(),
             input,
             output_schema: Arc::clone(&self.output_schema),
+            format: self.format,
         })
     }
 }
@@ -358,6 +478,7 @@ impl PartialEq for FusedSeries {
             && self.binding == other.binding
             && self.input == other.input
             && self.output_schema == other.output_schema
+            && self.format == other.format
     }
 }
 
@@ -369,6 +490,7 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.input.hash(state);
         self.output_schema.hash(state);
+        self.format.hash(state);
     }
 }
 
@@ -387,6 +509,12 @@ impl PartialOrd for FusedSeries {
             ord => return ord,
         }
         match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        // The format is part of what the node is, and it is cheap and total, so it is compared
+        // before the schema it decides rather than folded into the incomparable case below.
+        match self.format.partial_cmp(&other.format) {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
@@ -751,8 +879,13 @@ pub struct FusedSeriesExec {
     ordering: SeriesOrdering,
     /// The position of the tree's input node, where every raw chunk a partition reads enters.
     input_path: NodePath,
-    /// Where each output column comes from.
-    classification: Arc<[OutputColumn]>,
+    /// Which of the two formats this node answers in.
+    format: FusedOutputFormat,
+    /// Where each output column comes from, or `None` when the output is a frame.
+    ///
+    /// A frame is addressed by series and grid position rather than by column, so it has no column
+    /// to classify: the whole table below the [`FusedOutputFormat::PlainRows`] case is skipped.
+    classification: Option<Arc<[OutputColumn]>>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
     /// child without losing which column its time came from.
     time_column: String,
@@ -779,7 +912,10 @@ impl FusedSeriesExec {
     /// `input` produces native raw series frames: the series' encoded key, its finality, its
     /// timestamps and its fields, plus the complete labels when `label_source` is
     /// [`RawLabelSource::Explicit`]. `time_column` and `tags` name the columns of the output, which
-    /// is a row table rather than a frame.
+    /// is a row table rather than a frame, and are what
+    /// [`FusedOutputFormat::PlainRows`] declares. A [`FusedOutputFormat::SeriesFrame`] output
+    /// declares `output_schema` instead, which has to be the codec's own declaration for the tree's
+    /// evaluated output: a frame whose schema was assembled for another layout cannot be decoded.
     ///
     /// The parameters stay separate because each is a fact its own caller has: the query, the plan
     /// below, the frame's label binding and ordering, the tree, and the three things the output
@@ -794,7 +930,24 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
+        format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
+        // A frame output is decided first, so a tree it cannot carry is refused with what is wrong
+        // about the tree rather than with the shape of its input.
+        let frame_schema = match format {
+            FusedOutputFormat::PlainRows => None,
+            FusedOutputFormat::SeriesFrame => {
+                let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+                if declared != output_schema {
+                    return Err(DataFusionError::Plan(
+                        "FusedSeriesExec was declared a series frame output of a layout the tree's \
+                         evaluated output does not have"
+                            .to_string(),
+                    ));
+                }
+                Some(declared)
+            }
+        };
         let tree_input = tree_input(&tree)?;
         // Building a state is what proves the runtime executes this tree: a node kind it does not
         // run yet is refused here, so a plan that is built is a plan that starts. The throwaway
@@ -805,8 +958,17 @@ impl FusedSeriesExec {
             &ExecutionPlanMetricsSet::new(),
             0,
         )?;
-        let classification =
-            classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
+        let classification = match frame_schema {
+            // A frame is addressed by series and grid position, so no column of it has to be
+            // traced back to a field, a tag or the time axis.
+            Some(_) => None,
+            None => Some(Arc::from(classify_output(
+                &output_schema,
+                &tree_input.schema,
+                &tags,
+                &time_column,
+            )?)),
+        };
         // Read here rather than below, because whether the split below can happen decides whether
         // the tree shape is one this node may run at all.
         let input_properties = input.properties();
@@ -868,7 +1030,8 @@ impl FusedSeriesExec {
             label_source,
             ordering,
             input_path: tree_input.path,
-            classification: classification.into(),
+            format,
+            classification,
             time_column,
             tags: tags.into(),
             input,
@@ -894,8 +1057,15 @@ impl std::fmt::Debug for FusedSeriesExec {
 impl DisplayAs for FusedSeriesExec {
     /// The query, then the tree it compiles to: the tree is rendered by [`NativeTree`]'s own
     /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
+    ///
+    /// A frame output names its format on the node line, because that line is where a reader sees
+    /// that this plan answers something other than the rows the query asked for.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)
+        write!(f, "FusedSeriesExec: {}", self.promql)?;
+        if let Some(format) = self.format.as_str() {
+            write!(f, " (output: {format})")?;
+        }
+        write!(f, "\n{}", self.tree)
     }
 }
 
@@ -959,6 +1129,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.format,
         )?))
     }
 
@@ -990,15 +1161,39 @@ impl ExecutionPlan for FusedSeriesExec {
             &self.metric,
             partition,
         )?;
+        // A frame output is encoded from the evaluated schema the tree's root declares, which is
+        // the schema the plan was built against; a row table needs neither it nor a frame builder.
+        let (eval_schema, frame_builder) = match self.format {
+            FusedOutputFormat::PlainRows => (None, None),
+            FusedOutputFormat::SeriesFrame => {
+                let schema = evaluated_output(&self.tree)?;
+                let builder = SeriesFrameBuilder::try_new(
+                    &schema,
+                    FrameLabelMode::Explicit,
+                    None,
+                    SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+                    SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+                )
+                .map_err(|error| {
+                    DataFusionError::Plan(format!(
+                        "FusedSeriesExec cannot encode a series frame output: {error}"
+                    ))
+                })?;
+                (Some(schema), Some(builder))
+            }
+        };
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
         Ok(Box::pin(FusedSeriesStream {
             input: Some(input),
             executor: Some(NativeExecutor::new(state)),
             input_path: self.input_path.clone(),
-            classification: Arc::clone(&self.classification),
+            format: self.format,
+            classification: self.classification.clone(),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
+            eval_schema,
+            frame_builder,
             labels: Arc::clone(&self.labels),
             ready: VecDeque::new(),
             done: false,
@@ -1369,15 +1564,29 @@ pub struct FusedSeriesStream {
     executor: Option<NativeExecutor>,
     /// The position of the tree's input node, which is where every chunk read enters.
     input_path: NodePath,
-    /// Where each output column comes from.
-    classification: Arc<[OutputColumn]>,
+    /// Which of the two formats this stream yields.
+    format: FusedOutputFormat,
+    /// Where each output column comes from, in the row-table format.
+    classification: Option<Arc<[OutputColumn]>>,
     /// The tag column names, indexed by `OutputColumn::Tag`.
     tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
+    /// The evaluated schema the tree's output is on, in the frame format.
+    ///
+    /// A chunk is validated against it before it is encoded, so a chunk that does not belong to
+    /// this plan's series is refused at the chunk that reached it.
+    eval_schema: Option<Arc<SeriesSchema>>,
+    /// The frame rows buffered between batches, in the frame format.
+    ///
+    /// One builder for the whole stream, not one per chunk: a chunk that does not fill a batch's
+    /// rows or bytes leaves them buffered, and the next chunk's rows join them. The closing flush is
+    /// what hands the last buffered rows over; dropping the builder instead would drop them.
+    frame_builder: Option<SeriesFrameBuilder>,
     /// The label-set occupancy shared with the other partitions' streams.
     ///
     /// What it holds is charged to the plan's own reservation, attached by the first execution.
+    /// The frame format does not claim, so it never grows here: see [`FusedSeriesStream::convert`].
     labels: SharedLabelSets,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
@@ -1452,23 +1661,94 @@ impl FusedSeriesStream {
         // are released when the plan itself is dropped.
         // A batch queued before the error was settled by a run that has now stopped.
         self.ready.clear();
+        // Rows buffered by a frame that will not be completed belong to the run that stopped.
+        self.frame_builder = None;
     }
 
     /// Converts the chunks the executor settled into batches, in the order it produced them.
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
         for chunk in &chunks {
-            // The label set is claimed before its batch is queued, so a collision surfaces at the
-            // chunk that reached it and nothing this plan would refuse is handed out after it.
-            self.labels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .claim(&chunk.series)?;
-            let batch = series_to_record_batch(
-                &self.classification,
-                &self.tags,
-                &self.output_schema,
-                chunk,
-            )?;
+            match self.format {
+                FusedOutputFormat::PlainRows => {
+                    // The label set is claimed before its batch is queued, so a collision surfaces at
+                    // the chunk that reached it and nothing this plan would refuse is handed out
+                    // after it.
+                    self.labels
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .claim(&chunk.series)?;
+                    let classification = self.classification.as_deref().ok_or_else(|| {
+                        DataFusionError::Internal(
+                            "FusedSeriesExec stream is a row table without a column \
+                             classification"
+                                .to_string(),
+                        )
+                    })?;
+                    let batch = series_to_record_batch(
+                        classification,
+                        &self.tags,
+                        &self.output_schema,
+                        chunk,
+                    )?;
+                    self.ready.push_back(batch);
+                }
+                // A frame is an intermediate hand-over of one series' positions, not the final row
+                // table: the same label set may be filled by a later chain, and stopping that
+                // contribution here would drop values Prometheus answers with. The runtime's own
+                // `Emitted::occupy` (see `src/promql/src/native/execute.rs`) checks the conflicts
+                // this layer may not throw away, and it does not treat `is_last` as the end of a
+                // label set - only as the end of the chain that carried it - so dropping the plan
+                // level claim here cannot hide a conflict the runtime would have reported.
+                FusedOutputFormat::SeriesFrame => self.encode_frame(chunk)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Encodes one evaluated chunk into the frame the plan declared, queueing whatever is ready.
+    ///
+    /// The chunk is encoded as it stands: the axis it carries becomes the row's spans, so a sparse
+    /// chunk keeps its holes and a chunk that carries nothing but its finality still hands over the
+    /// row that closes its series.
+    fn encode_frame(&mut self, chunk: &EvaluatedChunk) -> DataFusionResult<()> {
+        let (Some(schema), Some(builder)) = (self.eval_schema.clone(), self.frame_builder.as_mut())
+        else {
+            return Err(DataFusionError::Internal(
+                "FusedSeriesExec stream is a series frame without its encoder".to_string(),
+            ));
+        };
+        let mut cursor =
+            SeriesFrameCursor::try_new_evaluated(&schema, chunk.series.clone(), chunk.is_last)
+                .map_err(|error| {
+                    DataFusionError::Execution(format!(
+                        "FusedSeriesExec cannot frame a chunk: {error}"
+                    ))
+                })?;
+        // The cursor buffers at most one row, which it retries after a flush, so a chunk whose rows
+        // cross a batch bound leaves nothing behind when the loop ends.
+        while let Some(batch) = cursor.append_to(builder).map_err(|error| {
+            DataFusionError::Execution(format!("FusedSeriesExec cannot frame a chunk: {error}"))
+        })? {
+            let batch = batch.with_schema(self.output_schema.clone())?;
+            self.ready.push_back(batch);
+        }
+        Ok(())
+    }
+
+    /// Hands the rows still buffered by the frame builder over as the last batch.
+    ///
+    /// Nothing is queued when this stream is not a frame or when nothing is buffered. A frame that
+    /// buffered rows when the execution ended would lose them by dropping the builder, so this runs
+    /// before the stream is done rather than on the way out.
+    fn flush_frames(&mut self) -> DataFusionResult<()> {
+        let Some(builder) = self.frame_builder.as_mut() else {
+            return Ok(());
+        };
+        let batch = builder.flush().map_err(|error| {
+            DataFusionError::Execution(format!("FusedSeriesExec cannot flush a frame: {error}"))
+        })?;
+        if let Some(batch) = batch {
+            let batch = batch.with_schema(self.output_schema.clone())?;
             self.ready.push_back(batch);
         }
         Ok(())
@@ -1511,6 +1791,14 @@ impl Stream for FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
+                        // The execution ended, so the rows a frame still buffers are the last ones
+                        // this stream owes. They are handed over now: dropping the builder without
+                        // flushing would lose them, because nothing reads it after the stream is
+                        // done.
+                        if let Err(error) = this.flush_frames() {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
                         this.done = true;
                         continue;
                     }
@@ -1523,7 +1811,20 @@ impl Stream for FusedSeriesStream {
             };
             let polled = input.as_mut().poll_next(cx);
             match polled {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    // A frame that is holding rows must not hold them behind an input that settled
+                    // nothing: a consumer waiting for the row that closes a series would be waiting
+                    // for input that may never arrive. They are handed over now, and the pending
+                    // input is polled again on the next poll of this stream.
+                    if let Err(error) = this.flush_frames() {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    if let Some(batch) = this.ready.pop_front() {
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(None) => {
                     // The input ended, so every series it opened has to be closed. The tree settles
                     // what it was holding, and the answers are pulled below in this same poll

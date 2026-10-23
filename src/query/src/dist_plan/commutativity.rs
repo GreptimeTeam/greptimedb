@@ -404,7 +404,7 @@ mod tests {
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+    use promql::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
@@ -526,6 +526,7 @@ mod tests {
                     binding,
                     input,
                     output_schema,
+                    FusedOutputFormat::PlainRows,
                 )
                 .unwrap(),
             ),

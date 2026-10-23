@@ -38,7 +38,7 @@ use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+use promql::extension_plan::{FusedOutputFormat, FusedSeries, FusedSeriesBinding};
 use promql::native::plan::reads_across_series;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -323,6 +323,9 @@ impl PromPlanner {
             binding,
             input,
             output_schema,
+            // The query path answers the row table the SQL and Prometheus APIs read. A frame output
+            // is planned by a caller that asks for one, not by a statement.
+            FusedOutputFormat::PlainRows,
         )
         .context(DataFusionPlanningSnafu)?;
 
