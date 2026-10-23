@@ -27,7 +27,7 @@ use datatypes::series::{Label, MetricName};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
-use promql::native::metrics::NodePath;
+use promql::native::metrics::{NodePath, walk};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundWindow,
     Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -4309,6 +4309,8 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
     )
     .unwrap_err();
     assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+}
+
 /// Every selector is bound through the callback, so each input reports the layout its own selector
 /// asked for and the requirement beside it names the series and the matchers that selector wrote.
 #[test]
@@ -4508,6 +4510,59 @@ fn selector_binding_propagates_callback_errors() {
     assert!(error.to_string().contains("binding failed"));
 }
 
+/// Subquery selector requirements describe the actual inner grid, not the outer statement grid.
+#[test]
+fn subquery_selector_requirements_report_the_inner_scan_hull() {
+    let cases = [
+        // The subquery's `(−270s, 90s]` interval at 30s steps has grid points −270s..90s.
+        // The inner rate opens a further 60s range, producing the raw scan hull `(−330s, 90s]`.
+        (
+            "max_over_time(rate(x[1m])[5m:30s])",
+            (-270_000, 90_000, 0, None, 60_000, (-330_000, 90_000, false)),
+        ),
+        // The subquery anchor resolves to 1174s after its 60s offset; its interval
+        // `(874s, 1174s]` has 30s boundaries 900s..1170s. The inner selector has no
+        // separate anchor or offset. Its child grid starts at 900s, so the 60s rate range
+        // scans `(840s, 1170s]`.
+        (
+            "max_over_time(rate(x[1m])[5m:30s] @ 1234 offset 1m)",
+            (
+                900_000,
+                1_170_000,
+                0,
+                None,
+                60_000,
+                (840_000, 1_170_000, false),
+            ),
+        ),
+    ];
+
+    for (query, (grid_start, grid_end, offset, anchor, range, scan)) in cases {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(compiled.inputs.len(), 1, "query: {query}");
+        let requirement = &compiled.inputs[0].requirement;
+        assert_eq!(requirement.metric.as_deref(), Some("x"), "query: {query}");
+        assert_eq!(requirement.grid_start_ms, grid_start, "query: {query}");
+        assert_eq!(requirement.grid_end_ms, grid_end, "query: {query}");
+        assert_eq!(requirement.offset_ms, offset, "query: {query}");
+        assert_eq!(requirement.at_ms, anchor, "query: {query}");
+        assert_eq!(
+            requirement.timing,
+            SelectorTiming::Window { range_ms: range }
+        );
+        assert_eq!(
+            requirement.raw_scan_bounds().unwrap(),
+            scan,
+            "query: {query}"
+        );
+    }
+}
+
 /// Selector bindings keep the path of their input through every recursive wrapper shape.
 #[test]
 fn selector_bindings_follow_structural_input_paths() {
@@ -4521,6 +4576,13 @@ fn selector_bindings_follow_structural_input_paths() {
         ("-x", "root.right.input"),
         ("rate(x[5m:1m])", "root.input.input"),
         ("rate(abs(x)[5m:1m])", "root.input.input.input"),
+        ("sort(x)", "root.input.input"),
+        ("absent(x)", "root.input.input"),
+        ("histogram_quantile(0.9, x)", "root.input.input"),
+        ("year(x)", "root.input.input"),
+        ("rate(x[5m:1m] @ 1234 offset 1m)", "root.input.input"),
+        ("rate(x[5m:1m] offset 1m @ 1234)", "root.input.input"),
+        ("rate(rate(x[5m:1m])[5m:1m])", "root.input.input.input"),
     ];
     for (query, expected_path) in cases {
         let schema = raw_schema();
@@ -4547,5 +4609,26 @@ fn selector_bindings_follow_structural_input_paths() {
             SeriesOrdering::KeyThenTime,
             "query: {query}"
         );
+
+        // Compare the callback records with the inputs actually reachable in the returned tree,
+        // using the same traversal rule as native metrics. This checks both directions and ordering.
+        let mut tree_inputs = Vec::new();
+        walk(compiled.tree.root(), &mut |node, path| {
+            if let NativeExpr::Input(BoundInput {
+                output: NativeType::Samples(bound_schema),
+                ordering,
+            }) = &node.expr
+            {
+                tree_inputs.push((path.clone(), Arc::clone(bound_schema), *ordering));
+            }
+        });
+        assert_eq!(tree_inputs.len(), compiled.inputs.len(), "query: {query}");
+        for ((path, tree_schema, tree_ordering), bound) in
+            tree_inputs.iter().zip(compiled.inputs.iter())
+        {
+            assert_eq!(path, &bound.path, "query: {query}");
+            assert!(Arc::ptr_eq(tree_schema, &bound.schema), "query: {query}");
+            assert_eq!(*tree_ordering, bound.ordering, "query: {query}");
+        }
     }
 }
