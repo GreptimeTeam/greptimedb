@@ -1100,6 +1100,7 @@ transform:
             serde_json::Value::Null,
             serde_json::json!([2, 4, 6]),
             serde_json::json!({"active": true}),
+            serde_json::json!({"a\"b": "\u{0001}"}),
             serde_json::json!([]),
             serde_json::json!({}),
             serde_json::Value::Null,
@@ -1133,7 +1134,7 @@ transform:
                 let Some(ValueData::BinaryValue(value)) = &row.values[index].value_data else {
                     return Err("expected JSONB-encoded value".into());
                 };
-                assert_eq!(jsonb::from_slice(value)?.to_string(), expected.to_string());
+                assert_eq!(datatypes::types::jsonb_to_serde_json(value)?, *expected);
             }
         }
         let error = pipeline
