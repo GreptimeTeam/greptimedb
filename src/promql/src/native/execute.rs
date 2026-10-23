@@ -2869,9 +2869,6 @@ impl NativeExecutionState {
     pub(crate) fn runtime_tree(&self) -> RuntimeTreeHandle {
         Arc::clone(&self.runtime)
     }
-    pub fn input_count(&self) -> usize {
-        self.inputs.len()
-    }
     pub fn reserved_bytes(&self) -> usize {
         self.inputs
             .iter()
@@ -2957,7 +2954,12 @@ impl NativeExecutionState {
             tree.root.release();
             finished
         };
-        for slot in &mut self.inputs {
+        // The slots are taken rather than only released: what a released slot still holds is its
+        // schema and the grid that schema is addressed on, and a caller that keeps the stopped
+        // executor -- as one holding the runtime tree does -- would otherwise keep the input's
+        // schema and materialized timestamps alive past the execution. The leaf itself stays: the
+        // root keeps its `Input(InputId)` and the metrics an observer reads, and it holds neither.
+        for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
         finished
@@ -2965,6 +2967,10 @@ impl NativeExecutionState {
 
     /// Gives back everything this execution still holds: its payloads, its slots and the bytes
     /// they reserved.
+    ///
+    /// The slots are taken here as they are when the execution closes, so the input's schema and
+    /// grid do not outlive it in the executor an observer still holds; a second call finds an empty
+    /// vector and nothing left to take.
     fn release(&mut self) {
         {
             let mut tree = self
@@ -2973,7 +2979,7 @@ impl NativeExecutionState {
                 .unwrap_or_else(|error| error.into_inner());
             tree.root.release();
         }
-        for slot in &mut self.inputs {
+        for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
     }
