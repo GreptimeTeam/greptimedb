@@ -470,7 +470,7 @@ async fn test_engine_create_preserves_manifest_on_open_error() -> WhateverResult
 }
 
 #[tokio::test]
-async fn test_engine_create_json2_sparse_requires_flat() -> WhateverResult<()> {
+async fn test_engine_create_json2_sparse_forces_flat() -> WhateverResult<()> {
     let mut env = TestEnv::with_prefix("create-json2-sparse").await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
@@ -489,21 +489,18 @@ async fn test_engine_create_json2_sparse_requires_flat() -> WhateverResult<()> {
     request.column_metadatas = metadata.column_metadatas.clone();
     request.primary_key = metadata.primary_key.clone();
     request.column_metadatas[4].column_schema = json_column;
-    let err = engine
-        .handle_request(region_id, RegionRequest::Create(request.clone()))
-        .await
-        .unwrap_err();
-    assert_eq!(StatusCode::InvalidArguments, err.status_code());
-    assert!(
-        err.output_msg()
-            .contains("JSON2 columns require sst_format=flat")
-    );
-    assert!(!engine.is_region_exists(region_id));
-
-    request.options.insert("sst_format".into(), "flat".into());
     engine
         .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await?;
+    assert_eq!(
+        Some(FormatType::Flat),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .sst_format
+    );
     let schema = rows_schema(&request);
     let mut pk_schema = schema[0].clone();
     pk_schema.column_name = PRIMARY_KEY_COLUMN_NAME.into();
