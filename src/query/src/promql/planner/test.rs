@@ -18,7 +18,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use catalog::RegisterTableRequest;
 use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
 use common_base::Plugins;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE, MITO_ENGINE};
+use common_catalog::consts::{
+    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE,
+};
 use common_query::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
 };
@@ -946,7 +948,9 @@ async fn build_test_table_provider_with_field_type(
         ConcreteDataType::timestamp_millisecond_datatype(),
         false,
         field_type,
-        DEFAULT_ENGINE,
+        // The native engine, so the field guard below is what refuses this table: on the blank
+        // engine the engine gate would answer first and this test would prove nothing.
+        NATIVE_ENGINE,
     )
     .await
 }
@@ -1877,6 +1881,37 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
 }
 
 /// The flag on and a shape the compiler refuses: the existing planner plans it unchanged.
+/// A metric-engine logical table is served by its physical region's scanner, so it is admitted.
+///
+/// The ordinary metric rewrite puts a filter and an alias between the scan and this node, which the
+/// bare-scan check refuses - that is why such a query usually falls back. This test pins the one
+/// shape that reaches the node bare (the physical table could not be resolved), so that the engine
+/// whitelist does not refuse a table whose region really does serve frames.
+#[tokio::test]
+async fn native_fused_metric_engine_bare_scan_is_admitted() {
+    let native = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            METRIC_ENGINE,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        find_fused_series(&native).map(|fused| fused.promql().to_string()),
+        Some("rate(some_metric[5m])".to_string()),
+        "a metric-engine table serves frames, so a bare scan over one keeps the native route"
+    );
+}
+
 /// A table whose engine has no raw-series scanner keeps the existing plan.
 ///
 /// A file-engine table answers an ordinary read with a `SinglePartitionScanner`, whose
@@ -1938,6 +1973,9 @@ async fn native_fused_non_numeric_field_falls_back() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
+        // Arrow's `is_numeric` includes the decimals while the region's preflight does not, so
+        // asking Arrow would let a decimal field through to a planning error.
+        ConcreteDataType::decimal128_datatype(10, 2),
     ] {
         let native = build_native_fused_plan_with_provider(
             "some_metric",
