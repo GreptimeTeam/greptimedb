@@ -127,6 +127,9 @@ fn describe(node: &NativeNode) -> String {
             BoundVectorOp::Histogram(HistogramFunction::Fraction { lower, upper }) => {
                 format!("histogram_fraction {lower} {upper}")
             }
+            BoundVectorOp::CountValues { label, group } => {
+                format!("count_values {label:?} {}", grouping(group))
+            }
         },
         NativeExpr::Aggregate { op, .. } => format!(
             "{} {} [{}] {}",

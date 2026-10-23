@@ -36,7 +36,7 @@ use datatypes::series::{Label, MetricName, SeriesOrdering};
 use super::{
     BinaryRuntime, Emitted, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer,
     NodeRuntime, absorb_rebuilds, evaluated_bytes, grid_end_ms, map_chunk, operand_chunk_bytes,
-    raw_bytes,
+    raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -8449,6 +8449,86 @@ fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
         .filter_map(|(position, value)| value.map(|_| position))
         .collect();
     assert_eq!(positions, [0, 1]);
+}
+
+/// `count_values` counts the samples that share a value across the whole vector at a point, under
+/// a label set per value; `a` arrives in two chunks and counts at both points.
+#[test]
+fn count_values_counts_the_samples_sharing_a_value() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        evaluated_input(Arc::clone(&grid)),
+        BoundVectorOp::CountValues {
+            label: "v".into(),
+            group: Grouping::By(Arc::from([])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    for (job, start, value, is_last) in [
+        ("a", 0, 1.0, false),
+        ("a", 1, 1.0, true),
+        ("b", 0, 2.0, true),
+        ("c", 0, 1.0, true),
+    ] {
+        execution
+            .push_evaluated(evaluated_chunk_of(
+                &schema,
+                named_metric("m", job),
+                start,
+                vec![Some(value)],
+                is_last,
+            ))
+            .unwrap();
+    }
+    let mut counts: Vec<(String, Decided)> = run(&mut execution)
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.series.metric.get("v").unwrap().to_string(),
+                decided(std::slice::from_ref(chunk)),
+            )
+        })
+        .collect();
+    counts.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        counts,
+        [
+            ("1".to_string(), vec![(0, Some(2.0)), (1, Some(1.0))]),
+            ("2".to_string(), vec![(0, Some(1.0))]),
+        ]
+    );
+}
+
+/// Every field's distinct values make `count_values` groups of their own, so its estimate grows
+/// with the field count, not only with the rows: a row of four fields reserves at least four
+/// times what a row of one field does.
+#[test]
+fn count_values_reserves_a_group_per_field_sample() {
+    let grid = grid(0, 60_000, 1);
+    let op = BoundVectorOp::CountValues {
+        label: "v".into(),
+        group: Grouping::By(Arc::from([])),
+    };
+    let estimate = |fields: usize| {
+        let schema = SeriesSchema {
+            fields: field_count(fields),
+            eval_grid: Some(Arc::clone(&grid)),
+        };
+        let samples = (0..fields)
+            .map(|field| Samples::from_float(Float64Array::from(vec![field as f64])))
+            .collect();
+        let series = Series::try_new(
+            &schema,
+            named_metric("m", "a"),
+            TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 1).unwrap()),
+            SeriesFields::try_from_vec(samples).unwrap(),
+        )
+        .unwrap();
+        vector_workspace_bytes(&op, &schema, &[series])
+    };
+    assert!(estimate(4) >= 4 * estimate(1));
 }
 
 /// `label_replace` runs in a map: each series is relabelled as it passes, and two series it gives
