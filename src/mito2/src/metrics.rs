@@ -311,6 +311,14 @@ lazy_static! {
         "mito upload bytes total",
     )
     .unwrap();
+    /// Bounded event labels distinguish lookup misses from actual shared loads.
+    pub static ref RANGE_CACHE_WORKER_EVENTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_range_cache_worker_events_total",
+        "Range cache load coordination and SST retirement events",
+        &["event"]
+    )
+    .unwrap();
+
     /// Cache eviction counter, labeled with cache type and eviction reason.
     pub static ref CACHE_EVICTION: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_cache_eviction",

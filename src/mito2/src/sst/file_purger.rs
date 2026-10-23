@@ -35,6 +35,9 @@ pub trait FilePurger: Send + Sync + fmt::Debug {
     /// If `index_outdated` is true, the index file will be deleted regardless of `is_delete`.
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool);
 
+    /// Retire cached scan results immediately, without waiting for physical deletion.
+    fn invalidate_file(&self, _: &FileMeta) {}
+
     /// Notify the purger of a new file created.
     /// This is useful for object store based storage, where we need to track the file references
     /// The default implementation is a no-op.
@@ -110,6 +113,7 @@ pub fn create_file_purger(
         && matches!(path_type, PathType::Data | PathType::Bare)
     {
         Arc::new(ObjectStoreFilePurger {
+            cache_manager,
             file_ref_manager,
             scheduler,
             range_index_deleter,
@@ -198,6 +202,12 @@ impl LocalFilePurger {
 }
 
 impl FilePurger for LocalFilePurger {
+    fn invalidate_file(&self, file_meta: &FileMeta) {
+        if let Some(cache) = &self.cache_manager {
+            cache.invalidate_range_results(file_meta.file_id);
+        }
+    }
+
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool, index_outdated: bool) {
         if is_delete {
             schedule_range_index_deletion(
@@ -213,6 +223,7 @@ impl FilePurger for LocalFilePurger {
 }
 
 pub struct ObjectStoreFilePurger {
+    cache_manager: Option<CacheManagerRef>,
     file_ref_manager: FileReferenceManagerRef,
     scheduler: SchedulerRef,
     range_index_deleter: Option<RangeIndexDeleter>,
@@ -246,6 +257,12 @@ fn schedule_range_index_deletion(
 }
 
 impl FilePurger for ObjectStoreFilePurger {
+    fn invalidate_file(&self, file_meta: &FileMeta) {
+        if let Some(cache) = &self.cache_manager {
+            cache.invalidate_range_results(file_meta.file_id);
+        }
+    }
+
     fn remove_file(&self, file_meta: FileMeta, is_delete: bool, _index_outdated: bool) {
         // if not on local file system, instead inform the global file purger to remove the file reference.
         // notice that no matter whether the file is deleted or not, we need to remove the reference
@@ -330,12 +347,25 @@ mod tests {
         let owner = RegionId::new(9, 1);
         let index_path = crate::sst::range_index::range_index_path(owner, sst_file_id.file_id());
         index_store.write(&index_path, "range index").await.unwrap();
+        let cache = Arc::new(
+            crate::cache::CacheManager::builder()
+                .range_result_cache_size(1024 * 1024)
+                .build(),
+        );
+        let cache_key = crate::cache::test_util::range_cache_key(&[sst_file_id.file_id()]);
+        cache.put_range_result(
+            cache_key.clone(),
+            Arc::new(crate::read::range_cache::RangeScanCacheValue::new(
+                vec![],
+                0,
+            )),
+        );
         let file_purger = create_file_purger(
             gc_enabled,
             PathType::Bare,
             scheduler.clone(),
             layer,
-            None,
+            Some(cache.clone()),
             Arc::new(crate::sst::file_ref::FileReferenceManager::new(None)),
             Some(RangeIndexDeleter::new(index_store.clone(), owner)),
         );
@@ -365,6 +395,9 @@ mod tests {
             if is_delete {
                 handle.mark_deleted();
             }
+            // Retirement must invalidate before any snapshot releases its handle,
+            // for both local purge and object-store GC.
+            assert_eq!(cache.get_range_result(&cache_key).is_none(), is_delete);
             let reader = handle.clone();
             drop(handle);
             assert!(index_store.exists(&index_path).await.unwrap());

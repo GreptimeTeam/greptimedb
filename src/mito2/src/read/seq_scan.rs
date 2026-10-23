@@ -41,9 +41,7 @@ use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
-use crate::read::range_cache::{
-    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
-};
+use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList, SplitRecordBatchStream,
@@ -284,15 +282,39 @@ impl SeqScan {
         merge_semaphore: Option<Arc<Semaphore>>,
     ) -> Result<(BoxedRecordBatchStream, usize)> {
         let cache_key = build_range_cache_key(stream_ctx, part_range);
-
-        if let Some(key) = cache_key.as_ref() {
-            if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
-                part_metrics.inc_range_cache_hit();
-                return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
-            }
-            part_metrics.inc_range_cache_miss();
+        let ctx = stream_ctx.clone();
+        let range = *part_range;
+        let metrics = part_metrics.clone();
+        CachedRangeReader {
+            stream_ctx,
+            part_range,
+            key: cache_key,
+            metrics: part_metrics,
         }
+        .build(move || async move {
+            Self::build_uncached_partition_range(
+                &ctx,
+                &range,
+                compaction,
+                &metrics,
+                partition_pruner,
+                file_scan_semaphore,
+                merge_semaphore,
+            )
+            .await
+        })
+        .await
+    }
 
+    async fn build_uncached_partition_range(
+        stream_ctx: &Arc<StreamContext>,
+        part_range: &PartitionRange,
+        compaction: bool,
+        part_metrics: &PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+        file_scan_semaphore: Option<Arc<Semaphore>>,
+        merge_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<(BoxedRecordBatchStream, usize)> {
         let mut sources = Vec::new();
         let split_batch_size = build_flat_sources(
             stream_ctx,
@@ -315,16 +337,6 @@ impl SeqScan {
             channel_size,
         )
         .await?;
-
-        let stream = match cache_key {
-            Some(key) => cache_flat_range_stream(
-                stream,
-                stream_ctx.input.cache_strategy.clone(),
-                key,
-                part_metrics.clone(),
-            ),
-            None => stream,
-        };
 
         Ok((stream, estimated_rows_per_batch))
     }

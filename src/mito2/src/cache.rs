@@ -19,6 +19,7 @@ pub(crate) mod cache_size;
 pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
+pub(crate) mod range_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -143,6 +144,19 @@ impl RangeResultMemoryLimiter {
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
+    }
+
+    /// Never wait while holding a partial load: several partial loads could
+    /// otherwise exhaust the budget and wait on each other indefinitely.
+    pub(crate) fn try_acquire(&self, bytes: usize) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let permits = bytes.div_ceil(self.permit_bytes).max(1);
+        if permits > self.total_permits {
+            return None;
+        }
+        self.semaphore
+            .clone()
+            .try_acquire_many_owned(permits.try_into().ok()?)
+            .ok()
     }
 
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
@@ -898,6 +912,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::get_range_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    #[cfg(test)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -910,6 +925,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -917,6 +933,13 @@ impl CacheStrategy {
     ) {
         if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_range_result(key, result);
+        }
+    }
+
+    pub(crate) fn range_cache_worker(&self) -> Option<&Arc<range_cache::RangeCacheWorker>> {
+        match self {
+            Self::EnableAll(manager) => manager.range_result_cache.as_ref(),
+            Self::Compaction(_) | Self::Disabled => None,
         }
     }
 
@@ -1389,7 +1412,15 @@ impl CacheManager {
         }
     }
 
+    /// Retires decoded range results when an SST leaves the current version.
+    pub(crate) fn invalidate_range_results(&self, file_id: FileId) {
+        if let Some(worker) = &self.range_result_cache {
+            worker.invalidate_file(file_id);
+        }
+    }
+
     /// Gets cached result for range scan.
+    #[cfg(test)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -1400,15 +1431,13 @@ impl CacheManager {
     }
 
     /// Puts range scan result into cache.
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
         result: Arc<RangeScanCacheValue>,
     ) {
         if let Some(cache) = &self.range_result_cache {
-            CACHE_BYTES
-                .with_label_values(&[RANGE_RESULT_TYPE])
-                .add(range_result_cache_weight(&key, &result).into());
             cache.insert(key, result);
         }
     }
@@ -1649,21 +1678,8 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let range_result_cache = (self.range_result_cache_size != 0).then(|| {
-            Cache::builder()
-                .max_capacity(self.range_result_cache_size)
-                .weigher(range_result_cache_weight)
-                .eviction_listener(move |k, v, cause| {
-                    let size = range_result_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[RANGE_RESULT_TYPE])
-                        .sub(size.into());
-                    CACHE_EVICTION
-                        .with_label_values(&[RANGE_RESULT_TYPE, removal_cause_str(cause)])
-                        .inc();
-                })
-                .build()
-        });
+        let range_result_cache = (self.range_result_cache_size != 0)
+            .then(|| range_cache::RangeCacheWorker::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
@@ -2093,7 +2109,7 @@ type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
 type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 /// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Cache<RangeScanCacheKey, Arc<RangeScanCacheValue>>;
+type RangeResultCache = Arc<range_cache::RangeCacheWorker>;
 
 #[cfg(test)]
 mod tests {
