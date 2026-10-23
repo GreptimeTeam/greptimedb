@@ -143,6 +143,7 @@ impl ExecutionPlan for MergedSeriesScanExec {
         Ok(self)
     }
     fn reset_state(self: Arc<Self>) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        self.input.clone().reset_state()?;
         Ok(self)
     }
 }
@@ -431,20 +432,9 @@ impl DummyTableProvider {
     /// cannot be split: there is no scanner to prepare before this point, and the leaf refuses an
     /// unprepared scan because its label binding resolves against prepared partition ranges.
     ///
-    /// **The single partition below is a limit of the named binding, not of the raw frame.** The
-    /// conversion this leaf uses resolves authorized logical names against the prepared scanner, and
-    /// that resolution declines any scan whose partition count is not exactly one
-    /// (`resolve_named_series_binding` in `table::table::scan`). A frame stream is described
-    /// per-series and needs no such reduction.
-    ///
-    /// The alternative that would keep several partitions is [`RegionScanExec::try_to_series_scan`],
-    /// which takes a [`RawLabelSource`] built here instead of resolving names. It cannot be used
-    /// from this layer today: a scanner accepts that source only when its `physical_metadata` is
-    /// the scanner's own snapshot by `Arc` identity, and this provider holds the metadata of the
-    /// region engine, not the snapshot the acquired scanner bound — the named path exists to bridge
-    /// exactly that gap, by binding against the scanner. So relaxing this needs a scanner-side
-    /// binding, not a different call here; preparing more partitions here would only make the
-    /// conversion decline, and the target stays one partition until then.
+    /// The prepared scan retains its N assigned partitions. The named raw-series conversion binds
+    /// against the scanner's metadata snapshot, and [`MergedSeriesScanExec`] restores ordered raw
+    /// series at the single-stream region-read boundary.
     ///
     /// This read asked for frames and is answered with frames or with an error naming why it could
     /// not be: it never silently receives rows. Answering with rows would be a different answer to
@@ -498,8 +488,8 @@ impl DummyTableProvider {
                 DataFusionError::NotImplemented(format!(
                     "region {region_id} cannot answer a raw series request for metric \
                      `{metric_name}`: engine `{}` declined to serve raw series from the prepared \
-                     scan (raw series unsupported, an unprepared or multi-partition scan, dynamic \
-                     filters, or requested names that do not bind)",
+                     scan (raw series unsupported, dynamic filters, or requested names that do not \
+                     bind)",
                     self.engine.name(),
                 ))
             })?;
@@ -1407,11 +1397,12 @@ mod tests {
 
     // ---- raw series leaf selection ----
 
-    use common_error::ext::BoxedError;
+    use common_error::ext::{BoxedError, PlainError};
     use common_query::series_frame::{label_decode_spec, unpack_raw_series};
     use datafusion::execution::SessionStateBuilder;
-    use datafusion::execution::context::TaskContext;
+    use datafusion::execution::context::{SessionConfig, TaskContext};
     use datafusion::physical_plan::ExecutionPlanProperties;
+    use datafusion::physical_plan::execution_plan::reset_plan_states;
     use datatypes::arrow::array::Float64Array;
     use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
     use datatypes::data_type::ConcreteDataType;
@@ -1419,7 +1410,7 @@ mod tests {
     use datatypes::series::SeriesOrdering;
     use datatypes::series::frame::LabelDecodeSpec;
     use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-    use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+    use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::region_engine::{
         PartitionRange, PrepareRequest, QueryScanContext, RawLabelSource, RawSeriesStream,
@@ -1442,6 +1433,12 @@ mod tests {
         Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
     );
 
+    /// Scripted raw-series chunks not yet yielded or released by the scan streams.
+    type PendingChunks = Arc<Mutex<usize>>;
+
+    /// Suspends a scripted scan stream, once it has yielded this many chunks, until it is cleared.
+    type PauseAfterChunks = Arc<Mutex<Option<usize>>>;
+
     /// A region whose scan either can or cannot serve raw series frames.
     ///
     /// The engine reports the metadata and hands out one scanner; whether that scanner has a raw
@@ -1452,17 +1449,30 @@ mod tests {
         distributions: Arc<Mutex<Vec<Option<TimeSeriesDistribution>>>>,
         prepares: Arc<Mutex<Vec<usize>>>,
         partition_chunks: Arc<Vec<Vec<RawSeriesChunk>>>,
+        pending: PendingChunks,
+        pause_after: PauseAfterChunks,
     }
 
     impl FrameRegionEngine {
         /// The engine as a test builds it, with the chunks each scan partition emits.
-        fn with_partition_chunks(
-            serves_frames: bool,
+        ///
+        /// The returned counter holds the scripted chunks owned by live scan streams; it is zero
+        /// when every stream has yielded or released its chunks. The returned pause handle
+        /// suspends every scan stream once it has yielded the configured number of chunks.
+        fn with_scripted_chunks(
             partition_chunks: Vec<Vec<RawSeriesChunk>>,
-        ) -> FrameRegionSetup {
-            let (mut engine, metadata, prepares, distributions) = Self::new(serves_frames);
+        ) -> (FrameRegionSetup, PendingChunks, PauseAfterChunks) {
+            let (mut engine, metadata, prepares, distributions) = Self::new(true);
+            let pending = Arc::new(Mutex::new(0));
+            let pause_after = Arc::new(Mutex::new(None));
             engine.partition_chunks = Arc::new(partition_chunks);
-            (engine, metadata, prepares, distributions)
+            engine.pending = pending.clone();
+            engine.pause_after = pause_after.clone();
+            (
+                (engine, metadata, prepares, distributions),
+                pending,
+                pause_after,
+            )
         }
 
         fn new(serves_frames: bool) -> FrameRegionSetup {
@@ -1476,6 +1486,8 @@ mod tests {
                     distributions: distributions.clone(),
                     prepares: prepares.clone(),
                     partition_chunks: Arc::new(Vec::new()),
+                    pending: Arc::new(Mutex::new(0)),
+                    pause_after: Arc::new(Mutex::new(None)),
                 },
                 metadata,
                 prepares,
@@ -1569,6 +1581,9 @@ mod tests {
         prepares: Arc<Mutex<Vec<usize>>>,
         /// Chunks each scan partition emits, indexed by partition. Empty unless a test scripts it.
         partition_chunks: Arc<Vec<Vec<RawSeriesChunk>>>,
+        executed_partitions: Arc<Mutex<Vec<bool>>>,
+        pending: PendingChunks,
+        pause_after: PauseAfterChunks,
     }
 
     impl datafusion::physical_plan::DisplayAs for FrameScanner {
@@ -1640,16 +1655,35 @@ mod tests {
             partition: usize,
             label_source: &RawLabelSource,
         ) -> RegionResult<Option<SendableRawSeriesStream>> {
-            Ok(Some(Box::pin(EmptyRawStream {
+            {
+                let mut executed = self.executed_partitions.lock().unwrap();
+                if executed[partition] {
+                    return Err(BoxedError::new(PlainError::new(
+                        "partition executed twice without reset".to_string(),
+                        common_error::status_code::StatusCode::Unexpected,
+                    )));
+                }
+                executed[partition] = true;
+            }
+            let chunks = self
+                .partition_chunks
+                .get(partition)
+                .cloned()
+                .unwrap_or_default();
+            *self.pending.lock().unwrap() += chunks.len();
+            Ok(Some(Box::pin(ScriptedRawStream {
                 schema: frame_series_schema(&self.metadata, self.projection.as_ref()),
                 source: label_source.clone(),
                 decode: label_decode_spec(label_source),
-                chunks: self
-                    .partition_chunks
-                    .get(partition)
-                    .cloned()
-                    .unwrap_or_default(),
+                chunks,
+                yielded: 0,
+                pending: self.pending.clone(),
+                pause_after: self.pause_after.clone(),
             })))
+        }
+
+        fn reset_state(&mut self) {
+            self.executed_partitions.lock().unwrap().fill(false);
         }
 
         fn has_predicate_without_region(&self) -> bool {
@@ -1668,15 +1702,20 @@ mod tests {
         fn set_query_load_region_id(&mut self, _region_id: RegionId) {}
     }
 
-    /// A raw stream with no chunks that declares the same binding the scanner was asked for.
-    struct EmptyRawStream {
+    /// A raw stream over the chunks scripted for its scan partition.
+    struct ScriptedRawStream {
         schema: Arc<SeriesSchema>,
         source: RawLabelSource,
         decode: Option<LabelDecodeSpec>,
         chunks: Vec<RawSeriesChunk>,
+        yielded: usize,
+        pending: PendingChunks,
+        /// When set, poll suspends after that many chunks without waking, so the remaining chunks
+        /// stay owned by the stream and a consumer can cancel it mid-scan.
+        pause_after: PauseAfterChunks,
     }
 
-    impl RawSeriesStream for EmptyRawStream {
+    impl RawSeriesStream for ScriptedRawStream {
         fn schema(&self) -> &Arc<SeriesSchema> {
             &self.schema
         }
@@ -1694,7 +1733,7 @@ mod tests {
         }
     }
 
-    impl futures::Stream for EmptyRawStream {
+    impl futures::Stream for ScriptedRawStream {
         type Item = RegionResult<RawSeriesChunk>;
 
         fn poll_next(
@@ -1702,11 +1741,23 @@ mod tests {
             _cx: &mut std::task::Context<'_>,
         ) -> std::task::Poll<Option<Self::Item>> {
             let this = self.as_mut().get_mut();
+            if !this.chunks.is_empty() && *this.pause_after.lock().unwrap() == Some(this.yielded) {
+                return std::task::Poll::Pending;
+            }
             if this.chunks.is_empty() {
                 std::task::Poll::Ready(None)
             } else {
+                this.yielded += 1;
+                *this.pending.lock().unwrap() -= 1;
                 std::task::Poll::Ready(Some(Ok(this.chunks.remove(0))))
             }
+        }
+    }
+
+    impl Drop for ScriptedRawStream {
+        fn drop(&mut self) {
+            *self.pending.lock().unwrap() -= self.chunks.len();
+            self.chunks.clear();
         }
     }
 
@@ -1741,6 +1792,12 @@ mod tests {
                     && request.distribution == Some(TimeSeriesDistribution::PerSeries),
                 prepares: self.prepares.clone(),
                 partition_chunks: self.partition_chunks.clone(),
+                executed_partitions: Arc::new(Mutex::new(vec![
+                    false;
+                    frame_partition_ranges().len()
+                ])),
+                pending: self.pending.clone(),
+                pause_after: self.pause_after.clone(),
             }))
         }
 
@@ -1828,6 +1885,29 @@ mod tests {
         (provider, prepares, distributions)
     }
 
+    /// Answers a frame read from a region whose scan streams are scripted.
+    async fn scripted_plan(engine: FrameRegionEngine) -> Arc<dyn ExecutionPlan> {
+        let provider = DummyTableProviderFactory
+            .create_table_provider(
+                RegionId::new(2048, 1),
+                Arc::new(engine) as RegionEngineRef,
+                Some(Arc::new(
+                    QueryContextBuilder::default()
+                        .extensions(HashMap::from([(
+                            RAW_SERIES_READ_EXTENSION_KEY.to_string(),
+                            "cpu_usage".to_string(),
+                        )]))
+                        .build(),
+                )),
+            )
+            .await
+            .unwrap();
+        provider
+            .scan(&test_session(), Some(&vec![2]), &[], None)
+            .await
+            .expect("an eligible region answers a frame read")
+    }
+
     fn frame_partition_ranges() -> Vec<Vec<PartitionRange>> {
         (0..3)
             .map(|i| {
@@ -1856,7 +1936,9 @@ mod tests {
     }
 
     fn test_session() -> datafusion::execution::SessionState {
-        SessionStateBuilder::new().build()
+        SessionStateBuilder::new()
+            .with_config(SessionConfig::new().with_target_partitions(3))
+            .build()
     }
 
     #[tokio::test]
@@ -1986,60 +2068,83 @@ mod tests {
         .unwrap()
     }
 
-    /// The keys and closing flags of a packed frame stream, in the order it emits them.
-    async fn frame_keys(plan: &Arc<dyn ExecutionPlan>) -> Vec<(Vec<u8>, bool)> {
+    /// Drains a plan's packed frame stream into the raw-series chunks it carries.
+    async fn frame_chunks(plan: &Arc<dyn ExecutionPlan>) -> Vec<RawSeriesChunk> {
         let context = Arc::new(TaskContext::default());
-        let stream = plan.execute(0, context).unwrap();
-        let unpacked = unpack_raw_series(stream, None).unwrap();
-        let chunks = futures_util::TryStreamExt::try_collect::<Vec<_>>(unpacked)
+        let unpacked = unpack_raw_series(plan.execute(0, context).unwrap(), None).unwrap();
+        futures_util::TryStreamExt::try_collect::<Vec<_>>(unpacked)
             .await
-            .unwrap();
+            .unwrap()
+    }
+
+    /// Joins an error and its sources, so an assertion can see a cause a consumer wrapped.
+    fn error_chain(error: &dyn std::error::Error) -> String {
+        let mut chain = vec![error.to_string()];
+        let mut source = error.source();
+        while let Some(error) = source {
+            chain.push(error.to_string());
+            source = error.source();
+        }
+        chain.join(": ")
+    }
+
+    /// The complete payload of a raw-series stream: key, times, float samples and finality.
+    fn frame_snapshot(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, Vec<i64>, Vec<f64>, bool)> {
         chunks
-            .into_iter()
-            .map(|chunk| (chunk.primary_key.to_vec(), chunk.is_last))
+            .iter()
+            .map(|chunk| {
+                (
+                    chunk.primary_key.to_vec(),
+                    chunk.time.as_buffer().to_vec(),
+                    chunk
+                        .fields
+                        .get(0)
+                        .unwrap()
+                        .iter()
+                        .map(|sample| match sample {
+                            SampleRef::Float(value) => value,
+                            _ => panic!("the fixture stores float samples"),
+                        })
+                        .collect(),
+                    chunk.is_last,
+                )
+            })
             .collect()
     }
 
     /// Partitions that would interleave if simply concatenated are merged into one ordered stream.
     ///
     /// Every partition is itself well formed: within it a series is closed before the next key
-    /// starts, which is what `unpack_raw_series` requires of one stream. Partition 0 carries
-    /// `a` in two chunks and then `c`; partition 1 carries `b`. Concatenating the partitions gives
-    /// `a, a, c, b`, which breaks the `KeyThenTime` contract every raw-series consumer requires.
-    /// The single region-read stream must instead be `a, a, b, c`, keeping `a`'s two chunks
-    /// adjacent.
+    /// starts, which is what `unpack_raw_series` requires of one stream. The encoded key `a` is
+    /// split across partitions 0 and 1 with interleaved times and closed by both of them,
+    /// partition 0 also carries `c`, and partition 1 also carries `b`. Concatenating the
+    /// partitions gives `a, a, c, a, a, b`, which breaks the `KeyThenTime` contract every
+    /// raw-series consumer requires. The single region-read stream must instead be
+    /// `a@10, a@11, a@12, a@15, b@25, c@20`, keeping `a`'s chunks adjacent and closing it exactly
+    /// once across both partitions.
+    ///
+    /// The same plan then replays: an execution without a reset fails, a reset reproduces the
+    /// complete payload, and a partially consumed stream that is dropped and reset reproduces it
+    /// again. For the cancellation the fixture suspends its streams after two chunks without
+    /// waking, so the dropped stream still owns undrained chunks when it is cancelled.
     #[tokio::test]
     async fn raw_series_partitions_merge_into_one_ordered_stream() {
-        let region_id = RegionId::new(2048, 1);
         let chunks = vec![
             vec![
                 frame_chunk(&[10], b"a", false),
-                frame_chunk(&[11], b"a", true),
+                frame_chunk(&[12], b"a", true),
                 frame_chunk(&[20], b"c", true),
             ],
-            vec![frame_chunk(&[15], b"b", true)],
+            vec![
+                frame_chunk(&[11], b"a", false),
+                frame_chunk(&[15], b"a", true),
+                frame_chunk(&[25], b"b", true),
+            ],
             Vec::new(),
         ];
-        let (engine, _, _, _) = FrameRegionEngine::with_partition_chunks(true, chunks);
-        let mut builder = QueryContextBuilder::default();
-        builder = builder.extensions(HashMap::from([(
-            RAW_SERIES_READ_EXTENSION_KEY.to_string(),
-            "cpu_usage".to_string(),
-        )]));
-        let provider = DummyTableProviderFactory
-            .create_table_provider(
-                region_id,
-                Arc::new(engine) as RegionEngineRef,
-                Some(Arc::new(builder.build())),
-            )
-            .await
-            .unwrap();
-        let state = test_session();
-
-        let plan = provider
-            .scan(&state, Some(&vec![2]), &[], None)
-            .await
-            .expect("an eligible region answers a frame read");
+        let ((engine, _, _, _), pending, pause_after) =
+            FrameRegionEngine::with_scripted_chunks(chunks);
+        let plan = scripted_plan(engine).await;
         // The scan keeps its three partitions; the region-read boundary sees one.
         assert_eq!(
             plan.downcast_ref::<MergedSeriesScanExec>()
@@ -2052,18 +2157,165 @@ mod tests {
         );
         assert_eq!(plan.output_partitioning().partition_count(), 1);
 
-        // The key bytes are the encoded primary key the fixture wrote (`key` + two padding
-        // bytes), so compare the leading byte rather than the whole buffer.
-        let emitted = frame_keys(&plan).await;
-        let shape = emitted
-            .iter()
-            .map(|(key, last)| (key[0], *last))
-            .collect::<Vec<_>>();
+        let first = frame_snapshot(&frame_chunks(&plan).await);
+        let expected = vec![
+            (b"a\0\0".to_vec(), vec![10], vec![10.0], false),
+            (b"a\0\0".to_vec(), vec![11], vec![11.0], false),
+            (b"a\0\0".to_vec(), vec![12], vec![12.0], false),
+            (b"a\0\0".to_vec(), vec![15], vec![15.0], true),
+            (b"b\0\0".to_vec(), vec![25], vec![25.0], true),
+            (b"c\0\0".to_vec(), vec![20], vec![20.0], true),
+        ];
         assert_eq!(
-            shape,
-            vec![(b'a', false), (b'a', true), (b'b', true), (b'c', true)],
-            "the merged stream must be key ordered, keep each series' chunks adjacent, and close \
-             every series exactly once: {emitted:?}"
+            first, expected,
+            "the merged stream must be ordered by key then time, keep each series' chunks \
+             adjacent, and close every series exactly once"
+        );
+        // A scan that has ended is not replayable until it is reset: the hidden scanner refuses.
+        let error = match plan.execute(0, task_context()) {
+            Ok(_) => panic!("an unreset scan must not execute again"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("partition executed twice without reset"),
+            "unexpected error: {error}"
+        );
+
+        // Resetting the wrapper resets the scan it hides, so the whole stream replays.
+        let replay = reset_plan_states(plan.clone()).unwrap();
+        assert_eq!(frame_snapshot(&frame_chunks(&replay).await), first);
+
+        // A cancelled stream is dropped while the source still owns chunks, and the reset plan
+        // replays the complete payload afterwards.
+        *pause_after.lock().unwrap() = Some(2);
+        let cancelled = reset_plan_states(replay).unwrap();
+        let mut partial =
+            unpack_raw_series(cancelled.execute(0, task_context()).unwrap(), None).unwrap();
+        assert!(
+            futures_util::TryStreamExt::try_next(&mut partial)
+                .await
+                .unwrap()
+                .is_some(),
+            "the cancelled stream must emit a chunk before cancellation"
+        );
+        let held = *pending.lock().unwrap();
+        assert!(
+            held > 0,
+            "the paused stream still owns {held} undrained chunks"
+        );
+        drop(partial);
+        assert_eq!(
+            *pending.lock().unwrap(),
+            0,
+            "dropping the cancelled stream releases the rest of the source"
+        );
+        *pause_after.lock().unwrap() = None;
+        let after_cancel = reset_plan_states(cancelled).unwrap();
+        assert_eq!(frame_snapshot(&frame_chunks(&after_cancel).await), first);
+    }
+
+    /// A failure acquiring a later partition releases the partition already acquired.
+    ///
+    /// The wrapper acquires partitions in order, so a partition spent before it runs fails the
+    /// read after an earlier partition was acquired. The acquired stream must be released with
+    /// its chunks, the scan must stay one-shot until it is reset, and the reset plan must replay
+    /// the complete payload from both partitions.
+    #[tokio::test]
+    async fn raw_series_later_partition_failure_releases_the_acquired_partition() {
+        let chunks = vec![
+            vec![frame_chunk(&[10], b"a", true)],
+            vec![frame_chunk(&[20], b"b", true)],
+            Vec::new(),
+        ];
+        let ((engine, _, _, _), pending, _) = FrameRegionEngine::with_scripted_chunks(chunks);
+        let plan = scripted_plan(engine).await;
+        let input = plan
+            .downcast_ref::<MergedSeriesScanExec>()
+            .unwrap()
+            .input
+            .clone();
+
+        // Spend partition 1's single acquisition before the wrapper asks for it, then release it.
+        drop(input.execute(1, task_context()).unwrap());
+        assert_eq!(*pending.lock().unwrap(), 0);
+
+        let error = match plan.execute(0, task_context()) {
+            Ok(_) => panic!("a partition spent before the wrapper runs must fail the read"),
+            Err(error) => error,
+        };
+        assert!(
+            error_chain(&error).contains("partition executed twice without reset"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            *pending.lock().unwrap(),
+            0,
+            "the partition acquired before the failure must release its chunks"
+        );
+        // Partition 0 was really acquired: the scan refuses it instead of it never having run.
+        let error = match input.execute(0, task_context()) {
+            Ok(_) => panic!("the failed execution must have acquired partition 0"),
+            Err(error) => error,
+        };
+        assert!(
+            error_chain(&error).contains("partition executed twice without reset"),
+            "unexpected error: {error}"
+        );
+
+        // Resetting the wrapper recovers the whole stream, including both partitions.
+        let replay = reset_plan_states(plan).unwrap();
+        assert_eq!(
+            frame_snapshot(&frame_chunks(&replay).await),
+            vec![
+                (b"a\0\0".to_vec(), vec![10], vec![10.0], true),
+                (b"b\0\0".to_vec(), vec![20], vec![20.0], true),
+            ]
+        );
+    }
+
+    /// A partition that ends before its final chunk fails the read and releases the rest.
+    ///
+    /// Partition 1's series `b` never closes, so the partition's own packing rejects the truncated
+    /// stream at EOF before the merge can judge it. Partition 0 is suspended after two chunks, so
+    /// it still owns `d` when that error arrives: the failed read must release the chunk it never
+    /// consumed rather than leave it behind in the scanner. The read is not claimed to be empty
+    /// before the error, only to fail and to own nothing afterwards.
+    #[tokio::test]
+    async fn raw_series_truncated_partition_fails_and_releases_the_stream() {
+        let chunks = vec![
+            vec![
+                frame_chunk(&[10], b"a", true),
+                frame_chunk(&[30], b"c", true),
+                frame_chunk(&[40], b"d", true),
+            ],
+            vec![frame_chunk(&[20], b"b", false)],
+            Vec::new(),
+        ];
+        let ((engine, _, _, _), pending, pause_after) =
+            FrameRegionEngine::with_scripted_chunks(chunks);
+        let plan = scripted_plan(engine).await;
+        assert_eq!(*pending.lock().unwrap(), 0, "nothing is acquired yet");
+
+        // Partition 0 yields `a` and `c`, then suspends while it still owns `d`; partition 1's
+        // single open chunk is not held back, so its EOF reaches the read.
+        *pause_after.lock().unwrap() = Some(2);
+        let unpacked = unpack_raw_series(plan.execute(0, task_context()).unwrap(), None).unwrap();
+        assert!(
+            *pending.lock().unwrap() > 0,
+            "the read must acquire partition 0's remaining chunks"
+        );
+        let error = match futures_util::TryStreamExt::try_collect::<Vec<_>>(unpacked).await {
+            Ok(_) => panic!("a partition that ends before its final chunk must fail the read"),
+            Err(error) => error,
+        };
+        assert!(
+            error_chain(&error).contains("raw series stream ended before key was final"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            *pending.lock().unwrap(),
+            0,
+            "the failed read must release the chunk it never consumed"
         );
     }
 

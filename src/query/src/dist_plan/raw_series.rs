@@ -118,6 +118,14 @@ mod tests {
         batches: Vec<RecordBatch>,
         fail_after_batches: bool,
         failed: bool,
+        drops: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    }
+    impl Drop for InputStream {
+        fn drop(&mut self) {
+            if let Some(drops) = &self.drops {
+                drops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
     }
     impl Stream for InputStream {
         type Item = common_recordbatch::error::Result<RecordBatch>;
@@ -158,6 +166,8 @@ mod tests {
         batches: Vec<Vec<RecordBatch>>,
         targets: Vec<RegionQueryTarget>,
         fail_after_batches: bool,
+        drops: Option<Arc<std::sync::atomic::AtomicUsize>>,
+        fail_get_at: Option<usize>,
     }
     #[async_trait]
     impl RegionQueryHandler for Handler {
@@ -180,6 +190,7 @@ mod tests {
                 batches: self.batches.clone(),
                 fail_after_batches: false,
                 failed: false,
+                drops: None,
             }))
         }
         async fn handle_remote_dyn_filter_update(
@@ -215,6 +226,15 @@ mod tests {
         ) -> crate::error::Result<common_recordbatch::SendableRecordBatchStream> {
             assert_eq!(request.read_kind, RegionReadKind::RawSeries);
             let index = request.region_id.region_number() as usize - 1;
+            if self.fail_get_at == Some(index) {
+                return Err(crate::error::Error::QueryPlan {
+                    source: BoxedError::new(PlainError::new(
+                        "later target acquisition failed".to_string(),
+                        common_error::status_code::StatusCode::Unexpected,
+                    )),
+                    location: snafu::Location::new(file!(), line!(), column!()),
+                });
+            }
             let batches = self.batches.get(index).expect("route target has batches");
             let schema = batches[0].schema.clone();
             assert_eq!(target, &self.targets[index]);
@@ -223,6 +243,7 @@ mod tests {
                 batches: batches.clone(),
                 fail_after_batches: self.fail_after_batches,
                 failed: false,
+                drops: self.drops.clone(),
             }))
         }
         async fn handle_remote_dyn_filter_update(
@@ -385,6 +406,16 @@ mod tests {
             targets: vec![(RegionId::new(1, n), target())],
         }
     }
+    fn caused_by(error: &(dyn std::error::Error + 'static), needle: &str) -> bool {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            if error.to_string().contains(needle) {
+                return true;
+            }
+            current = error.source();
+        }
+        false
+    }
 
     #[tokio::test]
     async fn one_target_chunks_remain_contiguous_and_ordered() {
@@ -414,6 +445,8 @@ mod tests {
             batches: vec![b, a],
             targets: targets.clone(),
             fail_after_batches: false,
+            drops: None,
+            fail_get_at: None,
         });
         let p = plan();
         let r = CaptureNativeRawRoute {
@@ -453,12 +486,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn identical_keys_merge_interleaved_timestamps_with_one_final_marker() {
+        let targets = vec![target_with_peer(2), target_with_peer(1)];
+        let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
+            // Each region closes its own copy of the same key; only the merged view decides which
+            // chunk is globally final.
+            batches: vec![
+                [frame(b"same", &[1], false), frame(b"same", &[3], true)].concat(),
+                [frame(b"same", &[2], false), frame(b"same", &[4], true)].concat(),
+            ],
+            targets: targets.clone(),
+            fail_after_batches: false,
+            drops: None,
+            fail_get_at: None,
+        });
+        let p = plan();
+        let r = CaptureNativeRawRoute {
+            targets: vec![
+                (RegionId::new(1, 1), targets[0].clone()),
+                (RegionId::new(1, 2), targets[1].clone()),
+            ],
+        };
+        let table = table::table_name::TableName::new("catalog", "schema", "table");
+        let ctx = session::context::QueryContext::arc();
+        let chunks = merged_raw_series(source(&handler, &p, &r, &table, &ctx))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(chunks.len(), 4);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.primary_key.as_slice() == b"same\0\0")
+        );
+        let samples: Vec<(i64, f64)> = chunks
+            .iter()
+            .map(|chunk| {
+                let value = match chunk.fields.get(0).unwrap().sample(0) {
+                    datatypes::series::samples::SampleRef::Float(value) => value,
+                    _ => panic!("expected float sample"),
+                };
+                (chunk.time.timestamp(0).unwrap(), value)
+            })
+            .collect();
+        assert_eq!(samples, vec![(1, 1.0), (2, 2.0), (3, 3.0), (4, 4.0)]);
+        assert_eq!(chunks.iter().filter(|chunk| chunk.is_last).count(), 1);
+        assert!(chunks.last().unwrap().is_last);
+    }
+
+    #[tokio::test]
     async fn a_stream_error_after_a_batch_propagates() {
         let target = target_with_peer(7);
         let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
             batches: vec![frame(b"a", &[1], false)],
             targets: vec![target.clone()],
             fail_after_batches: true,
+            drops: None,
+            fail_get_at: None,
         });
         let p = plan();
         let r = CaptureNativeRawRoute {
@@ -480,6 +566,139 @@ mod tests {
             cause = error.source();
         }
         panic!("original stream error was not preserved: {error}");
+    }
+
+    #[tokio::test]
+    async fn truncated_non_final_stream_is_rejected() {
+        let target = target_with_peer(1);
+        let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
+            // The fixture ends naturally after a chunk that is not final for its key.
+            batches: vec![frame(b"a", &[1], false)],
+            targets: vec![target.clone()],
+            fail_after_batches: false,
+            drops: None,
+            fail_get_at: None,
+        });
+        let p = plan();
+        let r = CaptureNativeRawRoute {
+            targets: vec![(RegionId::new(1, 1), target)],
+        };
+        let table = table::table_name::TableName::new("catalog", "schema", "table");
+        let ctx = session::context::QueryContext::arc();
+        let error = merged_raw_series(source(&handler, &p, &r, &table, &ctx))
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .expect_err("EOF before the final marker must be rejected");
+        assert!(
+            caused_by(&error, "raw series stream ended before key was final"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_schema_is_rejected() {
+        let target = target_with_peer(1);
+        let rows = ArrowSchema::new(vec![
+            Field::new("ts", DataType::Int64, false),
+            Field::new("value", DataType::Float64, true),
+        ]);
+        let batch = RecordBatch::new_empty(Arc::new(Schema::try_from(rows).unwrap()));
+        let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
+            batches: vec![vec![batch]],
+            targets: vec![target.clone()],
+            fail_after_batches: false,
+            drops: None,
+            fail_get_at: None,
+        });
+        let p = plan();
+        let r = CaptureNativeRawRoute {
+            targets: vec![(RegionId::new(1, 1), target)],
+        };
+        let table = table::table_name::TableName::new("catalog", "schema", "table");
+        let ctx = session::context::QueryContext::arc();
+        let error = merged_raw_series(source(&handler, &p, &r, &table, &ctx))
+            .await
+            .err()
+            .expect("a Rows schema is not a raw series frame");
+        assert!(
+            caused_by(&error, "raw frame schema declares no known label mode"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_consumer_drops_all_acquired_streams() {
+        let targets = vec![target_with_peer(1), target_with_peer(2)];
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
+            // Every target has a second key still queued, so both acquired streams are live when
+            // the consumer stops after the first output.
+            batches: vec![
+                [frame(b"a", &[1], true), frame(b"c", &[1], true)].concat(),
+                [frame(b"b", &[1], true), frame(b"d", &[1], true)].concat(),
+            ],
+            targets: targets.clone(),
+            fail_after_batches: false,
+            drops: Some(drops.clone()),
+            fail_get_at: None,
+        });
+        let p = plan();
+        let r = CaptureNativeRawRoute {
+            targets: vec![
+                (RegionId::new(1, 1), targets[0].clone()),
+                (RegionId::new(1, 2), targets[1].clone()),
+            ],
+        };
+        let table = table::table_name::TableName::new("catalog", "schema", "table");
+        let ctx = session::context::QueryContext::arc();
+        let mut stream = merged_raw_series(source(&handler, &p, &r, &table, &ctx))
+            .await
+            .unwrap();
+        let first = stream.try_next().await.unwrap().expect("first chunk");
+        assert_eq!(first.primary_key.as_slice(), b"a\0\0");
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+        drop(stream);
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn later_acquisition_error_drops_prior_stream_and_is_preserved() {
+        let targets = vec![target_with_peer(1), target_with_peer(2)];
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: crate::region_query::RegionQueryHandlerRef = Arc::new(PerTargetHandler {
+            batches: vec![
+                [frame(b"a", &[1], true), frame(b"c", &[1], true)].concat(),
+                [frame(b"b", &[1], true), frame(b"d", &[1], true)].concat(),
+            ],
+            targets: targets.clone(),
+            fail_after_batches: false,
+            drops: Some(drops.clone()),
+            fail_get_at: Some(1),
+        });
+        let p = plan();
+        let r = CaptureNativeRawRoute {
+            targets: vec![
+                (RegionId::new(1, 1), targets[0].clone()),
+                (RegionId::new(1, 2), targets[1].clone()),
+            ],
+        };
+        let table = table::table_name::TableName::new("catalog", "schema", "table");
+        let ctx = session::context::QueryContext::arc();
+        let error = merged_raw_series(source(&handler, &p, &r, &table, &ctx))
+            .await
+            .err()
+            .expect("second do_get must fail");
+        assert!(
+            matches!(&error, crate::error::Error::QueryPlan { .. }),
+            "original acquisition error must not be replaced: {error}"
+        );
+        assert!(
+            caused_by(&error, "later target acquisition failed"),
+            "{error}"
+        );
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
