@@ -91,9 +91,9 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
-use datatypes::arrow::array::{Array, Float64Array};
+use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
-use datatypes::series::histogram::{HistogramBatch, HistogramView};
+use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
     DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -103,7 +103,8 @@ use datatypes::series::{MetricName, SeriesOrdering};
 
 use crate::aggregate;
 use crate::grid_series::{
-    GridSample, GridSeriesBuilder, LabelSet, label_set, merge_same_labelset, owned,
+    GridSample, GridSeriesBuilder, LabelSet, fields_bytes, label_set, merge_same_labelset, owned,
+    series_bytes, table_bytes,
 };
 use crate::histogram_eval::evaluate_histograms;
 use crate::instant_eval::select_instants;
@@ -111,12 +112,16 @@ use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, MathOp, ScalarOperand, drop_metric_name,
     map_arithmetic, map_compare, map_math,
 };
+use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::{NodeMetrics, NodePath};
 use crate::native::plan::{
     BoundInstant, BoundScalar, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
     NativeType,
 };
+#[cfg(test)]
+pub(crate) use crate::native::runs::absorb_rebuilds;
+use crate::native::runs::{Run, absorb};
 use crate::range_eval::RangeEvaluator;
 use crate::select::{self, SortOrder};
 use crate::vector_match::{
@@ -190,34 +195,11 @@ fn raw_bytes(chunk: &RawSeriesChunk) -> usize {
 /// The bytes an evaluated chunk holds: its struct and the Arrow buffers behind its fields.
 ///
 /// The grid is shared by every chunk addressed on it, so it is not counted per chunk.
-fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
-    std::mem::size_of::<EvaluatedChunk>().saturating_add(fields_bytes(&chunk.series.fields))
-}
-
-/// The bytes one evaluated series holds: its header, the axis that addresses it, the identity it
-/// carries and the sample buffers behind its fields.
 ///
-/// It is the figure a fragment of an affected window is charged with as it arrives. The axis's runs
-/// and the segments of its fields are counted in one pass over the series, so the estimate costs
-/// the fragment rather than a walk over everything the node holds. A payload a fragment shares with
-/// another — a histogram table behind two slices of it, the grid behind every axis — is counted
-/// once per fragment: that over-count is accepted here rather than a deduplication that would have
-/// to keep state across fragments.
-fn series_bytes(series: &Series) -> usize {
-    let runs = series.time.runs().count();
-    let segments: usize = series
-        .fields
-        .iter()
-        .map(|field| field.segments().len())
-        .sum();
-    std::mem::size_of::<Series>()
-        .saturating_add(std::mem::size_of::<TimeAxis>())
-        .saturating_add(runs.saturating_mul(std::mem::size_of::<(usize, usize)>()))
-        .saturating_add(
-            segments.saturating_mul(std::mem::size_of::<Samples>() + std::mem::size_of::<usize>()),
-        )
-        .saturating_add(fields_bytes(&series.fields))
-        .saturating_add(metric_bytes(&series.metric))
+/// It is what an aggregate node charges for a chunk it is folding: that node hands the chunk over
+/// to its fold and drops it, so the chunk alone is what it holds for as long as it holds anything.
+pub(super) fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
+    std::mem::size_of::<EvaluatedChunk>().saturating_add(fields_bytes(&chunk.series.fields))
 }
 
 /// The bytes one chunk a binary operand retains holds on its own.
@@ -343,42 +325,6 @@ fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize 
         .saturating_add(output)
 }
 
-/// The bytes the fields of a chunk hold: the sample buffers of every segment, and the histogram
-/// tables those segments reference.
-fn fields_bytes(fields: &SeriesFields) -> usize {
-    fields
-        .iter()
-        .map(|field| {
-            field.segments().iter().fold(0usize, |total, segment| {
-                total.saturating_add(segment_bytes(segment))
-            })
-        })
-        .fold(0usize, usize::saturating_add)
-}
-
-/// The bytes one dense segment of samples holds.
-fn segment_bytes(segment: &Samples) -> usize {
-    match segment.dense() {
-        Some(DenseSamplesRef::Float(values)) => values.get_array_memory_size(),
-        Some(DenseSamplesRef::Histogram(histograms)) => histograms
-            .indices()
-            .get_array_memory_size()
-            .saturating_add(table_bytes(histograms.batch())),
-        Some(DenseSamplesRef::Mixed(mixed)) => mixed
-            .floats()
-            .get_array_memory_size()
-            .saturating_add(mixed.histograms().indices().get_array_memory_size())
-            .saturating_add(table_bytes(mixed.histograms().batch())),
-        // `segments` hands out dense segments only, so a nested chunk never reaches here.
-        None => 0,
-    }
-}
-
-/// The bytes one histogram table holds: the batch struct and the arrays its columns view.
-fn table_bytes(table: &Arc<HistogramBatch>) -> usize {
-    std::mem::size_of::<HistogramBatch>().saturating_add(table.as_arrow().get_array_memory_size())
-}
-
 /// The bytes the allocation `buffer` is a slice of.
 ///
 /// The capacity is the whole allocation, which is what a slice keeps alive: a key of a few bytes
@@ -409,6 +355,8 @@ enum NodeTag {
     /// Matches two evaluated vectors and applies one operation to every matched pair of series, or
     /// broadcasts one constant over the chunks of one evaluated vector.
     Binary,
+    /// Folds every series of the input into one series per group, when the input ends.
+    Aggregate,
     /// Keeps some samples of its whole input vector at each grid point.
     Vector,
 }
@@ -423,6 +371,7 @@ impl NodeTag {
             Self::Window => "window",
             Self::Map => "map",
             Self::Binary => "binary",
+            Self::Aggregate => "aggregate",
             Self::Vector => "vector operation",
         }
     }
@@ -577,7 +526,9 @@ impl MergeInput {
 /// in the query; the metrics report the same figure so a slow node can be told apart from a wide
 /// one. The reservation is also the figure itself: a node holds nothing beside what it reserved, so
 /// a gauge reads its size rather than a copy that could drift from it.
-struct NodeBuffer {
+// Visible to the aggregate node so that its fold can reserve for what it is about to allocate; the
+// reservation belongs to a node, not to a module.
+pub(super) struct NodeBuffer {
     metrics: Arc<NodeMetrics>,
     reservation: MemoryReservation,
 }
@@ -593,7 +544,7 @@ impl NodeBuffer {
     }
 
     /// Reserves `bytes` beside what this node already holds.
-    fn grow(&mut self, bytes: usize) -> Result<()> {
+    pub(super) fn grow(&mut self, bytes: usize) -> Result<()> {
         self.reservation.try_grow(bytes)?;
         self.record();
         Ok(())
@@ -604,7 +555,7 @@ impl NodeBuffer {
     /// What a node that consumes its input chunk by chunk holds afterwards is not the sum of what
     /// it consumed, so the reservation is set from the state that is left rather than grown per
     /// chunk.
-    fn resize(&mut self, bytes: usize) -> Result<()> {
+    pub(super) fn resize(&mut self, bytes: usize) -> Result<()> {
         self.reservation.try_resize(bytes)?;
         self.record();
         Ok(())
@@ -626,20 +577,6 @@ impl NodeBuffer {
     fn release(&mut self) {
         self.reservation.free();
         self.record();
-    }
-}
-
-/// One run of grid positions, half-open, that hold a value in one field.
-#[derive(Clone, Copy, Debug)]
-struct Run {
-    start: usize,
-    end: usize,
-}
-
-impl Run {
-    /// Whether two runs share a position.
-    fn overlaps(self, other: Self) -> bool {
-        self.start < other.end && other.start < self.end
     }
 }
 
@@ -875,109 +812,6 @@ fn misaligned_field(
         time.len(),
         field.len(),
     ))
-}
-
-// How many times `absorb` rebuilt the stored runs instead of appending to them.
-//
-// Test-only, and per thread: the runs stored afterwards are the same either way, so a rebuild shows
-// only in what it costs, and a test that reads its own thread's figure is not disturbed by another
-// test's chunks.
-#[cfg(test)]
-thread_local! {
-    static ABSORB_REBUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// How many times this thread's [`absorb`] rebuilt the stored runs.
-#[cfg(test)]
-fn absorb_rebuilds() -> usize {
-    ABSORB_REBUILDS.with(std::cell::Cell::get)
-}
-
-/// Merges `incoming` into `stored`, keeping the result in position order and joining the runs that
-/// touch.
-///
-/// Within a chunk one pass over both sides is what keeps this linear, since each side is sorted and
-/// disjoint. Adding the runs one at a time and rebuilding the array after each would cost the square
-/// of the runs a chunk yields: a chunk of one hundred thousand positions alternating between values
-/// and nulls yields fifty thousand runs, and re-merging after each is over a billion element moves
-/// for a single series.
-///
-/// One pass per chunk is still a pass over everything the series has stored so far, so it is not
-/// free once the *history* grows across chunks: a series split into `K` chunks of one position each,
-/// a hole apart, stores one more run per chunk and moves `K(K+1)/2` of them, with no label collision
-/// and no illegal input anywhere. A chunk that starts no earlier than the end of the last stored run
-/// only ever adds to the end — the stored runs are sorted and disjoint, so every one of them ends
-/// before anything this chunk holds — and it is appended instead, which is amortised constant per
-/// run. That is the shape a scan hands over as its positions move forward chunk after chunk. A chunk
-/// that starts before the last stored run can split a run or reach back past it, so it still costs
-/// the full merge.
-///
-/// Either way the result is sorted, disjoint, and has the runs that touch joined, which is what
-/// [`Emitted::occupy`] looks a position up by.
-fn absorb(stored: &mut Vec<Run>, incoming: &[Run]) {
-    if incoming.is_empty() {
-        return;
-    }
-    if stored
-        .last()
-        .is_none_or(|last| incoming[0].start >= last.end)
-    {
-        append_runs(stored, incoming);
-    } else {
-        merge_runs(stored, incoming);
-    }
-}
-
-/// Appends `incoming` to `stored`, all of which lies past the last stored run.
-///
-/// Nothing already stored has to be placed again: the two sides are each in position order and
-/// nothing `incoming` holds can reach back into what is stored, so its runs are pushed on the end and
-/// the vector's own growth is the only move — amortised over the runs appended. Where its first run
-/// touches the end of the last stored run the two are one run, as they are after a merge, so it is
-/// joined rather than left beside it.
-fn append_runs(stored: &mut Vec<Run>, incoming: &[Run]) {
-    let mut incoming = incoming;
-    if let Some(last) = stored.last_mut()
-        && let Some(first) = incoming.first()
-        && first.start <= last.end
-    {
-        last.end = last.end.max(first.end);
-        incoming = &incoming[1..];
-    }
-    stored.extend_from_slice(incoming);
-}
-
-/// Merges `incoming` into `stored`, where the two can interleave.
-///
-/// One pass is enough because each side is sorted and disjoint: whichever run starts first is
-/// placed, and it joins the run before it where the two touch.
-fn merge_runs(stored: &mut Vec<Run>, incoming: &[Run]) {
-    #[cfg(test)]
-    ABSORB_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
-    let mut merged: Vec<Run> = Vec::with_capacity(stored.len() + incoming.len());
-    let (mut a, mut b) = (0, 0);
-    while a < stored.len() || b < incoming.len() {
-        let larger = match (stored.get(a), incoming.get(b)) {
-            (Some(left), Some(right)) if right.start < left.start => {
-                b += 1;
-                *right
-            }
-            (Some(left), _) => {
-                a += 1;
-                *left
-            }
-            (None, Some(right)) => {
-                b += 1;
-                *right
-            }
-            (None, None) => break,
-        };
-        match merged.last_mut() {
-            Some(last) if larger.start <= last.end => last.end = last.end.max(larger.end),
-            _ => merged.push(larger),
-        }
-    }
-    *stored = merged;
 }
 
 /// What a map node applies.
@@ -2293,6 +2127,14 @@ struct NodeRuntime {
     /// `None` for every other node, and for a binary node that broadcasts a constant instead: that
     /// one holds no operand at all and is described by [`NodeRuntime::broadcast`].
     binary: Option<BinaryRuntime>,
+    /// What an aggregate node holds: the fold over what it was handed.
+    ///
+    /// Unlike a binary node's operands, nothing of the input survives a chunk: the fold keeps its
+    /// states and the chunk it read is dropped, so this is the one node whose reservation does not
+    /// follow what it was handed but what it accumulated. That is also why this node cannot report
+    /// its input complete from what it holds -- there is nothing to hold -- and reads the driver's
+    /// [`NativeExecutor::inputs_finished`] and its child's [`NativeExecutionState::settled`] instead.
+    aggregate: Option<AggregateRuntime>,
     /// What a vector node holds.
     vector: Option<VectorRuntime>,
     /// What a binary node holds when one operand is a constant: the operation and the layout of the
@@ -2702,6 +2544,102 @@ impl NodeRuntime {
         self.buffer.resize(queued)
     }
 
+    /// Folds one chunk into this node's aggregate.
+    ///
+    /// The chunk is reserved for before it is folded, by what the node reports it is worth, and the
+    /// reservation settles afterwards on the fold that is left. Unlike [`Self::retain_binary`], what
+    /// stops being held here is the chunk itself: the fold keeps its states, so a chunk that closes
+    /// its series leaves nothing behind and the node is empty of input again.
+    fn retain_aggregate(&mut self, path: &NodePath, chunk: NativeChunk) -> Result<()> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "the aggregate at {path} consumes evaluated chunks, not raw samples"
+            )));
+        };
+        // The figure is read before the chunk is folded, because reserving after the fact would be
+        // reserving for memory the fold already read.
+        let pending = self
+            .aggregate
+            .as_ref()
+            .ok_or_else(|| no_aggregate(path))?
+            .pending(&chunk);
+        let positions = chunk.series.time.len();
+        self.buffer.grow(pending)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        {
+            let _timer = metrics.timer();
+            let (aggregate, buffer) = (&mut self.aggregate, &mut self.buffer);
+            aggregate
+                .as_mut()
+                .ok_or_else(|| no_aggregate(path))?
+                .accumulate(path, chunk, buffer, pending)?;
+        }
+        metrics.record_input(1, positions);
+        // A chunk that closed its series closed it for the node below: a group is not a series, so
+        // the fold completing nothing on it is why nothing is counted here. The series this node
+        // closes are the ones it hands out, counted when it queues them.
+        Ok(())
+    }
+
+    /// Finishes this node's fold and queues one chunk per group it produced.
+    ///
+    /// Each group is one series, decided in full by the fold, so the one chunk it is handed over as
+    /// closes it: a consumer above reads "nothing more here" from that chunk rather than from another
+    /// one arriving.
+    fn compute_aggregate(&mut self, path: &NodePath) -> Result<()> {
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let _timer = metrics.timer();
+        let groups = self
+            .aggregate
+            .as_ref()
+            .map_or(0, |aggregate| aggregate.groups());
+        let queue_capacity = self.queued.capacity();
+        let queue_target = self.queued.len().saturating_add(groups);
+        let queue_growth = queue_target
+            .saturating_sub(queue_capacity)
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
+        self.buffer.grow(queue_growth)?;
+        if groups > 0 {
+            self.queued.try_reserve_exact(groups).map_err(|error| {
+                DataFusionError::Execution(format!(
+                    "cannot reserve aggregate output queue: {error}"
+                ))
+            })?;
+        }
+        let queue_bytes = queue_target
+            .max(queue_capacity)
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
+        let output = {
+            let aggregate = self.aggregate.as_mut().ok_or_else(|| no_aggregate(path))?;
+            aggregate.compute(path, &mut self.buffer, queue_bytes)?
+        };
+        // The fold has returned its series; reserve their handover before appending them to the queue.
+        let Some(output) = output else {
+            return Ok(());
+        };
+        let mut closed = 0usize;
+        for series in output {
+            let bytes = series_bytes(&series);
+            let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
+            self.queued.push_back((chunk, bytes));
+            closed += 1;
+        }
+        // A group is one series and this node closes each of them exactly once, on the one chunk it
+        // hands it over as.
+        self.buffer.metrics.record_completed_series(closed);
+        // The output Vec has been consumed; the node now holds only queue backing and chunks.
+        let queued_bytes = self
+            .queued
+            .iter()
+            .fold(0usize, |total, (_, bytes)| total.saturating_add(*bytes));
+        let queue_backing = self
+            .queued
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(NativeChunk, usize)>());
+        self.buffer
+            .resize(queued_bytes.saturating_add(queue_backing))
+    }
+
     /// Feeds one chunk to this node's instant selection.
     ///
     /// `None` means the series this chunk belongs to has not ended: the selection reads one whole
@@ -2904,6 +2842,8 @@ impl NodeRuntime {
         self.window = None;
         self.instant = None;
         self.binary = None;
+        // The fold is what an aggregate node holds, and dropping it is what gives its states back.
+        self.aggregate = None;
         self.vector = None;
         self.broadcast = None;
         self.source_schema = None;
@@ -2996,15 +2936,14 @@ impl NativeExecutionState {
                 // two vectors, or a constant broadcast over one -- is decided where the operands'
                 // layouts are read.
                 NativeExpr::Binary { .. } => NodeTag::Binary,
+                // An aggregate is built here and narrowed below, for the same reason: `validate`
+                // admits every kind and every stage as a legal tree, and the runtime computes one
+                // kind at one stage.
+                NativeExpr::Aggregate { .. } => NodeTag::Aggregate,
                 NativeExpr::Vector { .. } => NodeTag::Vector,
                 // A scalar is a value node: it produces the constant it was bound to, hands over no
                 // chunk and holds no state, so it is built like any other node and pulled like none.
                 NativeExpr::Scalar(_) => NodeTag::Scalar,
-                // An aggregate is legal in a bound tree, and `validate` stays the authority on that;
-                // this runtime simply does not execute it yet. Rejected before a single chunk is
-                // read: a tree the runtime cannot execute must not start, because a partial answer
-                // would be one the caller never asked for.
-                NativeExpr::Aggregate { .. } => return Err(not_implemented("Aggregate", &path)),
             };
             let buffer = NodeBuffer::new(&path, handles, &pool);
             let mut runtime = NodeRuntime {
@@ -3015,6 +2954,7 @@ impl NativeExecutionState {
                 window: None,
                 map: None,
                 binary: None,
+                aggregate: None,
                 vector: None,
                 broadcast: None,
                 source_schema: None,
@@ -3114,6 +3054,29 @@ impl NativeExecutionState {
                     // out. A broadcast that keeps the labels it reads is not where two series
                     // become one either, so it keeps none; the one that drops them does, above.
                 }
+                NativeExpr::Aggregate { input, op } => {
+                    // A `Complete` aggregate neither adds nor drops a field and evaluates on its
+                    // input's grid, so the node's own output is the layout it folds. What it does
+                    // not execute -- another kind, or another stage -- is refused here, before the
+                    // pass reaches the input that would feed it, and naming what it found is that
+                    // rejection's job: a `Partial` aggregate's output is state and names no samples
+                    // at all, so the input's layout stands in for it and the stage decides.
+                    let schema = node
+                        .output
+                        .samples()
+                        .or_else(|| input.output.samples())
+                        .cloned()
+                        .ok_or_else(|| {
+                            DataFusionError::Execution(format!(
+                                "the aggregate at {path} does not produce samples"
+                            ))
+                        })?;
+                    runtime.aggregate = Some(AggregateRuntime::new(
+                        op.clone(),
+                        schema,
+                        &mut runtime.buffer,
+                    )?);
+                }
                 NativeExpr::Vector { op, .. } => {
                     let schema = node.output.samples().cloned().ok_or_else(|| {
                         DataFusionError::Execution(format!(
@@ -3136,10 +3099,9 @@ impl NativeExecutionState {
                     // A vector operation keeps the labels of the series it reads, or answers under
                     // label sets of its own, so it keeps no ledger of what it handed out.
                 }
-                NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
+                NativeExpr::Scalar(_) => {
                     // A scalar holds nothing: what its consumer reads is the constant the node was
-                    // bound to, which is on the tree rather than in this state. The aggregate is
-                    // rejected above, where the pass has the position to name.
+                    // bound to, which is on the tree rather than in this state.
                 }
             }
             // The inputs this node reads, in the order the tree declares them: a unary node's one
@@ -3147,12 +3109,11 @@ impl NativeExecutionState {
             // pushed back to front, so the node the spec names is the one the pass reaches next and
             // nothing but its own subtree lies between the two.
             let reads_input = match &node.expr {
-                NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::Aggregate { .. } => {
-                    false
-                }
+                NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
                 | NativeExpr::Map { input, .. }
+                | NativeExpr::Aggregate { input, .. }
                 | NativeExpr::Vector { input, .. } => {
                     pending.push((input.as_ref(), path.input()));
                     true
@@ -3222,6 +3183,14 @@ impl NativeExecutionState {
                         holds_shared[index] = input_holds_shared;
                     }
                     NodeTag::Map => holds_shared[index] = true,
+                    NodeTag::Aggregate => {
+                        // An aggregate hands over one series per group, each under the label set its
+                        // group was keyed by and each closed on its own chunk: two groups are two
+                        // label sets, so nothing above has to join pieces of a series. Its own input
+                        // is read whole -- the fold holds what it accumulated, not the chunks -- so
+                        // nothing about its input's flag reaches it either.
+                        holds_shared[index] = false;
+                    }
                     NodeTag::Scalar => {
                         // A scalar produces one value and no labels, so it is not a stream of series
                         // and nothing above it can read two of them under one label set. The flag
@@ -3780,9 +3749,24 @@ impl NativeExecutor {
             // A scalar produces its value without reading anything, so it is settled from the
             // start: there is no chunk it owes its consumer.
             NodeTag::Scalar => true,
+            // These report as they are handed chunks, so a child with nothing left is all it takes
+            // for them to have nothing left either.
             NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
                 .input
                 .is_none_or(|child| self.settled(child)),
+            // An aggregate answers one series per group and only once its input ended, so its own
+            // fold has to have run as well: a child that has handed everything up is not enough,
+            // because every one of those chunks was folded and none of them answered yet. This is
+            // what keeps it out of the line above, which asks only about the child.
+            NodeTag::Aggregate => {
+                runtime
+                    .aggregate
+                    .as_ref()
+                    .is_some_and(|aggregate| aggregate.computed)
+                    && self.state.nodes[index]
+                        .input
+                        .is_none_or(|child| self.settled(child))
+            }
             NodeTag::Vector => {
                 runtime
                     .vector
@@ -3980,6 +3964,7 @@ impl NativeExecutor {
                 // does, so its values are counted rather than read as its positions.
                 runtime.pop_queued(evaluated_values)
             }
+            NodeTag::Aggregate => self.aggregate_node(index),
             NodeTag::Vector => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
                 // Which samples are kept at a point is not decided until the whole input has
@@ -3997,6 +3982,35 @@ impl NativeExecutor {
                 runtime.pop_queued(evaluated_values)
             }
         }
+    }
+
+    /// Folds everything the aggregate at `index` can read and hands over one group's series.
+    ///
+    /// What it reads is taken to the end of what its child has, because nothing the fold is handed
+    /// is retained: a chunk is folded as it arrives and dropped, so reading the child dry costs the
+    /// fold's states and not the input's bytes. Nothing is answered until the input has ended --
+    /// before that, a group's value at a point is still missing the members that have not arrived.
+    ///
+    /// That is the difference from a binary node. A binary node retains both operands and so can ask
+    /// whether they hold anything still open; an aggregate keeps none of them and asks the driver
+    /// instead: [`Self::inputs_finished`] says the caller will hand over nothing more, and
+    /// [`NativeExecutionState::settled`] says the child has none left to produce.
+    fn aggregate_node(&mut self, index: usize) -> Result<Option<NativeChunk>> {
+        let child = self.state.nodes[index]
+            .input
+            .ok_or_else(|| missing_input(NodeTag::Aggregate))?;
+        while let Some(chunk) = self.pull(child)? {
+            let path = &self.state.paths[index];
+            self.state.runtimes[index].retain_aggregate(path, chunk)?;
+        }
+        if !self.inputs_finished || !self.settled(child) {
+            return Ok(None);
+        }
+        let path = &self.state.paths[index];
+        self.state.runtimes[index].compute_aggregate(path)?;
+        // A group's series holds one value per field and point it decided, so its values are counted
+        // rather than read as its positions, as a binary result's are.
+        self.state.runtimes[index].pop_queued(evaluated_values)
     }
 
     /// Pulls the vector side of the broadcast at `index` until it hands over a chunk, and returns
@@ -4226,28 +4240,12 @@ fn valid_values(chunk: &EvaluatedChunk) -> usize {
         .sum()
 }
 
-/// The values a chunk a binary node hands over holds.
-///
-/// A binary result is an evaluated chunk, so this is [`valid_values`]: one value per field sample
-/// that holds one. A raw chunk cannot reach a binary node's queue, and is answered as its positions
-/// so an impossible queue cannot under-count.
+/// The values an evaluated chunk hands over, or the timestamps a raw source hands over.
 fn evaluated_values(chunk: &NativeChunk) -> usize {
     match chunk {
         NativeChunk::Evaluated(chunk) => valid_values(chunk),
         NativeChunk::Raw(chunk) => chunk.time.len(),
     }
-}
-
-/// The rejection of a node kind this runtime does not execute yet.
-///
-/// It names the kind and the node's position: the position is what the metrics and `EXPLAIN` call
-/// the same node, so a reader can find it in the tree. An aggregate is the one kind left here: a
-/// scalar executes as a value node, and a binary node executes both as a vector match and as a
-/// constant broadcast.
-fn not_implemented(kind: &str, path: &NodePath) -> DataFusionError {
-    DataFusionError::NotImplemented(format!(
-        "the native runtime does not execute {kind} nodes yet: {kind} at {path}"
-    ))
 }
 
 /// The error for a window whose evaluator this execution already closed.
@@ -4331,11 +4329,27 @@ fn truncated_input(path: &NodePath) -> DataFusionError {
     ))
 }
 
+/// The rejection of a node kind this runtime does not execute yet.
+///
+/// It names the kind and the node's position: the position is what the metrics and `EXPLAIN` call
+/// the same node, so a reader can find it in the tree.
+fn not_implemented(kind: &str, path: &NodePath) -> DataFusionError {
+    DataFusionError::NotImplemented(format!(
+        "the native runtime does not execute {kind} nodes yet: {kind} at {path}"
+    ))
+}
+
 /// The error for a node asked to compute without the runtime its kind holds.
 fn no_binary(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the node at {path} holds no binary operation"))
 }
 
+/// The error for an aggregate node whose fold is missing.
+fn no_aggregate(path: &NodePath) -> DataFusionError {
+    DataFusionError::Execution(format!("the node at {path} holds no aggregate"))
+}
+
+/// The error for a node asked to run a vector operation without one.
 fn no_vector(path: &NodePath) -> DataFusionError {
     DataFusionError::Execution(format!("the node at {path} holds no vector operation"))
 }
