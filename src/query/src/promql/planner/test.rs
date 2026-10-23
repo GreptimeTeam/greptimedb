@@ -970,6 +970,7 @@ async fn native_engine_provider(partition_key_indices: Vec<usize>) -> DfTableSou
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_test_table_provider_with_options(
     table_name_tuples: &[(String, String)],
     num_tag: usize,

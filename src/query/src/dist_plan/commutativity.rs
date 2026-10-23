@@ -393,7 +393,6 @@ impl Categorizer {
 /// several series at once. Neither has a compiler producer yet, which is why refusing them costs
 /// nothing today: a tree built some other way is exactly what this check is for, because evaluating
 /// it one region at a time would fold a partial input and answer a wrong query silently.
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
