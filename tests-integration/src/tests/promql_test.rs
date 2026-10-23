@@ -1797,8 +1797,10 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
             .unwrap();
             let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
             let values = batch
-                .column_by_name("val")
-                .unwrap()
+                .columns()
+                .iter()
+                .find(|column| column.data_type() == &DataType::Float64)
+                .expect("native/legacy result has one Float64 value column")
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .unwrap();
@@ -1832,6 +1834,11 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
                     .first()
                     .map(|child| child.output_partitioning().partition_count())
                     .unwrap_or(0),
+            );
+            assert_eq!(
+                node.output_partitioning().partition_count(),
+                4,
+                "fused output must retain four partitions"
             );
         }
         if let Some(metrics) = node.metrics() {
@@ -1894,8 +1901,18 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     )
     .await;
     execute_all(&instance, "INSERT INTO native_e2e (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4), ('c', 0, 6), ('d', 0, 8), ('e', 0, 10), ('f', 0, 12), ('g', 0, 14), ('h', 0, 16), ('i', 0, 18), ('j', 0, 20), ('k', 0, 22), ('l', 0, 24), ('m', 0, 26), ('n', 0, 28), ('o', 0, 30), ('p', 0, 32)", QueryContext::arc()).await;
-    let sql = "TQL EVAL (0, 0, '1s') native_e2e";
-    let native = native_tql_output(&instance, sql, true).await;
+    let query = PromQuery {
+        query: "native_e2e".to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "1s".to_string(),
+        ..PromQuery::default()
+    };
+    let native = instance
+        .do_promql_query(query.clone(), native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
     let plan = native
         .meta
         .plan
@@ -1914,7 +1931,14 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
         .zip((1..=16).map(|index| index as f64 * 2.0))
         .map(|(host, value)| (0, (host as char).to_string(), value))
         .collect::<Vec<_>>();
-    let legacy_rows = native_result_rows(native_tql_output(&instance, sql, false).await).await;
+    let legacy_rows = native_result_rows(
+        instance
+            .do_promql_query(query, native_query_context(false, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
     assert_eq!(native_rows, expected);
     assert_eq!(native_rows, legacy_rows);
 }
@@ -1964,7 +1988,7 @@ async fn native_promql_view_fallback_preserves_native_hint() {
     let expected_extensions = ctx.extensions();
     execute_all(
         &instance,
-        "CREATE VIEW native_view AS TQL EVAL (0, 0, '1s') native_view_source",
+        "CREATE VIEW native_view AS TQL EVAL (0, 0, '1s', '5m') native_view_source",
         ctx.clone(),
     )
     .await;
@@ -1976,6 +2000,14 @@ async fn native_promql_view_fallback_preserves_native_hint() {
     let view_rows = native_result_rows(view).await;
     assert_eq!(ctx.extensions(), expected_extensions);
     assert_eq!(view_rows, vec![(0, "a".to_string(), 2.0)]);
+    let create_view = instance
+        .do_query("SHOW CREATE VIEW native_view", ctx.clone())
+        .await
+        .remove(0)
+        .unwrap();
+    let create_view_text = native_output_text(create_view).await;
+    assert!(create_view_text.contains("TQL EVAL"));
+    assert!(create_view_text.contains("5m"));
     let direct = instance
         .do_query("TQL EVAL (0, 0, '1s') native_view_source", ctx)
         .await
