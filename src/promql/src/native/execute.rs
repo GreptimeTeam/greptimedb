@@ -2353,6 +2353,493 @@ impl RuntimeTree {
     }
 }
 
+/// What the driver asks of one node.
+///
+/// A node reads its own children directly instead of being told which node to read: a pull descends
+/// the part of the tree it needs and returns, and the one lock the state takes around the root is
+/// what makes the whole descent exclusive. No node therefore has to know where in the tree it sits,
+/// and the topology stays the one the tree was built with.
+impl RuntimeNode {
+    /// Pulls the next chunk this node hands over, taking what its children owe it.
+    ///
+    /// `inputs_finished` is the caller's word that no more source chunks will arrive. A node that
+    /// decides nothing until its whole input is there reads it to tell the last pull that found
+    /// nothing -- "nothing more" -- from the ones before it, which meant "nothing yet".
+    fn pull(
+        &mut self,
+        inputs: &mut [InputSlot],
+        inputs_finished: bool,
+    ) -> Result<Option<NativeChunk>> {
+        match &mut self.op {
+            // A source hands over what the caller queued at it. The id was assigned when the tree
+            // was built, so an id past the leaves means this call and the tree disagree rather than
+            // that the chunk belongs somewhere else.
+            RuntimeOp::Input(id) => {
+                let input = *id;
+                let count = inputs.len();
+                let slot = inputs
+                    .get_mut(input.index())
+                    .ok_or_else(|| no_input(count, input))?;
+                slot.pop_source()
+            }
+            // A scalar owes its consumer no chunk: it produces one value and no series, and the
+            // value is the constant on the tree, which the consumer reads off its own binding. A
+            // pull of it is therefore empty by construction and says nothing has stalled.
+            RuntimeOp::Scalar => Ok(None),
+            RuntimeOp::Instant {
+                input,
+                instant,
+                state,
+            } => {
+                let Some(selection) = instant.as_mut() else {
+                    return Err(no_instant());
+                };
+                // A selection decides a whole series at once, so every chunk before the one that
+                // closes it yields nothing and the selection asks its input again.
+                loop {
+                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
+                    };
+                    if let Some(output) = state.instant(selection, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
+            RuntimeOp::Window {
+                input,
+                window,
+                merge,
+                state,
+            } => {
+                // A chunk this window computed while flushing its collected input leaves first: it
+                // was produced before the window was drained, and the pull that hands it up is the
+                // one that empties the queue.
+                if let Some(chunk) = state.take_output()? {
+                    return Ok(Some(chunk));
+                }
+                let Some(evaluator) = window.as_mut() else {
+                    return Err(no_window());
+                };
+                // A window reports on the chunk that closes a series, so a chunk that decides
+                // nothing yields nothing and the window asks its input again.
+                loop {
+                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
+                    };
+                    if let Some(output) = state.window(evaluator, merge, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
+            RuntimeOp::Map { input, map, state } => {
+                let Some(operation) = map.as_ref() else {
+                    return Err(no_map());
+                };
+                // An operation that empties every position yields no chunk, and the map asks its
+                // input again rather than reporting a decision it did not make.
+                loop {
+                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
+                    };
+                    let NativeChunk::Evaluated(chunk) = chunk else {
+                        return Err(DataFusionError::Execution(
+                            "the map node consumes an evaluated chunk, not raw samples".to_string(),
+                        ));
+                    };
+                    if let Some(output) = state.map(operation, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                state,
+            } => {
+                let Some(operation) = binary.as_mut() else {
+                    return Err(no_binary());
+                };
+                // Both operands are read to the end of what they hand over: before the input ends a
+                // binary node only retains the chunks, because a pair is not decided until both
+                // sides are whole, and after it ends this is the drain that empties the two.
+                while let Some(chunk) = left.pull(inputs, inputs_finished)? {
+                    state.retain_binary(operation, 0, chunk)?;
+                }
+                while let Some(chunk) = right.pull(inputs, inputs_finished)? {
+                    state.retain_binary(operation, 1, chunk)?;
+                }
+                // Nothing has settled for a point that has an operand still arriving, and an
+                // operand below a collecting window has not arrived until that window is flushed:
+                // a node that reports itself settled reports it for everything below it too.
+                if !inputs_finished || !left.settled(inputs) || !right.settled(inputs) {
+                    return Ok(None);
+                }
+                state.compute_binary(operation)?;
+                // A result holds one value per field, and a field may hold none where another
+                // does, so its values are counted rather than read as its positions.
+                state.pop_queued(evaluated_values)
+            }
+            RuntimeOp::Broadcast {
+                left,
+                right,
+                broadcast,
+                state,
+            } => {
+                let Some(operation) = broadcast.as_mut() else {
+                    return Err(no_broadcast());
+                };
+                // A broadcast reads the vector side only: the constant is on the node's binding, so
+                // there is no second stream to pull and no chunk to retain. Each chunk is
+                // transformed as it arrives and handed up, which is what keeps a broadcast over a
+                // whole vector from costing the vector.
+                let vector = match operation.operand {
+                    ScalarOperand::Left(_) => &mut **right,
+                    ScalarOperand::Right(_) => &mut **left,
+                };
+                // An operation that empties every position yields no chunk, and the node asks its
+                // vector side again rather than reporting a decision it did not make.
+                loop {
+                    let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
+                    };
+                    if let Some(output) = state.broadcast(operation, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
+            RuntimeOp::Aggregate {
+                input,
+                aggregate,
+                state,
+            } => {
+                let Some(fold) = aggregate.as_mut() else {
+                    return Err(no_aggregate());
+                };
+                // What the fold reads is not retained -- a chunk is folded as it arrives and
+                // dropped -- so reading the child dry costs the fold's states and not the input's
+                // bytes. Nothing is answered before the input ends: until then a group's value at a
+                // point is still missing the members that have not arrived.
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state.retain_aggregate(fold, chunk)?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                state.compute_aggregate(fold)?;
+                // A group's series holds one value per field and point it decided, so its values
+                // are counted rather than read as its positions, as a binary result's are.
+                state.pop_queued(evaluated_values)
+            }
+            RuntimeOp::Vector {
+                input,
+                vector,
+                state,
+            } => {
+                let Some(operation) = vector.as_mut() else {
+                    return Err(no_vector());
+                };
+                // Which samples are kept at a point is not decided until the whole input has
+                // arrived, so the input is read to the end before anything is handed over.
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    state.retain_vector(operation, chunk)?;
+                }
+                if !inputs_finished || !input.settled(inputs) {
+                    return Ok(None);
+                }
+                state.compute_vector(operation)?;
+                state.pop_queued(evaluated_values)
+            }
+        }
+    }
+
+    /// Whether this node has produced everything it ever will.
+    ///
+    /// A pull that finds nothing does not answer it: a collecting window reports nothing until it
+    /// is flushed, and a binary node that matches two vectors reports nothing until both nodes it
+    /// reads from are finished. Each node therefore answers from its own state and from its
+    /// children's, which is what keeps a binary node from computing on an operand a window below it
+    /// has not handed over yet.
+    fn settled(&self, inputs: &[InputSlot]) -> bool {
+        match &self.op {
+            // A source has handed over everything it ever will once nothing is queued at it: what
+            // it hands over is what the caller queued.
+            RuntimeOp::Input(id) => inputs
+                .get(id.index())
+                .is_some_and(|slot| slot.state.queued.is_empty()),
+            // A scalar produces its value without reading anything, so it is settled from the
+            // start: there is no chunk it owes its consumer.
+            RuntimeOp::Scalar => true,
+            // These report as they are handed chunks, so a child with nothing left is all it takes
+            // for them to have nothing left either.
+            RuntimeOp::Instant { input, state, .. } | RuntimeOp::Map { input, state, .. } => {
+                state.queued.is_empty() && input.settled(inputs)
+            }
+            // A window that collects its input has not answered until it has flushed it, so a merge
+            // still held is an answer still owed.
+            RuntimeOp::Window {
+                input,
+                merge,
+                state,
+                ..
+            } => state.queued.is_empty() && merge.is_none() && input.settled(inputs),
+            // An aggregate answers one series per group and only once its input ended, so its own
+            // fold has to have run as well: a child that has handed everything up is not enough,
+            // because every one of those chunks was folded and none of them answered yet.
+            RuntimeOp::Aggregate {
+                input,
+                aggregate,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && aggregate.as_ref().is_some_and(|fold| fold.computed)
+                    && input.settled(inputs)
+            }
+            RuntimeOp::Vector {
+                input,
+                vector,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && vector.as_ref().is_some_and(|operation| operation.computed)
+                    && input.settled(inputs)
+            }
+            // A vector match is settled once its kernel ran and both operands are: what one side
+            // answers at a point depends on the other side.
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && binary.as_ref().is_some_and(|operation| operation.computed)
+                    && left.settled(inputs)
+                    && right.settled(inputs)
+            }
+            // A broadcast owes only what its vector side has not handed over yet: it answers each
+            // chunk as it reads it and keeps nothing, so it is settled exactly when that side is.
+            RuntimeOp::Broadcast {
+                left,
+                right,
+                broadcast,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && broadcast
+                        .as_ref()
+                        .is_some_and(|operation| match operation.operand {
+                            ScalarOperand::Left(_) => right.settled(inputs),
+                            ScalarOperand::Right(_) => left.settled(inputs),
+                        })
+            }
+        }
+    }
+
+    /// Merges the collected input of every window that collects it, deepest first.
+    ///
+    /// Deeper windows go first: a window above one of them collects the chunks the one below hands
+    /// up, so flushing the shallow one first would merge an input it has not received yet. What a
+    /// flush queues is handed up by the caller's own pulls, which is why nothing here collects the
+    /// answer into a value of its own: a window whose input has not settled is simply left for a
+    /// later call, when what is below it has handed its answer over.
+    fn flush_ready_merges(&mut self, inputs: &[InputSlot]) -> Result<bool> {
+        match &mut self.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(false),
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Vector { input, .. } => input.flush_ready_merges(inputs),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                let left_flushed = left.flush_ready_merges(inputs)?;
+                let right_flushed = right.flush_ready_merges(inputs)?;
+                Ok(left_flushed || right_flushed)
+            }
+            RuntimeOp::Window {
+                input,
+                window,
+                merge,
+                state,
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                // A window collects its input only when it can hold two series under one canonical
+                // label set, and that input has to be finished before it is merged: a node below
+                // still holding collected input has not answered yet, and merging what it has not
+                // sent would answer a series from half of its contributions.
+                if merge.is_some() && input.settled(inputs) {
+                    let Some(evaluator) = window.as_mut() else {
+                        return Err(no_window());
+                    };
+                    state.flush_merge(evaluator, merge)?;
+                    flushed = true;
+                }
+                Ok(flushed)
+            }
+        }
+    }
+
+    /// Whether any window still holds collected input that has not been merged.
+    fn any_merge_pending(&self) -> bool {
+        match &self.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => false,
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Vector { input, .. } => input.any_merge_pending(),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                left.any_merge_pending() || right.any_merge_pending()
+            }
+            // Only a window that collects its input keeps collected input to merge.
+            RuntimeOp::Window { input, merge, .. } => merge.is_some() || input.any_merge_pending(),
+        }
+    }
+
+    /// Refuses a node that ended inside a series, in every node that would read the remainder.
+    ///
+    /// A node that retains its whole input is the one that can tell a series that ended from one
+    /// that was cut off there: the assembly above would read half a vector as a whole one, and a
+    /// window that collected its input would merge the pieces it has into a series that looks
+    /// finished. Both are refused here, before any of them allocates a workspace.
+    fn unclosed(&self) -> Result<()> {
+        match &self.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Aggregate { input, .. } => input.unclosed(),
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                ..
+            } => {
+                if let Some(operation) = binary {
+                    operation.closed()?;
+                }
+                left.unclosed()?;
+                right.unclosed()
+            }
+            RuntimeOp::Broadcast { left, right, .. } => {
+                left.unclosed()?;
+                right.unclosed()
+            }
+            RuntimeOp::Vector { input, vector, .. } => {
+                if let Some(operation) = vector {
+                    operation.input.ensure_closed(Reader::Vector)?;
+                }
+                input.unclosed()
+            }
+        }
+    }
+
+    /// Finishes every window's evaluator that is still here, and reports the first failure.
+    ///
+    /// An evaluator that read the input says here whether that input ended inside a series: one
+    /// still holding a series is what a truncated stream looks like above the leaf that could have
+    /// named it. Every evaluator is finished even after one fails -- the first error is the one
+    /// reported -- so that a failure leaves nothing to be read on the way out.
+    fn finish_windows(&mut self) -> Result<()> {
+        match &mut self.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Vector { input, .. } => input.finish_windows(),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                // Both sides are finished even when the first one fails: the failure is reported
+                // from here, and an evaluator left holding a series would keep its bytes.
+                let first = left.finish_windows();
+                let second = right.finish_windows();
+                first.and(second)
+            }
+            RuntimeOp::Window { input, window, .. } => {
+                let child = input.finish_windows();
+                let own = window.take().map_or(Ok(()), RangeEvaluator::finish);
+                child.and(own)
+            }
+        }
+    }
+
+    /// Gives back everything this node and its children hold, keeping the topology.
+    ///
+    /// The operation's payload goes first: it is what the reservation was taken for, and dropping
+    /// it after the reservation went back would hand the pool bytes it cannot admit while they are
+    /// still read. Both arms of a binary or broadcast node are released rather than the variant
+    /// being replaced, so the metrics an observer exported still describe the tree that ran.
+    fn release(&mut self) {
+        match &mut self.op {
+            // A source keeps its queue in the caller-owned slot, which is released beside the tree,
+            // and a scalar holds nothing at all.
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Instant {
+                input,
+                instant,
+                state,
+            } => {
+                *instant = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Window {
+                input,
+                window,
+                merge,
+                state,
+            } => {
+                *window = None;
+                *merge = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Map { input, map, state } => {
+                *map = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Aggregate {
+                input,
+                aggregate,
+                state,
+            } => {
+                *aggregate = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Vector {
+                input,
+                vector,
+                state,
+            } => {
+                *vector = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Binary {
+                left,
+                right,
+                binary,
+                state,
+            } => {
+                *binary = None;
+                state.release();
+                left.release();
+                right.release();
+            }
+            RuntimeOp::Broadcast {
+                left,
+                right,
+                broadcast,
+                state,
+            } => {
+                *broadcast = None;
+                state.release();
+                left.release();
+                right.release();
+            }
+        }
+    }
+}
+
 impl NativeExecutionState {
     pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
         let mut inputs = Vec::new();
@@ -2397,6 +2884,109 @@ impl NativeExecutionState {
                     .root
                     .reserved_bytes(),
             )
+    }
+}
+
+/// What the driver asks of one execution's state.
+///
+/// Every operation locks the tree once, does all of its work on the nodes below inside that lock,
+/// and drops the guard before returning. Dropping it there is what keeps a caller that stops the
+/// execution after an error from waiting on itself: stopping it locks the tree again to release
+/// what the failed operation left behind.
+impl NativeExecutionState {
+    /// Pulls the next chunk the root of this state's tree hands over.
+    ///
+    /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
+    /// down unchanged, because only a node that reads its whole input needs it.
+    fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
+        let mut tree = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tree.root.pull(&mut self.inputs, inputs_finished)
+    }
+
+    /// Refuses an input the caller never closed, and every node that ended inside a series.
+    ///
+    /// The slots are read first: an open series there is the input the caller can still close, and
+    /// the name it is reported under is the routing slot it was queued at. Only then are the nodes
+    /// asked, because a node that retains its whole input reports the same truncation in its own
+    /// terms.
+    fn unclosed(&self) -> Result<()> {
+        if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
+            return Err(truncated_input(InputId::new(index)));
+        }
+        let tree = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tree.root.unclosed()
+    }
+
+    /// Merges what every window that collects its input has been handed, deepest first.
+    fn flush_ready_merges(&mut self) -> Result<bool> {
+        let mut tree = self
+            .runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        tree.root.flush_ready_merges(&self.inputs)
+    }
+
+    /// Whether any window still holds collected input that has not been merged.
+    fn any_merge_pending(&self) -> bool {
+        self.runtime
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .root
+            .any_merge_pending()
+    }
+
+    /// Closes the execution: finishes every window's evaluator and gives everything back.
+    ///
+    /// The evaluators are finished before anything is released, so the first failure is reported
+    /// from the state that caused it. Everything is released whether or not one of them failed:
+    /// the caller reads the error either way, and holding the bytes past it would keep the query's
+    /// memory in use for as long as the executor is alive.
+    fn close(&mut self) -> Result<()> {
+        let finished = {
+            let mut tree = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let finished = tree.root.finish_windows();
+            tree.root.release();
+            finished
+        };
+        for slot in &mut self.inputs {
+            slot.release();
+        }
+        finished
+    }
+
+    /// Gives back everything this execution still holds: its payloads, its slots and the bytes
+    /// they reserved.
+    fn release(&mut self) {
+        {
+            let mut tree = self
+                .runtime
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            tree.root.release();
+        }
+        for slot in &mut self.inputs {
+            slot.release();
+        }
+    }
+}
+
+impl Drop for NativeExecutionState {
+    /// Returns what the execution never gave back itself.
+    ///
+    /// An observer can keep the tree alive past the executor -- the metrics handles are shared
+    /// through it -- so the payloads and the reservations are given back here rather than with the
+    /// tree: what outlives the execution is its topology and the counters it recorded.
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -3237,8 +3827,9 @@ impl NativeExecutor {
         // soon as the tree settles it: the caller pulls the answer instead of receiving it as one
         // collected value, and what it has not pulled yet stays charged to the node holding it.
         loop {
-            // The root is the node the state was built from, which the pass puts first.
-            let pulled: Option<NativeChunk> = match self.pull(0) {
+            // The state's tree is the one this execution was built from, and a pull is asked of its
+            // root; the nodes below it read their own children from there.
+            match self.state.pull(self.inputs_finished) {
                 Ok(Some(NativeChunk::Evaluated(chunk))) => return Ok(Some(chunk)),
                 // Rejected when the state was built; kept as an error rather than a panic so an
                 // impossible tree cannot take the process down.
@@ -3251,13 +3842,13 @@ impl NativeExecutor {
                     self.stop(&error);
                     return Err(error);
                 }
-                Ok(None) => None,
+                // Nothing has settled: the stages below decide whether that is a stall or an end.
+                Ok(None) => {}
                 Err(error) => {
                     self.stop(&error);
                     return Err(error);
                 }
-            };
-            let _ = pulled;
+            }
             // Nothing has settled. While the caller is still pushing, that is a stall and the
             // answer is simply not ready; once it has ended the input, each stage below runs on the
             // first pull that finds the tree quiet, and the loop looks for what it produced.
@@ -3281,7 +3872,7 @@ impl NativeExecutor {
             // first is what keeps the two in order: the window produces, the pull that follows
             // carries its output to whoever reads it, and only then can a binary node decide
             // whether both of its operands are complete.
-            match self.flush_ready_merges() {
+            match self.state.flush_ready_merges() {
                 // A window answered: what it queued is pulled on the next turn, and that pull is
                 // also what carries its answer to a node above it.
                 Ok(true) => continue,
@@ -3291,7 +3882,7 @@ impl NativeExecutor {
                     return Err(error);
                 }
             }
-            if self.any_merge_pending() {
+            if self.state.any_merge_pending() {
                 // A window still holds collected input, so something below it has not finished:
                 // pulling again is what gives that node its turn.
                 continue;
@@ -3351,320 +3942,19 @@ impl NativeExecutor {
         }
     }
 
-    /// Merges the collected input of every window that collects it, and drains the root after each
-    /// merged series.
-    ///
-    /// Deeper windows go first: a window above one of them collects the chunks the one below hands
-    /// up, so flushing the shallow one first would merge an input it has not received yet. What a
-    /// flush queues is handed up by the caller's own pulls, which is why nothing here collects the
-    /// answer into a value of its own.
-    fn flush_ready_merges(&mut self) -> Result<bool> {
-        let mut flushed = false;
-        for index in (0..self.state.runtimes.len()).rev() {
-            // A window that collects its input is the one node holding a [`MergeInput`], and the
-            // flush takes it: the same node is not visited twice.
-            if self.state.runtimes[index].merge.is_none() {
-                continue;
-            }
-            // Its input has to be finished before it is merged: a node below still holding collected
-            // input has not answered yet, and merging what it has not sent would answer a series
-            // from half of its contributions.
-            let Some(child) = self.state.nodes[index].input else {
-                continue;
-            };
-            if !self.settled(child) {
-                continue;
-            }
-            self.flush_merge(index)?;
-            flushed = true;
-        }
-        Ok(flushed)
-    }
-
-    /// Whether any window still holds collected input that has not been merged.
-    fn any_merge_pending(&self) -> bool {
-        self.state
-            .runtimes
-            .iter()
-            .any(|runtime| runtime.merge.is_some())
-    }
-
-    /// Whether the node at `index` has produced everything it ever will.
-    ///
-    /// A pull that finds nothing does not answer it: a collecting window reports nothing until it
-    /// is flushed, and a binary node that matches two vectors reports nothing until both nodes it
-    /// reads from are finished. Each node therefore answers from its own state and from its
-    /// children's, which is what keeps a binary node from computing on an operand a window below it
-    /// has not handed over yet.
-    fn settled(&self, index: usize) -> bool {
-        let runtime = &self.state.runtimes[index];
-        if !runtime.queued.is_empty() || runtime.merge.is_some() {
-            return false;
-        }
-        match self.state.nodes[index].tag {
-            NodeTag::Input => true,
-            // A scalar produces its value without reading anything, so it is settled from the
-            // start: there is no chunk it owes its consumer.
-            NodeTag::Scalar => true,
-            // These report as they are handed chunks, so a child with nothing left is all it takes
-            // for them to have nothing left either.
-            NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
-                .input
-                .is_none_or(|child| self.settled(child)),
-            // An aggregate answers one series per group and only once its input ended, so its own
-            // fold has to have run as well: a child that has handed everything up is not enough,
-            // because every one of those chunks was folded and none of them answered yet. This is
-            // what keeps it out of the line above, which asks only about the child.
-            NodeTag::Aggregate => {
-                runtime
-                    .aggregate
-                    .as_ref()
-                    .is_some_and(|aggregate| aggregate.computed)
-                    && self.state.nodes[index]
-                        .input
-                        .is_none_or(|child| self.settled(child))
-            }
-            NodeTag::Vector => {
-                runtime
-                    .vector
-                    .as_ref()
-                    .is_some_and(|vector| vector.computed)
-                    && self.state.nodes[index]
-                        .input
-                        .is_none_or(|child| self.settled(child))
-            }
-            NodeTag::Binary => {
-                // A broadcast owes only what its vector side has not handed over yet: it answers
-                // each chunk as it reads it and keeps nothing, so it is settled exactly when that
-                // side is. A vector match is settled once its kernel ran and both operands are.
-                if let Some(broadcast) = &runtime.broadcast {
-                    let vector = match broadcast.operand {
-                        ScalarOperand::Right(_) => self.state.nodes[index].input,
-                        ScalarOperand::Left(_) => self.state.right_input(index).ok(),
-                    };
-                    return vector.is_some_and(|vector| self.settled(vector));
-                }
-                runtime
-                    .binary
-                    .as_ref()
-                    .is_some_and(|binary| binary.computed)
-                    && self.state.nodes[index]
-                        .input
-                        .is_none_or(|child| self.settled(child))
-                    && self
-                        .state
-                        .right_input(index)
-                        .is_ok_and(|right| self.settled(right))
-            }
-        }
-    }
-
-    /// The next chunk of the node at `index`.
-    fn pull(&mut self, index: usize) -> Result<Option<NativeChunk>> {
-        let tag = self.state.nodes[index].tag;
-        let input = self.state.nodes[index].input;
-        match tag {
-            NodeTag::Input => self.state.runtimes[index].pop_source(),
-            // A scalar owes its consumer no chunk: it produces one value and no series, and the
-            // value is the constant on the tree, which the consumer reads off its own binding. A
-            // pull of it is therefore empty by construction and says nothing has stalled.
-            NodeTag::Scalar => Ok(None),
-            NodeTag::Map => {
-                let child = input.ok_or_else(|| missing_input(tag))?;
-                // An operation that empties every position yields no chunk, and the map asks its
-                // input again rather than reporting a decision it did not make.
-                loop {
-                    let Some(chunk) = self.pull(child)? else {
-                        return Ok(None);
-                    };
-                    if let Some(output) = self.map_node(index, chunk)? {
-                        return Ok(Some(output));
-                    }
-                }
-            }
-            NodeTag::Window => {
-                // A chunk this window computed while flushing its collected input leaves first: it
-                // was produced before the window was drained, and the pull that hands it up is the
-                // one that empties the queue.
-                if let Some(chunk) = self.state.runtimes[index].take_output()? {
-                    return Ok(Some(chunk));
-                }
-                let child = input.ok_or_else(|| missing_input(tag))?;
-                // A window reports on the chunk that closes a series, so a chunk that decides
-                // nothing yields nothing and the window asks its input again.
-                loop {
-                    let Some(chunk) = self.pull(child)? else {
-                        return Ok(None);
-                    };
-                    if let Some(output) = self.window_node(index, chunk)? {
-                        return Ok(Some(NativeChunk::Evaluated(output)));
-                    }
-                }
-            }
-            NodeTag::Instant => {
-                let child = input.ok_or_else(|| missing_input(tag))?;
-                // A selection decides a whole series at once, so every chunk before the one that
-                // closes it yields nothing and the selection asks its input again.
-                loop {
-                    let Some(chunk) = self.pull(child)? else {
-                        return Ok(None);
-                    };
-                    if let Some(output) = self.instant_node(index, chunk)? {
-                        return Ok(Some(NativeChunk::Evaluated(output)));
-                    }
-                }
-            }
-            NodeTag::Binary => {
-                // The spec names the left operand, the node the build pass reaches next; the right
-                // one is the input a spec of two fields would have had to carry.
-                let left = input.ok_or_else(|| missing_input(tag))?;
-                let right = self.state.right_input(index)?;
-                // A broadcast reads the vector side only: the constant is on the node's binding, so
-                // there is no second stream to pull and no chunk to retain. Each chunk is
-                // transformed as it arrives and handed up, which is what keeps a broadcast over a
-                // whole vector from costing the vector.
-                if self.state.runtimes[index].broadcast.is_some() {
-                    return self.broadcast_node(index, left, right);
-                }
-                // Both operands are read to the end of what they hand over: before the input ends a
-                // binary node only retains the chunks, because a pair is not decided until both
-                // sides are whole, and after it ends this is the drain that empties the two.
-                for (side, child) in [left, right].into_iter().enumerate() {
-                    while let Some(chunk) = self.pull(child)? {
-                        let path = &self.state.paths[index];
-                        self.state.runtimes[index].retain_binary(path, side, chunk)?;
-                    }
-                }
-                // Nothing has settled for a point that has an operand still arriving, and an
-                // operand below a collecting window has not arrived until that window is flushed.
-                if !self.inputs_finished || !self.settled(left) || !self.settled(right) {
-                    return Ok(None);
-                }
-                let path = &self.state.paths[index];
-                let runtime = &mut self.state.runtimes[index];
-                runtime.compute_binary(path)?;
-                // A result holds one value per field, and a field may hold none where another
-                // does, so its values are counted rather than read as its positions.
-                runtime.pop_queued(evaluated_values)
-            }
-            NodeTag::Aggregate => self.aggregate_node(index),
-            NodeTag::Vector => {
-                let child = input.ok_or_else(|| missing_input(tag))?;
-                // Which samples are kept at a point is not decided until the whole input has
-                // arrived, so the input is read to the end before anything is handed over.
-                while let Some(chunk) = self.pull(child)? {
-                    let path = &self.state.paths[index];
-                    self.state.runtimes[index].retain_vector(path, chunk)?;
-                }
-                if !self.inputs_finished || !self.settled(child) {
-                    return Ok(None);
-                }
-                let path = &self.state.paths[index];
-                let runtime = &mut self.state.runtimes[index];
-                runtime.compute_vector(path)?;
-                runtime.pop_queued(evaluated_values)
-            }
-        }
-    }
-
-    /// Folds everything the aggregate at `index` can read and hands over one group's series.
-    ///
-    /// What it reads is taken to the end of what its child has, because nothing the fold is handed
-    /// is retained: a chunk is folded as it arrives and dropped, so reading the child dry costs the
-    /// fold's states and not the input's bytes. Nothing is answered until the input has ended --
-    /// before that, a group's value at a point is still missing the members that have not arrived.
-    ///
-    /// That is the difference from a binary node. A binary node retains both operands and so can ask
-    /// whether they hold anything still open; an aggregate keeps none of them and asks the driver
-    /// instead: [`Self::inputs_finished`] says the caller will hand over nothing more, and
-    /// [`NativeExecutionState::settled`] says the child has none left to produce.
-    fn aggregate_node(&mut self, index: usize) -> Result<Option<NativeChunk>> {
-        let child = self.state.nodes[index]
-            .input
-            .ok_or_else(|| missing_input(NodeTag::Aggregate))?;
-        while let Some(chunk) = self.pull(child)? {
-            let path = &self.state.paths[index];
-            self.state.runtimes[index].retain_aggregate(path, chunk)?;
-        }
-        if !self.inputs_finished || !self.settled(child) {
-            return Ok(None);
-        }
-        let path = &self.state.paths[index];
-        self.state.runtimes[index].compute_aggregate(path)?;
-        // A group's series holds one value per field and point it decided, so its values are counted
-        // rather than read as its positions, as a binary result's are.
-        self.state.runtimes[index].pop_queued(evaluated_values)
-    }
-
-    /// Pulls the vector side of the broadcast at `index` until it hands over a chunk, and returns
-    /// that chunk transformed.
-    ///
-    /// Only the vector side is pulled: the scalar side is the constant the node was bound to. The
-    /// chunk is transformed inside this call and nothing of it is kept, so what a broadcast holds
-    /// does not grow with the vector it reads.
-    fn broadcast_node(
-        &mut self,
-        index: usize,
-        left: usize,
-        right: usize,
-    ) -> Result<Option<NativeChunk>> {
-        let vector = {
-            let broadcast = self.state.runtimes[index]
-                .broadcast
-                .as_ref()
-                .ok_or_else(|| no_broadcast(&self.state.paths[index]))?;
-            match broadcast.operand {
-                ScalarOperand::Right(_) => left,
-                ScalarOperand::Left(_) => right,
-            }
-        };
-        // An operation that empties every position yields no chunk, and the node asks its vector
-        // side again rather than reporting a decision it did not make.
-        loop {
-            let Some(chunk) = self.pull(vector)? else {
-                // Nothing is left in the vector side. Before the input ends that is a stall rather
-                // than an end, and so is a vector side still holding collected input: the node has
-                // answered everything it can and owes whatever that side has not produced yet.
-                return Ok(None);
-            };
-            let path = &self.state.paths[index];
-            let runtime = &mut self.state.runtimes[index];
-            if let Some(output) = runtime.broadcast(path, chunk)? {
-                return Ok(Some(NativeChunk::Evaluated(output)));
-            }
-        }
-    }
-
-    /// Maps one chunk the node at `index` pulled from its input.
-    fn map_node(&mut self, index: usize, chunk: NativeChunk) -> Result<Option<NativeChunk>> {
-        let NativeChunk::Evaluated(chunk) = chunk else {
-            return Err(DataFusionError::Execution(format!(
-                "the map node at {} consumes an evaluated chunk, not raw samples",
-                self.state.paths[index]
-            )));
-        };
-        let path = &self.state.paths[index];
-        let runtime = &mut self.state.runtimes[index];
-        Ok(runtime.map(path, chunk)?.map(NativeChunk::Evaluated))
-    }
-
-    /// Feeds one chunk to the window at `index`.
-    fn window_node(&mut self, index: usize, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
-        let path = &self.state.paths[index];
-        let runtime = &mut self.state.runtimes[index];
-        runtime.window(path, chunk)
-    }
-
-    /// Feeds one chunk to the instant selection at `index`.
-    fn instant_node(&mut self, index: usize, chunk: NativeChunk) -> Result<Option<EvaluatedChunk>> {
-        let path = &self.state.paths[index];
-        let runtime = &mut self.state.runtimes[index];
-        runtime.instant(path, chunk)
-    }
-
     /// Queues a source chunk at the input leaf `input` names.
     fn push_source(&mut self, input: InputId, chunk: NativeChunk) -> Result<()> {
         self.check_running()?;
+        // An execution whose input ended reads no more of it: the ending stages run as the caller
+        // pulls, and a chunk queued behind them would arrive at a node that has already decided
+        // what to answer. The refusal leaves the execution alone rather than stopping it, because
+        // what it still holds is the answer the caller is pulling.
+        if self.ended {
+            return Err(DataFusionError::Execution(
+                "the native execution already ended its input, so no chunk can be queued at it"
+                    .to_string(),
+            ));
+        }
         let result = self.queue_source(input, chunk);
         if let Err(error) = &result {
             self.stop(error);
@@ -3672,45 +3962,18 @@ impl NativeExecutor {
         result
     }
 
-    /// Queues a source chunk at one input node, checking it against that input's binding.
+    /// Queues a source chunk at one input leaf, checking it against that input's binding.
     fn queue_source(&mut self, input: InputId, chunk: NativeChunk) -> Result<()> {
-        let source = self.source_index(input)?;
-        let at = &self.state.paths[source];
-        let Some(binding) = self.state.runtimes[source].source_schema.as_ref() else {
-            return Err(DataFusionError::Execution(format!(
-                "the input node at {at} does not produce samples"
-            )));
-        };
-        let bound = binding.eval_grid.is_some();
-        let evaluated = matches!(chunk, NativeChunk::Evaluated(_));
-        if evaluated != bound {
-            return Err(DataFusionError::Execution(format!(
-                "the native source at {at} is bound to {}, but {} chunk was queued at it",
-                if bound {
-                    "an evaluated series"
-                } else {
-                    "raw samples"
-                },
-                if evaluated { "an evaluated" } else { "a raw" },
-            )));
-        }
-        self.state.runtimes[source].enqueue(chunk)
-    }
-
-    /// The node `input` names as an input leaf.
-    ///
-    /// The id counts the leaves left to right, so an id past the last one names no leaf at all: a
-    /// caller that miscounted its tree is refused rather than answered from whichever leaf the
-    /// count happened to reach.
-    fn source_index(&self, input: InputId) -> Result<usize> {
-        let index = *self.state.sources.get(input.index()).ok_or_else(|| {
-            DataFusionError::Execution(format!(
-                "the native execution has {} inputs, and no input {} was queued at",
-                self.state.sources.len(),
-                input.index()
-            ))
-        })?;
-        Ok(index)
+        // The id counts the leaves left to right, so an id past the last one names no leaf at all:
+        // a caller that miscounted its tree is refused rather than answered from whichever leaf the
+        // count happened to reach.
+        let count = self.state.inputs.len();
+        let slot = self
+            .state
+            .inputs
+            .get_mut(input.index())
+            .ok_or_else(|| no_input(count, input))?;
+        slot.enqueue(chunk)
     }
 
     /// Refuses to continue an execution that finished or stopped.
@@ -3729,11 +3992,11 @@ impl NativeExecutor {
     /// Stops the execution, returning every byte it reserved to the pool.
     ///
     /// A stopped execution is not resumed: an evaluator that failed must not be reused, so the
-    /// chunks it already produced are the only ones the caller will see.
+    /// chunks it already produced are the only ones the caller will see. Every node is released
+    /// here -- its payload, its queue and its reservation -- so a stopped execution holds nothing
+    /// while the caller still owns it.
     fn stop(&mut self, error: &DataFusionError) {
-        for runtime in &mut self.state.runtimes {
-            runtime.release();
-        }
+        self.state.release();
         self.phase = Phase::Failed(error.to_string());
     }
 }
@@ -3873,17 +4136,6 @@ fn missing_row(index: usize) -> DataFusionError {
     ))
 }
 
-/// The rejection of an input ordering this runtime cannot execute.
-///
-/// It names the ordering found, so a reader can tell a tree this runtime cannot run from one it
-/// cannot run correctly.
-fn unsupported_ordering(ordering: SeriesOrdering) -> DataFusionError {
-    DataFusionError::NotImplemented(format!(
-        "the native runtime does not execute {ordering:?} input yet: the nodes here read one series \
-         at a time, and an input of that ordering hands over two of them interleaved"
-    ))
-}
-
 /// The rejection of a chunk holding a value where the same field already holds one.
 ///
 /// No merge resolves this one: at `position`, field `field` of the label set `labels` would carry
@@ -3917,13 +4169,15 @@ fn truncated_input(input: InputId) -> DataFusionError {
     ))
 }
 
-/// The rejection of a node kind this runtime does not execute yet.
+/// The rejection of a chunk routed to an input the execution does not have.
 ///
-/// It names the kind, so a reader can tell a tree this runtime cannot run from one it cannot run
-/// correctly.
-fn not_implemented(kind: &str) -> DataFusionError {
-    DataFusionError::NotImplemented(format!(
-        "the native runtime does not execute {kind} nodes yet"
+/// The id counts the leaves left to right, so an id past the last one names no leaf at all: a
+/// caller that miscounted its tree is refused rather than answered from whichever leaf the count
+/// happened to reach.
+fn no_input(inputs: usize, input: InputId) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the native execution has {inputs} inputs, and no input {} was queued at",
+        input.index()
     ))
 }
 
@@ -3945,6 +4199,21 @@ fn no_vector() -> DataFusionError {
 /// The error for a node asked to broadcast without the broadcast its kind holds.
 fn no_broadcast() -> DataFusionError {
     DataFusionError::Execution("the node holds no scalar broadcast".to_string())
+}
+
+/// The error for a node asked to map without the operation its kind holds.
+fn no_map() -> DataFusionError {
+    DataFusionError::Execution("the node holds no map operation".to_string())
+}
+
+/// The error for a node asked to select without the selection its kind holds.
+fn no_instant() -> DataFusionError {
+    DataFusionError::Execution("the node holds no instant selection".to_string())
+}
+
+/// The error for a node asked to evaluate a window without its evaluator.
+fn no_window() -> DataFusionError {
+    DataFusionError::Execution("the node holds no window evaluator".to_string())
 }
 
 /// The rejection of a scalar broadcast whose matching is not the one a constant can take.

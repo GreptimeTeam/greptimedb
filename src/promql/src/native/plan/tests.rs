@@ -255,14 +255,18 @@ fn adding_a_map_only_changes_the_tree() {
         "{}",
         mapped.validate().unwrap_err()
     );
-    // The mapped tree has one more node, and it is the same window below it.
-    let mut depth = 0;
-    super::super::metrics::walk(&mapped, &mut |_, _| depth += 1);
-    assert_eq!(depth, 3);
+    // The mapped tree is that map over that window over that input, and nothing else: the map on
+    // top is the one node the bare tree gained, and what is below it is the tree it was built from.
     let NativeExpr::Map { input, .. } = &mapped.expr else {
         unreachable!("the mapped tree's root is a map")
     };
-    assert!(matches!(input.expr, NativeExpr::Window { .. }));
+    let NativeExpr::Window { input: leaf, .. } = &input.expr else {
+        unreachable!("the map is not over the window the bare tree is")
+    };
+    assert!(
+        matches!(leaf.expr, NativeExpr::Input(_)),
+        "the window is not over the input the bare tree reads"
+    );
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.
