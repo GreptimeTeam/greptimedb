@@ -80,14 +80,13 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 
 /// The ordering this route compiles its trees against.
 ///
-/// The logical planner cannot read the ordering a scanner will declare — it is decided when the
-/// region scanner is prepared, which happens during physical planning — so the route names the
-/// strongest ordering it can assume instead of guessing: `KeyThenTime` orders each series' chunks
-/// contiguously *and* orders the series by identity, which `Contiguous` (the weaker declaration a
-/// two-phase legacy scan makes) also satisfies. Nothing downstream enforces the tree's declared
-/// ordering against the frame's own declaration beyond rejecting `Interleaved`, so a scanner that
-/// declares `Contiguous` still feeds a tree compiled here.
-const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::KeyThenTime;
+/// Which ordering a raw-series scan declares is decided when the region scanner is prepared, during
+/// physical planning, and the logical planner cannot read it: a legacy scan declares `KeyThenTime`
+/// and a two-phase scan `Contiguous`. So the route names the weakest ordering both provide —
+/// `Contiguous`, every series contiguous and the series themselves unordered — rather than
+/// overclaiming the legacy scan's stronger `KeyThenTime`. A native evaluation only refuses
+/// `Interleaved`, so a tree compiled here runs on either scanner.
+const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 impl PromPlanner {
     /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
