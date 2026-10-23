@@ -96,6 +96,12 @@ impl PromStoreProtocolHandler for DummyInstance {
             .fail();
         }
 
+        let rows = request
+            .inserts
+            .iter()
+            .filter_map(|insert| insert.rows.as_ref())
+            .map(|rows| rows.rows.len())
+            .sum();
         let _ = self
             .write_tx
             .send(RemoteWriteCapture {
@@ -107,7 +113,7 @@ impl PromStoreProtocolHandler for DummyInstance {
             })
             .await;
 
-        Ok(Output::new_with_affected_rows(0))
+        Ok(Output::new_with_affected_rows(rows))
     }
 
     async fn write(

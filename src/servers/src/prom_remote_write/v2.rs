@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::hash_map::Entry;
+use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 #[cfg(test)]
@@ -29,7 +30,7 @@ use api::v1::ColumnSchema;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows, SemanticType, Value};
 use bytes::{Buf, Bytes};
-use common_grpc::precision::Precision;
+use common_memory_manager::MemoryGuard;
 #[cfg(test)]
 use common_query::native_histogram::*;
 use common_query::native_histogram::{
@@ -41,7 +42,7 @@ use prost::encoding::{
     DecodeContext, WireType, decode_key, decode_varint, message, skip_field, uint32,
 };
 use prost::{DecodeError, Message};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use table::requests::{
     METADATA_QUALITY_DECLARED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_METRIC_TYPE,
     SEMANTIC_METRIC_UNIT,
@@ -49,7 +50,6 @@ use table::requests::{
 
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
-use crate::prom_remote_write::validation::validate_label_name;
 use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, decompress_remote_write_body};
 #[allow(deprecated)]
 use crate::prom_store::{
@@ -57,6 +57,7 @@ use crate::prom_store::{
     PHYSICAL_TABLE_LABEL_ALT, SCHEMA_LABEL,
 };
 use crate::request_memory_limiter::ServerMemoryLimiter;
+use crate::request_memory_metrics::RequestMemoryMetrics;
 use crate::row_writer::{self, TableData};
 use crate::semantic::{
     METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, METRIC_TYPE_GAUGE_HISTOGRAM, METRIC_TYPE_HISTOGRAM,
@@ -126,6 +127,66 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     /// Per-table semantic metadata from the series' inline `Metadata`, folded
     /// into table options at auto-create time.
     pub semantic_index: SemanticIndexes,
+    pub memory_guard: Arc<MemoryGuard<RequestMemoryMetrics>>,
+}
+
+struct ConversionBudget<'a> {
+    limiter: &'a ServerMemoryLimiter,
+    guard: MemoryGuard<RequestMemoryMetrics>,
+    used_bytes: u64,
+}
+
+impl<'a> ConversionBudget<'a> {
+    fn new(limiter: &'a ServerMemoryLimiter, wire_bytes: usize) -> Result<Self> {
+        let mut budget = Self {
+            limiter,
+            used_bytes: 0,
+            guard: limiter.try_acquire(0).context(error::InternalSnafu {
+                err_msg: "cannot create an empty memory reservation",
+            })?,
+        };
+        // Borrowed symbol/series vectors and protobuf scratch can exceed the wire size.
+        budget.reserve(wire_bytes.checked_mul(16))?;
+        Ok(budget)
+    }
+
+    fn reserve(&mut self, bytes: Option<usize>) -> Result<()> {
+        let required = bytes
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .and_then(|bytes| self.used_bytes.checked_add(bytes));
+        if let Some(required) = required {
+            let granted = self.guard.granted_bytes();
+            let additional = required.saturating_sub(granted);
+            if additional == 0 {
+                self.used_bytes = required;
+                return Ok(());
+            }
+            // Amortize quota updates; cap the chunk size at 1/64 of a finite limit.
+            let limit = self.limiter.limit_bytes();
+            let (chunk, available) = if limit == 0 {
+                (64 * 1024, u64::MAX - granted)
+            } else {
+                (
+                    (64 * 1024).min(limit / 64),
+                    limit.saturating_sub(self.limiter.used_bytes()),
+                )
+            };
+            let reservation = additional.max(chunk).min(available).max(additional);
+            if self.guard.try_acquire_additional(reservation)
+                || (reservation > additional && self.guard.try_acquire_additional(additional))
+            {
+                self.used_bytes = required;
+                return Ok(());
+            }
+        }
+        // Never wait while retaining the decompressed body or earlier rows.
+        Err(error::MemoryLimitExceededSnafu.into_error(
+            common_memory_manager::Error::MemoryLimitExceeded {
+                requested_bytes: required.unwrap_or(u64::MAX),
+                limit_bytes: self.limiter.limit_bytes(),
+            },
+        ))
+    }
 }
 
 pub(crate) async fn decode_remote_write_v2(
@@ -142,16 +203,20 @@ pub(crate) async fn decode_remote_write_v2(
     let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
+    let budget = ConversionBudget::new(limiter, buf.len())?;
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
     drop(decode_timer);
 
     let _convert_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["convert", REMOTE_WRITE_V2_VERSION])
         .start_timer();
-    convert_remote_write_v2(request)
+    convert_remote_write_v2(request, budget)
 }
 
-fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2WriteRequests> {
+fn convert_remote_write_v2(
+    request: BorrowedRequest<'_>,
+    mut budget: ConversionBudget<'_>,
+) -> Result<RemoteWriteV2WriteRequests> {
     ensure!(
         request.symbols.first().copied() == Some(""),
         error::InvalidPromRemoteRequestSnafu {
@@ -178,9 +243,23 @@ fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2
             continue;
         }
 
+        let label_bytes = labels_refs.iter().try_fold(0usize, |bytes, index| {
+            bytes.checked_add(request.symbols.get(*index as usize).map_or(0, |s| s.len()))
+        });
+        budget.reserve(label_bytes.and_then(|bytes| {
+            bytes
+                .checked_mul(4)?
+                .checked_add(labels_refs.len().checked_mul(128)?)
+        }))?;
         let (prom_ctx, table_name, tags) =
             resolve_series_labels(&request.symbols, &labels_refs, &mut label_names)?;
         ensure_no_internal_histogram_labels(&tags)?;
+        budget.reserve(
+            request
+                .symbols
+                .get(metadata.unit_ref as usize)
+                .map_or(Some(0), |unit| unit.len().checked_mul(4)),
+        )?;
         record_series_metadata(
             &mut semantic_index,
             &request.symbols,
@@ -213,6 +292,56 @@ fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2
                 .with_context(|| error::InvalidPromRemoteRequestSnafu {
                     msg: "remote write v2 series has too many labels".to_string(),
                 })?;
+        let existing = if counts.samples > 0 {
+            &sample_tables
+        } else {
+            &histogram_tables
+        }
+        .get(&prom_ctx)
+        .and_then(|tables| tables.get(&table_name));
+        let old_columns = existing.map_or(2, TableData::num_columns);
+        let old_rows = existing.map_or(0, TableData::num_rows);
+        let new_columns = tags
+            .iter()
+            .filter(|(name, _)| existing.is_none_or(|table| table.column_index(name).is_none()))
+            .count();
+        let row_count = counts.samples.checked_add(counts.histograms);
+        let tag_bytes = tags
+            .iter()
+            .try_fold(0usize, |bytes, (_, value)| bytes.checked_add(value.len()));
+        budget.reserve((|| {
+            let rows = row_count?;
+            let width = old_columns.checked_add(new_columns)?;
+            // Include row capacity, the tag template, and NULL padding of older rows.
+            let cells = rows
+                .checked_add(1)?
+                .checked_mul(width)?
+                .checked_add(old_rows.checked_mul(new_columns)?)?;
+            let values = cells.checked_mul(2 * std::mem::size_of::<Value>())?;
+            let strings = tag_bytes?.checked_mul(rows.checked_add(1)?)?;
+            let row_slots = rows.checked_mul(2 * std::mem::size_of::<api::v1::Row>())?;
+            let schema = new_columns
+                .checked_mul(512)?
+                .checked_add(if existing.is_none() { 8192 } else { 0 })?;
+            let histograms = if counts.histograms > 0 {
+                // A one-byte bucket delta expands into a Value plus decoding scratch.
+                series
+                    .len()
+                    .checked_mul(2 * std::mem::size_of::<Value>() + 32)?
+                    .checked_add(
+                        counts
+                            .histograms
+                            .checked_mul(18 * std::mem::size_of::<Value>())?,
+                    )?
+            } else {
+                0
+            };
+            values
+                .checked_add(strings)?
+                .checked_add(row_slots)?
+                .checked_add(schema)?
+                .checked_add(histograms)
+        })())?;
         let (writer, row_count) = if counts.samples > 0 {
             (
                 SeriesWriter::Samples(get_or_create_table_data(
@@ -249,6 +378,7 @@ fn convert_remote_write_v2(request: BorrowedRequest<'_>) -> Result<RemoteWriteV2
         sample_count: sample_count_total,
         histogram_count: histogram_count_total,
         semantic_index,
+        memory_guard: Arc::new(budget.guard),
     })
 }
 
@@ -398,6 +528,7 @@ fn decode_series_leaves(
     scratch: &mut LeafScratch,
 ) -> Result<()> {
     let mut sample_row_template = None;
+    let mut histogram_row_template = None;
 
     while buf.has_remaining() {
         let (tag, wire_type) = decode_key(&mut buf).context(error::DecodePromRemoteRequestSnafu)?;
@@ -480,18 +611,54 @@ fn decode_series_leaves(
                     }
                 })?;
                 if let Some(SeriesWriter::Histograms(table_data)) = &mut writer {
-                    if rows_remaining == 0 {
-                        write_native_histogram(
+                    // Validate every payload, including subsequent histograms in a series.
+                    let value = encode_native_histogram(&scratch.histogram).map_err(|error| {
+                        error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("remote write v2 {error}"),
+                        }
+                        .build()
+                    })?;
+                    if histogram_row_template.is_none() {
+                        let timestamp_index = table_data.ensure_column_by_name(
+                            greptime_timestamp(),
+                            ColumnDataType::TimestampMillisecond,
+                            SemanticType::Timestamp,
+                        )?;
+                        let value_index = match table_data.column_index(greptime_native_histogram())
+                        {
+                            Some(index) => index,
+                            None => {
+                                let schema = native_histogram_column_schema().map_err(|error| {
+                                    error::InvalidPromRemoteRequestSnafu {
+                                        msg: format!("remote write v2 {error}"),
+                                    }
+                                    .build()
+                                })?;
+                                table_data.ensure_column(schema)?
+                            }
+                        };
+                        let mut row = table_data.alloc_one_row();
+                        row_writer::write_tags(
                             table_data,
-                            &scratch.histogram,
                             std::mem::take(&mut tags).into_iter(),
+                            &mut row,
                         )?;
-                    } else {
-                        write_native_histogram(
-                            table_data,
-                            &scratch.histogram,
-                            tags.iter().cloned(),
-                        )?;
+                        histogram_row_template = Some((row, timestamp_index, value_index));
+                    }
+                    if let Some((template, timestamp_index, value_index)) =
+                        histogram_row_template.as_mut()
+                    {
+                        // Clone only tags, never the previous histogram's bucket lists.
+                        let mut row = if rows_remaining == 0 {
+                            std::mem::take(template)
+                        } else {
+                            template.clone()
+                        };
+                        row[*timestamp_index].value_data = Some(
+                            ValueData::TimestampMillisecondValue(scratch.histogram.timestamp),
+                        );
+                        row[*value_index].value_data = Some(value);
+                        table_data.add_row(row);
                     }
                 }
             }
@@ -584,47 +751,6 @@ fn get_or_create_table_data(
     }
 }
 
-fn write_native_histogram<'a>(
-    table_data: &mut TableData,
-    histogram: &Histogram,
-    tags: impl Iterator<Item = (&'a str, String)>,
-) -> Result<()> {
-    let value = encode_native_histogram(histogram).map_err(|error| {
-        error::InvalidPromRemoteRequestSnafu {
-            msg: format!("remote write v2 {error}"),
-        }
-        .build()
-    })?;
-    let column_schema = native_histogram_column_schema().map_err(|error| {
-        error::InvalidPromRemoteRequestSnafu {
-            msg: format!("remote write v2 {error}"),
-        }
-        .build()
-    })?;
-
-    // Persist both int and float families into the logical table schema. Only one
-    // family is populated per row; the other is written as NULL so PromQL can
-    // infer the original histogram flavor without a separate type column.
-    let mut row = table_data.alloc_one_row();
-    row_writer::write_ts_to_millis(
-        table_data,
-        greptime_timestamp(),
-        Some(histogram.timestamp),
-        Precision::Millisecond,
-        &mut row,
-    )?;
-    row_writer::write_by_schema(
-        table_data,
-        std::iter::once((column_schema, Some(value))),
-        &mut row,
-    )?;
-
-    row_writer::write_tags(table_data, tags, &mut row)?;
-    table_data.add_row(row);
-
-    Ok(())
-}
-
 fn ensure_no_internal_histogram_labels(tags: &PromTags<'_>) -> Result<()> {
     // The histogram field column is generated from the protobuf payload.
     for (name, _) in tags {
@@ -695,7 +821,7 @@ fn resolve_series_labels<'a>(
 
 fn validate_label(name: &str) -> Result<()> {
     ensure!(
-        validate_label_name(name.as_bytes()),
+        !name.is_empty(),
         error::InvalidPromRemoteRequestSnafu {
             msg: format!("remote write v2 invalid label name `{name}`"),
         }
@@ -855,9 +981,11 @@ pub mod test_util {
     pub fn decode_uncompressed_write_requests(
         body: &[u8],
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
+        let limiter = ServerMemoryLimiter::default();
+        let budget = super::ConversionBudget::new(&limiter, body.len())?;
         let request =
             super::BorrowedRequest::decode(body).context(error::DecodePromRemoteRequestSnafu)?;
-        let requests = super::convert_remote_write_v2(request)?;
+        let requests = super::convert_remote_write_v2(request, budget)?;
         Ok((
             requests.samples.all_req().collect(),
             requests.histograms.all_req().collect(),
@@ -1362,6 +1490,141 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_expanded_rows_are_charged_before_allocation_and_released() {
+        use common_memory_manager::OnExhaustedPolicy;
+        let label = "x".repeat(64 * 1024);
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("tag", &label)]);
+        request.timeseries[0].samples = vec![Sample::default(); 10_000];
+        let limiter = ServerMemoryLimiter::new(8 * 1024 * 1024, OnExhaustedPolicy::Fail);
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let error = match decode_remote_write_v2(false, body, &limiter).await {
+            Ok(_) => panic!("interned labels must not expand past the quota"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, error::Error::MemoryLimitExceeded { .. }));
+        assert_eq!(limiter.used_bytes(), 0);
+
+        request.timeseries[0].samples.truncate(1);
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let decoded = decode_remote_write_v2(false, body, &limiter).await.unwrap();
+        assert!(limiter.used_bytes() >= label.len() as u64);
+        let progress =
+            session::write_progress::WriteProgress::with_reservation(decoded.memory_guard.clone());
+        drop(decoded);
+        assert!(limiter.used_bytes() >= label.len() as u64);
+        drop(progress);
+        assert_eq!(limiter.used_bytes(), 0);
+        let mut budget = ConversionBudget::new(&limiter, 0).unwrap();
+        assert!(budget.reserve(usize::MAX.checked_mul(2)).is_err());
+    }
+
+    #[test]
+    fn test_chunked_reservations_respect_small_and_shared_quotas() {
+        let limiter =
+            ServerMemoryLimiter::new(8192, common_memory_manager::OnExhaustedPolicy::Fail);
+        let mut first = ConversionBudget::new(&limiter, 0).unwrap();
+        let mut second = ConversionBudget::new(&limiter, 0).unwrap();
+        first.reserve(Some(3000)).unwrap();
+        second.reserve(Some(3000)).unwrap();
+        assert!(limiter.used_bytes() <= 8192);
+        assert!(first.reserve(Some(8192)).is_err());
+        assert!(first.guard.granted_bytes() >= first.used_bytes);
+        drop(second);
+        first.reserve(Some(3000)).unwrap();
+        assert!(first.guard.granted_bytes() >= first.used_bytes);
+        first.used_bytes = u64::MAX;
+        assert!(first.reserve(Some(1)).is_err());
+        drop(first);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[test]
+    fn test_schema_widening_reserves_null_padding() {
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
+        let series = request.timeseries.pop().unwrap();
+        for index in 0..200 {
+            let mut series = series.clone();
+            series.labels_refs.extend([request.symbols.len() as u32, 0]);
+            request.symbols.push(format!("label_{index}"));
+            request.timeseries.push(series);
+        }
+        let body = request.encode_to_vec();
+        let limiter = ServerMemoryLimiter::default();
+        let budget = ConversionBudget::new(&limiter, body.len()).unwrap();
+        let decoded =
+            convert_remote_write_v2(BorrowedRequest::decode(&body).unwrap(), budget).unwrap();
+        let minimum = 200 * 202 * std::mem::size_of::<Value>();
+        assert!(limiter.used_bytes() >= minimum as u64);
+        let rows = decoded.samples.all_req().next().unwrap().rows.unwrap();
+        assert_eq!(rows.schema.len(), 202);
+        assert!(rows.rows.iter().all(|row| row.values.len() == 202));
+        drop(decoded.memory_guard);
+        assert_eq!(limiter.used_bytes(), 0);
+
+        let limiter = ServerMemoryLimiter::new(
+            minimum as u64 / 2,
+            common_memory_manager::OnExhaustedPolicy::Fail,
+        );
+        let budget = ConversionBudget::new(&limiter, body.len()).unwrap();
+        assert!(convert_remote_write_v2(BorrowedRequest::decode(&body).unwrap(), budget).is_err());
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[test]
+    fn test_utf8_labels_and_histogram_row_templates() {
+        let labels = vec![
+            (METRIC_NAME_LABEL, "metric"),
+            ("service.name", "api"),
+            ("区域", "西"),
+            ("has-dash", "value"),
+        ];
+        let sample = request_with_sample(labels.clone());
+        let (requests, _, _, _) = test_util::write_requests(sample).unwrap();
+        let sample_rows = requests[0].rows.as_ref().unwrap();
+        assert_eq!(sample_rows.schema[3].column_name, "区域");
+        assert_eq!(
+            sample_rows.rows[0].values[3].value_data,
+            Some(ValueData::StringValue("西".into()))
+        );
+
+        let mut request = request_with_sample(labels);
+        request.timeseries[0].samples.clear();
+        request.timeseries[0].histograms = vec![
+            Histogram {
+                timestamp: i64::MIN,
+                sum: 1.0,
+                ..Default::default()
+            },
+            Histogram {
+                timestamp: i64::MAX,
+                sum: 2.0,
+                ..Default::default()
+            },
+        ];
+        let (_, requests, _, count) = test_util::write_requests(request.clone()).unwrap();
+        assert_eq!(count, 2);
+        let rows = requests[0].rows.as_ref().unwrap();
+        for (index, timestamp) in [i64::MIN, i64::MAX].into_iter().enumerate() {
+            assert_eq!(
+                rows.rows[index].values[0].value_data,
+                Some(ValueData::TimestampMillisecondValue(timestamp))
+            );
+            assert_eq!(
+                rows.rows[index].values[1].value_data,
+                Some(encode_native_histogram(&request.timeseries[0].histograms[index]).unwrap())
+            );
+            assert_eq!(
+                rows.rows[index].values[3].value_data,
+                Some(ValueData::StringValue("西".into()))
+            );
+        }
+        request.timeseries[0].histograms[1].schema = 99;
+        assert!(test_util::write_requests(request).is_err());
+    }
+
     #[test]
     fn test_into_context_req_rejects_invalid_requests() {
         let mut cases = Vec::new();
@@ -1409,24 +1672,6 @@ mod tests {
         cases.push((
             "empty label name",
             request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("", "api")]),
-            "invalid label name",
-        ));
-
-        cases.push((
-            "invalid label name",
-            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("has-dash", "api")]),
-            "invalid label name",
-        ));
-
-        cases.push((
-            "dotted label name",
-            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("service.name", "api")]),
-            "invalid label name",
-        ));
-
-        cases.push((
-            "non-ascii label name",
-            request_with_sample(vec![(METRIC_NAME_LABEL, "metric"), ("区域", "api")]),
             "invalid label name",
         ));
 
