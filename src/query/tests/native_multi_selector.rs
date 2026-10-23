@@ -37,7 +37,7 @@ use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::NativeExpr;
@@ -74,7 +74,7 @@ fn compile(query: &str) -> CompiledTree {
 }
 
 /// The metric `name` with `labels`, as a source series of the samples a scan would read.
-fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
+fn metric(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
     let tags = labels
         .iter()
         .map(|(name, value)| Label {
@@ -82,7 +82,7 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
             value: (*value).into(),
         })
         .collect();
-    MetricName::try_new(Some(name.into()), tags).expect("distinct label names")
+    SeriesLabels::try_new(Some(name.into()), tags).expect("distinct label names")
 }
 
 /// One raw chunk of `series`, holding `rows` at their source timestamps, closing the series.
@@ -92,7 +92,7 @@ fn metric(name: &str, labels: &[(&str, &str)]) -> MetricName {
 fn raw_chunk(
     schema: &SeriesSchema,
     key: &str,
-    series: MetricName,
+    series: SeriesLabels,
     rows: &[(i64, f64)],
 ) -> RawSeriesChunk {
     let timestamps: Vec<i64> = rows.iter().map(|&(time, _)| time).collect();
