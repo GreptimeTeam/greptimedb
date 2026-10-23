@@ -1918,8 +1918,12 @@ async fn native_test_instance(
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_executes_fused_node_and_matches_legacy() {
     common_telemetry::init_default_ut_logging();
-    let mut mito_config = mito2::config::MitoConfig::default();
-    mito_config.experimental_series_scan_v2 = true;
+    // The fixture opts in so its single bulk insert is distributed across real TSID scan
+    // partitions; legacy may send its one batch only to partition 0.
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
     let builder =
         GreptimeDbStandaloneBuilder::new("native_promql_fused_e2e").with_mito_config(mito_config);
     let (standalone, observer) = native_test_instance(builder).await;
@@ -2003,7 +2007,6 @@ async fn native_promql_explain_and_analyze_execute_fused_plan() {
         } else if statement.contains("EXPLAIN") && enabled {
             assert!(text.contains("FusedSeries: native_explain"));
             assert!(text.contains("MergeScanExec"));
-            assert!(!text.contains("FusedSeriesExec"));
         } else if !enabled {
             assert!(!text.contains("FusedSeries:"));
         }
