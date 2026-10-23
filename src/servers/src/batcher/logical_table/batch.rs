@@ -159,6 +159,9 @@ pub(crate) async fn flush_batch(
     match result {
         Ok(progress) => {
             metrics::FLUSH_TOTAL.inc();
+            let affected_rows = progress.iter().map(|result| result.affected_rows).sum();
+            metrics::FLUSH_DROPPED_ROWS
+                .inc_by(total_row_count.saturating_sub(affected_rows) as u64);
             let successful = progress
                 .iter()
                 .enumerate()
@@ -397,7 +400,7 @@ mod tests {
     use crate::batcher::test_util::mock_table_flownode_cache;
     use crate::error;
     use crate::error::Error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::metrics::{self, FLOW_NOTIFICATION_DROPPED};
 
     #[tokio::test]
     async fn test_flush_batch_notifies_flownode_after_successful_physical_write() {
@@ -652,6 +655,7 @@ mod tests {
             .collect();
         let (notifier, _receiver) =
             FlowNotifier::try_new(16, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+        let dropped = metrics::FLUSH_DROPPED_ROWS.get();
         flush_batch(
             Batch {
                 table_batches: vec![TableBatch {
@@ -675,6 +679,7 @@ mod tests {
             notifier,
         )
         .await;
+        assert_eq!(metrics::FLUSH_DROPPED_ROWS.get(), dropped + 1);
         for (owner, receiver) in receivers.into_iter().enumerate() {
             let result = receiver.await.unwrap();
             assert_eq!(result.affected_rows, 1);

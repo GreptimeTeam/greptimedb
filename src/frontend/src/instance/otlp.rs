@@ -128,7 +128,11 @@ impl OpenTelemetryProtocolHandler for Instance {
                 .map(|request| PermissionTableTarget::new(catalog, &schema, &request.table_name))
                 .collect::<Vec<_>>();
             if prepared.has_exemplars() && table_names.insert(METRICS_EXEMPLARS_TABLE) {
-                targets.push(PermissionTableTarget::new(catalog, &schema, METRICS_EXEMPLARS_TABLE));
+                targets.push(PermissionTableTarget::new(
+                    catalog,
+                    &schema,
+                    METRICS_EXEMPLARS_TABLE,
+                ));
             }
             targets
         };

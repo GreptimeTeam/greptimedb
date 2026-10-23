@@ -21,7 +21,7 @@ use snafu::{OptionExt, ensure};
 
 use crate::error::{InvalidOtlpMetricInputSnafu, Result};
 use crate::exemplar::{self as normalized, Exemplar as Observation};
-use crate::otlp::metrics::{legacy_normalize_otlp_name, scalar_value_string, translate_label_name};
+use crate::otlp::metrics::{scalar_value_string, translate_label_name};
 use crate::row_writer::TableData;
 
 pub(super) fn value(exemplar: &Exemplar) -> Result<f64> {
@@ -82,11 +82,8 @@ pub(super) fn append<'a>(
                     }
                 );
                 if let Some(value) = scalar_value_string(attribute.value.as_ref()) {
-                    let name = if ctx.is_legacy {
-                        legacy_normalize_otlp_name(&attribute.key)
-                    } else {
-                        translate_label_name(&attribute.key, ctx.metric_translation_strategy)
-                    };
+                    let name =
+                        translate_label_name(&attribute.key, ctx.metric_translation_strategy);
                     attributes.push((name, value));
                 }
             }
@@ -208,103 +205,98 @@ mod tests {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
             AggregationTemporality, Histogram, HistogramDataPoint,
         };
-        for is_legacy in [false, true] {
-            for mode in 0..3 {
-                let mut exemplars: Vec<_> = [5.0, 1.0, f64::NEG_INFINITY, f64::NAN]
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, v)| Exemplar {
-                        time_unix_nano: i as u64 + 1,
-                        value: Some(exemplar::Value::AsDouble(v)),
-                        ..Default::default()
-                    })
-                    .collect();
-                exemplars.insert(0, Exemplar::default());
-                exemplars.push(Exemplar {
-                    trace_id: vec![1],
-                    value: Some(exemplar::Value::AsDouble(1.0)),
+        for mode in 0..3 {
+            let mut exemplars: Vec<_> = [5.0, 1.0, f64::NEG_INFINITY, f64::NAN]
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| Exemplar {
+                    time_unix_nano: i as u64 + 1,
+                    value: Some(exemplar::Value::AsDouble(v)),
                     ..Default::default()
-                });
-                let mut point = HistogramDataPoint {
-                    time_unix_nano: 100,
-                    count: 4,
-                    explicit_bounds: vec![1.0, 2.0],
-                    bucket_counts: vec![1, 1, 2],
-                    exemplars,
+                })
+                .collect();
+            exemplars.insert(0, Exemplar::default());
+            exemplars.push(Exemplar {
+                trace_id: vec![1],
+                value: Some(exemplar::Value::AsDouble(1.0)),
+                ..Default::default()
+            });
+            let mut point = HistogramDataPoint {
+                time_unix_nano: 100,
+                count: 4,
+                explicit_bounds: vec![1.0, 2.0],
+                bucket_counts: vec![1, 1, 2],
+                exemplars,
+                ..Default::default()
+            };
+            if mode == 1 {
+                point.explicit_bounds.clear();
+                point.bucket_counts.clear();
+            }
+            if mode == 2 {
+                point.flags = 1;
+            }
+            let rejected = HistogramDataPoint {
+                explicit_bounds: vec![1.0],
+                bucket_counts: vec![4],
+                count: 4,
+                exemplars: vec![Exemplar {
+                    value: None,
                     ..Default::default()
-                };
+                }],
+                ..Default::default()
+            };
+            let hist = Histogram {
+                data_points: vec![point, rejected],
+                aggregation_temporality: AggregationTemporality::Delta as i32,
+            };
+            let mut tables = MultiTableData::default();
+            let mut output = Vec::new();
+            let mut outcome = MetricsIngestOutcome::default();
+            encode_histogram(
+                &mut tables,
+                "latency",
+                &hist,
+                None,
+                None,
+                &OtlpMetricCtx::default(),
+                &mut outcome,
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(outcome.accepted_data_points, 1);
+            assert_eq!(outcome.rejected_data_points, 1);
+            output.sort_by_key(|e| e.timestamp);
+            assert_eq!(output.len(), 4);
+            assert!(output.iter().all(|e| e.metric == "latency_bucket"));
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|e| e.series_labels["le"].as_str())
+                    .collect::<Vec<_>>(),
                 if mode == 1 {
-                    point.explicit_bounds.clear();
-                    point.bucket_counts.clear();
+                    vec!["inf"; 4]
+                } else {
+                    vec!["inf", "1", "1", "inf"]
                 }
-                if mode == 2 {
-                    point.flags = 1;
-                }
-                let rejected = HistogramDataPoint {
-                    explicit_bounds: vec![1.0],
-                    bucket_counts: vec![4],
-                    count: 4,
-                    exemplars: vec![Exemplar {
-                        value: None,
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                };
-                let hist = Histogram {
-                    data_points: vec![point, rejected],
-                    aggregation_temporality: AggregationTemporality::Delta as i32,
-                };
-                let mut tables = MultiTableData::default();
-                let mut output = Vec::new();
-                let mut outcome = MetricsIngestOutcome::default();
-                encode_histogram(
-                    &mut tables,
-                    "latency",
-                    &hist,
-                    None,
-                    None,
-                    &OtlpMetricCtx {
-                        is_legacy,
-                        ..Default::default()
-                    },
-                    &mut outcome,
-                    &mut output,
-                )
+            );
+            let (requests, _) = tables.into_row_insert_requests();
+            let rows = requests
+                .inserts
+                .iter()
+                .find(|r| r.table_name == "latency_bucket")
+                .unwrap()
+                .rows
+                .as_ref()
                 .unwrap();
-                assert_eq!(outcome.accepted_data_points, 1);
-                assert_eq!(outcome.rejected_data_points, 1);
-                output.sort_by_key(|e| e.timestamp);
-                assert_eq!(output.len(), 4);
-                assert!(output.iter().all(|e| e.metric == "latency_bucket"));
-                assert_eq!(
-                    output
-                        .iter()
-                        .map(|e| e.series_labels["le"].as_str())
-                        .collect::<Vec<_>>(),
-                    if mode == 1 {
-                        vec!["inf"; 4]
-                    } else {
-                        vec!["inf", "1", "1", "inf"]
-                    }
-                );
-                let (requests, _) = tables.into_row_insert_requests();
-                let rows = requests
-                    .inserts
-                    .iter()
-                    .find(|r| r.table_name == "latency_bucket")
-                    .unwrap()
-                    .rows
-                    .as_ref()
-                    .unwrap();
-                let le = rows
-                    .schema
-                    .iter()
-                    .position(|c| c.column_name == "le")
-                    .unwrap();
-                for e in output {
-                    assert!(rows.rows.iter().any(|r| r.values[le].value_data.as_ref()
-                        == Some(&ValueData::StringValue(e.series_labels["le"].clone()))));
-                }
+            let le = rows
+                .schema
+                .iter()
+                .position(|c| c.column_name == "le")
+                .unwrap();
+            for e in output {
+                assert!(rows.rows.iter().any(|r| r.values[le].value_data.as_ref()
+                    == Some(&ValueData::StringValue(e.series_labels["le"].clone()))));
             }
         }
     }
@@ -325,51 +317,46 @@ mod tests {
             span_id: vec![0xcd; 8],
             value: Some(exemplar::Value::AsDouble(0.32)),
         };
-        for is_legacy in [false, true] {
-            let ctx = OtlpMetricCtx {
-                is_legacy,
-                ..Default::default()
-            };
+        let ctx = OtlpMetricCtx::default();
+        let mut output = Vec::new();
+        append(&mut output, [&exemplar], "latency", &table, &row, &ctx).unwrap();
+        assert_eq!(output[0].timestamp, 1720000000123456789);
+        assert_eq!(output[0].series_labels["job"], "api");
+        assert_eq!(output[0].labels["trace_id"], "ab".repeat(16));
+        assert_eq!(output[0].labels["span_id"], "cd".repeat(8));
+        let mut without_id = exemplar.clone();
+        without_id.trace_id.clear();
+        append(&mut output, [&without_id], "latency", &table, &row, &ctx).unwrap();
+        assert_eq!(output[1].labels["trace_id"], "fallback");
+        for invalid in [
+            Exemplar {
+                value: None,
+                ..exemplar.clone()
+            },
+            Exemplar {
+                time_unix_nano: u64::MAX,
+                ..exemplar.clone()
+            },
+            Exemplar {
+                filtered_attributes: vec![
+                    string_key_value("a", "1".into()),
+                    string_key_value("a", "2".into()),
+                ],
+                ..exemplar.clone()
+            },
+        ] {
             let mut output = Vec::new();
-            append(&mut output, [&exemplar], "latency", &table, &row, &ctx).unwrap();
-            assert_eq!(output[0].timestamp, 1720000000123456789);
-            assert_eq!(output[0].series_labels["job"], "api");
-            assert_eq!(output[0].labels["trace_id"], "ab".repeat(16));
-            assert_eq!(output[0].labels["span_id"], "cd".repeat(8));
-            let mut without_id = exemplar.clone();
-            without_id.trace_id.clear();
-            append(&mut output, [&without_id], "latency", &table, &row, &ctx).unwrap();
-            assert_eq!(output[1].labels["trace_id"], "fallback");
-            for invalid in [
-                Exemplar {
-                    value: None,
-                    ..exemplar.clone()
-                },
-                Exemplar {
-                    time_unix_nano: u64::MAX,
-                    ..exemplar.clone()
-                },
-                Exemplar {
-                    filtered_attributes: vec![
-                        string_key_value("a", "1".into()),
-                        string_key_value("a", "2".into()),
-                    ],
-                    ..exemplar.clone()
-                },
-            ] {
-                let mut output = Vec::new();
-                append(
-                    &mut output,
-                    [&invalid, &exemplar, &invalid, &exemplar],
-                    "latency",
-                    &table,
-                    &row,
-                    &ctx,
-                )
-                .unwrap();
-                assert_eq!(output.len(), 2);
-                assert_eq!(output[0], output[1]);
-            }
+            append(
+                &mut output,
+                [&invalid, &exemplar, &invalid, &exemplar],
+                "latency",
+                &table,
+                &row,
+                &ctx,
+            )
+            .unwrap();
+            assert_eq!(output.len(), 2);
+            assert_eq!(output[0], output[1]);
         }
     }
 }

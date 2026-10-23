@@ -549,7 +549,8 @@ impl PreparedMetrics {
                 METADATA_QUALITY_DECLARED,
             );
         }
-        let (exemplars, exemplar_rows) = crate::exemplar::into_rows(exemplars)?;
+        let exemplar_rows = exemplars.len();
+        let (exemplars, _) = crate::exemplar::into_rows(exemplars)?;
         Ok(MetricsConversion {
             exemplars,
             exemplar_rows,
