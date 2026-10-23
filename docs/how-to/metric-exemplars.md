@@ -68,8 +68,10 @@ WITH (
 
 Choose boundaries and retention for the actual workload. This example does
 not balance metric names by hash, and a single busy metric remains in one
-partition. Pre-created inherited label columns must be nullable string tags;
-additional inherited labels can still be added automatically.
+partition. Pre-created inherited label columns must be nullable string tags
+without non-NULL defaults, so omitted source labels remain absent. Additional
+inherited labels can still be added automatically. Writes to pre-created tables
+use the table's timestamp precision, including when automatic creation is disabled.
 
 ## Permissions
 

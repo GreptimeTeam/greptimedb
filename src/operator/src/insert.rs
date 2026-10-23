@@ -63,7 +63,9 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use datatypes::schema::{ColumnEncoding, CompressionOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnEncoding, CompressionOptions, SkippingIndexOptions,
+};
 use futures_util::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -1229,11 +1231,11 @@ impl Inserter {
                         .fail();
                     }
                 };
-                // Metric path: an existing destination table keeps its own
-                // time index unit (it may be bound to another physical
-                // table than the one selected by this request).
-                if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
-                    && let Some(rows) = req.rows.as_mut()
+                // Existing metric and exemplar destinations keep their time index unit.
+                if matches!(
+                    auto_create_table_type,
+                    AutoCreateTableType::Logical(_) | AutoCreateTableType::Exemplar
+                ) && let Some(rows) = req.rows.as_mut()
                     && let Some(target_unit) = table_time_index_unit(&table)
                 {
                     convert_rows_time_unit(rows, target_unit)?;
@@ -2170,6 +2172,18 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
                 && column.is_nullable(),
             InvalidInsertRequestSnafu {
                 reason: "inherited exemplar labels must be nullable string tags"
+            }
+        );
+        // An absent inherited label must remain absent from the source series identity.
+        ensure!(
+            matches!(
+                column.default_constraint(),
+                None | Some(ColumnDefaultConstraint::Value(
+                    datatypes::value::Value::Null
+                ))
+            ),
+            InvalidInsertRequestSnafu {
+                reason: "inherited exemplar labels must not have non-NULL defaults"
             }
         );
     }

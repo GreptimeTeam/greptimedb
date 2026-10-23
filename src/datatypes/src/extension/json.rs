@@ -117,7 +117,8 @@ fn parse_version(metadata: &str) -> crate::error::Result<Option<u8>> {
 }
 
 /// Returns the remainder field of a JSON2 v2 root.
-pub(crate) fn json2_remainder_field(field: &Field) -> crate::error::Result<Option<&FieldRef>> {
+/// Validates the layout version and remainder type, returning `None` for legacy layouts.
+pub fn json2_remainder_field(field: &Field) -> crate::error::Result<Option<&FieldRef>> {
     let layout = Json2PhysicalLayout::try_from_root(field)?;
     if !layout.is_version_2() {
         return Ok(None);

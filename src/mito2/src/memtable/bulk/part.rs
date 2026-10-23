@@ -266,13 +266,14 @@ impl BulkPart {
                     ),
                 })?;
             let arrow_array = default_vector.to_arrow_array();
-            column_meta.column_schema.data_type.as_arrow_type();
-
-            new_fields.push(Arc::new(Field::new(
-                column_meta.column_schema.name.clone(),
-                column_meta.column_schema.data_type.as_arrow_type(),
-                column_meta.column_schema.is_nullable(),
-            )));
+            new_fields.push(Arc::new(
+                Field::new(
+                    column_meta.column_schema.name.clone(),
+                    arrow_array.data_type().clone(),
+                    column_meta.column_schema.is_nullable(),
+                )
+                .with_metadata(column_meta.column_schema.metadata().clone()),
+            ));
             new_columns.push(arrow_array);
         }
 
@@ -982,12 +983,12 @@ fn lexsort_primary_key_indices(batch: &RecordBatch) -> Result<UInt32Array> {
     datatypes::arrow::compute::lexsort_to_indices(&sort_columns, None).context(ComputeArrowSnafu)
 }
 
-/// Converts a `BulkPart` that is unordered and without encoded primary keys into a `BulkPart`
+/// Converts an unordered `BulkPart` with raw tags or encoded primary keys into a `BulkPart`
 /// with the same format as produced by [BulkPartConverter].
 ///
 /// This function takes a `BulkPart` where:
-/// - For dense encoding: Primary key columns may be stored as individual columns
-/// - For sparse encoding: The `__primary_key` column should already be present with encoded keys
+/// - Raw primary key columns are stored individually and encoded with the destination codec
+/// - Sparse destinations also accept encoded keys in a `__primary_key` column
 /// - The batch may not be sorted
 ///
 /// And produces a `BulkPart` where:
@@ -1182,6 +1183,46 @@ pub fn convert_bulk_part(
     let op_type_array = UInt8Array::from(vec![OpType::Put as u8; num_rows]);
     output_columns.push(Arc::new(op_type_array) as ArrayRef);
 
+    // JSON2 arrays carry a data-dependent shape and their own physical layout version.
+    // Keep that layout metadata while retaining the destination's column IDs.
+    let schema = if region_metadata
+        .field_columns()
+        .any(|c| c.column_schema.data_type.is_json2())
+    {
+        let fields = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                if !datatypes::extension::json::is_json2_extension_type(field) {
+                    return field.clone();
+                }
+                let source = input_schema.field(column_indices[field.name().as_str()]);
+                let mut metadata = field.metadata().clone();
+                if datatypes::extension::json::is_json2_extension_type(source) {
+                    for key in [
+                        arrow_schema::extension::EXTENSION_TYPE_NAME_KEY,
+                        arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY,
+                    ] {
+                        if let Some(value) = source.metadata().get(key) {
+                            metadata.insert(key.to_string(), value.clone());
+                        } else {
+                            metadata.remove(key);
+                        }
+                    }
+                }
+                Arc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(source.data_type().clone())
+                        .with_metadata(metadata),
+                )
+            })
+            .collect::<Vec<_>>();
+        Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+    } else {
+        schema
+    };
     let batch = RecordBatch::try_new(schema, output_columns).context(NewRecordBatchSnafu)?;
 
     // Sorts the batch by (primary_key, timestamp, sequence desc)

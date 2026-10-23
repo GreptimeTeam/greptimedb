@@ -4484,20 +4484,27 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     use crate::tests::test_util::{MockInstanceBuilder, RebuildableMockInstance, TestContext};
 
     let name = format!("exemplar_lifecycle_{distributed}_{batching}_{precreated}");
+    let protocols = if batching {
+        vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+    } else {
+        Vec::new()
+    };
+    let table_batcher = BatcherOptions {
+        protocols: protocols.clone(),
+        pending_rows_flush_interval: std::time::Duration::from_millis(20),
+        ..Default::default()
+    };
     let builder = if distributed {
         MockInstanceBuilder::Distributed(
-            GreptimeDbClusterBuilder::new(&name).await.with_datanodes(3),
+            GreptimeDbClusterBuilder::new(&name)
+                .await
+                .with_datanodes(3)
+                .with_table_batcher(table_batcher),
         )
     } else {
-        let mut builder = GreptimeDbStandaloneBuilder::new(&name);
-        if batching {
-            builder = builder.with_table_batcher(BatcherOptions {
-                protocols: vec![BatchingProtocol::Prom, BatchingProtocol::Otlp],
-                pending_rows_flush_interval: std::time::Duration::from_millis(20),
-                ..Default::default()
-            });
-        }
-        MockInstanceBuilder::Standalone(builder)
+        MockInstanceBuilder::Standalone(
+            GreptimeDbStandaloneBuilder::new(&name).with_table_batcher(table_batcher),
+        )
     };
     let mut context = TestContext::new(builder).await;
     if precreated {
@@ -4526,7 +4533,10 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
                     None,
                 )
         };
-        let server = builder.with_otlp_handler(frontend, batching).build();
+        let server = builder
+            .with_batching_protocols(protocols.clone())
+            .with_otlp_handler(frontend, batching)
+            .build();
         server.build(server.make_app()).unwrap()
     };
     let mut app = router(context.frontend());
@@ -5028,6 +5038,104 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
             .unwrap()
             .is_none()
     );
+}
+
+#[rstest]
+#[case::auto_create(true, false, false)]
+#[case::auto_create_disabled(false, false, false)]
+#[case::hint_disabled(true, true, false)]
+#[case::batched(true, false, true)]
+#[case::batched_auto_create_disabled(false, false, true)]
+#[case::batched_hint_disabled(true, true, true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_precreated_precision_and_label_defaults(
+    #[case] auto_create: bool,
+    #[case] hint_disabled: bool,
+    #[case] batching: bool,
+) {
+    use std::collections::BTreeMap;
+
+    use frontend::service_config::BatcherOptions;
+    use servers::batcher::BatchingProtocol;
+    use servers::exemplar::query::Query;
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
+    use table::requests::AUTO_CREATE_TABLE_KEY;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let mut builder = GreptimeDbStandaloneBuilder::new("exemplar_precreated_contract")
+        .with_auto_create_table(auto_create);
+    if batching {
+        builder = builder.with_table_batcher(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: std::time::Duration::from_millis(10),
+            ..Default::default()
+        });
+    }
+    let instance = builder.build().await;
+    let frontend = instance.fe_instance();
+    let mut ctx = QueryContext::arc().with_confirmed_writes();
+    ctx.set_batching_enabled(batching);
+    if hint_disabled {
+        ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
+    }
+    let ctx = Arc::new(ctx);
+    for default in ["", "DEFAULT NULL", "DEFAULT 'east'"] {
+        execute_sql(
+            frontend,
+            &format!(
+                "CREATE TABLE metrics_exemplars (
+                    greptime_timestamp TIMESTAMP(6) TIME INDEX,
+                    greptime_metric STRING, site STRING {default},
+                    greptime_value DOUBLE, exemplar_labels JSON2,
+                    PRIMARY KEY (greptime_metric, site)
+                ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
+            ),
+        )
+        .await;
+        let request = into_rows(vec![Exemplar {
+            metric: "metric".into(),
+            series_labels: BTreeMap::new(),
+            timestamp: -1,
+            value: 1.0,
+            labels: BTreeMap::new(),
+        }])
+        .unwrap()
+        .0;
+        let result = frontend
+            .write_exemplars_prepared(request, ctx.clone())
+            .await;
+        if default == "DEFAULT 'east'" {
+            let error = result.unwrap_err();
+            assert!(
+                error.output_msg().contains("non-NULL defaults"),
+                "{error:?}"
+            );
+        } else {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .write_progress()
+                    .await
+                    .into_result()
+                    .unwrap(),
+                1
+            );
+            let series = frontend
+                .query_exemplars(
+                    Query::parse("metric{site=\"\"}".into(), "-0.000001", "0", "public").unwrap(),
+                    QueryContext::arc(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(series.len(), 1);
+            assert!(!series[0].series_labels.contains_key("site"));
+            assert_eq!(series[0].exemplars[0].timestamp.0, -1000);
+        }
+        execute_sql(frontend, "DROP TABLE metrics_exemplars").await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
