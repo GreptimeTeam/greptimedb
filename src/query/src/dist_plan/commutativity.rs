@@ -400,6 +400,9 @@ fn reads_across_series(node: &NativeNode) -> bool {
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. } => reads_across_series(input),
         NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } => true,
+        // A vector operation reads the whole vector at each grid point (`topk`, `absent`,
+        // `histogram_quantile`, ...), so it is not a per-series node either.
+        NativeExpr::Vector { .. } => true,
     }
 }
 

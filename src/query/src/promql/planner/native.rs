@@ -224,6 +224,14 @@ impl PromPlanner {
         if Self::field_columns_contain_native_histogram(input.schema(), &fields) {
             return Ok(None);
         }
+        // The region's raw series preflight serves a field only when it is numeric or a native
+        // histogram, and the physical layer turns that refusal into a planning error because the
+        // logical plan is already fixed by then. A table whose selected fields are, say, a string
+        // and a boolean therefore has to be declined here, while the existing plan is still the
+        // fallback - `stringsfield` over such a table answered normally before this route existed.
+        if !Self::field_columns_are_raw_series_servable(input.schema(), &fields) {
+            return Ok(None);
+        }
         let Some(stmt) = self.native_statement(prom_expr) else {
             return Ok(None);
         };
@@ -250,6 +258,14 @@ impl PromPlanner {
             Err(DataFusionError::NotImplemented(_)) => return Ok(None),
             Err(error) => return Err(error).context(DataFusionPlanningSnafu),
         };
+        // A vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole
+        // vector at each grid point rather than one series at a time, so it cannot be evaluated by
+        // one executor per scan partition. Declining here is the only place that still works: once
+        // the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
+        // declining to push it down would leave a node the physical layer must build anyway.
+        if reads_across_series(tree.root()) {
+            return Ok(None);
+        }
 
         let binding = FusedSeriesBinding {
             series_schema,
@@ -354,6 +370,25 @@ fn selector_range_millis(expr: &PromExpr) -> Option<i64> {
             .iter()
             .find_map(|arg| selector_range_millis(arg)),
         _ => None,
+    }
+}
+
+/// Whether any node of `tree` reads the whole input vector at a point rather than one series.
+///
+/// Such a node folds or pairs across series (`Aggregate`, `Binary`) or reorders/reads a whole
+/// vector (`Vector`: `sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...). This node runs
+/// one executor per scan partition, and a partition holds only part of a metric's series, so those
+/// nodes would answer from a fragment.
+fn reads_across_series(node: &promql::native::plan::NativeNode) -> bool {
+    use promql::native::plan::NativeExpr;
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. } => reads_across_series(input),
+        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } | NativeExpr::Vector { .. } => {
+            true
+        }
     }
 }
 
