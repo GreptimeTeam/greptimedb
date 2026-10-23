@@ -29,7 +29,7 @@ use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
@@ -165,11 +165,11 @@ fn map_parts(node: &NativeNode) -> (&NativeNode, &BoundMap) {
     (input, op)
 }
 
-/// The one operation a `Map` node applies.
+/// The one math operation a `Map` node applies.
 fn map_op(node: &NativeNode) -> MathOp {
     let (_, op) = map_parts(node);
-    let [only] = &op.ops[..] else {
-        panic!("the map holds {} operation(s)", op.ops.len());
+    let [MapOp::Math(only)] = &op.ops[..] else {
+        panic!("the map holds {:?}, not one math operation", op.ops);
     };
     *only
 }
@@ -4271,4 +4271,40 @@ fn a_compiled_sum_over_a_rate_with_empty_input_produces_no_groups() {
     };
     let tree = compile(&statement, raw_schema(), SeriesOrdering::KeyThenTime).unwrap();
     assert_eq!(run_aggregate_tree(&tree, Vec::new()), Vec::new());
+}
+
+/// `label_replace` and `label_join` bind their label change into a map over the vector they are
+/// given, with the strings the call wrote.
+#[test]
+fn label_functions_bind_their_change_into_a_map() {
+    let cases = [
+        (
+            r#"label_replace(x, "dst", "$1", "src", "(.*)")"#,
+            r#"label_replace "dst" "$1" "src" "(.*)""#,
+        ),
+        (
+            r#"label_join(x, "dst", "-", "a", "b")"#,
+            r#"label_join "dst" "-" ["a", "b"]"#,
+        ),
+    ];
+    for (query, op) in cases {
+        let tree = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let display = tree.to_string();
+        let root = display.lines().nth(1).expect("a compiled tree has a root");
+        assert_eq!(root, format!("  root Map {op}"), "`{query}`");
+    }
+}
+
+/// An invalid regular expression fails the statement, as it fails Prometheus' evaluation, rather
+/// than being left to another path that would fail it the same way.
+#[test]
+fn an_invalid_label_replace_expression_fails_the_statement() {
+    let error = compile(
+        &eval_stmt(r#"label_replace(x, "dst", "$1", "src", "(")"#),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_err();
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
 }
