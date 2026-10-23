@@ -328,15 +328,25 @@ mod tests {
         assert_eq!(counter("native.root.output_values"), Some(11));
     }
 
+    /// Each partition's peak is exported under a name of its own, from handles of its own.
+    ///
+    /// A [`NodeMetrics`] belongs to one node in one partition, which is the shape one runtime tree
+    /// per partition gives. Two partitions are therefore two sets of handles that grow
+    /// independently: what the second one records never reaches the figure the first one exported,
+    /// and the peak of each is reported under the partition it belongs to rather than summed under
+    /// one shared name.
     #[test]
     fn peak_exports_are_distinct_per_partition() {
-        let metrics = NodeMetrics::default();
-        metrics.record_reserved_bytes(1024);
+        let first_metrics = NodeMetrics::default();
+        first_metrics.record_reserved_bytes(1024);
         let first = ExecutionPlanMetricsSet::new();
-        metrics.register("root", &first, 0);
-        metrics.record_reserved_bytes(2048);
+        first_metrics.register("root", &first, 0);
+        // The second partition's node is another set of handles, recorded and exported later: the
+        // first export above must not follow it.
+        let second_metrics = NodeMetrics::default();
+        second_metrics.record_reserved_bytes(2048);
         let second = ExecutionPlanMetricsSet::new();
-        metrics.register("root", &second, 1);
+        second_metrics.register("root", &second, 1);
         let peak = |set: &ExecutionPlanMetricsSet, expected: &str| {
             set.clone_inner()
                 .iter()

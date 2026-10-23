@@ -6320,7 +6320,7 @@ fn a_binary_of_a_selection_and_a_window_matches_prometheus() {
         .unwrap();
     execution
         .push_raw(
-            InputId::new(0),
+            InputId::new(1),
             raw_chunk_of(
                 &schema,
                 b"right_raw",
