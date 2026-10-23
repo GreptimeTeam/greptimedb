@@ -14,6 +14,8 @@
 
 //! Normalized metric exemplars shared by Remote Write and OTLP conversion.
 
+pub mod query;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use api::v1::value::ValueData;
