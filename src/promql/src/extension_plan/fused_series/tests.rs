@@ -1139,10 +1139,9 @@ fn grid_timestamps() -> Vec<i64> {
         .collect()
 }
 
-/// A waker a test can ask whether it was woken.
+/// A waker a test can ask whether it was notified.
 ///
-/// A poll that stops on its own budget has to wake itself, and the default waker a `poll!` uses
-/// swallows that, so the tests that check it poll with this one.
+/// The poll tests use this to drive only when a child or the bounded-work continuation woke them.
 #[derive(Default)]
 struct CountingWake(AtomicBool);
 
@@ -1155,6 +1154,10 @@ impl futures::task::ArcWake for CountingWake {
 impl CountingWake {
     fn woken(&self) -> bool {
         self.0.load(Ordering::SeqCst)
+    }
+
+    fn clear(&self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1812,6 +1815,321 @@ fn an_instant_then_window_over_one_partition_is_accepted() {
 fn a_window_over_raw_input_on_two_partitions_is_accepted() {
     plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
         .expect("ordinary input-to-window trees do not split a logical series");
+}
+
+/// A child that notifies between parent polls is not lost behind an all-pending combinator pass.
+///
+/// `SelectAll` polls every child once and cooperatively wakes the parent, then parks until a child
+/// notifies. The wake from that first pass is cleared here so the wake asserted after it is the
+/// child's own, and the parent is only polled while that notification is outstanding.
+#[test]
+fn a_child_woken_between_parent_polls_is_not_lost() {
+    let schema = raw_schema();
+    let woken = Arc::new(CountingWake::default());
+    let child_count = POLL_BUDGET + 1;
+    let poll_counts = (0..child_count)
+        .map(|_| Arc::new(AtomicUsize::new(0)))
+        .collect::<Vec<_>>();
+    let child_waker = Arc::new(std::sync::Mutex::new(None));
+    let child_ready = Arc::new(AtomicBool::new(false));
+    let inputs: Vec<_> = poll_counts
+        .iter()
+        .enumerate()
+        .map(|(index, count)| {
+            let count = Arc::clone(count);
+            let child_waker = Arc::clone(&child_waker);
+            let child_ready = Arc::clone(&child_ready);
+            let batches = Box::pin(
+                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                    frame_schema(),
+                    futures::stream::poll_fn({
+                        let child_waker = Arc::clone(&child_waker);
+                        let child_ready = Arc::clone(&child_ready);
+                        move |cx| {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            if index == 0 {
+                                *child_waker.lock().unwrap() = Some(cx.waker().clone());
+                                if child_ready.load(Ordering::SeqCst) {
+                                    return Poll::Ready(Some(Err(DataFusionError::Execution(
+                                        "woken first child failed".to_string(),
+                                    ))));
+                                }
+                            }
+                            Poll::Pending
+                        }
+                    }),
+                ),
+            );
+            let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
+                .expect("the empty raw-frame stream decodes");
+            let stream = super::materialize_raw_labels(decoded)
+                .expect("the empty raw-frame stream materializes labels");
+            (NodePath::root().input(), Some(stream), false)
+        })
+        .collect();
+    let mut stream = super::FusedSeriesStream {
+        inputs: inputs.into_iter().fold(
+            futures::stream::SelectAll::new(),
+            |mut all, (path, stream, _)| {
+                all.push(Box::pin(
+                    stream
+                        .expect("input stream exists")
+                        .map(move |item| (path.clone(), item)),
+                ) as super::TaggedInputStream);
+                all
+            },
+        ),
+        executor: None,
+        classification: Arc::from([]),
+        tags: Arc::from([]),
+        output_schema: output_schema(),
+        labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
+        ready: VecDeque::new(),
+        input_ended: false,
+        done: false,
+    };
+
+    let waker = futures::task::waker(Arc::clone(&woken));
+    let mut context = Context::from_waker(&waker);
+    assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+    assert!(child_waker.lock().unwrap().is_some(), "child 0 was polled");
+    assert!(
+        woken.woken(),
+        "the combinator's first all-pending pass wakes once"
+    );
+    // Clear that cooperative yield so the next wake can only be the child's.
+    woken.clear();
+    child_ready.store(true, Ordering::SeqCst);
+    child_waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
+    assert!(woken.woken(), "the child notification reaches the parent");
+    let mut saw_error = false;
+    for _ in 0..4 {
+        assert!(woken.woken(), "drive only on a notification");
+        woken.clear();
+        match Pin::new(&mut stream).poll_next(&mut context) {
+            Poll::Ready(Some(Err(DataFusionError::External(error)))) => {
+                assert!(error.to_string().contains("woken first child failed"));
+                saw_error = true;
+                break;
+            }
+            Poll::Pending => {}
+            other => panic!("unexpected stream result: {other:?}"),
+        }
+    }
+    assert!(saw_error, "the woken child error must be observed");
+    assert_eq!(
+        2,
+        poll_counts[0].load(Ordering::SeqCst),
+        "child 0 was polled by the first pass and again after its wake"
+    );
+    assert_eq!(1, poll_counts[POLL_BUDGET].load(Ordering::SeqCst));
+    assert!(stream.done, "the error ends the stream");
+    assert!(stream.executor.is_none(), "the error releases the executor");
+    assert!(stream.ready.is_empty(), "the error drops queued batches");
+    assert!(stream.inputs.is_empty(), "the error releases every input");
+    let counts: Vec<_> = poll_counts
+        .iter()
+        .map(|count| count.load(Ordering::SeqCst))
+        .collect();
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut context),
+        Poll::Ready(None)
+    ));
+    assert_eq!(
+        counts,
+        poll_counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect::<Vec<_>>(),
+        "a terminal poll polls no child"
+    );
+}
+
+/// A ready error at child 65 is not starved behind earlier pending children.
+#[test]
+fn late_child_error_is_not_starved() {
+    let schema = raw_schema();
+    let poll_counts = (0..=POLL_BUDGET)
+        .map(|_| Arc::new(AtomicUsize::new(0)))
+        .collect::<Vec<_>>();
+    let inputs: Vec<_> = poll_counts
+        .iter()
+        .enumerate()
+        .map(|(index, count)| {
+            let count = Arc::clone(count);
+            let batches = Box::pin(
+                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                    frame_schema(),
+                    futures::stream::poll_fn(move |_| {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        if index == POLL_BUDGET {
+                            Poll::Ready(Some(Err(DataFusionError::Execution(
+                                "late child failed".to_string(),
+                            ))))
+                        } else {
+                            Poll::Pending
+                        }
+                    }),
+                ),
+            );
+            let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
+                .expect("the empty raw-frame stream decodes");
+            let stream = super::materialize_raw_labels(decoded)
+                .expect("the empty raw-frame stream materializes labels");
+            (NodePath::root().input(), stream)
+        })
+        .collect();
+    let mut input_streams = futures::stream::SelectAll::new();
+    input_streams.extend(inputs.into_iter().map(|(path, stream)| {
+        Box::pin(stream.map(move |item| (path.clone(), item))) as super::TaggedInputStream
+    }));
+    let mut stream = super::FusedSeriesStream {
+        inputs: input_streams,
+        executor: None,
+        classification: Arc::from([]),
+        tags: Arc::from([]),
+        output_schema: output_schema(),
+        labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
+        ready: VecDeque::new(),
+        input_ended: false,
+        done: false,
+    };
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut context),
+        Poll::Ready(Some(Err(DataFusionError::External(error))))
+            if error.to_string().contains("late child failed")
+    ));
+    assert!(
+        poll_counts
+            .iter()
+            .all(|count| count.load(Ordering::SeqCst) == 1),
+        "the first combinator pass polls every child once, the last one included"
+    );
+    assert!(stream.done);
+    assert!(stream.executor.is_none());
+    assert!(stream.ready.is_empty());
+    assert!(stream.inputs.is_empty());
+    let counts: Vec<_> = poll_counts
+        .iter()
+        .map(|count| count.load(Ordering::SeqCst))
+        .collect();
+    assert!(matches!(
+        Pin::new(&mut stream).poll_next(&mut context),
+        Poll::Ready(None)
+    ));
+    assert_eq!(
+        counts,
+        poll_counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A fully pending input set parks after the combinator's one cooperative yield.
+#[test]
+fn all_pending_children_park_without_self_wake() {
+    for child_count in [POLL_BUDGET, POLL_BUDGET + 1] {
+        let schema = raw_schema();
+        let woken = Arc::new(CountingWake::default());
+        let poll_counts = (0..child_count)
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let inputs: Vec<_> = poll_counts
+            .iter()
+            .map(|count| {
+                let count = Arc::clone(count);
+                let batches = Box::pin(
+                    datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+                        frame_schema(),
+                        futures::stream::poll_fn(move |_| {
+                            count.fetch_add(1, Ordering::SeqCst);
+                            Poll::Pending
+                        }),
+                    ),
+                );
+                let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
+                    .expect("the empty raw-frame stream decodes");
+                let stream = super::materialize_raw_labels(decoded)
+                    .expect("the empty raw-frame stream materializes labels");
+                (NodePath::root().input(), Some(stream), false)
+            })
+            .collect();
+        let mut stream = super::FusedSeriesStream {
+            inputs: inputs.into_iter().fold(
+                futures::stream::SelectAll::new(),
+                |mut all, (path, stream, _)| {
+                    all.push(Box::pin(
+                        stream
+                            .expect("input stream exists")
+                            .map(move |item| (path.clone(), item)),
+                    ) as super::TaggedInputStream);
+                    all
+                },
+            ),
+            executor: None,
+            classification: Arc::from([]),
+            tags: Arc::from([]),
+            output_schema: output_schema(),
+            labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
+            ready: VecDeque::new(),
+            input_ended: false,
+            done: false,
+        };
+        let waker = futures::task::waker(Arc::clone(&woken));
+        let mut context = Context::from_waker(&waker);
+        // The first pass polls every child once, then the combinator wakes once to yield.
+        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+        assert!(
+            woken.woken(),
+            "the combinator's first all-pending pass wakes once"
+        );
+        assert!(
+            poll_counts
+                .iter()
+                .all(|count| count.load(Ordering::SeqCst) == 1),
+            "every child is polled exactly once in the first pass"
+        );
+        let mut drained = 0;
+        for _ in 0..4 {
+            if !woken.woken() {
+                break;
+            }
+            woken.clear();
+            assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+            drained += 1;
+        }
+        assert!(drained > 0, "the cooperative yield is drained");
+        assert!(
+            !woken.woken(),
+            "a parked all-pending set must not self-wake"
+        );
+        assert!(
+            poll_counts
+                .iter()
+                .all(|count| count.load(Ordering::SeqCst) == 1),
+            "no child is polled again without a notification"
+        );
+        let counts: Vec<_> = poll_counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect();
+        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
+        assert!(
+            !woken.woken(),
+            "an unnotified poll of a parked set must not self-wake"
+        );
+        assert_eq!(
+            counts,
+            poll_counts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .collect::<Vec<_>>(),
+            "an unnotified poll of a parked set polls no child"
+        );
+    }
 }
 
 /// One poll reads at most [`POLL_BUDGET`] chunks of input, and stopping there loses nothing.

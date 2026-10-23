@@ -72,7 +72,8 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
+use futures::stream::{SelectAll, StreamExt};
+use store_api::region_engine::RawLabelSource;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
@@ -88,15 +89,26 @@ mod tests;
 /// The label a metric name is stored under, which is not a tag column of the input.
 const METRIC_NAME: &str = "__name__";
 
-/// How many input steps one poll of [`FusedSeriesStream`] runs before it wakes itself.
+/// How many ready input chunks one poll of [`FusedSeriesStream`] processes before it wakes itself.
 ///
-/// A step polls the input once and hands what it settled to the executor. Settling is not
-/// guaranteed: raw samples before the first evaluation point settle nothing, so an input of many
-/// such chunks would otherwise be read to its end inside one poll, holding the task's thread for
-/// an unbounded time and delaying both other tasks on it and the cancellation the consumer asked
-/// for. The budget makes that a poll that yields instead, and the waker makes sure it is polled
-/// again, so nothing is lost by stopping early.
+/// A chunk that settles no batch is the cost this bounds: raw samples before the first evaluation
+/// point settle nothing, so an input of many such chunks would otherwise be read to its end inside
+/// one poll, holding the task's thread for an unbounded time and delaying both other tasks on it
+/// and the cancellation the consumer asked for. The budget does not bound how many child streams
+/// [`SelectAll`](futures::stream::SelectAll) polls to find readiness; it bounds only the chunks
+/// this node hands to the executor. A poll that stops early wakes itself, so nothing is lost.
 const POLL_BUDGET: usize = 64;
+
+type TaggedInputStream = Pin<
+    Box<
+        dyn Stream<
+                Item = (
+                    NodePath,
+                    Result<RawSeriesChunk, common_error::ext::BoxedError>,
+                ),
+            > + Send,
+    >,
+>;
 
 /// What the tree's input was compiled against, and how its output columns are named.
 ///
@@ -1036,17 +1048,20 @@ impl ExecutionPlan for FusedSeriesExec {
         )?;
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
+        let inputs = inputs.into_iter().map(|(path, stream)| {
+            Box::pin(stream.map(move |item| (path.clone(), item))) as TaggedInputStream
+        });
+        let mut input_streams = SelectAll::new();
+        input_streams.extend(inputs);
         Ok(Box::pin(FusedSeriesStream {
-            inputs: inputs
-                .into_iter()
-                .map(|(path, stream)| (path, Some(stream), false))
-                .collect(),
+            inputs: input_streams,
             executor: Some(NativeExecutor::new(state)),
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
             ready: VecDeque::new(),
+            input_ended: false,
             done: false,
         }))
     }
@@ -1461,7 +1476,7 @@ fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    inputs: Vec<(NodePath, Option<SendableRawSeriesStream>, bool)>,
+    inputs: SelectAll<TaggedInputStream>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Where each output column comes from.
@@ -1476,6 +1491,8 @@ pub struct FusedSeriesStream {
     labels: SharedLabelSets,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
+    /// Whether the executor has already been told that every input ended.
+    input_ended: bool,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,
 }
@@ -1594,7 +1611,7 @@ impl Stream for FusedSeriesStream {
             if this.done {
                 return Poll::Ready(None);
             }
-            if this.inputs.is_empty() {
+            if this.input_ended {
                 match this.pull_one() {
                     Ok(Some(chunk)) => {
                         if let Err(error) = this.convert(vec![chunk]) {
@@ -1613,53 +1630,30 @@ impl Stream for FusedSeriesStream {
                 }
                 continue;
             }
-            let mut all_pending = true;
-            for index in 0..this.inputs.len() {
-                if this.inputs[index].2 || budget == 0 {
-                    continue;
-                }
-                // Each child poll is what the budget bounds, so a node with several inputs cannot
-                // multiply the work one poll does by the number of children it happens to have.
-                budget -= 1;
-                let polled = this.inputs[index]
-                    .1
-                    .as_mut()
-                    .expect("live input exists")
-                    .as_mut()
-                    .poll_next(cx);
-                match polled {
-                    Poll::Pending => {}
-                    Poll::Ready(None) => {
-                        all_pending = false;
-                        this.inputs[index].1 = None;
-                        this.inputs[index].2 = true;
-                    }
-                    Poll::Ready(Some(Err(error))) => {
-                        this.fail();
-                        return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
-                    }
-                    Poll::Ready(Some(Ok(chunk))) => {
-                        all_pending = false;
-                        let path = this.inputs[index].0.clone();
-                        if let Err(error) = this.push_at(&path, chunk) {
-                            this.fail();
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                    }
-                }
-            }
-            if this.inputs.iter().all(|input| input.2) {
-                if let Err(error) = this.close_input() {
+            match Pin::new(&mut this.inputs).poll_next(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Some((_path, Err(error)))) => {
                     this.fail();
-                    return Poll::Ready(Some(Err(error)));
+                    return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                this.inputs.clear();
-            } else if all_pending {
-                return Poll::Pending;
+                Poll::Ready(Some((path, Ok(chunk)))) => {
+                    budget -= 1;
+                    if let Err(error) = this.push_at(&path, chunk) {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+                Poll::Ready(None) => {
+                    if let Err(error) = this.close_input() {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    this.input_ended = true;
+                }
             }
         }
-        // The budget ran out on input that settled nothing. Everything read so far is kept, so the
-        // next poll continues where this one stopped; waking first is what asks for that poll.
+        // Reaching the chunk budget means there is productive input still to process. Wake the
+        // parent to continue; a genuinely pending SelectAll already registered child wakers.
         cx.waker().wake_by_ref();
         Poll::Pending
     }
