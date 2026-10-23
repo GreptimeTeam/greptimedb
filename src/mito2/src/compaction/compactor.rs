@@ -37,7 +37,7 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
-use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
@@ -591,7 +591,7 @@ impl SstMerger for DefaultSstMerger {
             time_range: output.output_time_range,
             merge_mode,
         };
-        let source = builder.build_flat_sst_reader().await?;
+        let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = context.region_metadata.clone();

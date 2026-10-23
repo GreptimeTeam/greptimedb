@@ -36,6 +36,7 @@ use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::read_columns::ReadColumns;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::seq_scan::SeqScan;
+use crate::read::stream::spawn_compact_stream;
 use crate::region::options::MergeMode;
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::MetadataCacheMetrics;
@@ -178,6 +179,17 @@ impl CompactionSstReaderBuilder<'_> {
         }
         Ok(metadata)
     }
+}
+
+/// Number of merged batches buffered between the merge task and the SST writer.
+const MERGED_BATCH_CHANNEL_SIZE: usize = 2;
+
+/// Reads and merges `source` on a separate task, so the SST writer can encode
+/// merged batches while the next ones are being read and merged.
+pub(crate) fn spawn_merge(source: FlatSource) -> FlatSource {
+    let schema = source.schema().clone();
+    let stream = spawn_compact_stream(source.into_stream(), MERGED_BATCH_CHANNEL_SIZE, None);
+    FlatSource::new_stream(schema, stream)
 }
 
 /// Converts time range to predicates so that rows outside the range will be filtered.
