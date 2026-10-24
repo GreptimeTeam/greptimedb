@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
@@ -46,8 +46,14 @@ use common_frontend::slow_query_event::{
 };
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
+use datafusion::physical_plan::ExecutionPlan;
+use datatypes::arrow::array::{
+    Array as _, Float64Array, StringArray, StringViewArray, TimestampMillisecondArray,
+};
+use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use frontend::instance::Instance;
 use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -62,6 +68,8 @@ use pipeline::{
     GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
 };
 use prost::Message;
+use query::options::QueryOptions;
+use query::parser::PromQuery;
 use rstest_reuse::apply;
 use serde_json::{Value, json};
 use servers::http::handler::HealthResponse;
@@ -79,16 +87,18 @@ use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
 use servers::http::{GreptimeQueryOutput, HttpOptions, HttpServerBuilder};
+use servers::interceptor::{PromQueryInterceptor, PromQueryInterceptorRef};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
+use servers::query_handler::sql::SqlQueryHandler;
 use servers::request_memory_limiter::ServerMemoryLimiter;
-use session::context::QueryContextRef;
+use session::context::{QueryContextBuilder, QueryContextRef};
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
-    setup_test_http_app, setup_test_http_app_with_frontend,
+    execute_sql, execute_sql_and_expect, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_custom_options,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -165,6 +175,8 @@ macro_rules! http_tests {
                 test_http_analyze_stream_tql,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_prometheus_native_promql_route,
+                test_native_promql_route_plans_the_query,
                 test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
@@ -1444,6 +1456,727 @@ pub async fn test_prometheus_promql_api(store_type: StorageType) {
     );
 
     guard.remove_all().await;
+}
+
+/// Keeps the plan of the last PromQL request so a test can prove which route answered it.
+///
+/// The plan is only complete once the response body has been drained: a frontend plan keeps its
+/// region stages behind `MergeScanExec`, whose `children()` is empty, and those stages fill in their
+/// metrics while the body streams out. `take_plan` therefore runs after the body is consumed and
+/// leaves nothing behind, so no request can read the plan of another one.
+#[derive(Default)]
+struct PromRouteObserver {
+    last_plan: Mutex<Option<Arc<dyn ExecutionPlan>>>,
+}
+
+impl PromQueryInterceptor for PromRouteObserver {
+    type Error = servers::error::Error;
+
+    fn post_execute(
+        &self,
+        output: common_query::Output,
+        _query_ctx: QueryContextRef,
+    ) -> servers::error::Result<common_query::Output> {
+        *self.last_plan.lock().unwrap() = output.meta.plan.clone();
+        Ok(output)
+    }
+}
+
+impl PromRouteObserver {
+    /// Takes the plan of the request that just finished.
+    fn take_plan(&self) -> Arc<dyn ExecutionPlan> {
+        self.last_plan
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the request finished without the observer seeing the plan it executed")
+    }
+}
+
+/// Every plan node of every stage of an executed plan, in plan order.
+fn plan_nodes(plan: &Arc<dyn ExecutionPlan>) -> Vec<Value> {
+    fn push(node: &Value, nodes: &mut Vec<Value>) {
+        nodes.push(node.clone());
+        if let Some(children) = node["children"].as_array() {
+            for child in children {
+                push(child, nodes);
+            }
+        }
+    }
+
+    let stages = query::analyze_plan_metrics_to_json_value(plan, true)
+        .expect("an executed plan's metrics serialize to JSON");
+    let mut nodes = Vec::new();
+    for stage in stages
+        .as_array()
+        .expect("plan metrics are a list of stages")
+    {
+        push(&stage["plan"], &mut nodes);
+    }
+    nodes
+}
+
+/// The nodes of `plan` named `name`.
+fn plan_nodes_named(plan: &Arc<dyn ExecutionPlan>, name: &str) -> Vec<Value> {
+    plan_nodes(plan)
+        .into_iter()
+        .filter(|node| node["name"] == name)
+        .collect()
+}
+
+/// Whether the executed plan answered on the native fused-series route.
+///
+/// Every stage is searched: on a vector query the fused node runs inside the region stage behind
+/// `MergeScanExec`, while on a constant it is the frontend plan itself.
+fn executes_fused_series(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    !plan_nodes_named(plan, "FusedSeriesExec").is_empty()
+}
+
+/// One row of a PromQL result: its tag columns in schema order, its timestamp and its value.
+type PromqlRow = (Vec<(String, String)>, i64, f64);
+
+/// Checks that a native result reads no scan for a constant, and one real scan over
+/// `scan_partitions` non-empty partitions for a vector, and returns the fused node it ran.
+fn assert_native_plan(
+    plan: &Arc<dyn ExecutionPlan>,
+    scan_partitions: Option<usize>,
+    context: &str,
+) -> Value {
+    let fused = {
+        let mut nodes = plan_nodes_named(plan, "FusedSeriesExec");
+        assert_eq!(
+            nodes.len(),
+            1,
+            "{context}: expected one fused node: {nodes:?}"
+        );
+        nodes.remove(0)
+    };
+    // The tree the node will run, rendered the way `EXPLAIN` renders it: one line per node.
+    let tree = fused["param"].as_str().unwrap_or_default();
+    let scans = plan_nodes_named(plan, "SeriesScanExec");
+    let Some(partitions) = scan_partitions else {
+        // A constant reads no frame: its one value per grid point comes from the tree alone, so the
+        // node has no child, plans no scan and binds no source.
+        assert!(
+            scans.is_empty(),
+            "{context}: a constant planned a scan: {scans:?}"
+        );
+        assert_eq!(
+            fused["children"].as_array().map(Vec::len),
+            Some(0),
+            "{context}: a constant's fused node has children: {fused}"
+        );
+        assert!(
+            !tree.contains("Input"),
+            "{context}: a constant's tree binds an input: {tree}"
+        );
+        return fused;
+    };
+    assert_eq!(
+        fused["children"].as_array().map(Vec::len),
+        Some(1),
+        "{context}: a vector must read exactly one child: {fused}"
+    );
+    assert_eq!(
+        scans.len(),
+        1,
+        "{context}: a vector must read exactly one scan: {scans:?}"
+    );
+    let scan = &fused["children"][0];
+    assert_eq!(
+        scan["name"], "SeriesScanExec",
+        "{context}: the fused node's child is not the scan it reads: {fused}"
+    );
+    let scan_description = scan["param"].as_str().unwrap_or_default();
+    assert!(
+        scan_description.contains(&format!("partitions={partitions}")),
+        "{context}: the scan does not expose {partitions} partitions: {scan_description}"
+    );
+    // Both inputs of one selector name the one source, so a tree that reads two sources or none
+    // would have had to pair or gather them.
+    assert_eq!(
+        tree.matches("source=0").count(),
+        1,
+        "{context}: the tree does not read the one source: {tree}"
+    );
+    assert!(
+        !tree.contains("source=1"),
+        "{context}: the tree reads a second source: {tree}"
+    );
+    // Every partition the scan exposes did its own work: a gather of the raw input would leave the
+    // partitions without the input figure, and a partition that never ran would leave both at zero.
+    let metrics = fused["metrics"]
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: the fused node reports no metrics: {fused}"));
+    for partition in 0..partitions {
+        let root_peak = format!("native.p{partition}.root.peak_reserved_bytes");
+        assert!(
+            metrics
+                .get(&root_peak)
+                .and_then(Value::as_u64)
+                .unwrap_or_default()
+                > 0,
+            "partition {partition} of `{context}` did no native work: {fused}"
+        );
+        let prefix = format!("native.p{partition}.root.");
+        assert!(
+            metrics.iter().any(|(name, value)| name.starts_with(&prefix)
+                && name.ends_with(".input.peak_reserved_bytes")
+                && value.as_u64().unwrap_or_default() > 0),
+            "partition {partition} of `{context}` read no input: {fused}"
+        );
+    }
+    fused
+}
+
+/// The columns of a result as (name, type, nullable).
+fn result_columns(schema: &SchemaRef) -> Vec<(String, DataType, bool)> {
+    schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().clone(),
+                field.data_type().clone(),
+                field.is_nullable(),
+            )
+        })
+        .collect()
+}
+
+/// The tag columns of `rows`, which every row of one result shares.
+fn row_tags(rows: &[PromqlRow]) -> Vec<(String, String)> {
+    rows.first().map(|row| row.0.clone()).unwrap_or_default()
+}
+
+/// Checks the schema the native route reports: the time index, then one nullable `Float64` per
+/// series field, then one nullable `Utf8` per tag.
+///
+/// A constant reports no tags and no series fields: its one value per grid point is `value` on the
+/// `time` grid, which is the schema the legacy path also reports for a bare literal.
+fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
+    let tags = row_tags(expected);
+    // The time index and the one field the tree reports, then one `Utf8` column per tag.
+    let mut columns = vec![
+        (
+            if tags.is_empty() { "time" } else { "ts" }.to_string(),
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+        (
+            if tags.is_empty() { "value" } else { "val" }.to_string(),
+            DataType::Float64,
+            true,
+        ),
+    ];
+    for (name, _) in &tags {
+        columns.push((name.clone(), DataType::Utf8, true));
+    }
+    assert_eq!(
+        result_columns(schema),
+        columns,
+        "{context}: native result schema"
+    );
+}
+
+/// Checks the schema the legacy route reports by role, since it does not share the native one:
+/// the legacy pipeline projects the tags before the time index and names a computed field after the
+/// expression that computes it (`native_demo.val * Float64(100)`), while the native route reports
+/// the time index first and the field the tree reads.
+///
+/// One time column, one `Float64` value column and one `Utf8` column per tag are therefore required
+/// in any order, and the value column has to name the field it derives from.
+fn assert_legacy_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
+    let tags = row_tags(expected);
+    let time_column = if tags.is_empty() { "time" } else { "ts" };
+    let columns = result_columns(schema);
+    assert_eq!(
+        columns.len(),
+        2 + tags.len(),
+        "{context}: legacy result columns: {columns:?}"
+    );
+    let times = columns
+        .iter()
+        .filter(|column| matches!(column.1, DataType::Timestamp(TimeUnit::Millisecond, None)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        times.len(),
+        1,
+        "{context}: legacy result reports one millisecond time column: {columns:?}"
+    );
+    assert_eq!(
+        times[0].0, time_column,
+        "{context}: legacy time column name: {columns:?}"
+    );
+    let values = columns
+        .iter()
+        .filter(|column| column.1 == DataType::Float64)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values.len(),
+        1,
+        "{context}: legacy result reports one Float64 value column: {columns:?}"
+    );
+    assert!(
+        values[0].0.contains("val"),
+        "{context}: legacy value column does not name the field it derives from: {columns:?}"
+    );
+    let tag_names = columns
+        .iter()
+        .filter(|column| column.1 == DataType::Utf8)
+        .map(|column| &column.0)
+        .collect::<Vec<_>>();
+    let expected_tag_names = tags.iter().map(|(name, _)| name).collect::<Vec<_>>();
+    assert_eq!(
+        tag_names, expected_tag_names,
+        "{context}: legacy tag columns: {columns:?}"
+    );
+}
+
+/// Compares two complete row lists: the same series at the same timestamps, and values that agree to
+/// a relative `1e-9`. Comparing the keys row by row is what rejects a prefix, a duplicate or a
+/// missing series; a row count alone would accept the first two.
+fn assert_rows_eq(actual: &[PromqlRow], expected: &[PromqlRow], context: &str) {
+    let keys = |rows: &[PromqlRow]| {
+        rows.iter()
+            .map(|(tags, timestamp, _)| (tags.clone(), *timestamp))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        keys(actual),
+        keys(expected),
+        "{context}: the result does not name the expected series and times"
+    );
+    for (actual, expected) in actual.iter().zip(expected) {
+        let tolerance = 1e-9 * expected.2.abs().max(1.0);
+        assert!(
+            (actual.2 - expected.2).abs() <= tolerance,
+            "{context}: series {:?} at {} must report {}, found {}",
+            expected.0,
+            expected.1,
+            expected.2,
+            actual.2
+        );
+    }
+}
+
+/// The three grid points of every fixture host: its two stored samples, then the last of them carried
+/// forward to the last point. `value` turns a stored sample into the queried value.
+fn fixture_rows(value: impl Fn(f64) -> f64) -> Vec<PromqlRow> {
+    (0..8)
+        .flat_map(|host| {
+            let tags = vec![("host".to_string(), format!("h{host}"))];
+            [
+                (0, value((host + 1) as f64)),
+                (1_000, value((host + 2) as f64)),
+                (2_000, value((host + 2) as f64)),
+            ]
+            .into_iter()
+            .map(move |(timestamp, value)| (tags.clone(), timestamp, value))
+        })
+        .collect()
+}
+
+/// Runs one PromQL query through the public frontend handler and returns the plan it executed, the
+/// schema it answered with and every row it reported.
+async fn promql_output(
+    frontend: &Arc<Instance>,
+    query: &str,
+    native: bool,
+    start: &str,
+    end: &str,
+) -> (Arc<dyn ExecutionPlan>, SchemaRef, Vec<PromqlRow>) {
+    let mut query_ctx = QueryContextBuilder::default();
+    if native {
+        query_ctx = query_ctx.set_extension(
+            "query.experimental_native_promql".to_string(),
+            "true".to_string(),
+        );
+    }
+    let prom_query = PromQuery {
+        query: query.to_string(),
+        start: start.to_string(),
+        end: end.to_string(),
+        step: "1s".to_string(),
+        ..Default::default()
+    };
+    let outputs = SqlQueryHandler::do_promql_query(
+        frontend.as_ref(),
+        &prom_query,
+        Arc::new(query_ctx.build()),
+    )
+    .await;
+    let output = outputs
+        .into_iter()
+        .next()
+        .expect("a PromQL query answers once")
+        .unwrap_or_else(|error| panic!("`{query}` failed: {error}"));
+    let plan = output
+        .meta
+        .plan
+        .clone()
+        .expect("a query reports the plan it executed");
+    let output_data = match output.data {
+        common_query::OutputData::RecordBatches(batches) => batches,
+        common_query::OutputData::Stream(stream) => {
+            common_recordbatch::RecordBatches::try_collect(stream)
+                .await
+                .unwrap_or_else(|error| panic!("`{query}` result collection failed: {error}"))
+        }
+        common_query::OutputData::AffectedRows(rows) => {
+            panic!("`{query}` returned affected rows: {rows}")
+        }
+    };
+    let mut schema = None;
+    let mut rows = Vec::new();
+    for batch in output_data.iter() {
+        let batch = batch.df_record_batch();
+        let arrow_schema = batch.schema();
+        if schema.is_none() {
+            schema = Some(arrow_schema.clone());
+        }
+        let timestamps = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<TimestampMillisecondArray>())
+            .unwrap_or_else(|| panic!("`{query}` reports no millisecond timestamp column"));
+        let values = batch
+            .columns()
+            .iter()
+            .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+            .unwrap_or_else(|| panic!("`{query}` reports no Float64 value column"));
+        // The tags are the result's string columns, in schema order: a column the schema names but
+        // no row carries would be caught by the row comparison below.
+        let tag_columns = arrow_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, field)| matches!(field.data_type(), DataType::Utf8 | DataType::Utf8View))
+            .map(|(index, field)| (index, field.name().clone()))
+            .collect::<Vec<_>>();
+        for row in 0..batch.num_rows() {
+            assert!(
+                timestamps.is_valid(row),
+                "`{query}`: null timestamp at row {row}"
+            );
+            assert!(values.is_valid(row), "`{query}`: null value at row {row}");
+            let tags = tag_columns
+                .iter()
+                .map(|(index, name)| {
+                    let column = batch.column(*index);
+                    let value = match column.data_type() {
+                        DataType::Utf8 => {
+                            let array = column.as_any().downcast_ref::<StringArray>().unwrap();
+                            assert!(
+                                array.is_valid(row),
+                                "`{query}`: null tag {name} at row {row}"
+                            );
+                            array.value(row).to_string()
+                        }
+                        DataType::Utf8View => {
+                            let array = column.as_any().downcast_ref::<StringViewArray>().unwrap();
+                            assert!(
+                                array.is_valid(row),
+                                "`{query}`: null tag {name} at row {row}"
+                            );
+                            array.value(row).to_string()
+                        }
+                        other => panic!("`{query}`: tag column {name} is not a string: {other}"),
+                    };
+                    (name.clone(), value)
+                })
+                .collect::<Vec<_>>();
+            rows.push((tags, timestamps.value(row), values.value(row)));
+        }
+    }
+    rows.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    (
+        plan,
+        schema.expect("a result reports at least one batch"),
+        rows,
+    )
+}
+
+/// Checks public PromQL results and the executed plan of every request on both routes.
+///
+/// One standalone frontend serves both routes: the engine-wide option is on, so each request's own
+/// hint decides its route, and the test-local observer proves which one answered. Every response is
+/// compared whole - result type, labels, timestamp and value - and never by prefix.
+pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
+    let plugins = Plugins::default();
+    let observer = Arc::new(PromRouteObserver::default());
+    plugins.insert::<PromQueryInterceptorRef<servers::error::Error>>(observer.clone());
+    let mut instance =
+        tests_integration::standalone::GreptimeDbStandaloneBuilder::new("promql_native_route")
+            .with_default_store_type(store_type)
+            .with_query_options(QueryOptions {
+                experimental_native_promql: true,
+                ..Default::default()
+            })
+            .with_plugin(plugins)
+            .build()
+            .await;
+    let server = build_test_prom_server(instance.fe_instance().clone(), false, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    let native_hint = ("x-greptime-hints", "query.experimental_native_promql=true");
+
+    for sql in [
+        // One series to compute over, one whose only value is zero, and one table that keeps no row.
+        "CREATE TABLE native_route (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "CREATE TABLE native_zero (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "CREATE TABLE native_empty (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host))",
+        "INSERT INTO native_route(host, val, ts) VALUES ('h1', 1.0, 0), ('h1', 2.0, 1000)",
+        "INSERT INTO native_zero(host, val, ts) VALUES ('z', 0.0, 0), ('z', 0.0, 1000)",
+    ] {
+        let res = client
+            .get(&format!("/v1/sql?db=public&sql={}", encode(sql)))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "{sql}");
+    }
+
+    // One expression per shape a statement root can take: a folded constant, a negated constant, a
+    // broadcast on either side of the input, a negation compiled as one, and two divisions by zero.
+    // `100 / 0` is `+Inf` and `0 / 0` is `NaN`: both are reported as the values they are, not as a
+    // missing sample, so each series keeps its row.
+    let instants = [
+        ("1 + 2", json!({"resultType":"scalar","result":[1.0,"3.0"]})),
+        ("-1", json!({"resultType":"scalar","result":[1.0,"-1.0"]})),
+        (
+            "native_route * 100",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"200.0"]}]}),
+        ),
+        (
+            "100 / native_route",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"50.0"]}]}),
+        ),
+        (
+            "-native_route",
+            json!({"resultType":"vector","result":[{"metric":{"host":"h1"},"value":[1.0,"-2.0"]}]}),
+        ),
+        (
+            "100 / native_zero",
+            json!({"resultType":"vector","result":[{"metric":{"host":"z"},"value":[1.0,"inf"]}]}),
+        ),
+        (
+            "native_zero / 0",
+            json!({"resultType":"vector","result":[{"metric":{"host":"z"},"value":[1.0,"NaN"]}]}),
+        ),
+        // A selector that matches nothing broadcasts over no series, and a table that holds no row
+        // reports no series either; a constant answers on the grid it was asked about in both cases.
+        (
+            "native_route{host=\"absent\"} * 100",
+            json!({"resultType":"vector","result":[]}),
+        ),
+        ("native_empty", json!({"resultType":"vector","result":[]})),
+    ];
+    for native in [false, true] {
+        for (query, expected) in &instants {
+            let mut request = client.get(&format!(
+                "/v1/prometheus/api/v1/query?query={}&time=1",
+                encode(*query)
+            ));
+            if native {
+                request = request.header(native_hint.0, native_hint.1);
+            }
+            let res = request.send().await;
+            assert_eq!(res.status(), StatusCode::OK, "`{query}`, native={native}");
+            let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+            assert_eq!(body.status, "success", "`{query}`, native={native}");
+            let actual = serde_json::to_value(&body.data).unwrap();
+            assert_eq!(&actual, expected, "`{query}`, native={native}");
+            assert_eq!(
+                executes_fused_series(&observer.take_plan()),
+                native,
+                "`{query}` asked native={native} but executed the other route"
+            );
+        }
+    }
+
+    // The same expression over a range: a matrix carries every grid point of every series, with the
+    // last sample carried forward, and both routes answer it with the same one.
+    let query = encode("native_route * 100");
+    let expected = json!({"resultType":"matrix","result":[{"metric":{"host":"h1"},"values":[[0.0,"100.0"],[1.0,"200.0"],[2.0,"200.0"]]}]});
+    for native in [false, true] {
+        let mut request = client.get(&format!(
+            "/v1/prometheus/api/v1/query_range?query={query}&start=0&end=2&step=1s"
+        ));
+        if native {
+            request = request.header(native_hint.0, native_hint.1);
+        }
+        let res = request.send().await;
+        assert_eq!(res.status(), StatusCode::OK, "range query, native={native}");
+        let body = serde_json::from_str::<PrometheusJsonResponse>(&res.text().await).unwrap();
+        assert_eq!(body.status, "success", "range query, native={native}");
+        let actual = serde_json::to_value(&body.data).unwrap();
+        assert_eq!(&actual, &expected, "range query, native={native}");
+        assert_eq!(
+            executes_fused_series(&observer.take_plan()),
+            native,
+            "the hinted range query executed the other route"
+        );
+    }
+
+    instance.guard.remove_all().await;
+}
+
+/// Verifies the native route's plan and complete result against the legacy one.
+///
+/// The fixture is four pk-disjoint insert batches, each persisted by its own flush, so the scan has
+/// four series batches to distribute over the four partitions the query asks for.
+pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
+    let mut instance =
+        tests_integration::standalone::GreptimeDbStandaloneBuilder::new("promql_native_route_plan")
+            .with_default_store_type(store_type)
+            .with_query_options(QueryOptions {
+                experimental_native_promql: true,
+                parallelism: 4,
+                ..Default::default()
+            })
+            .build()
+            .await;
+    let frontend = instance.fe_instance();
+
+    // The relaxed TWCS thresholds keep the four flushed files from being compacted back into one
+    // unit of work, so four file ranges reach the scan.
+    for sql in [
+        "CREATE TABLE native_demo (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host)) WITH ('compaction.type' = 'twcs', 'compaction.twcs.active_window.trigger_file_num' = '100', 'compaction.twcs.inactive_window.trigger_file_num' = '100')",
+        "CREATE TABLE native_rate (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY (host)) WITH ('compaction.type' = 'twcs', 'compaction.twcs.active_window.trigger_file_num' = '100', 'compaction.twcs.inactive_window.trigger_file_num' = '100')",
+    ] {
+        execute_sql_and_expect(frontend, sql, "Affected Rows: 0").await;
+    }
+    for (first, second) in [(0, 1), (2, 3), (4, 5), (6, 7)] {
+        let values = [first, second]
+            .into_iter()
+            .map(|host| {
+                format!(
+                    "('h{host}', {}.0, 0), ('h{host}', {}.0, 1000)",
+                    host + 1,
+                    host + 2
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql_and_expect(
+            frontend,
+            &format!("INSERT INTO native_demo(host, val, ts) VALUES {values}"),
+            "Affected Rows: 4",
+        )
+        .await;
+        // A counter that starts at zero and gains three per sample: every increment is non-zero, and
+        // evaluating it at its last sample needs no extrapolation on either side.
+        let values = [first, second]
+            .into_iter()
+            .map(|host| format!("('h{host}', 0.0, 0), ('h{host}', 3.0, 1000)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        execute_sql_and_expect(
+            frontend,
+            &format!("INSERT INTO native_rate(host, val, ts) VALUES {values}"),
+            "Affected Rows: 4",
+        )
+        .await;
+        // Flushing before the next pair keeps every round a separate persisted batch.
+        execute_sql(frontend, "ADMIN FLUSH_TABLE('native_demo')").await;
+        execute_sql(frontend, "ADMIN FLUSH_TABLE('native_rate')").await;
+    }
+
+    for (query, start, end, expected, scan_partitions) in [
+        (
+            "1 + 2",
+            "0",
+            "2",
+            vec![
+                (Vec::new(), 0_i64, 3.0),
+                (Vec::new(), 1_000, 3.0),
+                (Vec::new(), 2_000, 3.0),
+            ],
+            None,
+        ),
+        (
+            "-1",
+            "0",
+            "2",
+            vec![
+                (Vec::new(), 0_i64, -1.0),
+                (Vec::new(), 1_000, -1.0),
+                (Vec::new(), 2_000, -1.0),
+            ],
+            None,
+        ),
+        (
+            "native_demo * 100",
+            "0",
+            "2",
+            fixture_rows(|value| value * 100.0),
+            Some(4),
+        ),
+        (
+            "100 / native_demo",
+            "0",
+            "2",
+            fixture_rows(|value| 100.0 / value),
+            Some(4),
+        ),
+        (
+            "-native_demo",
+            "0",
+            "2",
+            fixture_rows(|value| -value),
+            Some(4),
+        ),
+        // Three increments over the 300s window, evaluated at the last sample of a counter that
+        // starts at zero: the inferred zero point pins the leading edge of the window and the
+        // evaluation point pins the trailing one, so nothing is extrapolated and the rate is
+        // 3 / 300, which the statement scales back to 1 by multiplying by 100. A steady counter
+        // therefore reports one per sample here, and neither a zero rate nor the naive `3 / 300`
+        // without the multiplicative scaling would report it.
+        (
+            "rate(native_rate[5m]) * 100",
+            "1",
+            "1",
+            (0..8)
+                .map(|host| (vec![("host".to_string(), format!("h{host}"))], 1_000, 1.0))
+                .collect::<Vec<PromqlRow>>(),
+            Some(4),
+        ),
+    ] {
+        let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
+        assert_rows_eq(&rows, &expected, query);
+        assert_native_result_schema(&schema, &expected, query);
+        let fused = assert_native_plan(&plan, scan_partitions, query);
+        assert_eq!(
+            fused["metrics"]["native.root.output_values"].as_u64(),
+            Some(expected.len() as u64),
+            "`{query}`: the tree reported a different number of values than the result holds"
+        );
+
+        // Without the per-query hint the same statement runs the legacy pipeline, which must answer
+        // with the same rows.
+        let (legacy_plan, legacy_schema, legacy_rows) =
+            promql_output(frontend, query, false, start, end).await;
+        assert!(
+            !executes_fused_series(&legacy_plan),
+            "`{query}` without the hint executed the fused route"
+        );
+        assert_rows_eq(&legacy_rows, &expected, query);
+        assert_legacy_result_schema(&legacy_schema, &expected, query);
+        // A bare literal is the one shape both routes name identically: the same `time` column and
+        // the same `value` field. A negated literal is not, because the legacy pipeline names the
+        // value column after the projection it builds (`(- value)`), which the role check above
+        // accepts while this comparison would not.
+        if query == "1 + 2" {
+            assert_eq!(
+                result_columns(&legacy_schema),
+                result_columns(&schema),
+                "`{query}`: the two routes must report the same constant schema"
+            );
+        }
+    }
+
+    instance.guard.remove_all().await;
 }
 
 pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
