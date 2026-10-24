@@ -2620,7 +2620,8 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
                 &[6.0, 7.0, 8.0, 9.0, 10.0],
                 true,
             ),
-        )        .unwrap();
+        )
+        .unwrap();
     let out = run(&mut distinct);
     assert_eq!(out.len(), 2, "two series over two hosts are two series");
 }
@@ -3411,7 +3412,8 @@ fn two_series_with_no_result_do_not_collide() {
                     &[1.0],
                     true,
                 ),
-            )            .unwrap();
+            )
+            .unwrap();
     }
     let mut handed = Vec::new();
     loop {
@@ -7422,9 +7424,12 @@ fn a_histogram_function_maps_the_histogram_positions() {
         vec![MapOp::Histogram(NativeHistogramFunction::Count)],
     ))
     .unwrap();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut execution = executor(&tree, pool());
     execution
-        .push_evaluated(EvaluatedChunk::try_new(series, true).unwrap())
+        .push_evaluated(
+            InputId::new(0),
+            EvaluatedChunk::try_new(series, true).unwrap(),
+        )
         .unwrap();
     let chunks = run(&mut execution);
     let [chunk] = chunks.as_slice() else {
@@ -7462,15 +7467,12 @@ fn a_histogram_function_names_an_emptied_closing_chunk_like_its_kernel() {
         vec![MapOp::Histogram(NativeHistogramFunction::Sum)],
     ))
     .unwrap();
-    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    let mut execution = executor(&tree, pool());
     execution
-        .push_evaluated(evaluated_chunk_of(
-            &schema,
-            metric,
-            0,
-            vec![Some(1.0), Some(2.0)],
-            true,
-        ))
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0), Some(2.0)], true),
+        )
         .unwrap();
     let chunks = run(&mut execution);
     let [closing] = chunks.as_slice() else {

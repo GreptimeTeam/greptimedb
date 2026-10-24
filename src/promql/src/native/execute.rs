@@ -4018,7 +4018,8 @@ impl NativeExecutor {
 /// from "no more input" by that chunk alone.
 ///
 /// `admit` is handed the bytes a label change can write before the change builds them; an error
-/// from it stops the map.fn map_chunk(
+/// from it stops the map.
+fn map_chunk(
     schema: &Arc<SeriesSchema>,
     chunk: &EvaluatedChunk,
     ops: &[MapOp],
