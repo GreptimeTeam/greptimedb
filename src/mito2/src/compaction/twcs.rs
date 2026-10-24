@@ -40,6 +40,7 @@ use crate::compaction::run::{
 };
 use crate::compaction::twcs::units::{ClosedMergeOptions, PickLimits};
 use crate::error::{JoinSnafu, Result};
+use crate::metrics::{TWCS_PICK_ELAPSED, TWCS_SCANNED_WINDOWS, TWCS_SELECTED_CANDIDATES};
 use crate::region::options::MergeMode;
 use crate::sst::file::{FileHandle, Level, overlaps};
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
@@ -57,6 +58,16 @@ pub(crate) enum PickClass {
     FileReduction,
     /// Merges files of an inactive window to resolve their overlaps.
     OverlapResolution,
+}
+
+impl PickClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::L0Merge => "l0_merge",
+            Self::FileReduction => "file_reduction",
+            Self::OverlapResolution => "overlap_resolution",
+        }
+    }
 }
 
 /// Compaction inputs picked for one window.
@@ -156,6 +167,13 @@ impl TwcsPicker {
         time_windows: BTreeMap<i64, Window>,
         context: WindowOutputContext,
     ) -> Result<Vec<CompactionOutput>> {
+        let mode = if self.pick_history.is_some() {
+            "fair"
+        } else {
+            "stateless"
+        };
+        let _timer = TWCS_PICK_ELAPSED.with_label_values(&[mode]).start_timer();
+        let scanned_windows = TWCS_SCANNED_WINDOWS.with_label_values(&[mode]);
         let WindowOutputContext {
             active_window,
             time_window_size,
@@ -198,9 +216,11 @@ impl TwcsPicker {
                 let picker = self.clone();
                 let time_windows = time_windows.clone();
                 let primary_key_mapper = primary_key_mapper.clone();
+                let scanned_windows = scanned_windows.clone();
                 handles.push(common_runtime::spawn_blocking_compact(move || {
                     let mut picks = Vec::new();
                     if let Some(files) = time_windows.get(&window) {
+                        scanned_windows.inc();
                         picks.extend(
                             picker
                                 .pick_window(
@@ -263,13 +283,19 @@ impl TwcsPicker {
             let mut selected_windows = HashSet::new();
             picks.retain(|(window, _)| selected_windows.insert(*window));
             for (window, pick) in picks.iter().take(max_outputs) {
-                history.select(
-                    PickKey {
-                        window: *window,
-                        class: pick.class,
-                    },
-                    pick.inputs.iter().map(FileHandle::file_id).collect(),
-                );
+                let key = PickKey {
+                    window: *window,
+                    class: pick.class,
+                };
+                let priority = if history.priority(key, now).1.is_some() {
+                    "promoted"
+                } else {
+                    "normal"
+                };
+                TWCS_SELECTED_CANDIDATES
+                    .with_label_values(&[pick.class.as_str(), priority])
+                    .inc();
+                history.select(key, pick.inputs.iter().map(FileHandle::file_id).collect());
             }
         } else {
             // Manual/stateless callers retain the existing priority policy.
@@ -3324,6 +3350,88 @@ mod tests {
             expected,
             output[0].inputs.iter().map(FileHandle::file_id).collect()
         );
+    }
+
+    #[rstest::rstest]
+    #[case::stateless_early_exit(false, false, true)]
+    #[case::fair_full_scan(true, false, true)]
+    #[case::promoted_selection(true, true, true)]
+    #[case::empty_plan(true, false, false)]
+    #[tokio::test]
+    async fn test_pick_metrics_cover_scanned_windows_and_selected_seeds(
+        #[case] fair: bool,
+        #[case] promoted: bool,
+        #[case] eligible: bool,
+    ) {
+        let mut files = priority_test_files(10, 0, 40, false).to_vec();
+        files.extend(priority_test_files(10, 1, 40, false));
+        files.extend(priority_test_files(0, 1, 40, false));
+        if !eligible {
+            files = vec![files[0].clone(), files[4].clone()];
+        }
+        let mut picker = priority_test_picker(1);
+        if fair {
+            let mut history = PickHistory::default();
+            if promoted {
+                history.observe(
+                    [PickKey {
+                        window: 0,
+                        class: PickClass::FileReduction,
+                    }]
+                    .into_iter(),
+                    Instant::now() - Duration::from_secs(120),
+                );
+            }
+            picker.pick_history = Some(Arc::new(Mutex::new(history)));
+        }
+        let mode = if fair { "fair" } else { "stateless" };
+        let elapsed = TWCS_PICK_ELAPSED.with_label_values(&[mode]);
+        let windows = TWCS_SCANNED_WINDOWS.with_label_values(&[mode]);
+        let elapsed_before = elapsed.get_sample_count();
+        let windows_before = windows.get();
+        let selected = [
+            PickClass::L0Merge,
+            PickClass::FileReduction,
+            PickClass::OverlapResolution,
+        ]
+        .into_iter()
+        .flat_map(|class| {
+            ["normal", "promoted"].into_iter().map(move |priority| {
+                let counter =
+                    TWCS_SELECTED_CANDIDATES.with_label_values(&[class.as_str(), priority]);
+                let before = counter.get();
+                (class, priority, counter, before)
+            })
+        })
+        .collect::<Vec<_>>();
+
+        let output = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(usize::from(eligible), output.len());
+        if eligible {
+            assert_eq!(if promoted { 0 } else { 10 }, output_window(&output[0]));
+        }
+        assert_eq!(elapsed_before + 1, elapsed.get_sample_count());
+        assert_eq!(windows_before + if fair { 2 } else { 1 }, windows.get());
+        // Count only the single selected seed, not the other discovered classes
+        // or the older window discarded by the output limit. Stateless picks
+        // never contribute to automatic selection/promotion metrics.
+        for (class, priority, counter, before) in selected {
+            let chosen = if promoted {
+                (PickClass::FileReduction, "promoted")
+            } else {
+                (PickClass::L0Merge, "normal")
+            };
+            let expected = u64::from(fair && eligible && (class, priority) == chosen);
+            assert_eq!(before + expected, counter.get(), "{class:?}/{priority}");
+        }
     }
 
     #[tokio::test]
