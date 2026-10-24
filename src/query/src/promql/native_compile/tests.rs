@@ -40,7 +40,10 @@ use promql_parser::parser::{
     VectorMatchFillValues,
 };
 
-use super::{SelectorRequirement, SelectorTiming, compile, compile_selectors, validate_inputs};
+use super::{
+    SelectorRequirement, SelectorTiming, compile, compile_selectors, compile_statement,
+    validate_inputs,
+};
 
 /// Whether a matching names its labels with `on` (`true`) or `ignoring` (`false`), and which.
 fn matching_labels(labels: &MatchingLabels) -> (bool, Vec<&str>) {
@@ -1835,6 +1838,49 @@ fn a_statement_with_no_vector_is_refused() {
         assert!(
             message.contains(found),
             "`{query}` did not name the type it found: {message}"
+        );
+    }
+}
+
+/// A constant statement compiles to the constant on the statement's grid, and it reads nothing.
+///
+/// The vector entry above refuses it — a tree over that entry reports evaluated samples — so the
+/// statement entry is the one that binds it, and the grid it reports on is the statement's own.
+#[test]
+fn a_constant_statement_is_a_scalar_on_the_statement_grid_without_input() {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
+        let stmt = eval_stmt(query);
+        let tree = compile_statement(&stmt)
+            .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        // The root is the number the statement means, on the statement's own grid: 100 seconds in
+        // 5-second steps is 21 points, and no point is the constant's to choose.
+        assert_eq!(Some(value), constant(tree.root()), "query: {query}");
+        assert_eq!((0, 5_000, 21), scalar_grid(tree.root()), "query: {query}");
+        // Nothing is read, so there is no input node for a scan to be bound to.
+        let mut inputs = 0;
+        walk(tree.root(), &mut |node, _| {
+            if matches!(node.expr, NativeExpr::Input(_)) {
+                inputs += 1;
+            }
+        });
+        assert_eq!(0, inputs, "query: {query}");
+    }
+}
+
+/// A statement whose value comes from the data or from the evaluation time has no constant to bind,
+/// so the statement entry refuses it rather than compiling a tree with nothing to read.
+#[test]
+fn a_statement_that_is_not_constant_has_no_statement_compilation() {
+    for query in ["time()", "time() + 1", "vector(1)", "x"] {
+        let error = compile_statement(&eval_stmt(query))
+            .expect_err(&format!("`{query}` compiled, and it should not have"));
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "`{query}` did not report NotImplemented: {error}"
+        );
+        assert!(
+            error.to_string().contains(&format!("`{query}`")),
+            "`{query}` did not name the expression it found: {error}"
         );
     }
 }

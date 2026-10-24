@@ -621,6 +621,19 @@ fn binding(tree: &NativeTree) -> FusedSeriesBinding {
     binding_of(tree, default_tags())
 }
 
+/// The binding of a constant scalar: its grid, no tag columns and no metric name.
+///
+/// A scalar reports one value per grid point and no labels at all, so the statement's output has no
+/// tag column for the binding to name.
+fn scalar_binding(tree: &NativeTree) -> FusedSeriesBinding {
+    FusedSeriesBinding {
+        grid: tree_grid(tree),
+        time_index: TIME.to_string(),
+        tags: Vec::new(),
+        metric_name: None,
+    }
+}
+
 /// One logical child: the plan a scan stands in for when the caller is not testing the plans below.
 fn child() -> LogicalPlan {
     input_plan(frame_schema())
@@ -658,6 +671,18 @@ fn output_schema() -> SchemaRef {
         Field::new(VALUE, DataType::Float64, true),
         Field::new(HOST, DataType::Utf8, true),
         Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]))
+}
+
+/// The columns a constant scalar produces: its one value and the grid timestamps, no tag column.
+fn scalar_output_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
         Field::new(
             TIME,
             DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -2164,30 +2189,20 @@ fn a_tree_wants_one_child_per_source() {
 /// same value at every grid point. A scalar on another grid is a different value at every grid
 /// point than the one the binding names, so it is refused; a tree that produces samples with no
 /// input at all would be an empty vector reported as an answer, which is not a shape this node
-/// invents. Nothing is read for the scalar yet, so asking for its physical node is refused rather
-/// than answered with an empty result.
+/// invents; `native::plan::tests::a_samples_root_without_an_input_is_refused` pins that refusal
+/// where the node is built.
 #[test]
 fn a_zero_child_tree_must_be_a_constant_scalar_on_the_statement_grid() {
     let scalar = scalar_tree(grid(), 7.0);
     let node = FusedSeries::try_new(
         Arc::from("7"),
         scalar.clone(),
-        binding(&scalar),
+        scalar_binding(&scalar),
         Vec::new(),
-        output_schema().to_dfschema_ref().unwrap(),
+        scalar_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("a constant scalar on the statement's grid reads no source");
     assert!(node.children().is_empty(), "the scalar binds no child");
-    let error = node
-        .to_execution_plan(Vec::new())
-        .expect_err("a constant scalar's rows are not produced yet");
-    assert!(
-        matches!(
-            error,
-            DataFusionError::Plan(_) | DataFusionError::NotImplemented(_)
-        ),
-        "the refusal is explicit, not an empty answer: {error}"
-    );
 
     // The same tree evaluated on another grid is not the statement's scalar.
     let elsewhere = scalar_tree(
@@ -2202,13 +2217,153 @@ fn a_zero_child_tree_must_be_a_constant_scalar_on_the_statement_grid() {
             ..binding(&elsewhere)
         },
         Vec::new(),
-        output_schema().to_dfschema_ref().unwrap(),
+        scalar_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect_err("the scalar is not evaluated on the grid the binding names");
     assert!(
         error.to_string().contains("constant scalar"),
         "the refusal must say the zero-child tree has to be a constant scalar: {error}"
     );
+}
+
+/// A zero-child scalar is planned as one partition that answers its own value.
+///
+/// Nothing is below it, so there is no frame to read and no partition to divide: one execution is
+/// the whole answer, and asking for a second partition is refused rather than answered with a copy
+/// of the first. What the physical node reports is the grid's timestamps and the constant at every
+/// one of them, which is the conversion the node owes a scalar.
+#[tokio::test]
+async fn a_zero_child_scalar_answers_one_partition_of_its_value() {
+    let scalar = scalar_tree(grid(), 7.0);
+    let node = FusedSeries::try_new(
+        Arc::from("7"),
+        scalar.clone(),
+        scalar_binding(&scalar),
+        Vec::new(),
+        scalar_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("a constant scalar on the statement's grid reads no source");
+    let exec = node
+        .to_execution_plan(Vec::new())
+        .expect("a constant scalar's rows come from the tree alone");
+    assert!(exec.children().is_empty(), "there is nothing below it");
+    assert_eq!(
+        1,
+        exec.properties().partitioning.partition_count(),
+        "one execution answers the whole scalar"
+    );
+
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let batches = collect(Arc::clone(&exec), context.clone())
+        .await
+        .expect("the scalar answers on its grid");
+    assert_eq!(1, batches.len(), "one chunk is one batch");
+    let mut times = Vec::new();
+    let mut values = Vec::new();
+    for batch in &batches {
+        let time = batch
+            .column_by_name(TIME)
+            .expect("the output has its time column")
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("the time column is a millisecond timestamp");
+        let value = batch
+            .column_by_name(VALUE)
+            .expect("the output has its one value column")
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("the value column is Float64");
+        for row in 0..batch.num_rows() {
+            times.push(time.value(row));
+            values.push(value.value(row));
+        }
+    }
+    assert_eq!(grid_timestamps(), times, "the statement's grid, row by row");
+    assert_eq!(
+        vec![7.0; GRID_LEN as usize],
+        values,
+        "the constant, once per point"
+    );
+
+    let metrics = exec
+        .metrics()
+        .expect("the node reports its runtime's metrics");
+    assert_eq!(1, count(&metrics, "native.root.output_batches"));
+    assert_eq!(0, count(&metrics, "native.root.input_batches"));
+    assert_eq!(
+        1,
+        count(&metrics, "native.root.completed_series"),
+        "the one chunk closes the value it reports"
+    );
+
+    // What the one execution charged is given back with the plan: the label set it claimed outlives
+    // the stream, so it is released when the plan is, and not a byte stays reserved.
+    assert!(
+        pool.reserved() > 0,
+        "the plan's label-set entry is charged while the plan is alive"
+    );
+    let error = match exec.execute(1, context) {
+        Ok(_) => panic!("a scalar is not divided over partitions"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, DataFusionError::Execution(_)),
+        "the refusal is explicit, not a second copy: {error}"
+    );
+    drop(exec);
+    assert_eq!(0, pool.reserved(), "dropping the plan releases all of it");
+}
+
+/// The conversion keeps the constant bit for bit, so a NaN reaches the batch as a value.
+///
+/// A missing sample is a null and an ordinary NaN is a value, and `-0.0` is not `0.0`: the field
+/// column is the chunk's own dense float array, so what the scalar reported is what a reader sees.
+#[tokio::test]
+async fn a_zero_child_scalar_keeps_nan_negative_zero_and_infinity() {
+    for value in [f64::NAN, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let scalar = scalar_tree(grid(), value);
+        let node = FusedSeries::try_new(
+            Arc::from("1"),
+            scalar.clone(),
+            scalar_binding(&scalar),
+            Vec::new(),
+            scalar_output_schema().to_dfschema_ref().unwrap(),
+        )
+        .expect("a constant scalar on the statement's grid reads no source");
+        let exec = node
+            .to_execution_plan(Vec::new())
+            .expect("a constant scalar's rows come from the tree alone");
+        let batches = collect(exec, SessionContext::default().task_ctx())
+            .await
+            .expect("the scalar answers on its grid");
+        // Every point of the grid is a row, so a value that answered fewer (or none) is caught here
+        // rather than by the per-row checks below passing vacuously.
+        assert_eq!(
+            GRID_LEN as usize,
+            batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+            "the constant {value} answers one row per grid point"
+        );
+        for batch in &batches {
+            let column = batch
+                .column_by_name(VALUE)
+                .expect("the output has its one value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the value column is Float64");
+            for row in 0..batch.num_rows() {
+                assert!(
+                    column.is_valid(row),
+                    "the constant {value} is a value and not a missing sample"
+                );
+                assert_eq!(
+                    column.value(row).to_bits(),
+                    value.to_bits(),
+                    "the constant {value} is reported bit for bit"
+                );
+            }
+        }
+    }
 }
 
 /// The child a tree input reads is part of what the tree is.

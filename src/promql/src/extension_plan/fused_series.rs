@@ -25,8 +25,8 @@
 //! the same series twice - so the tree says where every chunk goes. The logical node keeps its
 //! children in that index order and checks that every index is bound. The physical node runs one
 //! child: a second child would have to pair its series with the first by label, which needs an
-//! exchange this node does not have, and no child at all is a constant scalar, whose rows the
-//! conversion does not produce yet.
+//! exchange this node does not have, and no child at all is a constant scalar, whose one value per
+//! grid point the conversion produces from the tree alone.
 //!
 //! The two halves show different things in `EXPLAIN`, which is the point of having both. The
 //! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
@@ -70,6 +70,7 @@ use datafusion::execution::memory_pool::{
 };
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -78,7 +79,9 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
+};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
@@ -698,6 +701,50 @@ enum OutputColumn {
     Tag(usize),
 }
 
+/// The one-field series layout a constant scalar's output schema describes.
+///
+/// A scalar carries one value per grid point and no label, so the columns it reports are the time
+/// column and exactly one value column. That column is the single field of the layout
+/// [`classify_output`] classifies the rest of the output against, on the grid the root scalar
+/// reports on, which is how a scalar's rows are converted by the same code as a one-field series:
+/// nothing here describes a second conversion.
+fn scalar_root_schema(
+    output_schema: &SchemaRef,
+    tags: &[String],
+    time_column: &str,
+    grid: &Arc<EvalGrid>,
+) -> DataFusionResult<SeriesSchema> {
+    if !tags.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeriesExec runs a constant scalar, which carries no labels, but {} tag column(s) \
+             were declared",
+            tags.len()
+        )));
+    }
+    let mut values = output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.name().as_str() != time_column);
+    let Some(value) = values.next() else {
+        return Err(DataFusionError::Plan(
+            "missing value column in the output schema of a constant scalar".to_string(),
+        ));
+    };
+    if let Some(second) = values.next() {
+        return Err(DataFusionError::Plan(format!(
+            "the output schema of a constant scalar declares a second value column {:?}: a scalar \
+             has one value per grid point",
+            second.name()
+        )));
+    }
+    Ok(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from(value.name().as_str()),
+        }]),
+        eval_grid: Some(Arc::clone(grid)),
+    })
+}
+
 /// Classifies every output column, rejecting anything the conversion cannot produce.
 fn classify_output(
     output_schema: &SchemaRef,
@@ -876,10 +923,10 @@ impl FusedSeriesExec {
     /// is a row table rather than a frame.
     ///
     /// The children are the tree's sources in `source_index` order, so their number must be the
-    /// number of sources the tree reads. Exactly one is executed: a second child would have to pair
-    /// its series with the first by label, which needs an exchange this node does not have, and no
-    /// child at all is a constant scalar, whose rows the conversion does not produce yet. Both are
-    /// refused rather than answered with an empty result.
+    /// number of sources the tree reads. At most one is executed: a second child would have to pair
+    /// its series with the first by label, which needs an exchange this node does not have. No child
+    /// is a constant scalar, whose one value per grid point the conversion produces from the tree
+    /// alone; several are refused rather than answered with an empty result.
     ///
     /// Which frame layout the child must produce is not passed in: it is the raw series schema the
     /// tree's own input was compiled against, so there is no second description to drift from it.
@@ -915,56 +962,54 @@ impl FusedSeriesExec {
                 children.len()
             )));
         }
-        // No child is a constant scalar: a tree this node cannot run at all, and refused before the
-        // output schema is read, so the refusal names the missing conversion rather than a column.
-        if children.is_empty() {
-            return Err(DataFusionError::Plan(
-                "FusedSeriesExec runs a tree that reads no source: a constant scalar's rows are not \
-                 produced by this node yet"
-                    .to_string(),
-            ));
-        }
-        // One child and one tree source, which the arity check above has just made equal in count:
-        // taking both without indexing keeps this total even though neither can be empty here.
-        let (Some((child, source, ordering)), Some(tree_source)) =
-            (children.first(), sources.first())
-        else {
-            return Err(DataFusionError::Plan(
-                "FusedSeriesExec runs a tree whose sources do not pair with its children"
-                    .to_string(),
-            ));
-        };
-        // The producer's ordering is a promise each input node was compiled against, so it has to
-        // satisfy every one of them, not only the input the frames happen to reach first: a stream
-        // that may interleave two series cannot feed a node that reads one series to its last chunk,
-        // and merely contiguous frames are not yet the identity-then-time order an input may be
-        // bound to. Only one child is executed, and `tree_sources` has just made every input's
-        // source index name one of them, so all of them read this child's ordering.
-        let producer = *ordering;
-        let mut ordering_error: Option<String> = None;
-        metrics::walk(tree.root(), &mut |node, path| {
-            let NativeExpr::Input(bound) = &node.expr else {
-                return;
-            };
-            let required = bound.ordering;
-            let satisfied = match required {
-                // The weakest guarantee asks nothing of the producer, and an input declaring
-                // `Interleaved` is refused when the run state is built rather than here.
-                SeriesOrdering::Interleaved => true,
-                SeriesOrdering::Contiguous => producer != SeriesOrdering::Interleaved,
-                SeriesOrdering::KeyThenTime => producer == SeriesOrdering::KeyThenTime,
-            };
-            if !satisfied && ordering_error.is_none() {
-                let index = bound.source_index;
-                ordering_error = Some(format!(
-                    "FusedSeriesExec reads source {index} through {producer:?} frames, but the tree \
-                     input at `{path}` was bound to {required:?} frames, which is a stronger ordering \
-                     the producer does not provide"
+        // One child and one tree source, which the arity check above has just made equal in count;
+        // no child at all is a constant scalar, which reads no frame and so pairs with no source.
+        let one_child = match (children.first(), sources.first()) {
+            (Some((child, source, ordering)), Some(tree_source)) => {
+                Some((child, source, *ordering, tree_source))
+            }
+            (None, None) => None,
+            _ => {
+                return Err(DataFusionError::Plan(
+                    "FusedSeriesExec runs a tree whose sources do not pair with its children"
+                        .to_string(),
                 ));
             }
-        });
-        if let Some(message) = ordering_error {
-            return Err(DataFusionError::Plan(message));
+        };
+        if let Some((_, _, producer, _)) = &one_child {
+            // The producer's ordering is a promise each input node was compiled against, so it has
+            // to satisfy every one of them, not only the input the frames happen to reach first: a
+            // stream that may interleave two series cannot feed a node that reads one series to its
+            // last chunk, and merely contiguous frames are not yet the identity-then-time order an
+            // input may be bound to. Only one child is executed, and `tree_sources` has just made
+            // every input's source index name one of them, so all of them read this child's
+            // ordering.
+            let producer = *producer;
+            let mut ordering_error: Option<String> = None;
+            metrics::walk(tree.root(), &mut |node, path| {
+                let NativeExpr::Input(bound) = &node.expr else {
+                    return;
+                };
+                let required = bound.ordering;
+                let satisfied = match required {
+                    // The weakest guarantee asks nothing of the producer, and an input declaring
+                    // `Interleaved` is refused when the run state is built rather than here.
+                    SeriesOrdering::Interleaved => true,
+                    SeriesOrdering::Contiguous => producer != SeriesOrdering::Interleaved,
+                    SeriesOrdering::KeyThenTime => producer == SeriesOrdering::KeyThenTime,
+                };
+                if !satisfied && ordering_error.is_none() {
+                    let index = bound.source_index;
+                    ordering_error = Some(format!(
+                        "FusedSeriesExec reads source {index} through {producer:?} frames, but the \
+                         tree input at `{path}` was bound to {required:?} frames, which is a stronger \
+                         ordering the producer does not provide"
+                    ));
+                }
+            });
+            if let Some(message) = ordering_error {
+                return Err(DataFusionError::Plan(message));
+            }
         }
         let _ = NativeExecutionState::try_new(
             &tree,
@@ -975,50 +1020,81 @@ impl FusedSeriesExec {
         // The output columns are named by the fields the *tree* reports, so they are classified
         // against the tree's own output rather than against whichever scan happens to sit first:
         // `a + b` reports the fields of `a`, and reading them off the input would silently accept an
-        // output schema that names a field no input ever produced.
-        let root_schema = tree
-            .root()
-            .output
-            .samples()
-            .ok_or_else(|| {
-                DataFusionError::Plan(
-                    "FusedSeriesExec runs a tree whose output is not samples".to_string(),
-                )
-            })?
-            .clone();
+        // output schema that names a field no input ever produced. A constant scalar reports no
+        // field list at all: its one value per grid point on the root's own grid is the one field
+        // the conversion reads.
+        let root_schema = match &tree.root().output {
+            NativeType::Samples(schema) => Arc::clone(schema),
+            NativeType::Scalar(grid) => Arc::new(scalar_root_schema(
+                &output_schema,
+                &tags,
+                &time_column,
+                grid,
+            )?),
+            // Aggregate state is not a query value, and the run state built above has just refused
+            // it; answered here rather than by a panic so this stays a total match.
+            NativeType::AggregateState(_) => {
+                return Err(DataFusionError::Plan(
+                    "FusedSeriesExec runs a tree whose output is aggregate state".to_string(),
+                ));
+            }
+        };
         let classification = classify_output(&output_schema, &root_schema, &tags, &time_column)?;
-        let partition_count = child.properties().partitioning.partition_count();
+        let partition_count = match &one_child {
+            Some((child, ..)) => child.properties().partitioning.partition_count(),
+            // A constant scalar answers on its own, so its one execution is the whole answer.
+            None => 1,
+        };
         if partition_count == 0 {
             return Err(DataFusionError::Plan(
                 "FusedSeriesExec child has no partitions".to_string(),
             ));
         }
-        // The frame is checked against the schema the tree's own input was compiled against, which
-        // is the one the decoder is given in `execute`: no other schema is stored, so a child that
-        // changed shape cannot be decoded with a stale layout.
-        ensure_frame_matches_label_source(child.schema().as_ref(), source)?;
-        unpack_raw_series(
-            Box::pin(RecordBatchStreamAdapter::new(
-                child.schema(),
-                futures::stream::empty(),
-            )),
-            Some(Arc::clone(tree_source)),
-        )?;
+        if let Some((child, source, _, tree_source)) = &one_child {
+            // The frame is checked against the schema the tree's own input was compiled against,
+            // which is the one the decoder is given in `execute`: no other schema is stored, so a
+            // child that changed shape cannot be decoded with a stale layout.
+            ensure_frame_matches_label_source(child.schema().as_ref(), source)?;
+            unpack_raw_series(
+                Box::pin(RecordBatchStreamAdapter::new(
+                    child.schema(),
+                    futures::stream::empty(),
+                )),
+                Some(Arc::clone(tree_source)),
+            )?;
+        }
         reject_a_split_logical_series(&tree, partition_count)?;
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(partition_count),
-            child.properties().emission_type,
-            child.properties().boundedness,
-        ));
+        let properties = match &one_child {
+            Some((child, ..)) => Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(partition_count),
+                child.properties().emission_type,
+                child.properties().boundedness,
+            )),
+            // Nothing below the node to split the answer over, and nothing to wait for: the one
+            // chunk the tree settles is already decided when the execution starts.
+            None => Arc::new(PlanProperties::new(
+                EquivalenceProperties::new(output_schema.clone()),
+                Partitioning::UnknownPartitioning(1),
+                EmissionType::Incremental,
+                Boundedness::Bounded,
+            )),
+        };
+        let (child_bindings, children) = match &one_child {
+            Some((child, source, ordering, _)) => (
+                vec![((*source).clone(), *ordering)],
+                vec![Arc::clone(child)],
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
         Ok(Self {
             promql,
             tree,
-            child_bindings: vec![(source.clone(), *ordering)],
+            child_bindings,
             classification: classification.into(),
             time_column,
             tags: tags.into(),
-            children: vec![Arc::clone(child)],
+            children,
             output_schema,
             labels: Arc::new(Mutex::new(LabelSets::default())),
             metric: ExecutionPlanMetricsSet::new(),
@@ -1130,31 +1206,14 @@ impl ExecutionPlan for FusedSeriesExec {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach(&context.runtime_env().memory_pool);
-        // The child is executed once, at the partition this node was asked for, because a series
-        // never spans two partitions: an execution of the tree owns every chunk of every series the
-        // child reports in that partition, and the chunks are queued at every tree input bound to
-        // source 0, so a tree that reads one series twice reads the same rows at both.
-        let (Some(child), Some((label_source, _))) =
-            (self.children.first(), self.child_bindings.first())
-        else {
-            return Err(DataFusionError::Execution(
-                "FusedSeriesExec executes one child, and its plan holds another number".to_string(),
-            ));
-        };
-        // The layout the frame is decoded against is the one the tree's own input was compiled
-        // against, read back off the tree here rather than kept on the node: a stored copy could
-        // only disagree with it. The walk is tree-sized and runs once per execution, not per chunk.
-        let sources = tree_sources(&self.tree)?;
-        let [tree_source] = sources.as_slice() else {
-            return Err(DataFusionError::Execution(
-                "FusedSeriesExec runs a tree that reads no source".to_string(),
-            ));
-        };
-        let stream = child.execute(partition, Arc::clone(&context))?;
-        ensure_frame_matches_label_source(child.schema().as_ref(), label_source)?;
-        let stream = unpack_raw_series(stream, Some(Arc::clone(tree_source)))?;
-        let stream =
-            materialize_raw_labels(stream).map_err(|e| DataFusionError::External(Box::new(e)))?;
+        // A node with no child has exactly one partition, and any other asks for a division of an
+        // answer that is not divided. It is refused before the run state is registered, so a
+        // partition this node does not have leaves no metrics behind.
+        if self.children.is_empty() && partition != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "FusedSeriesExec has one partition, but partition {partition} was asked for"
+            )));
+        }
         // The execution name is the partition it answers, which is the one it was asked for.
         let state = NativeExecutionState::try_new(
             &self.tree,
@@ -1162,17 +1221,56 @@ impl ExecutionPlan for FusedSeriesExec {
             &self.metric,
             partition,
         )?;
+        let mut executor = NativeExecutor::new(state);
+        // The child is executed once, at the partition this node was asked for, because a series
+        // never spans two partitions: an execution of the tree owns every chunk of every series the
+        // child reports in that partition, and the chunks are queued at every tree input bound to
+        // source 0, so a tree that reads one series twice reads the same rows at both. A node with
+        // no child reads nothing: it answers from its own tree, on the one partition it has.
+        let (input, input_ended) = match (self.children.first(), self.child_bindings.first()) {
+            (Some(child), Some((label_source, _))) => {
+                // The layout the frame is decoded against is the one the tree's own input was
+                // compiled against, read back off the tree here rather than kept on the node: a
+                // stored copy could only disagree with it. The walk is tree-sized and runs once per
+                // execution, not per chunk.
+                let sources = tree_sources(&self.tree)?;
+                let [tree_source] = sources.as_slice() else {
+                    return Err(DataFusionError::Execution(format!(
+                        "FusedSeriesExec executes one child, and its tree reads {} sources",
+                        sources.len()
+                    )));
+                };
+                let stream = child.execute(partition, Arc::clone(&context))?;
+                ensure_frame_matches_label_source(child.schema().as_ref(), label_source)?;
+                let stream = unpack_raw_series(stream, Some(Arc::clone(tree_source)))?;
+                let stream = materialize_raw_labels(stream)
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                (Some(stream), false)
+            }
+            (None, None) => {
+                // Nothing will be pushed, so the input has ended before the first poll: the tree
+                // settles its own answer instead of waiting for a chunk that never arrives.
+                executor.end_of_input()?;
+                (None, true)
+            }
+            _ => {
+                return Err(DataFusionError::Execution(
+                    "FusedSeriesExec holds a child but no frame binding for it, or the reverse"
+                        .to_string(),
+                ));
+            }
+        };
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
         Ok(Box::pin(FusedSeriesStream {
-            input: Some(stream),
-            executor: Some(NativeExecutor::new(state)),
+            input,
+            executor: Some(executor),
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
             ready: VecDeque::new(),
-            input_ended: false,
+            input_ended,
             done: false,
         }))
     }
@@ -1531,7 +1629,8 @@ fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    /// The one child's decoded chunks, or `None` once the stream let go of it.
+    /// The one child's decoded chunks, or `None` when there is no child and once the stream let go
+    /// of it.
     input: Option<SendableRawSeriesStream>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
@@ -1548,6 +1647,9 @@ pub struct FusedSeriesStream {
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the executor has already been told that every input ended.
+    ///
+    /// True from the start for a tree with no child: it reads nothing, so there is no input whose
+    /// ending this stream would wait for.
     input_ended: bool,
     /// Whether the input ended and everything it settled has been handed out.
     done: bool,

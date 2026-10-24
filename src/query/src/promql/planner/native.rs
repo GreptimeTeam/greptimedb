@@ -28,6 +28,9 @@
 //! one child and both inputs rebound to it. The output schema is built to the shape the existing
 //! unary pipeline produces — the time index, then the series fields, then the tags — so a node
 //! planned here can be consumed by the same code that consumes a `SeriesNormalize` output.
+//!
+//! A statement whose value is a constant the statement itself decides is planned with no scan: one
+//! node, no child, the time index and the value.
 
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -57,8 +60,10 @@ use table::metadata::TableMeta;
 
 use crate::parser::{EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
-use crate::promql::native_compile::{compile_selectors, statement_grid};
-use crate::promql::planner::PromPlanner;
+use crate::promql::native_compile::{
+    compile_selectors, compile_statement, constant_value, statement_grid,
+};
+use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -170,9 +175,6 @@ impl PromPlanner {
             }
             values
         };
-        if selectors.is_empty() {
-            return Ok(None);
-        }
         // One occurrence keeps the single-scan route below unchanged. Two are admitted only as one
         // source read point-wise; three or more would need a match over more than two series sets,
         // which the collapse at the end of this method cannot express.
@@ -185,6 +187,39 @@ impl PromPlanner {
         let Ok(grid) = statement_grid(&stmt) else {
             return Ok(None);
         };
+        // No selector is not proof of a constant: `time()` and other data-free functions are
+        // unsupported here, so the existing fold is asked before a zero-child node is bound.
+        if selectors.is_empty() {
+            if constant_value(prom_expr).is_none() {
+                return Ok(None);
+            }
+            let tree = match compile_statement(&stmt) {
+                Ok(tree) => tree,
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            // A constant has no scan: no metric, no tags, and the value under the name the existing
+            // path gives a bare literal.
+            let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
+            let value = DEFAULT_FIELD_COLUMN.to_string();
+            let output_schema = fused_output_schema(&[value], &[], &time_index)?;
+            let node = FusedSeries::try_new(
+                Arc::from(prom_expr.to_string()),
+                tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index,
+                    tags: Vec::new(),
+                    metric_name: None,
+                },
+                Vec::new(),
+                output_schema,
+            )
+            .context(DataFusionPlanningSnafu)?;
+            return Ok(Some(LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            })));
+        }
         let original_context = self.ctx.clone();
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();

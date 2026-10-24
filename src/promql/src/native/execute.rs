@@ -44,13 +44,13 @@
 //! (`topk`, `limitk`, `limit_ratio`) reads its one input the same way, because which samples it
 //! keeps at a point depends on every series present there.
 //!
-//! A constant scalar is a value node rather than a stream: it has no input and hands over no chunk,
-//! because what it produces is the one value it was bound to and not a series. A binary node with a
-//! scalar operand therefore reads one input — the vector side — and applies the operation to each
-//! chunk it is handed as it arrives: the scalar is read off the node's binding rather than pulled,
-//! and no chunk of the vector is retained, because one vector value pairs with one constant and
-//! nothing is decided by what comes after it. That broadcast is a different mode from the vector
-//! matching above and keeps neither operand: what it hands out is the chunk it transformed.
+//! A constant scalar has no input, but as a root it materializes one unlabelled evaluated chunk on
+//! its bound grid. A binary node with a scalar operand instead reads one input — the vector side —
+//! and applies the operation to each chunk it is handed as it arrives: the scalar is read from its
+//! binding rather than pulled, and no chunk of the vector is retained, because one vector value pairs
+//! with one constant and nothing is decided by what comes after it. That broadcast is a different
+//! mode from the vector matching above and keeps neither operand: what it hands out is the chunk it
+//! transformed.
 //!
 //! A node kind this runtime does not execute yet is rejected when the execution is built, naming
 //! the kind and its position. That is an aggregate, and a binary node whose two operands are
@@ -96,7 +96,7 @@ use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{MetricName, SeriesOrdering};
@@ -339,12 +339,10 @@ fn buffer_bytes(buffer: &Buffer) -> usize {
 enum NodeTag {
     /// Forwards the chunks it is given.
     Input,
-    /// A constant scalar: the value its consumer broadcasts, and no chunk of its own.
+    /// A constant scalar: one unlabelled evaluated chunk on its bound grid.
     ///
-    /// It is a value node and not a stream. Its output type is [`NativeType::Scalar`], and the
-    /// runtime produces evaluated chunks only, so the node hands nothing over: what its consumer
-    /// reads is the constant bound to it, which is why it has no input and no run-time state. A
-    /// `pull` of it answers `None` for exactly that reason, and that is not a stall to fix.
+    /// Its binding supplies both the constant and the grid; a pull materializes the constant as a
+    /// single evaluated chunk, and subsequent pulls answer `None`.
     Scalar,
     /// Buffers one series and selects the last sample at or before each of its grid points.
     Instant,
@@ -378,7 +376,7 @@ impl NodeTag {
 }
 
 /// One node of the flattened tree.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct NodeSpec {
     tag: NodeTag,
     /// The index of this node's input, which is the node the build pass reaches next: the one
@@ -388,6 +386,12 @@ struct NodeSpec {
     ///
     /// The index is local to this execution, and several inputs may carry the same one.
     source_index: Option<usize>,
+    /// The value a scalar node reports and the grid it reports it on, for every other kind `None`.
+    ///
+    /// It is read off the node during the build pass rather than kept on the node, because the pass
+    /// is the one place that sees the tree: the runtime addresses nodes by position and holds no
+    /// second copy of what they compute.
+    scalar: Option<(f64, Arc<EvalGrid>)>,
 }
 
 /// The series whose first chunk this buffer received and whose closing chunk it has not seen.
@@ -2082,6 +2086,33 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     Ok(position as usize)
 }
 
+/// The field a scalar's one evaluated chunk is bound with.
+///
+/// The chunk protocol requires a field even though the consumer chooses the output column name.
+const SCALAR_FIELD: &str = "value";
+
+/// The one evaluated chunk emitted by a scalar node.
+///
+/// A scalar reads nothing, so what it reports is the constant it was bound to and no label: one
+/// value at every point of its grid, closed on that one chunk. The schema carries the grid, which is
+/// what makes the chunk's absolute positions the statement's own.
+fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
+    let schema = SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: SCALAR_FIELD.into(),
+        }]),
+        eval_grid: Some(Arc::clone(&grid)),
+    };
+    let len = grid.spec().len as usize;
+    let time = GridRange::try_new(grid, 0, len).map_err(series_error)?;
+    let values = Float64Array::from(vec![value; len]);
+    let fields = SeriesFields::one(Samples::from_float(values));
+    let metric = MetricName::try_new(None, Vec::new()).map_err(series_error)?;
+    let series =
+        Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+    EvaluatedChunk::try_new(series, true)
+}
+
 /// A closing chunk carrying `metric` and no row at all.
 ///
 /// A series whose selection picked no source row still closes exactly once, on a chunk that holds
@@ -2951,8 +2982,8 @@ impl NativeExecutionState {
                 // kind at one stage.
                 NativeExpr::Aggregate { .. } => NodeTag::Aggregate,
                 NativeExpr::Vector { .. } => NodeTag::Vector,
-                // A scalar is a value node: it produces the constant it was bound to, hands over no
-                // chunk and holds no state, so it is built like any other node and pulled like none.
+                // A constant root materializes its value on the grid once; a broadcast reads the
+                // binding instead of pulling the scalar node.
                 NativeExpr::Scalar(_) => NodeTag::Scalar,
             };
             let buffer = NodeBuffer::new(&path, handles, &pool);
@@ -3110,8 +3141,8 @@ impl NativeExecutionState {
                     // label sets of its own, so it keeps no ledger of what it handed out.
                 }
                 NativeExpr::Scalar(_) => {
-                    // A scalar holds nothing: what its consumer reads is the constant the node was
-                    // bound to, which is on the tree rather than in this state.
+                    // A scalar's value and grid stay in its `NodeSpec` until the root materializes
+                    // it; broadcasts read the binding directly and never pull this node.
                 }
             }
             // The inputs this node reads, in the order the tree declares them: a unary node's one
@@ -3139,10 +3170,20 @@ impl NativeExecutionState {
                 NativeExpr::Input(bound) => Some(bound.source_index),
                 _ => None,
             };
+            // A scalar's value and grid are read off the node here, where the pass still has it: the
+            // runtime addresses nodes by position only, and a scalar is the one kind whose whole
+            // output is decided before any chunk arrives.
+            let scalar = match (&node.expr, &node.output) {
+                (NativeExpr::Scalar(bound), NativeType::Scalar(grid)) => {
+                    Some((bound.value, Arc::clone(grid)))
+                }
+                _ => None,
+            };
             nodes.push(NodeSpec {
                 tag,
                 input: reads_input.then_some(index + 1),
                 source_index,
+                scalar,
             });
             exprs.push(&node.expr);
             paths.push(path.clone());
@@ -3303,21 +3344,22 @@ impl NativeExecutionState {
             }
         }
 
-        // The runtime's output is an evaluated chunk. Raw samples have no grid, and a scalar or
-        // aggregate state is not a query value, so neither can be the tree's answer.
-        match tree.root().output.samples() {
-            Some(schema) if schema.eval_grid.is_some() => {}
-            Some(_) => {
+        // The runtime's output is an evaluated chunk. Raw samples have no grid, while scalar roots
+        // materialize their bound values and aggregate states are not query values.
+        match &tree.root().output {
+            NativeType::Samples(schema) if schema.eval_grid.is_some() => {}
+            NativeType::Scalar(_) => {}
+            NativeType::Samples(_) => {
                 return Err(DataFusionError::Execution(
                     "the native runtime produces evaluated chunks, but the root of the tree \
                      produces raw samples"
                         .to_string(),
                 ));
             }
-            None => {
+            NativeType::AggregateState(_) => {
                 return Err(DataFusionError::Execution(
                     "the native runtime produces evaluated chunks, but the root of the tree \
-                     produces a scalar or aggregate state"
+                     produces aggregate state"
                         .to_string(),
                 ));
             }
@@ -3326,17 +3368,13 @@ impl NativeExecutionState {
         // Every input node is where a caller's chunks can enter, and each of them is named by its
         // own position when a caller queues a chunk. A tree of unary nodes has one input; a binary
         // node adds one per operand, so a tree of nested binary nodes has as many as it has leaves.
+        // A constant scalar has none: it reads nothing, and what it reports is its own value.
         let sources: Vec<usize> = nodes
             .iter()
             .enumerate()
             .filter(|(_, node)| node.tag == NodeTag::Input)
             .map(|(index, _)| index)
             .collect();
-        if sources.is_empty() {
-            return Err(DataFusionError::Execution(
-                "the native tree has no input node".to_string(),
-            ));
-        }
         // A caller's chunks are samples: a source that hands over aggregate state is not something
         // this runtime can be handed, and it is refused when the state is built rather than when the
         // first chunk is queued at it.
@@ -3776,9 +3814,10 @@ impl NativeExecutor {
         }
         match self.state.nodes[index].tag {
             NodeTag::Input => true,
-            // A scalar produces its value without reading anything, so it is settled from the
-            // start: there is no chunk it owes its consumer.
-            NodeTag::Scalar => true,
+            // A scalar owes its one chunk until it hands it over, and nothing after that. No node
+            // that reads samples takes a scalar as its input, so this answer is only ever read for
+            // the root or by a broadcast, which reads the value off the binding and not from here.
+            NodeTag::Scalar => self.state.nodes[index].scalar.is_none(),
             // These report as they are handed chunks, so a child with nothing left is all it takes
             // for them to have nothing left either.
             NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
@@ -3912,10 +3951,33 @@ impl NativeExecutor {
         let input = self.state.nodes[index].input;
         match tag {
             NodeTag::Input => self.state.runtimes[index].pop_source(),
-            // A scalar owes its consumer no chunk: it produces one value and no series, and the
-            // value is the constant on the tree, which the consumer reads off its own binding. A
-            // pull of it is therefore empty by construction and says nothing has stalled.
-            NodeTag::Scalar => Ok(None),
+            // A scalar materializes its bound value on its grid once, and then owes nothing; it
+            // has no input to pull from. A consumer that wants the value without a chunk (the
+            // broadcast) reads it off the binding instead and never pulls this node.
+            NodeTag::Scalar => {
+                let Some((value, grid)) = self.state.nodes[index].scalar.take() else {
+                    return Ok(None);
+                };
+                // What the chunk holds is reserved before it is allocated and given back once it is
+                // built: the chunk leaves the node here, so charging it to the node afterwards would
+                // charge one node for what its consumer owns.
+                let bytes = (grid.spec().len as usize)
+                    .saturating_mul(std::mem::size_of::<f64>())
+                    .saturating_add(
+                        std::mem::size_of::<EvaluatedChunk>() + std::mem::size_of::<Series>(),
+                    );
+                self.state.runtimes[index].buffer.grow(bytes)?;
+                let metrics = Arc::clone(&self.state.runtimes[index].buffer.metrics);
+                let chunk = {
+                    let _timer = metrics.timer();
+                    scalar_chunk(grid, value)?
+                };
+                metrics.record_output(1, valid_values(&chunk));
+                metrics.record_grid_points(chunk.series.time.len());
+                metrics.record_completed_series(1);
+                self.state.runtimes[index].buffer.shrink(bytes)?;
+                Ok(Some(NativeChunk::Evaluated(chunk)))
+            }
             NodeTag::Map => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
                 // An operation that empties every position yields no chunk, and the map asks its
