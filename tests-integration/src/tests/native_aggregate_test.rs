@@ -238,7 +238,7 @@ impl QueryResult {
         let fields = schema.arrow_schema().fields();
         let columns = fields
             .iter()
-            .map(|field| field.name().to_string())
+            .map(|field| field.name().clone())
             .collect::<Vec<_>>();
         let time_index = fields
             .iter()
@@ -779,7 +779,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     }
 
     let per_partition = fused_output_values_per_partition(&capture, &format!("native `{query}`"));
-    eprintln!(
+    common_telemetry::info!(
         "`{query}` native per-partition `{ROOT_OUTPUT_VALUES_METRIC}` counts: {per_partition:?}"
     );
     if case.per_partition {
