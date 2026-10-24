@@ -16,9 +16,12 @@
 //!
 //! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
 //! compiler and, when the compiler accepts it, replaces everything the existing path would plan
-//! below the root with one [`FusedSeries`] node over the selector's own table scan. Declining is
-//! the normal answer: every shape the compiler does not accept, and every query this route cannot
-//! bind to a scan faithfully, keeps the plan the existing planner builds.
+//! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
+//! folds across series - an aggregate - is split instead: its per-series prefix runs in a
+//! `FusedSeries` producer and an [`AggregateFinalize`] merges the state every partition exports,
+//! because a region holds only part of a group. Declining is the normal answer: every shape the
+//! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
+//! plan the existing planner builds.
 //!
 //! What the node needs from here is what the existing planner already resolves: the selector's own
 //! table scan with its matchers and compiled time bounds pushed down, the statement's evaluation
@@ -42,7 +45,7 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
 use promql::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
@@ -59,6 +62,7 @@ use crate::parser::{EXPLAIN_NODE_NAME, EXPLAIN_VERBOSE_NODE_NAME};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile_selectors, statement_grid};
 use crate::promql::planner::PromPlanner;
+use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -121,7 +125,12 @@ type PreparedInput = (
 );
 
 impl PromPlanner {
-    /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
+    /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
+    ///
+    /// `query_engine_state` is only read to build the *existing* plan of an aggregate query, whose
+    /// column names and grouped labels are what the rows of a split aggregate are named after. That
+    /// plan is built for its schema, its names are copied, and it is dropped: it is never executed
+    /// and never stored, so the batch that answers the query is the native route's own.
     ///
     /// The route is offered a whole expression because the compiler folds a range function and the
     /// math functions over it into one tree: offering a sub-expression instead would compile a tree
@@ -133,10 +142,10 @@ impl PromPlanner {
     /// `None` is not a failure. It says this query cannot take the route *unchanged*, and the
     /// caller plans it with the existing planner as if this method did not exist. The two ways that
     /// happens are a shape the compiler refuses (`DataFusionError::NotImplemented`, which names
-    /// what it found) and a query this route cannot bind faithfully — unsupported aggregates or
-    /// subqueries, alternative (`or`) matchers, an `__field__` matcher that narrows the field set, a
-    /// missing table, a field that is not `Float64`, a `rate`/`increase` over a delta-temporality
-    /// table, or an unusable grid.
+    /// what it found) and a query this route cannot bind faithfully — a shape the aggregate split
+    /// cannot carry or a binary operation that reads whole vectors, subqueries, alternative (`or`)
+    /// matchers, an `__field__` matcher that narrows the field set, a missing table, a field that is
+    /// not `Float64`, a `rate`/`increase` over a delta-temporality table, or an unusable grid.
     ///
     /// A statement with two occurrences of one selector is admitted only when both read one scan
     /// point-wise. That is the only shape this node can run over every partition of one child
@@ -144,13 +153,16 @@ impl PromPlanner {
     /// partition holds is whole. Such a statement is planned over that one child, with both of its
     /// tree inputs bound to it; the node's binding names the columns a series is reported under —
     /// the time index, the tags and the metric name — once for all of them. Everything else — a
-    /// different scan, different bounds, a match key that is not the whole series identity, a shape
-    /// that reads a whole series as a group — keeps the existing plan rather than gathering every
-    /// partition into one execution, because a match over two actual sources cannot be answered one
-    /// region at a time.
+    /// different scan, different bounds, a match key that is not the whole series identity, a whole
+    /// vector operation — keeps the existing plan rather than gathering every partition into one
+    /// execution, because a match over two actual sources cannot be answered one region at a time.
+    /// An aggregate is the one shape that reads across series and is still answered from a
+    /// partitioned scan: it is split into an [`AggregateFinalize`] merge over a per-series producer,
+    /// never run once per partition, because a partition holds only part of a group.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         if !self.native_fused {
             return Ok(None);
@@ -484,22 +496,78 @@ impl PromPlanner {
             .into_iter()
             .map(|(scan, _, _, _, _)| scan)
             .collect::<Vec<_>>();
-        // A tree run once per scan partition has to read one series at a time: an aggregate folds a
-        // label set's series together and a vector operation (`sort`, `absent`, `topk`,
-        // `histogram_quantile`, ...) reads the whole vector at a grid point, so one region's share
-        // of the series cannot answer either. Declining here is the only place that still works:
-        // once the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
-        // declining to push it down would leave a node the physical layer must build anyway. What
-        // does read one series at a time is one occurrence's samples - a selection, a window, a map
-        // over either, or a constant broadcast - and, for a statement that names one selector
-        // twice, a one-to-one match whose key holds the whole identity over one scan, which the
-        // collapse below reads as that scan.
-        let root = compiled.tree.root();
-        if reads_across_series(root)
-            && !(pointwise_operand(root)
-                || (selectors.len() == 2 && two_occurrences_pair_one_source(root, &tags)))
-        {
-            return Ok(None);
+        // A tree run once per scan partition has to read one series at a time: a vector operation
+        // (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole vector at a grid
+        // point, so one region's share of the series cannot answer it. Declining here is the only
+        // place that still works: once the `FusedSeries` node exists the logical plan is fixed, and
+        // the categorizer merely declining to push it down would leave a node the physical layer
+        // must build anyway. What does read one series at a time is one occurrence's samples - a
+        // selection, a window, a map over either, or a constant broadcast - and, for a statement
+        // that names one selector twice, a one-to-one match whose key holds the whole identity over
+        // one scan, which the collapse below reads as that scan.
+        //
+        // An aggregate also reads across series, and it is the one such shape a partitioned scan can
+        // still answer. It is never run once per partition - a partition folds its share of a group
+        // and the fold of the shares is not the group's value - so it is split instead: the
+        // per-series prefix runs in a producer per partition, and the merge of every partition's
+        // state runs on the frontend.
+        let per_partition = {
+            let root = compiled.tree.root();
+            !reads_across_series(root)
+                || pointwise_operand(root)
+                || (selectors.len() == 2 && two_occurrences_pair_one_source(root, &tags))
+        };
+        if !per_partition {
+            // A split aggregate folds one source's series, so a fold over two actual sources stays
+            // with the existing planner: no partition holds the whole of either source, and nothing
+            // here gathers them. A shape the split cannot carry - a `quantile` whose state is the
+            // group's samples, an aggregate grouped by a value field, a binary operation above the
+            // fold, a prefix that is not one series at a time - is declined for the same reason.
+            if selectors.len() != 1
+                || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
+            {
+                return Ok(None);
+            }
+            // The rows have to be named the way the existing plan names them, which is read off a
+            // legacy plan built for its schema only: it is never stored and never run, and the
+            // planning context is restored afterwards.
+            let saved = self.ctx.clone();
+            let planned = self
+                .prom_root_expr_to_plan(prom_expr, query_engine_state)
+                .await;
+            let legacy_fields = self.ctx.field_columns.clone();
+            let legacy_tags = self.ctx.tag_columns.clone();
+            self.ctx = saved;
+            // Only its schema mattered, so the plan is dropped here rather than stored.
+            drop(planned?);
+            let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
+            let Some(rawinput) = children.pop() else {
+                return Err(DataFusionError::Internal(
+                    "a single-source native tree prepared no scan".into(),
+                ))
+                .context(DataFusionPlanningSnafu);
+            };
+            let node = match AggregateFinalize::try_new(
+                Arc::from(prom_expr.to_string()),
+                compiled.tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index: time,
+                    tags,
+                    metric_name: metric,
+                },
+                rawinput,
+                output_schema,
+            ) {
+                Ok(node) => node,
+                // The split refusing a shape is this route declining it, exactly as the compiler
+                // refusing one is: the existing plan is the answer.
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            return Ok(Some(LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            })));
         }
         // Two occurrences of one selector read the same series only when the tree between them is
         // point-wise, both scans are the same scan, and the match key holds the whole identity,
@@ -567,6 +635,7 @@ impl PromPlanner {
     pub(super) async fn try_plan_native_fused_explain(
         &mut self,
         prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         let PromExpr::Extension(extension) = prom_expr else {
             return Ok(None);
@@ -580,7 +649,7 @@ impl PromPlanner {
         let [body] = children else {
             return Ok(None);
         };
-        let Some(plan) = self.try_plan_native_fused(body).await? else {
+        let Some(plan) = self.try_plan_native_fused(body, query_engine_state).await? else {
             return Ok(None);
         };
         Ok(Some(
@@ -966,9 +1035,9 @@ fn fused_output_schema(
 /// The order is the compiler's own: it compiles a node's operands in the order they were written, so
 /// this walk goes into the same children in the same order. The list is then matched position by
 /// position against the compiled inputs, which is what makes a walk that visits a different set the
-/// signal that the two disagree rather than a silent mismatch of selector to scan. `false` means a
-/// selector appeared under an aggregate or subquery, whose semantics this route cannot execute;
-/// the whole expression must fall back rather than binding only its remaining selectors.
+/// signal that the two disagree rather than a silent mismatch of selector to scan. `false` means the
+/// expression names a shape this route cannot plan at all — a subquery, or a label rewrite whose
+/// destination label no node here can declare.
 fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) -> bool {
     match expr {
         PromExpr::VectorSelector(selector) => out.push(selector),
@@ -995,9 +1064,15 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
                 }
             }
         }
-        // Aggregate and subquery plans are not executed by the native route. Decline the entire
-        // expression, including when either is nested beneath a supported call or binary node.
-        PromExpr::Aggregate(_) | PromExpr::Subquery(_) => return false,
+        // An aggregate folds its input's series, so the selector is the one its input names; whether
+        // this route can answer it is the split's own decision, which reads the compiled tree.
+        // `param` is not descended into: an aggregate's parameter has to be a constant for the
+        // compiler to bind it, and a parameter naming a second selector is refused there rather
+        // than planned against the wrong scan.
+        PromExpr::Aggregate(aggregate) => return collect_selectors(&aggregate.expr, out),
+        // Subquery plans are not executed by the native route. Decline the entire expression,
+        // including when one is nested beneath a supported call or binary node.
+        PromExpr::Subquery(_) => return false,
         _ => {}
     }
     true
@@ -1046,7 +1121,10 @@ fn metric_scan_and_table_id(
 }
 
 /// Whether `expr` calls `rate`/`increase`, anywhere an admitted statement can nest one: call
-/// arguments, parentheses, both binary operands and a unary operand.
+/// arguments, parentheses, both binary operands, a unary operand and an aggregate's input.
+///
+/// The aggregate's parameter is not descended into, because the compiler refuses a parameter that is
+/// not a constant: a `rate` sitting there is not a call the admitted tree computes.
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
@@ -1058,6 +1136,7 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
             calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
         }
         PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
+        PromExpr::Aggregate(aggregate) => calls_rate_or_increase(&aggregate.expr),
         _ => false,
     }
 }
@@ -1072,7 +1151,10 @@ mod tests {
     use promql::native::plan::{NativeExpr, NativeNode};
     use session::context::QueryContextBuilder;
 
-    use super::{NATIVE_PROMQL_EXTENSION_KEY, collapsed_pair_tree, native_promql_requested};
+    use super::{
+        NATIVE_PROMQL_EXTENSION_KEY, collapsed_pair_tree, collect_selectors,
+        native_promql_requested,
+    };
 
     #[test]
     fn native_promql_requested_is_false_when_extension_is_absent() {
@@ -1135,6 +1217,55 @@ mod tests {
             }
         });
         sources
+    }
+
+    /// The selectors `query` names, in the order the compiler binds them, or `None` when the walk
+    /// refuses the expression outright.
+    fn collected_selectors(query: &str) -> Option<Vec<String>> {
+        let expr = promql_parser::parser::parse(query).expect("the query parses");
+        let mut selectors = Vec::new();
+        if !collect_selectors(&expr, &mut selectors) {
+            return None;
+        }
+        Some(
+            selectors
+                .iter()
+                .map(|selector| selector.name.clone().unwrap_or_default())
+                .collect(),
+        )
+    }
+
+    /// The walk descends into an aggregate's input, because that is the selector the statement
+    /// reads, and leaves the aggregate's parameter alone: a parameter has to be a constant for the
+    /// compiler to bind it.
+    #[test]
+    fn collect_selectors_descends_into_an_aggregate_input() {
+        for query in [
+            "sum(x)",
+            "sum by (job) (x)",
+            "sum without (instance) (rate(x[5m]))",
+            "avg(ceil(x))",
+            "sum(count_over_time(x[10m]))",
+            "sum(rate(x[10m] offset 1m))",
+        ] {
+            assert_eq!(
+                collected_selectors(query),
+                Some(vec!["x".to_string()]),
+                "{query}"
+            );
+        }
+        // Two occurrences are two selectors whichever side of an aggregate they sit on; whether the
+        // route admits them is the two-source guard's decision, not this walk's.
+        for query in ["sum(a) / sum(b)", "sum(a + b)"] {
+            assert_eq!(
+                collected_selectors(query),
+                Some(vec!["a".to_string(), "b".to_string()]),
+                "{query}"
+            );
+        }
+        // A subquery names a shape no tree node here executes, so the whole expression is declined
+        // rather than bound to the selectors around it.
+        assert_eq!(collected_selectors("rate(x[5m:1m])"), None);
     }
 
     /// Collapsing a pair binds both occurrences to the one child the planner prepared for them.

@@ -44,6 +44,11 @@
 //! Everything the tree cannot do is rejected when the execution plan is built, not when the first
 //! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
 //! was not compiled against, or an output schema the conversion cannot classify.
+//!
+//! One mode is not the statement's answer: the scope side of a split aggregate exports, per
+//! partition, the state that partition folded, in the exchange's own layout. Its children and
+//! source indices are the same as the ordinary mode's - the prefix reads the one raw source - and
+//! only what the node does with the chunks it settles differs.
 
 use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
@@ -78,16 +83,22 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
+};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::aggregate_exchange::{PartialFold, state_schema};
 use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{self, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree, NativeType};
+use crate::native::plan::{
+    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeTree, NativeType,
+    reads_across_series,
+};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
@@ -193,6 +204,15 @@ pub struct FusedSeries {
     children: Vec<LogicalPlan>,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
+    /// The aggregate whose partition-local state this node exports instead of query values.
+    ///
+    /// `None` is the ordinary node, whose chunks are the answer. `Some` is the scope side of a
+    /// split aggregate: the tree is the per-series prefix, each partition folds what it read, and
+    /// the merge of those states happens above the exchange, never here.
+    ///
+    /// This state-row output is temporary; the final design has FusedSeries emit series frames
+    /// directly for native final aggregation, removing the bridge's extra conversions.
+    partial_fold: Option<BoundAggregate>,
 }
 
 impl FusedSeries {
@@ -220,6 +240,42 @@ impl FusedSeries {
             binding,
             children,
             output_schema,
+            partial_fold: None,
+        })
+    }
+
+    /// Creates the scope side of a split aggregate: a node that runs `tree` and exports `op`'s
+    /// partition-local state.
+    ///
+    /// `tree` is the aggregate's input, so it computes one series at a time and a partition folds
+    /// exactly the series its own scan returned; `children` is the prefix's one raw source, in the
+    /// same `source_index` order the ordinary mode uses. The output schema is therefore
+    /// [`state_schema`]'s layout, and a tree that reads across series is refused: it would fold a
+    /// group per partition and call the halves a group.
+    pub(crate) fn try_new_partial(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+        op: BoundAggregate,
+    ) -> DataFusionResult<Self> {
+        validate_binding(&tree, &binding, &children)?;
+        if reads_across_series(tree.root()) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries exports partition-local aggregate state from a tree that reads across \
+                 series, so every partition would fold part of a group and the merge above it would \
+                 take the parts for the whole"
+                    .to_string(),
+            ));
+        }
+        let output_schema = Arc::new(DFSchema::try_from(state_schema(&binding.tags))?);
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            children,
+            output_schema,
+            partial_fold: Some(op),
         })
     }
 
@@ -241,6 +297,12 @@ impl FusedSeries {
     /// The plans producing the input series, in `source_index` order.
     pub fn children(&self) -> &[LogicalPlan] {
         &self.children
+    }
+
+    /// The aggregate whose partition-local state this node exports, or `None` when its chunks are
+    /// the statement's answer.
+    pub fn partial_fold(&self) -> Option<&BoundAggregate> {
+        self.partial_fold.as_ref()
     }
 
     /// The physical node that runs `exec_children` as this node's children.
@@ -267,13 +329,14 @@ impl FusedSeries {
             )));
         }
         let output_schema: SchemaRef = self.output_schema.inner().clone();
-        Ok(Arc::new(FusedSeriesExec::try_new(
+        Ok(Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             exec_children,
             Arc::new(self.tree.clone()),
             output_schema,
             self.binding.time_index.clone(),
             self.binding.tags.clone(),
+            self.partial_fold.clone(),
         )?))
     }
 }
@@ -298,7 +361,15 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeries: {}", self.promql)
+        match &self.partial_fold {
+            Some(op) => write!(
+                f,
+                "FusedSeries: {} [partial {}]",
+                self.promql,
+                render_partial_fold(op)
+            ),
+            None => write!(f, "FusedSeries: {}", self.promql),
+        }
     }
 
     fn with_exprs_and_inputs(
@@ -314,14 +385,18 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
         }
         // Rebuilt rather than patched: the sources each tree input names are checked against the
         // tree again, and the schema the node reports keeps its metadata. A rewrite that changed a
-        // child's shape therefore cannot leave a tree whose raw inputs no longer fit it.
-        Self::try_new(
-            Arc::clone(&self.promql),
-            self.tree.clone(),
-            self.binding.clone(),
-            inputs,
-            Arc::clone(&self.output_schema),
-        )
+        // child's shape therefore cannot leave a tree whose raw inputs no longer fit it. The mode
+        // travels unchanged: rebuilding must not turn a state export into a node that answers the
+        // statement.
+        validate_binding(&self.tree, &self.binding, &inputs)?;
+        Ok(Self {
+            promql: Arc::clone(&self.promql),
+            tree: self.tree.clone(),
+            binding: self.binding.clone(),
+            children: inputs,
+            output_schema: Arc::clone(&self.output_schema),
+            partial_fold: self.partial_fold.clone(),
+        })
     }
 }
 
@@ -337,6 +412,7 @@ impl PartialEq for FusedSeries {
             && self.binding == other.binding
             && self.children == other.children
             && self.output_schema == other.output_schema
+            && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
     }
 }
 
@@ -348,6 +424,7 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.children.hash(state);
         self.output_schema.hash(state);
+        partial_key(self.partial_fold.as_ref()).hash(state);
     }
 }
 
@@ -369,12 +446,34 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        if self.output_schema == other.output_schema {
-            Some(Ordering::Equal)
-        } else {
-            None
+        if self.output_schema != other.output_schema {
+            return None;
         }
+        partial_key(self.partial_fold.as_ref())
+            .partial_cmp(&partial_key(other.partial_fold.as_ref()))
     }
+}
+
+/// The comparable form of one node's partial mode.
+///
+/// [`BoundAggregate`] carries no `Eq`/`Hash` - a quantile's parameter is an `f64` - so the render
+/// stands in for it, as the tree's renderer stands in for [`NativeTree`].
+fn partial_key(partial: Option<&BoundAggregate>) -> Option<String> {
+    partial.map(render_partial_fold)
+}
+
+/// Renders a partial aggregate as `<kind> <grouping> <stage>`, for the plan line and the node's
+/// equality: every bound field is named, quantile's parameter and the grouping's labels included.
+fn render_partial_fold(op: &BoundAggregate) -> String {
+    let group = match &op.group {
+        Grouping::By(labels) => format!("by ({})", labels.join(", ")),
+        Grouping::Without(labels) => format!("without ({})", labels.join(", ")),
+    };
+    let kind = match op.kind {
+        AggregateKind::Quantile { quantile } => format!("quantile({quantile})"),
+        kind => format!("{kind:?}").to_lowercase(),
+    };
+    format!("{kind} {group} {:?}", op.stage)
 }
 
 /// The raw series schema each source index of `tree` reads, in source order.
@@ -689,7 +788,7 @@ fn validate_binding(
 
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
-enum OutputColumn {
+pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
@@ -699,9 +798,18 @@ enum OutputColumn {
 }
 
 /// Classifies every output column, rejecting anything the conversion cannot produce.
-fn classify_output(
+///
+/// `fields` is the field layout of the series the rows are converted from, by name and position: a
+/// column naming one of them is a value column, one naming `tags` is a label column, and `time_column`
+/// is the grid axis. It is passed as the layout rather than as a [`SeriesSchema`] because the
+/// finalizer's series are described by the statement's own row schema, which carries the statement's
+/// names for those fields rather than the compiled tree's.
+///
+/// Visible to the finalizer because it builds the same row adapter over the series it assembles; a
+/// second copy would let the two nodes disagree about which column a name reads.
+pub(crate) fn classify_output(
     output_schema: &SchemaRef,
-    series_schema: &SeriesSchema,
+    fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
@@ -716,11 +824,7 @@ fn classify_output(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
             )));
         }
-        if series_schema
-            .fields
-            .iter()
-            .any(|field| field.name.as_ref() == tag)
-        {
+        if fields.iter().any(|field| field.name.as_ref() == tag) {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
@@ -728,7 +832,7 @@ fn classify_output(
     }
 
     let mut time_seen = false;
-    let mut field_seen = vec![false; series_schema.fields.len()];
+    let mut field_seen = vec![false; fields.len()];
     let mut tag_seen = vec![false; tags.len()];
     let mut classification = Vec::with_capacity(output_schema.fields().len());
     for field in output_schema.fields() {
@@ -756,11 +860,7 @@ fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_schema
-            .fields
-            .iter()
-            .position(|field| field.name.as_ref() == name)
-        {
+        if let Some(index) = fields.iter().position(|field| field.name.as_ref() == name) {
             if std::mem::replace(&mut field_seen[index], true) {
                 return Err(DataFusionError::Plan(format!(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
@@ -818,7 +918,7 @@ fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_schema.fields[index].name
+                fields[index].name
             )));
         }
     }
@@ -863,6 +963,14 @@ pub struct FusedSeriesExec {
     labels: SharedLabelSets,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
+    /// The aggregate whose partition-local state this node exports, or `None` when its batches are
+    /// the statement's answer.
+    partial_fold: Option<BoundAggregate>,
+    /// What the exported state batches keep charged on the memory pool.
+    ///
+    /// Plan-level, like [`Self::labels`]: they are paid for until the plan is dropped, and the
+    /// reservation is registered by the first partition that actually exports.
+    export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -889,6 +997,10 @@ impl FusedSeriesExec {
     /// The parameters stay separate because each is a fact its own caller has: the query, the plans
     /// below, the frame's label binding and ordering, the tree, and the three things the output
     /// schema is classified by. A struct over them would be the same list under another name.
+    ///
+    /// This builds the ordinary node, whose batches are the statement's rows.
+    /// [`FusedSeries::try_new_partial`] is the other mode, and goes through the same checks before
+    /// it keeps the aggregate whose state its partitions export.
     pub fn try_new(
         promql: Arc<str>,
         children: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
@@ -896,6 +1008,31 @@ impl FusedSeriesExec {
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
+    ) -> DataFusionResult<Self> {
+        Self::build(
+            promql,
+            children,
+            tree,
+            output_schema,
+            time_column,
+            tags,
+            None,
+        )
+    }
+
+    /// Creates the node, with `partial_fold` deciding whether its batches are the statement's rows
+    /// or the state each partition folded.
+    ///
+    /// In partial mode the output schema is the state layout, so it is not classified; everything
+    /// the input and the tree are checked for holds in both modes.
+    fn build(
+        promql: Arc<str>,
+        children: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        tree: Arc<NativeTree>,
+        output_schema: SchemaRef,
+        time_column: String,
+        tags: Vec<String>,
+        partial_fold: Option<BoundAggregate>,
     ) -> DataFusionResult<Self> {
         // Several children are refused on their count alone, before the tree is walked: what they
         // would need is an exchange that pairs their series by label, and no tree shape makes that
@@ -975,7 +1112,8 @@ impl FusedSeriesExec {
         // The output columns are named by the fields the *tree* reports, so they are classified
         // against the tree's own output rather than against whichever scan happens to sit first:
         // `a + b` reports the fields of `a`, and reading them off the input would silently accept an
-        // output schema that names a field no input ever produced.
+        // output schema that names a field no input ever produced. State mode has no row adapter to
+        // classify: the fold writes its batches in the exchange's own layout.
         let root_schema = tree
             .root()
             .output
@@ -986,7 +1124,18 @@ impl FusedSeriesExec {
                 )
             })?
             .clone();
-        let classification = classify_output(&output_schema, &root_schema, &tags, &time_column)?;
+        let classification: Arc<[OutputColumn]> = if partial_fold.is_some() {
+            // State batches are made by the fold in its own layout, not by the row adapter.
+            Arc::<[OutputColumn]>::from(Vec::new())
+        } else {
+            classify_output(
+                &output_schema,
+                root_schema.fields.as_ref(),
+                &tags,
+                &time_column,
+            )?
+            .into()
+        };
         let partition_count = child.properties().partitioning.partition_count();
         if partition_count == 0 {
             return Err(DataFusionError::Plan(
@@ -1015,13 +1164,15 @@ impl FusedSeriesExec {
             promql,
             tree,
             child_bindings: vec![(source.clone(), *ordering)],
-            classification: classification.into(),
+            classification,
             time_column,
             tags: tags.into(),
             children: vec![Arc::clone(child)],
             output_schema,
             labels: Arc::new(Mutex::new(LabelSets::default())),
             metric: ExecutionPlanMetricsSet::new(),
+            partial_fold,
+            export_budget: Arc::new(Mutex::new(None)),
             properties,
         })
     }
@@ -1042,7 +1193,12 @@ impl DisplayAs for FusedSeriesExec {
     /// The query, then the tree it compiles to: the tree is rendered by [`NativeTree`]'s own
     /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)
+        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
+        // State is not the statement's answer, so a reader sees the mode rather than infer it.
+        if let Some(op) = &self.partial_fold {
+            write!(f, "\npartial state: {}", render_partial_fold(op))?;
+        }
+        Ok(())
     }
 }
 
@@ -1102,8 +1258,10 @@ impl ExecutionPlan for FusedSeriesExec {
         // Rebuilt rather than patched: the schema the tree names is what the new child's frame is
         // validated against, so a child that changed shape is refused instead of decoded with a
         // stale layout. A child keeps the position it had, and so the source index it feeds: which
-        // child a tree input reads is never inferred from a schema.
-        Ok(Arc::new(Self::try_new(
+        // child a tree input reads is never inferred from a schema. The mode and its reservation
+        // carry over: rebuilding must not turn a state export into a node that answers the
+        // statement.
+        let rebuilt = Self::build(
             Arc::clone(&self.promql),
             children
                 .into_iter()
@@ -1114,7 +1272,12 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
-        )?))
+            self.partial_fold.clone(),
+        )?;
+        Ok(Arc::new(Self {
+            export_budget: Arc::clone(&self.export_budget),
+            ..rebuilt
+        }))
     }
 
     fn execute(
@@ -1130,6 +1293,28 @@ impl ExecutionPlan for FusedSeriesExec {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach(&context.runtime_env().memory_pool);
+        // One fold per partition, over only the series this partition's scan returned. What it
+        // folds is the tree's *root* output - the prefix's evaluated series - while the node's own
+        // output schema is the state layout the fold encodes, which is why the two are read from
+        // different places.
+        let partial_fold = match &self.partial_fold {
+            Some(op) => {
+                let schema = self.tree.root().output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Plan(
+                        "FusedSeries exports aggregate state from a tree that produces no samples"
+                            .to_string(),
+                    )
+                })?;
+                Some(PartialFold::try_new(
+                    op.clone(),
+                    schema,
+                    Arc::clone(&self.tags),
+                    Arc::clone(&self.export_budget),
+                    &context.runtime_env().memory_pool,
+                )?)
+            }
+            None => None,
+        };
         // The child is executed once, at the partition this node was asked for, because a series
         // never spans two partitions: an execution of the tree owns every chunk of every series the
         // child reports in that partition, and the chunks are queued at every tree input bound to
@@ -1164,6 +1349,7 @@ impl ExecutionPlan for FusedSeriesExec {
         )?;
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
+        // The stream keeps a share of the export reservation so queued state stays charged.
         Ok(Box::pin(FusedSeriesStream {
             input: Some(stream),
             executor: Some(NativeExecutor::new(state)),
@@ -1171,6 +1357,8 @@ impl ExecutionPlan for FusedSeriesExec {
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
+            partial_fold,
+            _export_budget: Arc::clone(&self.export_budget),
             ready: VecDeque::new(),
             input_ended: false,
             done: false,
@@ -1186,7 +1374,7 @@ impl ExecutionPlan for FusedSeriesExec {
 ///
 /// The time column is the absolute grid positions the chunk carries, missing samples are nulls and
 /// ordinary NaN stays a value.
-fn series_to_record_batch(
+pub(crate) fn series_to_record_batch(
     classification: &[OutputColumn],
     tags: &[String],
     output_schema: &SchemaRef,
@@ -1543,8 +1731,20 @@ pub struct FusedSeriesStream {
     output_schema: SchemaRef,
     /// The label-set occupancy shared with the other partitions' streams.
     ///
-    /// What it holds is charged to the plan's own reservation, attached by the first execution.
+    /// What it holds is charged to the plan's own reservation, attached by the first execution. Every
+    /// partition's prefix series is claimed, state mode included; only the encoded state rows are
+    /// not, because a group's labels may legitimately repeat across partitions.
     labels: SharedLabelSets,
+    /// This partition's fold, or `None` once its input ended or it stopped early.
+    ///
+    /// In state mode the chunks the executor settles are folded into it instead of converted, and
+    /// the state it exports when the input ends is what the stream hands over.
+    partial_fold: Option<PartialFold>,
+    /// A share of the plan's reservation for the exported state batches.
+    ///
+    /// Holding the plan's `Arc` keeps the bytes of queued batches charged until this stream drops;
+    /// nothing new is reserved, and in the ordinary mode it owns no reservation.
+    _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the executor has already been told that every input ended.
@@ -1618,6 +1818,10 @@ impl FusedSeriesStream {
         // The child's stream is dropped here: its plan, its decoder and whatever batch it was
         // holding are released as soon as this node stops reading them.
         self.input = None;
+        // A fold that stops early exports nothing: only a whole partition's states may be merged,
+        // so a half-read group would be taken for the whole one.
+        self.partial_fold = None;
+        // Its export charge is the plan's and stays until this stream drops, like the label sets.
         // The label-set map and its charge are the plan's, so a stream stopping early gives back
         // nothing: the entries another partition is still checking against have to stay charged, and
         // are released when the plan itself is dropped.
@@ -1627,19 +1831,44 @@ impl FusedSeriesStream {
 
     /// Converts the chunks the executor settled into batches, in the order it produced them.
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
-        for chunk in &chunks {
-            // The label set is claimed before its batch is queued, so a collision surfaces at the
-            // chunk that reached it and nothing this plan would refuse is handed out after it.
-            self.labels
+        let Self {
+            partial_fold,
+            labels,
+            classification,
+            tags,
+            output_schema,
+            ready,
+            ..
+        } = self;
+        for chunk in chunks {
+            // The prefix series is claimed before it is folded or converted either way: a chunk
+            // whose labels only *look* like a group's would be counted by two folds that never see
+            // each other, and the merge above cannot tell the halves from two contributions.
+            // Claimed before the batch is queued, so a collision surfaces at the chunk that reached
+            // it.
+            labels
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .claim(&chunk.series)?;
-            let batch = series_to_record_batch(
-                &self.classification,
-                &self.tags,
-                &self.output_schema,
-                chunk,
-            )?;
+            // In state mode the chunk is folded, not converted: each partition's fold keeps its own
+            // groups, and the series the exchange will see are assembled above this node.
+            if let Some(fold) = partial_fold.as_mut() {
+                fold.update(chunk)?;
+                continue;
+            }
+            let batch = series_to_record_batch(classification, tags, output_schema, &chunk)?;
+            ready.push_back(batch);
+        }
+        Ok(())
+    }
+
+    /// Ends the fold and queues the state batches it exports, once. The fold is taken first, so a
+    /// refusal leaves nothing to finish twice.
+    fn finish_fold(&mut self) -> DataFusionResult<()> {
+        let Some(mut fold) = self.partial_fold.take() else {
+            return Ok(());
+        };
+        for batch in fold.finish()? {
             self.ready.push_back(batch);
         }
         Ok(())
@@ -1682,6 +1911,12 @@ impl Stream for FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
+                        // The execution closed, so the fold has every chunk it will see: this is
+                        // where a partition's state becomes batches.
+                        if let Err(error) = this.finish_fold() {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
                         this.done = true;
                         continue;
                     }
