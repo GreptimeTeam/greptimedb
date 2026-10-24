@@ -347,10 +347,12 @@ struct Split {
 
 /// Splits the innermost aggregate out of `node`.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. Only a map and an aggregate may sit above the cut:
-/// a map is point-wise, so it is the same operation over merged values, while an instant selection, a
-/// window, a vector-wide or a binary operation would read evaluated values, the whole vector or a
-/// matched pair - shapes the merge does not produce.
+/// `Ok(None)` is a subtree holding no aggregate. Only a map, an aggregate and a binary operation with
+/// a constant on one side may sit above the cut: a map is point-wise and so is the same operation over
+/// merged values, an aggregate runs over the complete merge, and a constant is broadcast over whatever
+/// the other side answers - while an instant selection, a window, a vector-wide operation or a binary
+/// operation between two vectors would read evaluated values, the whole vector or a matched pair,
+/// shapes the merge does not produce.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => Ok(None),
@@ -419,13 +421,50 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
             )),
             None => Ok(None),
         },
-        NativeExpr::Binary { left, right, .. } => {
-            if split(left, fields, time_index)?.is_some()
-                || split(right, fields, time_index)?.is_some()
-            {
-                return Err(declined("an aggregate under a binary operation"));
-            }
-            Ok(None)
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            // Each side is split once, and at most one of them may hold the innermost aggregate: two
+            // would be two cuts, which this node cannot merge.
+            let (left_split, right_split) = (
+                split(left, fields, time_index)?,
+                split(right, fields, time_index)?,
+            );
+            // A constant operand is broadcast over whatever the other side answers, so applying the
+            // same operation to the merged values is the operation the query wrote. Any other sibling
+            // would have to be matched with those values by label, which nothing below this node
+            // gathers.
+            let (mut inner, constant_on_the_left) = match (left_split, right_split) {
+                (None, None) => return Ok(None),
+                (Some(inner), None) if matches!(right.expr, NativeExpr::Scalar(_)) => {
+                    (inner, false)
+                }
+                (None, Some(inner)) if matches!(left.expr, NativeExpr::Scalar(_)) => (inner, true),
+                _ => {
+                    return Err(declined(
+                        "an aggregate under a binary operation without a constant on the other side",
+                    ));
+                }
+            };
+            // The cut side's own suffix takes the place of the aggregate, on the side the query wrote
+            // it: a non-commutative operator means what that order says, and the matching and the
+            // output are the ones the compiler bound.
+            let (left, right) = if constant_on_the_left {
+                ((**left).clone(), inner.suffix)
+            } else {
+                (inner.suffix, (**right).clone())
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Binary {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                    matching: matching.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
         }
     }
 }
@@ -480,23 +519,47 @@ fn check_cut(op: &BoundAggregate, fields: &[FieldSpec], time_index: &str) -> DfR
 /// Checks that the per-series prefix is a tree one partition can evaluate on its own.
 ///
 /// The producer runs one execution per partition and folds exactly the series that partition's scan
-/// returned, so the prefix has to answer one series from one series' samples: maps are point-wise, and
-/// a window or an instant selection reads the raw input itself. A raw input means no evaluation grid -
-/// a tree whose input is already evaluated is a subquery's, which one partition cannot evaluate.
+/// returned, so the prefix has to answer one series from one series' samples: maps are point-wise, a
+/// binary operation with a constant side applies that constant to each series its other side answers,
+/// and a window or an instant selection reads the raw input itself. A raw input means no evaluation
+/// grid - a tree whose input is already evaluated is a subquery's, which one partition cannot evaluate.
 ///
 /// A `clamp` whose maximum is below its minimum answers no value at all, so the fold would see a group
 /// with no sample of that field rather than the query the reader wrote.
 fn admit_prefix(root: &NativeNode) -> DfResult<()> {
     let mut node = root;
-    while let NativeExpr::Map { input, op } = &node.expr {
-        for map_op in op.ops.iter() {
-            if let MapOp::Math(MathOp::Clamp { min, max }) = map_op
-                && max < min
-            {
-                return Err(declined("a `clamp` whose maximum is below its minimum"));
+    loop {
+        match &node.expr {
+            NativeExpr::Map { input, op } => {
+                for map_op in op.ops.iter() {
+                    if let MapOp::Math(MathOp::Clamp { min, max }) = map_op
+                        && max < min
+                    {
+                        return Err(declined("a `clamp` whose maximum is below its minimum"));
+                    }
+                }
+                node = input;
             }
+            // Only a constant side is broadcast: it reaches each series the other side answers, so
+            // that side is the one the fold runs. Two constants answer one value per grid point and
+            // read no series, and two vectors are a label match over the whole vector, which is not
+            // what either half of the split produces.
+            NativeExpr::Binary { left, right, .. } => {
+                node = match (&left.expr, &right.expr) {
+                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => {
+                        return Err(declined("a per-series prefix of two constants"));
+                    }
+                    (NativeExpr::Scalar(_), _) => &**right,
+                    (_, NativeExpr::Scalar(_)) => &**left,
+                    (_, _) => {
+                        return Err(declined(
+                            "a per-series prefix that matches two vectors by label",
+                        ));
+                    }
+                };
+            }
+            _ => break,
         }
-        node = input;
     }
     let raw = |node: &NativeNode| match &node.expr {
         NativeExpr::Input(input) => input

@@ -24,6 +24,8 @@ use datafusion::common::DFSchema;
 use datatypes::series::samples::FieldSpec;
 use datatypes::series::time::{EvalGrid, GridSpec};
 
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+
 /// The statement's grid, which every evaluated chunk is addressed on.
 fn grid() -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 60_000, 4).unwrap()).unwrap())
@@ -251,6 +253,127 @@ fn an_outer_map_stays_in_the_suffix() {
     assert!(suffix.contains("Map"), "{suffix}");
     assert!(suffix.contains("Input"), "{suffix}");
     assert_eq!(output_tags(&node), ["k0".to_string()]);
+}
+
+/// `left <op> right` with a constant on one side, bound the way the compiler binds a broadcast: the
+/// operation reports the vector side's samples.
+fn broadcast(left: NativeNode, right: NativeNode, op: BinaryOp) -> NativeNode {
+    let output = if matches!(left.output, NativeType::Scalar(_)) {
+        right.output.clone()
+    } else {
+        left.output.clone()
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    }
+}
+
+/// The constant scalar `value`, on the statement's grid.
+fn scalar_on(value: f64) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Scalar(crate::native::plan::BoundScalar { value }),
+        output: NativeType::Scalar(grid()),
+    }
+}
+
+/// A constant operand is broadcast over the merged values, so the aggregate under the other side is
+/// still the one cut: the suffix keeps the operation, the operand order and the matching, with the
+/// merged values where the aggregate was.
+#[test]
+fn a_constant_operand_keeps_the_cut_below_it() {
+    for (constant_on_the_left, value) in [(true, "100 - avg(v0)"), (false, "avg(v0) - 100")] {
+        let aggregate = complete(AggregateKind::Avg, by(&["k0"]))(window());
+        let root = if constant_on_the_left {
+            broadcast(scalar_on(100.0), aggregate, BinaryOp::Sub)
+        } else {
+            broadcast(aggregate, scalar_on(100.0), BinaryOp::Sub)
+        };
+        let node = finalize(root, output_schema(&[value], &["k0"])).unwrap();
+
+        // The producer still runs only the per-series prefix: the constant is above the cut, so the
+        // window is all the prefix holds and the constant is applied in the suffix.
+        let prefix = producer(&node).tree().to_string();
+        assert!(prefix.contains("Window"), "{prefix}");
+        assert!(!prefix.contains("Binary"), "{prefix}");
+        assert!(!prefix.contains("Scalar"), "{prefix}");
+
+        // The suffix is the operation over the merged values, which enter it as its own source `0`:
+        // the prefix's and the suffix's inputs are separate executions, not one exchange.
+        let NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } = &node.suffix.root().expr
+        else {
+            panic!("the operation stays above the cut: {}", node.suffix);
+        };
+        assert_eq!(BinaryOp::Sub, matching.op, "the operator is kept");
+        let (constant, merged) = if constant_on_the_left {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        assert!(
+            matches!(constant.expr, NativeExpr::Scalar(_)),
+            "the constant keeps its side: {}",
+            node.suffix
+        );
+        assert!(
+            matches!(&merged.expr, NativeExpr::Input(input) if input.source_index == 0),
+            "the merged values enter where the aggregate was: {}",
+            node.suffix
+        );
+        assert!(
+            !node.suffix.to_string().contains("Window"),
+            "{}",
+            node.suffix
+        );
+    }
+}
+
+/// A binary operation above the cut is only the operation over merged values when its other side is a
+/// constant: two aggregates are two cuts, a vector sibling would have to be matched with the merged
+/// values by label, and a prefix that pairs two vectors reads the whole vector rather than one series.
+#[test]
+fn a_binary_operation_without_a_constant_operand_is_refused() {
+    let folded = || {
+        complete(AggregateKind::Sum, by(&[]))(complete(AggregateKind::Avg, by(&["k0"]))(window()))
+    };
+    for root in [
+        // Two sides fold, and one cut cannot answer two aggregates.
+        broadcast(folded(), folded(), BinaryOp::Add),
+        // A vector sibling is another series set, which nothing below the merge brings together.
+        broadcast(
+            complete(AggregateKind::Sum, by(&["k0"]))(window()),
+            window(),
+            BinaryOp::Add,
+        ),
+        broadcast(
+            window(),
+            complete(AggregateKind::Sum, by(&["k0"]))(window()),
+            BinaryOp::Div,
+        ),
+        // A prefix that pairs two vectors reads the whole vector at a point, which one partition
+        // cannot do: admitting a constant operand does not admit this.
+        complete(AggregateKind::Sum, by(&["k0"]))(broadcast(window(), window(), BinaryOp::Div)),
+    ] {
+        let error = finalize(root, output_schema(&["sum(v0)"], &["k0"])).unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
+    }
 }
 
 /// The output's labels are the schema's string columns, which is what the merge writes.

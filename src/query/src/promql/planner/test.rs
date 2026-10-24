@@ -2214,9 +2214,9 @@ async fn native_fused_one_occurrence_records_one_path() {
     }
 }
 
-/// A whole-vector operation or a group fold reads across series wherever it sits, so a statement
-/// that holds one keeps the existing plan — under a binary root, under a map, and under a constant
-/// broadcast over either.
+/// A whole-vector operation reads across series wherever it sits, and a fold whose other operand is
+/// data is a match over two sources, so a statement that holds one keeps the existing plan — under a
+/// binary root, under a map, and under a constant broadcast over either.
 #[tokio::test]
 async fn native_fused_binary_holding_a_whole_vector_operation_falls_back() {
     let tags = [("host", false), ("zone", false)];
@@ -2225,7 +2225,6 @@ async fn native_fused_binary_holding_a_whole_vector_operation_falls_back() {
         "abs(sort(some_metric{host!=\"\"})) + some_metric{host!=\"\"}",
         "sort(some_metric{host!=\"\"}) * 2",
         "sum(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
-        "abs(sum(some_metric{host!=\"\"})) * 2",
     ] {
         let native = build_identity_fused_plan(&tags, query, true).await;
         let legacy = build_identity_fused_plan(&tags, query, false).await;
@@ -2885,6 +2884,19 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
         "sum(rate(some_metric[5m]))",
         "ceil(sum(some_metric))",
         "sum(avg(some_metric) by (tag_0))",
+        // A literal scalar on either side of the fold. Below the aggregate it is part of the prefix,
+        // which is the half that computes the values the state folds; above it the merge rebuilds
+        // the operation over the merged values, in the order the query wrote the operands. A
+        // negation is the same broadcast with `-1` where the minus was.
+        "sum(8 * rate(some_metric[5m]))",
+        "max(10 - rate(some_metric[5m]))",
+        "100 - avg(rate(some_metric[5m]))",
+        "sum(some_metric) * 2",
+        "100 / sum(some_metric)",
+        "-sum(some_metric)",
+        // A map between the two: the constant is broadcast over a map above the fold, so the prefix
+        // stays the selection and the suffix is `abs` over the merged value, then the multiply.
+        "abs(sum(some_metric)) * 2",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let legacy = build_native_fused_plan(query, false).await;
@@ -2962,14 +2974,21 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
 }
 
 /// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
-/// samples, a binary operation above an aggregate would match one side's series before the merge,
-/// and a group by a value field cannot be named by the state rows.
+/// samples, a binary operation whose sibling is data would match one side's series before the merge,
+/// a sibling a call computes has no native node at all, and a group by a value field cannot be named
+/// by the state rows. A literal scalar sibling is not one of them: the operation is computed per
+/// series below the fold, or rebuilt over the merged values above it.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
         "quantile(0.5, some_metric)",
         "sum(quantile(0.5, some_metric))",
-        "sum(some_metric) / 2",
+        // The sibling is data rather than a literal scalar, so the operation would pair each series
+        // with the aggregate's series before the merge.
+        "sum(some_metric) / some_metric",
+        // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
+        // native node, so the statement keeps the existing plan.
+        "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
     ] {
         let native = build_native_fused_plan(query, true).await;

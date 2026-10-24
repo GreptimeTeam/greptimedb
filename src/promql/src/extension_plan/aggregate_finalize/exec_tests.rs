@@ -50,6 +50,7 @@ use futures::Stream;
 
 use super::*;
 use crate::extension_plan::aggregate_exchange::PartialFold;
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The query the trees here are compiled from.
 const PROMQL: &str = "avg(rate(x[5m]))";
@@ -183,6 +184,38 @@ fn by(labels: &[&str]) -> Grouping {
 /// node so the prefix is the shape the split admits.
 fn avg_tree(kind: AggregateKind) -> NativeNode {
     complete(kind, by(&[K0]))(map_over(window(), vec![MathOp::Ceil]))
+}
+
+/// `left <op> right` with a constant on one side, bound the way the compiler binds a broadcast: the
+/// output is the vector side's samples.
+fn broadcast(left: NativeNode, right: NativeNode, op: BinaryOp) -> NativeNode {
+    let output = if matches!(left.output, NativeType::Scalar(_)) {
+        right.output.clone()
+    } else {
+        left.output.clone()
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    }
+}
+
+/// The constant `value` on the statement's grid.
+fn constant(value: f64) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Scalar(crate::native::plan::BoundScalar { value }),
+        output: NativeType::Scalar(grid()),
+    }
 }
 
 /// The producer's aggregate, bound the way the compiler binds it.
@@ -502,6 +535,71 @@ async fn the_tree_above_the_cut_runs_over_the_merged_series() {
         .await
         .expect("the suffix runs");
     assert_eq!(rows(&batches), [(POINT_TS, Some(6.0), None)]);
+}
+
+/// A constant operand of the suffix is applied to the merged values, whichever side it is written on
+/// and whichever operator it carries, and the answer's own direction follows the operand order.
+///
+/// Every case merges the same three samples: `2`, `6` and `10` of one group, folded `2` by one
+/// producer and `6` and `10` by the other. The partitions are therefore unequal, and the merged
+/// `avg` is `6` - the average of all three samples, where a mean of the two producers' means would
+/// answer `5` - while the merged `sum` is `18`. The two `Sub` cases answer `94` and `-94`, and the
+/// `Div` case `100 / 18`, so a swapped pair answers a different number; where the constant commutes
+/// with the fold - `* 2`, and the `-1` of the negation - the prefix would answer the same number,
+/// so those cases cover the operator rather than the placement.
+#[tokio::test]
+async fn a_constant_operand_of_the_suffix_computes_on_the_merged_values() {
+    use AggregateKind::{Avg, Sum};
+    let cases = [
+        (
+            Avg,
+            broadcast(constant(100.0), avg_tree(Avg), BinaryOp::Sub),
+            "100 - avg(rate(x[5m]))",
+            100.0 - 6.0,
+        ),
+        (
+            Avg,
+            broadcast(avg_tree(Avg), constant(100.0), BinaryOp::Sub),
+            "avg(rate(x[5m])) - 100",
+            6.0 - 100.0,
+        ),
+        (
+            Sum,
+            broadcast(avg_tree(Sum), constant(2.0), BinaryOp::Mul),
+            "sum(rate(x[5m])) * 2",
+            2.0 * 18.0,
+        ),
+        (
+            Sum,
+            broadcast(constant(100.0), avg_tree(Sum), BinaryOp::Div),
+            "100 / sum(rate(x[5m]))",
+            100.0 / 18.0,
+        ),
+        (
+            Sum,
+            broadcast(constant(-1.0), avg_tree(Sum), BinaryOp::Mul),
+            "-sum(rate(x[5m]))",
+            -18.0,
+        ),
+    ];
+    for (kind, root, column, expected) in cases {
+        let plan = finalize(root, output_schema(column, &[K0]))
+            .to_execution_plan(state_input(two_producers(kind)))
+            .expect("the operation runs over the merged values");
+        let batches = collect(plan, SessionContext::default().task_ctx())
+            .await
+            .expect("the suffix runs");
+        let rows = rows(&batches);
+        assert_eq!(rows.len(), 1, "{column}: {rows:?}");
+        let (time, value, label) = rows[0].clone();
+        let value = value.unwrap_or_else(|| panic!("{column} answered no value"));
+        assert_eq!(time, POINT_TS, "{column}");
+        assert!(
+            (value - expected).abs() < 1e-12,
+            "{column}: {value} != {expected}"
+        );
+        assert_eq!(label.as_deref(), Some(LABEL), "{column}");
+    }
 }
 
 /// Every producer is read at the same time. Each stream of the input below holds its rows back until

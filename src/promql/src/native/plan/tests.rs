@@ -21,6 +21,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    reads_across_series,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -751,6 +752,60 @@ fn two_scalars_cannot_produce_a_vector() {
             .contains("two scalars do not produce a scalar"),
         "{error}"
     );
+}
+
+/// A constant operand is broadcast to each series the other side answers, so such an operation reads
+/// one series at a time exactly when that other side does.
+///
+/// Two vectors are a match over the whole vector, and an aggregate folds a group, so either of them
+/// under the constant still reads across series. Two constants answer the same value for every series
+/// there is, so they read none.
+#[test]
+fn a_constant_operand_reads_one_series_at_a_time() {
+    let shared = grid(0, 60_000, 4);
+    let vector = || window_on(input(), None, Arc::clone(&shared));
+    let binary = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: vector().output,
+    };
+    let aggregate = NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(vector()),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+
+    // `100 - rate(v0[5m])`, and the same constant written on the other side.
+    for node in [
+        binary(scalar_on(100.0, Arc::clone(&shared)), vector()),
+        binary(vector(), scalar_on(100.0, Arc::clone(&shared))),
+    ] {
+        assert!(
+            !reads_across_series(&node),
+            "a broadcast reaches each series the vector side answers: {node:?}"
+        );
+    }
+    // `sum(rate(v0[5m])) + 100` folds a group first, so the constant is broadcast to each group.
+    assert!(reads_across_series(&binary(
+        aggregate,
+        scalar_on(100.0, Arc::clone(&shared))
+    )));
+    // `rate(v0[5m]) + rate(v0[5m])` matches two vectors by label.
+    assert!(reads_across_series(&binary(vector(), vector())));
+    // `1 + 2` answers one value for every series there is.
+    assert!(!reads_across_series(&binary(
+        scalar_on(1.0, Arc::clone(&shared)),
+        scalar_on(2.0, Arc::clone(&shared))
+    )));
 }
 
 /// A binary operation is point-wise on a grid, so a side of raw samples has no positions to line

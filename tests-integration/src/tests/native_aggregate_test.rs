@@ -44,11 +44,14 @@
 //! partial states that only a merge over *all* of them turns into `sum`, `avg`, `count` and
 //! `stddev` - while the gauge queries keep covering the shapes with round answers.
 //!
-//! Deliberately not covered yet: the split declines a tree that holds an aggregate under a binary
-//! operation, so `sum(rate(...)) / 2` and comparisons keep the existing plan even though the
-//! arithmetic kernels already exist, and `and`/`or`/`unless` and `time()`/`scalar()` have no native
-//! node at all. The focused cases to add once the split carries those trees are one of each on
-//! [`COUNTER_TABLE`], with the same per-partition coverage assertion below.
+//! A binary operation whose sibling is a literal scalar is carried by the split on either side of
+//! the fold: below the aggregate it is computed in the per-series prefix (`sum(8 * rate(...))`,
+//! `max(10 - rate(...))`), and above it the merge's suffix rebuilds it over the merged value with
+//! the operands in the order they were written (`100 - avg(rate(...))`, `100 / sum(rate(...))`,
+//! `-sum(rate(...))`). Deliberately not covered yet: the aggregate split carries a literal scalar
+//! as its only binary sibling, so a computed scalar (`scalar(...)`, `time()`) or a whole-vector
+//! combination such as `sort`, `absent` or `and`/`or`/`unless` beside the aggregate keeps the
+//! existing plan.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -896,6 +899,9 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             &[(&[], 12.0)],
             true,
         ),
+        // A literal scalar above the fold: `sum` over the gauge's 2, 6, 10, 4 and 8 is 30, and the
+        // merge's suffix doubles the merged value.
+        case(format!("sum({GAUGE_TABLE}) * 2"), &[(&[], 60.0)], true),
         // A gauge over a constant value has a rate of exactly zero, so these two only cover the
         // zero-rate case: every series has both samples inside the 5m window, hence every partition
         // must fold a value. They cannot tell a computed rate from a dropped one, which is what the
@@ -961,6 +967,46 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             format!("abs(sum(avg(rate({COUNTER_TABLE}[5m])) by (job)))"),
             &[(&[], 6.0)],
             "partial state: avg by (job) Complete",
+        ),
+        // A literal scalar below the fold is carried in the per-series prefix, so the state folds
+        // `8 * rate`: the rates 1, 3, 5, 2 and 4 become 8, 24, 40, 16 and 32 and the merge answers
+        // 120, where a state built without the multiplication would answer 15. The multiplication
+        // distributes over the sum, so 120 alone cannot say which side of the merge computed it;
+        // what this case pins down is that the constant is admitted below the cut and that the four
+        // nonempty partitions still fold one value per series into that one state.
+        counter_case(
+            format!("sum(8 * rate({COUNTER_TABLE}[5m]))"),
+            &[(&[], 120.0)],
+            "partial state: sum by () Complete",
+        ),
+        // The same below-the-fold placement with an operator the fold does not commute with: the
+        // maximum of the prefix-computed `10 - rate`. The rates 1, 3, 5, 2 and 4 become 9, 7, 5, 8
+        // and 6, whose maximum is 9 - so the answer tells the prefix from the suffix, where
+        // `10 - max(rate)` would answer 5, and from a prefix that swapped the operands, where
+        // `max(rate - 10)` would answer -5.
+        counter_case(
+            format!("max(10 - rate({COUNTER_TABLE}[5m]))"),
+            &[(&[], 9.0)],
+            "partial state: max by () Complete",
+        ),
+        // A literal scalar above the fold is rebuilt in the merge's suffix over the merged value,
+        // with the operands in the order the query wrote them: the mean rate is 3, so `100 - 3` is
+        // 97 where a swapped pair would report -97, and `100 / 15` is the sum's own answer where
+        // 15/100 would be the reciprocal. A negation is the same broadcast with `-1` on the left.
+        counter_case(
+            format!("100 - avg(rate({COUNTER_TABLE}[5m]))"),
+            &[(&[], 97.0)],
+            "partial state: avg by () Complete",
+        ),
+        counter_case(
+            format!("100 / sum(rate({COUNTER_TABLE}[5m]))"),
+            &[(&[], 100.0 / 15.0)],
+            "partial state: sum by () Complete",
+        ),
+        counter_case(
+            format!("-sum(rate({COUNTER_TABLE}[5m]))"),
+            &[(&[], -15.0)],
+            "partial state: sum by () Complete",
         ),
         // The range table holds one series in one partition, so this is a correctness smoke test of
         // one populated partition rather than a parallel acceptance. Its one series folds one

@@ -521,8 +521,9 @@ impl PromPlanner {
             // A split aggregate folds one source's series, so a fold over two actual sources stays
             // with the existing planner: no partition holds the whole of either source, and nothing
             // here gathers them. A shape the split cannot carry - a `quantile` whose state is the
-            // group's samples, an aggregate grouped by a value field, a binary operation above the
-            // fold, a prefix that is not one series at a time - is declined for the same reason.
+            // group's samples, an aggregate grouped by a value field, a binary operation whose
+            // sibling is not a constant scalar, a prefix that is not one series at a time - is
+            // declined for the same reason.
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {

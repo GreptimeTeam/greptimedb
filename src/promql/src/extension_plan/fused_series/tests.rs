@@ -4415,6 +4415,72 @@ fn a_prefix_that_reads_across_series_is_refused() {
     assert!(error.to_string().contains("reads across"), "{error}");
 }
 
+/// `constant <op> vector`, bound the way the compiler binds a scalar broadcast: the constant on the
+/// left, and the vector side's samples as the operation's output.
+fn broadcast_left(constant: f64, vector: NativeNode, op: BinaryOp) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads one evaluated vector")
+        .clone();
+    let output = vector.output.clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(NativeNode {
+                expr: NativeExpr::Scalar(BoundScalar { value: constant }),
+                output: NativeType::Scalar(grid),
+            }),
+            right: Box::new(vector),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    }
+}
+
+/// A constant broadcast is per-series work, so a partition folds it like any other prefix.
+///
+/// `max(10 - rate(x[5m]))` over the rates `1` and `2` of the two series below folds `9` and `8` of one
+/// group and exports `9`. Reading the constant on the other side exports `-8`, and folding the rate
+/// and subtracting the constant above the merge exports `10 - 2 = 8`, so the answer says where the
+/// operation ran and which operand its constant was.
+#[tokio::test]
+async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() {
+    let tree = NativeTree::try_new(broadcast_left(
+        10.0,
+        rate_tree().root().clone(),
+        BinaryOp::Sub,
+    ))
+    .expect("a broadcast over the rate tree is legal");
+    let exec = partial_plan(
+        tree,
+        memory_exec(two_series_frames()),
+        partial_op(AggregateKind::Max, &[]),
+        &[],
+    )
+    .expect("a per-series broadcast is a prefix one partition evaluates on its own");
+
+    let state = state_schema(&[]);
+    let batch = state_of(&exec, 0, &state).await;
+    let values = batch
+        .column_by_name("value")
+        .expect("the state carries the accumulator")
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("an accumulator is Float64");
+    let values: Vec<Option<f64>> = values.iter().collect();
+    assert_eq!(
+        vec![Some(9.0); GRID_LEN as usize],
+        values,
+        "every grid point holds `10 - 1`, the larger of the two series' values"
+    );
+}
+
 /// An input that fails after rows exports no state, and a partition the input lacks is refused.
 #[tokio::test]
 async fn a_failed_input_exports_no_partial_state() {
