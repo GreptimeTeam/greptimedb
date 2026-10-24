@@ -2239,7 +2239,7 @@ async fn native_promql_two_occurrences_route_one_scan_per_partition() {
     for sql in [
         format!(r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - ({table}{{host=~"h.+"}} * 2)"#),
         format!(
-            r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left ({table}{{host!=""}} * 2)"#
+            r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
         ),
     ] {
         observer.clear();
