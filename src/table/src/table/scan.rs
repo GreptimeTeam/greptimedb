@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{BinaryHeap, HashSet};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -107,6 +107,66 @@ impl std::fmt::Debug for RegionScanExec {
             .field("pushed_dyn_filters", &self.pushed_dyn_filters)
             .finish()
     }
+}
+
+/// Distribute [`PartitionRange`]s to each partition.
+///
+/// Currently we assign ranges to partitions according to their rows so each partition
+/// has similar number of rows. This method always return `expected_partition_num` partitions.
+pub fn assign_partition_ranges(
+    mut ranges: Vec<PartitionRange>,
+    expected_partition_num: usize,
+) -> Vec<Vec<PartitionRange>> {
+    if ranges.is_empty() {
+        // Returns a single partition with no range.
+        return vec![vec![]; expected_partition_num];
+    }
+
+    if ranges.len() == 1 {
+        let mut vec = vec![vec![]; expected_partition_num];
+        vec[0] = ranges;
+        return vec;
+    }
+
+    // Sort ranges by number of rows in descending order.
+    ranges.sort_by_key(|b| std::cmp::Reverse(b.num_rows));
+    let mut partition_ranges = vec![vec![]; expected_partition_num];
+
+    #[derive(Eq, PartialEq)]
+    struct HeapNode {
+        num_rows: usize,
+        partition_idx: usize,
+    }
+
+    impl Ord for HeapNode {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            // Reverse for min-heap.
+            self.num_rows.cmp(&other.num_rows).reverse()
+        }
+    }
+
+    impl PartialOrd for HeapNode {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    let mut part_heap =
+        BinaryHeap::from_iter((0..expected_partition_num).map(|partition_idx| HeapNode {
+            num_rows: 0,
+            partition_idx,
+        }));
+
+    // Assigns the range to the partition with the smallest number of rows.
+    for range in ranges {
+        let mut node = part_heap.pop().unwrap();
+        let partition_idx = node.partition_idx;
+        node.num_rows += range.num_rows;
+        partition_ranges[partition_idx].push(range);
+        part_heap.push(node);
+    }
+
+    partition_ranges
 }
 
 impl RegionScanExec {
@@ -434,6 +494,7 @@ impl RegionScanExec {
 
     /// Resolves authorized logical names against this prepared scanner's physical metadata,
     /// then selects a native raw-series leaf and returns the binding it was validated against.
+    /// Prepared scans may contain multiple partitions; the producer keeps each series in one partition.
     ///
     /// Approval must be based on the returned [`RawSeriesRequest`], because that binding, not the
     /// requested names, describes the approved output. See [`Self::try_to_named_series_scan`]
@@ -474,10 +535,6 @@ impl RegionScanExec {
         }
         let scanner = self.scanner.lock().unwrap();
         let metadata = scanner.metadata();
-        if scanner.properties().num_partitions().max(1) != 1 {
-            return None;
-        }
-
         let primary_key_ids = metadata
             .primary_key_columns()
             .map(|column| column.column_id)
@@ -1300,6 +1357,83 @@ mod test {
             schema,
             RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap(),
         )
+    }
+
+    #[test]
+    fn assign_partition_ranges_balances_rows_deterministically() {
+        let ranges: Vec<_> = [100, 200, 150, 250]
+            .into_iter()
+            .enumerate()
+            .map(|(identifier, num_rows)| PartitionRange {
+                start: common_time::Timestamp::new(
+                    identifier as i64,
+                    common_time::timestamp::TimeUnit::Second,
+                ),
+                end: common_time::Timestamp::new(
+                    identifier as i64 + 1,
+                    common_time::timestamp::TimeUnit::Second,
+                ),
+                num_rows,
+                identifier: identifier + 1,
+            })
+            .collect();
+        let assigned = assign_partition_ranges(ranges.clone(), 2);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4, 1], vec![2, 3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        let assigned = assign_partition_ranges(ranges.clone(), 5);
+        assert_eq!(
+            assigned
+                .iter()
+                .map(|partition| {
+                    partition
+                        .iter()
+                        .map(|range| range.identifier)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+            vec![vec![4], vec![1], vec![2], vec![], vec![3]]
+        );
+        let mut assigned_identifiers = assigned
+            .iter()
+            .flatten()
+            .map(|range| range.identifier)
+            .collect::<Vec<_>>();
+        assigned_identifiers.sort_unstable();
+        assert_eq!(assigned_identifiers, vec![1, 2, 3, 4]);
+
+        assert_eq!(assign_partition_ranges(vec![], 5), vec![vec![]; 5]);
+    }
+
+    #[test]
+    fn named_series_binding_accepts_multiple_prepared_partitions() {
+        let (_, plan) = dynamic_filter_fixture(5687);
+        let prepared = plan
+            .with_new_partitions(vec![vec![], vec![]], 2)
+            .expect("prepare two scanner partitions");
+        assert!(prepared.is_partition_set());
+        assert!(
+            prepared
+                .resolve_named_series_binding("cpu", &[], &["a".to_string()])
+                .is_some()
+        );
     }
 
     #[test]
