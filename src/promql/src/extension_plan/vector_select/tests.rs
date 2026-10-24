@@ -906,7 +906,7 @@ async fn a_selection_that_lands_two_values_on_one_point_fails() {
     );
 }
 
-/// The plan reports the runtime's own metrics, and only from executions it actually ran.
+/// The plan reports the counters its execution registered, and keeps them once it is gone.
 #[tokio::test]
 async fn the_plan_reports_the_runtime_root_and_its_input() {
     let node = node();
@@ -919,18 +919,51 @@ async fn the_plan_reports_the_runtime_root_and_its_input() {
             .iter()
             .count()
     );
-    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
-        .await
-        .expect("the four series are ranked");
+    let mut stream = exec
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the stream starts");
+    // The execution registered its counters as it was built, before it handed a batch over.
+    let running = exec
+        .metrics()
+        .expect("a running execution reports the counters it registered");
+    assert_ne!(
+        0,
+        running.iter().count(),
+        "a running execution reports the counters it registered"
+    );
+    let mut batches = Vec::new();
+    while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+        batches.push(batch.expect("the four series are ranked"));
+    }
     assert_eq!(K * GRID_LEN, rows(&batches).len());
+    drop(stream);
 
     // The stream is gone and the plan still reports what its execution did: the root is the
     // selection's runtime, and the input below it closed four series.
     let metrics = exec
         .metrics()
-        .expect("the node reports its runtime's metrics");
+        .expect("the node reports the counters of its execution");
     assert_eq!(2, count(&metrics, "native.root.completed_series"));
     assert_eq!(4, count(&metrics, "native.root.input.completed_series"));
+    // Those counts are the same entries the run registered: reading the metrics of a plan that has
+    // already run hands the retained counters back rather than registering a second set. Both
+    // snapshots are held here rather than taken in turn, so an equal address cannot be a fresh
+    // handle over a dropped one.
+    let same_entries = |before: &MetricsSet, after: &MetricsSet, what: &str| {
+        let before = before.iter().collect::<Vec<_>>();
+        let after = after.iter().collect::<Vec<_>>();
+        assert_eq!(before.len(), after.len(), "{what}");
+        for (before, after) in before.into_iter().zip(after) {
+            assert!(Arc::ptr_eq(before, after), "{what}");
+        }
+    };
+    same_entries(
+        &running,
+        &metrics,
+        "the plan reports the execution's own counters, before and after the input ended",
+    );
+    let repeated = exec.metrics().expect("a plan can export its metrics again");
+    same_entries(&metrics, &repeated, "a repeated read registers nothing");
 
     // A rebuilt node keeps the same tree and reports nothing until it runs, as the fused node does.
     let rebuilt = Arc::clone(&exec)
@@ -978,8 +1011,9 @@ async fn an_ended_stream_gives_up_the_schema_it_read() {
     while let Some(batch) = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
         assert!(batch.expect("the frames rank").num_rows() > 0);
     }
-    // The plan keeps its own copy for its metrics; the ended stream gives its copy back, so
-    // dropping the plan leaves this test's handle as the only one while the stream is still alive.
+    // The plan keeps its own copy so a later execution can read frames against it; the ended
+    // stream gives its copy back, so dropping the plan leaves this test's handle as the only one
+    // while the stream is still alive.
     drop(exec);
     assert_eq!(
         1,

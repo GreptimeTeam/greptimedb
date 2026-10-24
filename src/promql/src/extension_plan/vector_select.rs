@@ -51,7 +51,7 @@ use datafusion::physical_expr::{
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::expressions::Column;
-use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
@@ -66,7 +66,7 @@ use crate::extension_plan::fused_series::{
     FusedSeries, FusedSeriesBinding, LabelSets, OutputColumn, classify_output,
     series_to_record_batch,
 };
-use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor, RuntimeTreeHandle};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     BoundInput, BoundVectorOp, NativeExpr, NativeNode, NativeTree, reads_across_series,
 };
@@ -379,8 +379,11 @@ pub struct VectorSelectExec {
     ordering: LexOrdering,
     /// The label sets the final series claim, shared by every execution of this plan.
     labels: Arc<Mutex<LabelSets>>,
-    /// Runtime roots from executions of the suffix, retained for fresh metrics exports.
-    runtimes: Mutex<Vec<(usize, RuntimeTreeHandle)>>,
+    /// The counters every execution of the suffix registered, retained so the plan reports them
+    /// after that execution is gone.
+    ///
+    /// The set is synchronised by DataFusion itself, so it needs no lock of this node's own.
+    metrics: ExecutionPlanMetricsSet,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -433,7 +436,7 @@ impl VectorSelectExec {
             output_schema,
             ordering,
             labels: Arc::new(Mutex::new(LabelSets::default())),
-            runtimes: Mutex::new(Vec::new()),
+            metrics: ExecutionPlanMetricsSet::new(),
             properties,
         })
     }
@@ -539,12 +542,9 @@ impl ExecutionPlan for VectorSelectExec {
             &self.suffix,
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
-        // The runtime root outlives the stream: it is what this plan reports metrics from.
-        let runtime = state.runtime_tree();
-        self.runtimes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((partition, runtime));
+        // The counters are the plan's rather than the stream's: the execution registers them once,
+        // and the plan keeps reporting them after that execution is dropped.
+        state.register_metrics(&self.metrics, partition);
         // One frame batch is held at a time, so this reservation follows that batch.
         let frames = MemoryConsumer::new("VectorSelectExec frames")
             .register(&context.runtime_env().memory_pool);
@@ -567,15 +567,9 @@ impl ExecutionPlan for VectorSelectExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        let runtimes = self.runtimes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut metrics = MetricsSet::new();
-        for (partition, runtime) in runtimes.iter() {
-            let runtime = runtime.lock().unwrap_or_else(|e| e.into_inner());
-            for metric in runtime.export_metrics(*partition).iter() {
-                metrics.push(Arc::clone(metric));
-            }
-        }
-        Some(metrics)
+        // The set holds the executions' counter handles, so reading it again hands back the same
+        // entries and registers nothing.
+        Some(self.metrics.clone_inner())
     }
 }
 
