@@ -99,6 +99,10 @@ pub struct QueryEngineState {
     table_functions: Arc<RwLock<HashMap<String, Arc<TableFunction>>>>,
     extension_rules: Vec<Arc<dyn ExtensionAnalyzerRule + Send + Sync>>,
     plugins: Plugins,
+    experimental_native_promql: bool,
+    /// Whether this engine's regions are reached in process, which is what lets a region take a
+    /// `LogicalPlan` instead of Substrait bytes.
+    in_process_region_transport: bool,
 }
 
 impl fmt::Debug for QueryEngineState {
@@ -145,6 +149,39 @@ impl QueryEngineState {
         procedure_service_handler: Option<ProcedureServiceHandlerRef>,
         flow_service_handler: Option<FlowServiceHandlerRef>,
         with_dist_planner: bool,
+        plugins: Plugins,
+        options: QueryOptionsNew,
+    ) -> DfResult<Self> {
+        Self::try_new_with_region_transport(
+            catalog_list,
+            partition_rule_manager,
+            region_query_handler,
+            table_mutation_handler,
+            procedure_service_handler,
+            flow_service_handler,
+            with_dist_planner,
+            false,
+            plugins,
+            options,
+        )
+    }
+
+    /// [`QueryEngineState::try_new`], additionally stating how the engine reaches its regions.
+    ///
+    /// `in_process_region_transport` reaches [`DistPlannerAnalyzer`]: when it is `true` the
+    /// distributed planner may hand a region a `LogicalPlan` instead of Substrait bytes, which only
+    /// the in-process read path accepts. Every other caller builds an engine whose regions are
+    /// reached over the wire, which is what [`QueryEngineState::try_new`] states.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_new_with_region_transport(
+        catalog_list: CatalogManagerRef,
+        partition_rule_manager: Option<PartitionRuleManagerRef>,
+        region_query_handler: Option<RegionQueryHandlerRef>,
+        table_mutation_handler: Option<TableMutationHandlerRef>,
+        procedure_service_handler: Option<ProcedureServiceHandlerRef>,
+        flow_service_handler: Option<FlowServiceHandlerRef>,
+        with_dist_planner: bool,
+        in_process_region_transport: bool,
         plugins: Plugins,
         options: QueryOptionsNew,
     ) -> DfResult<Self> {
@@ -209,7 +246,9 @@ impl QueryEngineState {
             )),
         );
         if with_dist_planner {
-            analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+            analyzer.rules.push(Arc::new(DistPlannerAnalyzer::new(
+                in_process_region_transport,
+            )));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));
@@ -297,6 +336,8 @@ impl QueryEngineState {
             table_functions: Arc::new(RwLock::new(HashMap::new())),
             extension_rules,
             plugins,
+            experimental_native_promql: options.experimental_native_promql,
+            in_process_region_transport,
             scalar_functions: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -443,6 +484,15 @@ impl QueryEngineState {
     /// which is used by `DfContextProviderAdapter::get_window_meta`.
     pub fn register_window_function(&self, func: WindowUDF) {
         self.df_context.register_udwf(func);
+    }
+
+    pub(crate) fn experimental_native_promql(&self) -> bool {
+        self.experimental_native_promql
+    }
+
+    /// Whether a region read is served in this process, so a region can take a `LogicalPlan`.
+    pub(crate) fn in_process_region_transport(&self) -> bool {
+        self.in_process_region_transport
     }
 
     pub fn catalog_manager(&self) -> &CatalogManagerRef {

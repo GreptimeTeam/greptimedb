@@ -798,7 +798,7 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
         }
     }
     let mut out = Vec::new();
-    walk(&execution.state().tree.root, &mut out);
+    walk(&execution.state().root, &mut out);
     out
 }
 
@@ -829,7 +829,7 @@ fn gauge(set: &ExecutionPlanMetricsSet, name: &str) -> usize {
 /// it: the trees these tests build have one node of that kind, and it is the root. The state owns
 /// that tree, so the read is a borrow of it and the execution can be polled again afterwards.
 fn root_holds(execution: &NativeExecutor, holds: fn(&RuntimeOp) -> bool) -> bool {
-    holds(&execution.state().tree.root.op)
+    holds(&execution.state().root.op)
 }
 
 /// The payload a window root holds: its range evaluator.
@@ -1351,7 +1351,7 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     // One direct pattern per level, on the nodes the constructor made; the borrow ends before the
     // first push.
     {
-        let RuntimeOp::Binary { left, right, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Binary { left, right, .. } = &execution.state().root.op else {
             panic!("the root is not the binary node the tree built");
         };
         let RuntimeOp::Broadcast {
@@ -2125,7 +2125,7 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
     // The root is the window that collected the fragments, so its own reservation is what the peak
     // below has to cover. The borrow ends before the close below.
     let window_held = {
-        let RuntimeOp::Window { state, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Window { state, .. } = &execution.state().root.op else {
             panic!("the root is not the window the tree built");
         };
         state.buffer.reservation.size()
@@ -2198,7 +2198,7 @@ fn a_merge_flush_reserves_every_queued_output() {
     // the node handed out under, and the evaluator that evaluated them. The borrow ends before the
     // next pull.
     let (queued, queued_bytes, retained, emitted, held) = {
-        let RuntimeOp::Window { window, state, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Window { window, state, .. } = &execution.state().root.op else {
             panic!("the root is not the window the tree built");
         };
         let queued_bytes = state.queued.iter().map(|(_, bytes)| *bytes).sum::<usize>();
@@ -2287,7 +2287,7 @@ fn dropping_the_execution_releases_its_tree_and_keeps_the_registered_metrics() {
             window,
             merge,
             state,
-        } = &execution.state().tree.root.op
+        } = &execution.state().root.op
         else {
             panic!("the root is not the window the tree built");
         };
@@ -2319,7 +2319,7 @@ fn dropping_the_execution_releases_its_tree_and_keeps_the_registered_metrics() {
             merge,
             state,
             ..
-        } = &execution.state().tree.root.op
+        } = &execution.state().root.op
         else {
             panic!("the root is not the window the tree built");
         };
@@ -8139,7 +8139,7 @@ fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
     // The root is the aggregate the tree built, and the fold is its own payload: what is read
     // below is a copy of the flag, not a borrow held across the pulls.
     let computed = |execution: &NativeExecutor| {
-        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         aggregate
@@ -8334,7 +8334,7 @@ fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
     // reservation and the backing the queue grew to. The borrow ends inside the call, so the pull
     // below is taken with nothing held.
     let queue = |execution: &NativeExecutor| -> (usize, usize, usize, usize) {
-        let RuntimeOp::Aggregate { state, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Aggregate { state, .. } = &execution.state().root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         (
@@ -8414,7 +8414,7 @@ fn aggregate_fold_state_is_released_after_input() {
     // The root is the aggregate the tree built: its fold holds one group and has not run. The
     // borrow ends before the close below takes the state again.
     {
-        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().tree.root.op else {
+        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         let aggregate = aggregate.as_ref().expect("the root holds an aggregate");

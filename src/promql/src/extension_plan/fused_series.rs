@@ -37,18 +37,15 @@
 //! was not compiled against, or an output schema the conversion cannot classify.
 
 use std::cmp::Ordering;
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
-use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, StringArray, TimestampMillisecondArray,
-};
+use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -56,9 +53,7 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{
-    MemoryConsumer, MemoryPool, MemoryReservation, UnboundedMemoryPool,
-};
+use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -69,17 +64,14 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
-use crate::grid_series::{LabelSet, label_set};
-use crate::native::execute::InputId;
-use crate::native::execute::{NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
-use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
@@ -404,8 +396,7 @@ impl PartialOrd for FusedSeries {
 /// can only agree or disagree with it, and the frame this node reads has to be decoded against the
 /// same schema, so both halves read it here instead of each carrying a copy.
 struct TreeInput {
-    /// Which of the tree's inputs the raw chunks enter at. A tree this node feeds has one leaf, so
-    /// this is the first input; it is kept here so the exec does not have to count inputs again.
+    /// The input leaf where the runtime receives raw chunks, not an operator's position in the tree.
     input_id: InputId,
     /// The raw series schema the tree's input node was compiled against.
     schema: Arc<SeriesSchema>,
@@ -414,9 +405,8 @@ struct TreeInput {
 /// Reads what the tree's input node was compiled against, rejecting a tree this node cannot feed.
 ///
 /// A node feeds one raw input, and its output is addressed on a grid; a tree that does not have
-/// that shape is one this layer cannot hand chunks to. Because exactly one input is accepted, that
-/// input is the tree's only leaf and is therefore the first one: the id it is queued at is
-/// [`InputId::new(0)`], so nothing here has to count leaves beyond checking that it is alone.
+/// that shape is one this layer cannot hand chunks to. Since it accepts exactly one input, that
+/// input is the first leaf and receives [`InputId::new(0)`].
 fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
     let (sources, schema) = input_leaves(tree.root());
     if sources != 1 {
@@ -445,12 +435,7 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
     })
 }
 
-/// Counts the [`NativeExpr::Input`] leaves under `node`, and reads the raw schema a leaf declares.
-///
-/// Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was compiled
-/// against an already-evaluated schema would read the wrong thing. A tree this node accepts has one
-/// leaf, so the schema carried out of here is that leaf's; every other leaf is only counted, which
-/// is what refuses a tree with more than one.
+/// Counts the input leaves and reads the raw schema the sole accepted leaf declares.
 fn input_leaves(node: &NativeNode) -> (usize, Option<Arc<SeriesSchema>>) {
     match &node.expr {
         NativeExpr::Input(input) => (
@@ -472,95 +457,6 @@ fn input_leaves(node: &NativeNode) -> (usize, Option<Arc<SeriesSchema>>) {
             let (right_sources, right_schema) = input_leaves(right);
             (sources + right_sources, right_schema.or(schema))
         }
-    }
-}
-
-/// Refuses a tree whose logical series can be split across the partitions this node runs.
-///
-/// Keeping the metric name is not what keeps two raw series apart. An empty tag value and an absent
-/// tag are the same canonical label set, so `{host="h", zone=""}` and `{host="h"}` are one series to
-/// Prometheus while the scan encodes them as two raw keys. A window that evaluated its input without
-/// merging it therefore passes such a pair through as two series under one label set, exactly as the
-/// functions that drop `__name__` do by merging them, and a map drops `__name__` outright.
-///
-/// A stateful node above one of those needs both halves together, and the runtime does provide that
-/// within one execution: a window whose input can hold two series under one label set collects the
-/// fragments, merges each label set once, and only then evaluates. That merge is per execution, and
-/// this node runs one execution per partition. Two raw series that become one label set can land in
-/// different partitions - the scan keeps a *series* in one partition, which says nothing about two
-/// different series that later become indistinguishable - so each execution merges only the half it
-/// was given. The consumer above then answers from one half and reports nothing for the other, which
-/// is an empty result rather than an error.
-///
-/// Whether a window merged its input is runtime state this check does not have: it runs over a bare
-/// tree, where a window's input is only something that produces samples. A window below another
-/// window is therefore treated as one that did not merge, whatever function it runs, which refuses
-/// `rate` under `rate` (which drops the name) and `last_over_time` under `rate` (which keeps it)
-/// alike.
-///
-/// Reading such a tree needs an exchange above this node that merges a logical series across
-/// partitions, which does not exist yet. Until it does the tree is refused where it can hurt: over
-/// one partition there is nothing to split, so only a tree run over more than one is checked.
-///
-/// The compiler cannot build a nested window today - [`compile`](crate::promql::native_compile::compile)
-/// requires a range function to apply directly to a selector, `<range function>(<selector>[<range>])`,
-/// and a selector is raw samples - so no tree it produces has a window above a window, and this
-/// check costs no executable query. It is checked because [`FusedSeriesExec::try_new`] accepts any
-/// well-formed tree, and a tree it accepts is a tree it must answer correctly.
-fn reject_a_split_logical_series(
-    tree: &NativeTree,
-    partition_count: usize,
-) -> DataFusionResult<()> {
-    if partition_count == 1 {
-        return Ok(());
-    }
-    let Some(rewriter) = split_series_rewriter(tree.root(), false) else {
-        return Ok(());
-    };
-    Err(DataFusionError::Plan(format!(
-        "FusedSeries runs a tree where `{rewriter}` can leave two raw series on one canonical label \
-         set and the `Window` above it reads a whole series, over {partition_count} partitions: an \
-         empty tag value and an absent tag are the same label set, the runtime merges such \
-         fragments once per execution, and this node runs one execution per partition, so the \
-         `Window` would read one half and answer an empty result. Reading this tree needs an \
-         exchange between `{rewriter}` and the `Window` above it that merges a logical series \
-         across partitions, which is not implemented"
-    )))
-}
-
-/// Finds the rewriter below a consuming window in the subtree at `node`, naming its kind.
-///
-/// The search is outermost first, so it meets nodes in the reverse of the order data flows: a
-/// window met before a rewriter is one that the rewriter feeds. `consumer_above` says whether such
-/// a window was already met, which is what makes a rewriter below this node the shape that costs
-/// correctness.
-///
-/// A node can leave two raw series on one canonical label set. A map always can: it drops
-/// `__name__` and every empty-valued tag. An instant selection preserves its input labels, rather
-/// than dropping them, but can still leave two raw series on one canonical label set: `{zone=""}`
-/// and the absent `zone` are one label set and two raw keys. A window can whenever it did not merge
-/// its input, which a bare tree says nothing about: a check on the function alone accepts
-/// `last_over_time`, whose output keeps the name and can still hold both raw series. Every map,
-/// instant selection, and window is therefore taken to be a possible rewriter, and the caller's
-/// refusal narrows that to a window with a rewriter below it, a window being the only consumer.
-///
-/// A window both rewrites and consumes, so below a window it is the rewriter and otherwise
-/// everything below it is under a consumer. An aggregate and a vector operation are neither: they
-/// pass both facts on unchanged. A binary operation reads its operands independently, so a window
-/// in one operand does not consume the other operand's rewrite.
-fn split_series_rewriter(node: &NativeNode, consumer_above: bool) -> Option<&'static str> {
-    match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => None,
-        NativeExpr::Window { .. } if consumer_above => Some("Window"),
-        NativeExpr::Window { input, .. } => split_series_rewriter(input, true),
-        NativeExpr::Map { .. } if consumer_above => Some("Map"),
-        NativeExpr::Instant { .. } if consumer_above => Some("Instant"),
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => split_series_rewriter(input, consumer_above),
-        NativeExpr::Binary { left, right, .. } => split_series_rewriter(left, consumer_above)
-            .or_else(|| split_series_rewriter(right, consumer_above)),
     }
 }
 
@@ -774,7 +670,7 @@ pub struct FusedSeriesExec {
     label_source: RawLabelSource,
     /// The ordering the input frames guarantee.
     ordering: SeriesOrdering,
-    /// Which of the tree's inputs every raw chunk a partition reads enters at.
+    /// The id of the tree's input node, where every raw chunk a partition reads enters.
     input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
@@ -787,17 +683,8 @@ pub struct FusedSeriesExec {
     input: Arc<dyn ExecutionPlan>,
     /// The columns this node produces.
     output_schema: SchemaRef,
-    /// The grid positions every label set in this plan's output already occupies, and what they
-    /// keep charged on the memory pool.
-    ///
-    /// Plan-level rather than per-partition: see [`LabelSets`].
-    labels: SharedLabelSets,
-    /// The metric handles every execution of this plan registered, reported by [`Self::metrics`].
-    ///
-    /// An execution registers its tree's node handles here before it starts, so what this keeps is
-    /// those counters and gauges and not the runtime topology they were registered from. The set
-    /// synchronizes its own registration and reads.
-    metrics: ExecutionPlanMetricsSet,
+    /// Per-node metrics, registered by each execution of the tree.
+    metric: ExecutionPlanMetricsSet,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -831,8 +718,6 @@ impl FusedSeriesExec {
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let classification =
             classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
-        // Read here rather than below, because whether the split below can happen decides whether
-        // the tree shape is one this node may run at all.
         let input_properties = input.properties();
         let partition_count = input_properties.partitioning.partition_count();
         if partition_count == 0 {
@@ -840,7 +725,6 @@ impl FusedSeriesExec {
                 "FusedSeriesExec input has no partitions".into(),
             ));
         }
-        reject_a_split_logical_series(&tree, partition_count)?;
         // The frame states its own label layout and series ordering; this plan's binding is an
         // expectation checked against that declaration, not an input to decoding.
         ensure_frame_matches_label_source(input.schema().as_ref(), &label_source)?;
@@ -881,10 +765,6 @@ impl FusedSeriesExec {
             input_properties.emission_type,
             input_properties.boundedness,
         ));
-        // Shared by every partition's stream: a label set colliding is a property of the whole
-        // output vector, not of one partition. Building it needs no pool; the owner's reservation is
-        // attached in `execute`, which is the first point that has one.
-        let labels: SharedLabelSets = Arc::new(Mutex::new(LabelSets::default()));
         Ok(Self {
             promql,
             tree,
@@ -897,8 +777,7 @@ impl FusedSeriesExec {
             tags: tags.into(),
             input,
             output_schema,
-            labels,
-            metrics: ExecutionPlanMetricsSet::new(),
+            metric: ExecutionPlanMetricsSet::new(),
             properties,
         })
     }
@@ -991,14 +870,6 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        // The label-set state is the plan's, so the reservation that pays for it is attached exactly
-        // once, to the pool of the first execution. Every partition calls this and only the first
-        // takes effect: re-registering per stream would move a charge the other partitions keep
-        // growing, and would give it back when that stream ends while the entries stay.
-        self.labels
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .attach(&context.runtime_env().memory_pool);
         let input = self.input.execute(partition, Arc::clone(&context))?;
         // Batches become raw series chunks through the shared frame decoder, which is the inverse of
         // what the producer packed: one chunk per frame row, each series closed exactly once by the
@@ -1012,11 +883,7 @@ impl ExecutionPlan for FusedSeriesExec {
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
-        // Registered once, before the first chunk is pulled: what this plan reports afterwards is
-        // the handles the nodes update as they run, and the execution itself stays with the stream.
-        state.register_metrics(&self.metrics, partition);
-        // What the label sets hold is charged to the reservation attached above, so nothing is
-        // reserved per stream: the entries outlive every stream and are released with the plan.
+        state.register_metrics(&self.metric, partition);
         Ok(Box::pin(FusedSeriesStream {
             input: Some(input),
             executor: Some(NativeExecutor::new(state)),
@@ -1024,14 +891,13 @@ impl ExecutionPlan for FusedSeriesExec {
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
-            labels: Arc::clone(&self.labels),
             ready: VecDeque::new(),
             done: false,
         }))
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metrics.clone_inner())
+        Some(self.metric.clone_inner())
     }
 }
 
@@ -1125,263 +991,6 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     }
 }
 
-/// The bytes one label set holds, for the memory reservation.
-///
-/// It counts each label's name and value with the pair that refers to them, which is the same
-/// convention [`crate::native::execute`]'s own label-set table keeps.
-fn labels_bytes(labels: &LabelSet) -> usize {
-    labels
-        .iter()
-        .map(|(name, value)| size_of::<(Arc<str>, Arc<str>)>() + name.len() + value.len())
-        .sum()
-}
-
-/// Renders the label set Prometheus compares the way it prints one, for the duplicate-label-set
-/// error.
-fn render_labels(labels: &LabelSet) -> String {
-    let parts = labels
-        .iter()
-        .map(|(name, value)| format!("{name}={value:?}"))
-        .collect::<Vec<_>>();
-    format!("{{{}}}", parts.join(", "))
-}
-
-/// The grid positions each final label set already occupies, per field and as merged, sorted runs.
-///
-/// Shared by every partition's stream, because a label-set collision is a property of the whole
-/// output vector and not of one partition. Two series that carry the same labels after the range
-/// function and its maps drop a label land in different partitions, and the runtime's own per-node
-/// `Emitted` table never sees both: it belongs to one execution. Checking only within a partition
-/// would miss exactly those collisions.
-///
-/// The key is [`crate::grid_series::label_set`]'s normalization of the final labels rather than
-/// [`datatypes::series::MetricName`] itself: a label with an empty value is no label to
-/// Prometheus, so `{host="h", zone=""}` and `{host="h"}` are one label set and have to be compared
-/// as one. Encoding the tags as they are would file them apart and let one point hold two values.
-///
-/// Occupancy is per field and per position, not per chunk: two series whose label sets became equal
-/// while holding values in *different* fields merge cleanly in Prometheus, so only the same field
-/// at the same position collides. That is the rule
-/// [`crate::grid_series::merge_same_labelset`] applies.
-///
-/// The map belongs to the plan, not to one stream: a partition that ends leaves what it claimed
-/// for the partitions still running, so the entries are only released with the plan itself. The
-/// charge has the same lifetime, which is what makes the bytes the map holds - one entry per label
-/// set of the output, kept until the plan dies - visible to the memory pool. Charging each stream
-/// for what it inserted instead returned those bytes when that stream ended, while the entries the
-/// later partitions are checked against stayed: everything the map held after the first partition
-/// was unaccounted for.
-#[derive(Default)]
-struct LabelSets {
-    /// The grid positions each final label set already occupies, one run list per field of the
-    /// series schema. Each list is sorted, disjoint and has the runs that touch joined, which is
-    /// what lets a claim look a position up instead of walking the history.
-    seen: HashMap<LabelSet, Vec<Vec<Run>>>,
-    /// What `seen` keeps charged on the task's memory pool. `None` until the first execution,
-    /// since construction has no `TaskContext` and therefore no pool to register against.
-    reservation: Option<MemoryReservation>,
-}
-
-impl LabelSets {
-    /// Attaches the reservation to the pool of the first execution.
-    ///
-    /// Later executions keep the first reservation: it already pays for what `seen` holds, and
-    /// moving it to another pool would drop the bytes other partitions are still growing.
-    fn attach(&mut self, pool: &Arc<dyn MemoryPool>) {
-        if self.reservation.is_none() {
-            self.reservation =
-                Some(MemoryConsumer::new("FusedSeriesExec label sets").register(pool));
-        }
-    }
-
-    /// Claims the occupied grid positions of one chunk of a final series for its label set.
-    ///
-    /// A collision is an error only when both series hold a sample of *one field* at the same
-    /// evaluation timestamp, which is Prometheus' range-query rule. Series with disjoint points are
-    /// legal, and so are series that fill the same points field by field: Prometheus merges both
-    /// into one output series, while this node emits them as separate batches and defers that merge
-    /// to matrix assembly, so every sample survives.
-    fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
-        let runs = occupied_runs(series)?;
-        // A chunk holding no value occupies nothing, so there is no collision to remember and no
-        // entry to write. Such a chunk is not rare: a selection over a series that staleness or the
-        // range left empty still closes it, and hands over a closing chunk with no rows. Recording
-        // one entry per such series would grow the table - and its charge, which the plan holds for
-        // its whole life - for a query that never answers a value, until an empty result exhausted
-        // the pool. The executor's own `Emitted::occupy` takes the same early return.
-        if runs.iter().all(Vec::is_empty) {
-            return Ok(());
-        }
-        let key = label_set(&series.metric);
-        let Self { seen, reservation } = self;
-        // Nothing reaches a claim without an `execute` first, and an execution that ran attached the
-        // reservation. Claiming without one would leave the map growing uncharged, so it is refused
-        // rather than silently skipped.
-        let Some(reservation) = reservation.as_mut() else {
-            return Err(DataFusionError::Execution(
-                "FusedSeriesExec label-set state is not attached to a memory pool".to_string(),
-            ));
-        };
-        match seen.entry(key) {
-            Entry::Occupied(entry) => {
-                if let Some(field) = colliding_field(entry.get(), &runs) {
-                    return Err(DataFusionError::Execution(format!(
-                        "vector cannot contain metrics with the same labelset: {} (field \
-                         {field})",
-                        render_labels(entry.key())
-                    )));
-                }
-                let stored = entry.into_mut();
-                // An entry recorded from a chunk of fewer fields is padded, so every field of this
-                // chunk has a slot of its own: a slot is a field index of the schema, so both sides
-                // count the same field the same way. A chunk of *fewer* fields than the entry
-                // leaves the remaining slots to the chunks that fill them.
-                // Stage only the affected run lists, and reserve before committing. A forward
-                // append whose existing capacity suffices needs no copy of its stored history.
-                let mut growth = 0usize;
-                let mut shrink = 0usize;
-                let mut merged_runs = Vec::with_capacity(runs.len());
-                for (index, incoming) in runs.iter().enumerate() {
-                    let Some(old) = stored.get(index) else {
-                        let copy = incoming.clone();
-                        growth += copy.capacity();
-                        merged_runs.push(Some(copy));
-                        continue;
-                    };
-                    let append_fits = incoming.is_empty()
-                        || (old.last().is_none_or(|last| incoming[0].start >= last.end)
-                            && old.capacity()
-                                >= old.len() + incoming.len()
-                                    - usize::from(old.last().is_some_and(|last| {
-                                        incoming
-                                            .first()
-                                            .is_some_and(|first| first.start == last.end)
-                                    })));
-                    if append_fits {
-                        merged_runs.push(None);
-                    } else {
-                        let mut merged = old.clone();
-                        absorb(&mut merged, incoming);
-                        if merged.capacity() >= old.capacity() {
-                            growth += merged.capacity() - old.capacity();
-                        } else {
-                            shrink += old.capacity() - merged.capacity();
-                        }
-                        merged_runs.push(Some(merged));
-                    }
-                }
-                reservation.try_grow(growth * size_of::<Run>())?;
-                for (index, (incoming, merged)) in runs.iter().zip(merged_runs).enumerate() {
-                    if let Some(merged) = merged {
-                        if index < stored.len() {
-                            stored[index] = merged;
-                        } else {
-                            stored.push(merged);
-                        }
-                    } else if index < stored.len() {
-                        absorb(&mut stored[index], incoming);
-                    }
-                }
-                reservation.try_shrink(shrink * size_of::<Run>())?;
-            }
-            Entry::Vacant(entry) => {
-                // Only the label-set state is this node's own cross-poll state that grows with
-                // the output, so it is the only thing reserved here. The runs are charged by the
-                // capacity they were gathered with rather than by their length, so that a later
-                // claim appending into that slack is charged nothing for it.
-                let bytes = labels_bytes(entry.key())
-                    + runs.iter().map(|runs| runs.capacity()).sum::<usize>() * size_of::<Run>();
-                reservation.try_grow(bytes)?;
-                entry.insert(runs);
-            }
-        }
-        Ok(())
-    }
-}
-
-type SharedLabelSets = Arc<Mutex<LabelSets>>;
-
-/// The grid positions the rows of one chunk hold a value at, one run list per field.
-///
-/// Each [`Run`] is a half-open range of absolute grid indices, and the runs of one field are sorted
-/// and disjoint. Occupancy is kept per field because it is what a collision is: two series whose
-/// label sets became equal merge field by field in Prometheus, so only two values of the same field
-/// at one position collide. Marking the whole position as taken as soon as *any* field held a value
-/// would refuse the complementary pair that merges cleanly.
-fn occupied_runs(series: &Series) -> DataFusionResult<Vec<Vec<Run>>> {
-    // Rows are addressed on the statement's grid, so a row sits at the absolute position two
-    // series can collide on. An explicit axis has no such position, and a chunk never carries
-    // one: this is the refusal `EvaluatedChunk` already makes when the chunk is built.
-    if series.time.grid().is_none() {
-        return Err(DataFusionError::Execution(
-            "FusedSeriesExec requires evaluated series on a time grid".to_string(),
-        ));
-    }
-    let rows = series.time.len();
-    let range = series.time.as_grid_range();
-    let mut runs: Vec<Vec<Run>> = vec![Vec::new(); series.fields.len()];
-    // A field that is one dense, null-free float run holds a value on every row the chunk carries,
-    // so it occupies exactly the range the chunk reports and no row of it has to be inspected. This
-    // is the shape the fused evaluator produces for a range function over ordinary float samples.
-    // Every other field is walked below, and a field filled here is skipped there.
-    let mut walked: Vec<(usize, &Samples)> = Vec::new();
-    for (index, samples) in series.fields.iter().enumerate() {
-        match (range, samples.dense()) {
-            (Some(range), Some(DenseSamplesRef::Float(values)))
-                if rows > 0 && values.len() == rows && values.null_count() == 0 =>
-            {
-                runs[index] = vec![Run {
-                    start: range.start(),
-                    end: range.start() + rows,
-                }];
-            }
-            _ => walked.push((index, samples)),
-        }
-    }
-    if walked.is_empty() {
-        return Ok(runs);
-    }
-    // `positions` walks a chunk that forms one run and one whose rows form several the same way,
-    // in position order, so the holes between two runs are never read as rows.
-    let mut cursors: Vec<_> = walked.iter().map(|(_, samples)| samples.cursor()).collect();
-    for (position, row) in series.time.positions() {
-        for ((index, _), cursor) in walked.iter().zip(&mut cursors) {
-            if !matches!(cursor.at(row), Some(sample) if !matches!(sample, SampleRef::Missing)) {
-                continue;
-            }
-            match runs[*index].last_mut() {
-                Some(run) if run.end == position => run.end += 1,
-                _ => runs[*index].push(Run {
-                    start: position,
-                    end: position + 1,
-                }),
-            }
-        }
-    }
-    Ok(runs)
-}
-
-/// The field of `runs` that holds a value where `stored` already holds one, if any.
-///
-/// A collision is two values of one field at one position, so each field is checked on its own.
-/// Each incoming run is looked up rather than the stored history walked: the stored runs are sorted
-/// and disjoint, so the only run that can share a position with `run` is the first one that does not
-/// end before it, which is the look-up the runtime's own `Emitted::occupy` makes. Walking the
-/// history instead costs a sparse series one pass over everything it stored per chunk - a query
-/// whose chunks move forward one position at a time, a hole apart, is legal and would cost the
-/// square of its chunk count under the lock every partition shares.
-fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
-    for (field, (stored, new)) in stored.iter().zip(runs).enumerate() {
-        for run in new {
-            let at = stored.partition_point(|stored| stored.end <= run.start);
-            if stored.get(at).is_some_and(|stored| stored.overlaps(*run)) {
-                return Some(field);
-            }
-        }
-    }
-    None
-}
-
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
     /// The input frames, read as raw series chunks, or `None` once the stream ended in an error.
@@ -1392,7 +1001,7 @@ pub struct FusedSeriesStream {
     input: Option<SendableRawSeriesStream>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
-    /// The position of the tree's input node, which is where every chunk read enters.
+    /// The id of the tree's input node, which is where every chunk read enters.
     input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
@@ -1400,10 +1009,6 @@ pub struct FusedSeriesStream {
     tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
-    /// The label-set occupancy shared with the other partitions' streams.
-    ///
-    /// What it holds is charged to the plan's own reservation, attached by the first execution.
-    labels: SharedLabelSets,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
@@ -1418,8 +1023,7 @@ impl FusedSeriesStream {
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        // The chunk enters at the tree's input node by position: a position is how the runtime
-        // addresses a node, and a tree that gains a second input names them the same way.
+        // The chunk enters at the tree's first input, which is the only input this plan accepts.
         executor.push_raw(self.input_id, chunk)?;
         let mut settled = Vec::new();
         while let Some(chunk) = executor.next_chunk()? {
@@ -1472,9 +1076,6 @@ impl FusedSeriesStream {
         self.done = true;
         self.executor = None;
         self.input = None;
-        // The label-set map and its charge are the plan's, so a stream stopping early gives back
-        // nothing: the entries another partition is still checking against have to stay charged, and
-        // are released when the plan itself is dropped.
         // A batch queued before the error was settled by a run that has now stopped.
         self.ready.clear();
     }
@@ -1482,12 +1083,6 @@ impl FusedSeriesStream {
     /// Converts the chunks the executor settled into batches, in the order it produced them.
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
         for chunk in &chunks {
-            // The label set is claimed before its batch is queued, so a collision surfaces at the
-            // chunk that reached it and nothing this plan would refuse is handed out after it.
-            self.labels
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .claim(&chunk.series)?;
             let batch = series_to_record_batch(
                 &self.classification,
                 &self.tags,

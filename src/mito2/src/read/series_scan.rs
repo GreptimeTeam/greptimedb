@@ -256,10 +256,41 @@ impl SeriesScan {
             .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
+    /// Returns whether raw series come from the columnar prepared source.
+    ///
+    /// Derived only from the pinned series index version and every configured partition range, so
+    /// preflight, the ordering guarantee, the partition reader and scanner-wide preparation agree.
+    /// `false` means the stored sources are read by the ordinary scan.
+    fn uses_prepared_columnar(&self) -> Result<bool, BoxedError> {
+        if !self.uses_columnar() {
+            return Ok(false);
+        }
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)
+    }
+
+    /// Returns the raw ordering guarantee for a scan whose columnar readiness is already known.
+    fn raw_ordering(&self, prepared_columnar: bool) -> SeriesOrdering {
+        if prepared_columnar {
+            return SeriesOrdering::KeyThenTime;
+        }
+        match self.mode {
+            SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
+            SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
+        }
+    }
+
+    /// Prepares the raw scan and reports whether its data comes from the columnar prepared source.
     fn prepare_raw_scan(
         &self,
         label_source: &RawLabelSource,
-    ) -> Result<Option<RawScanPreparation>, BoxedError> {
+    ) -> Result<Option<(RawScanPreparation, bool)>, BoxedError> {
         let input = &self.stream_ctx.input;
         let metadata = input.mapper.metadata();
         match label_source {
@@ -386,25 +417,19 @@ impl SeriesScan {
             );
             return Ok(None);
         }
-        if self.uses_columnar() {
-            let ranges = self
-                .properties
-                .partitions
-                .iter()
-                .flatten()
-                .copied()
-                .collect::<Vec<_>>();
-            prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
-        }
+        // Structural eligibility errors still reject the raw path; ordinary scans cover sources
+        // without columnar artifacts, so missing coverage is not an error here.
+        let prepared_columnar = self.uses_prepared_columnar()?;
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
         });
         let typed_schema = input.mapper.input_arrow_schema(false);
         let mut predicates = Vec::new();
-        let predicate = if self.uses_columnar() {
+        let predicate = if prepared_columnar {
             input.predicate_group().predicate()
         } else {
+            // The ordinary scan applies region predicates before this residual filtering.
             input.predicate_group().predicate_without_region()
         };
         if let Some(predicate) = predicate {
@@ -452,11 +477,14 @@ impl SeriesScan {
                 predicates.push(physical);
             }
         }
-        Ok(Some(RawScanPreparation {
-            schema,
-            fields,
-            predicates,
-        }))
+        Ok(Some((
+            RawScanPreparation {
+                schema,
+                fields,
+                predicates,
+            },
+            prepared_columnar,
+        )))
     }
 
     fn supports_two_phase(input: &ScanInput) -> bool {
@@ -844,12 +872,11 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> SeriesOrdering {
-        if self.uses_columnar() {
-            return SeriesOrdering::KeyThenTime;
-        }
-        match self.mode {
-            SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
-            SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
+        // Readiness is fallible here, but every fallible entry point rejects the same structural
+        // errors before execution, so the `false` fallback below is never observed in a query.
+        match self.uses_prepared_columnar() {
+            Ok(prepared_columnar) => self.raw_ordering(prepared_columnar),
+            Err(_) => self.raw_ordering(false),
         }
     }
 
@@ -859,7 +886,7 @@ impl RegionScanner for SeriesScan {
     ) -> Result<Option<Arc<SeriesSchema>>, BoxedError> {
         Ok(self
             .prepare_raw_scan(label_source)?
-            .map(|preparation| preparation.schema))
+            .map(|(preparation, _)| preparation.schema))
     }
 
     fn scan_series_partition(
@@ -869,10 +896,10 @@ impl RegionScanner for SeriesScan {
         partition: usize,
         label_source: &RawLabelSource,
     ) -> Result<Option<SendableRawSeriesStream>, BoxedError> {
-        let Some(preparation) = self.prepare_raw_scan(label_source)? else {
+        let Some((preparation, prepared_columnar)) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
         };
-        if self.uses_columnar() {
+        if prepared_columnar {
             let partitions = self.properties.num_partitions().max(1);
             if partition >= partitions {
                 return Err(BoxedError::new(
@@ -897,10 +924,12 @@ impl RegionScanner for SeriesScan {
             return Ok(Some(raw::from_stream(
                 schema,
                 labels,
-                SeriesOrdering::KeyThenTime,
+                self.raw_ordering(prepared_columnar),
                 Box::pin(stream),
             )));
         }
+        // Stored sources without columnar artifacts (memtables, unindexed SSTs) are read by the
+        // ordinary scan, so the raw path stays available.
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -911,7 +940,7 @@ impl RegionScanner for SeriesScan {
         let batches = self
             .scan_batch_in_partition(ctx, partition, metrics.clone(), metrics_set)
             .map_err(BoxedError::new)?;
-        let ordering = self.raw_series_ordering();
+        let ordering = self.raw_ordering(prepared_columnar);
         Ok(Some(raw::make_stream(
             batches,
             preparation.schema,
@@ -957,9 +986,13 @@ impl RegionScanner for SeriesScan {
             &self.metrics_list,
         );
         Box::pin(async move {
-            let Some(preparation) = preparation? else {
+            let Some((preparation, prepared_columnar)) = preparation? else {
                 return Ok(None);
             };
+            if !prepared_columnar {
+                // Known unsupported coverage: the caller keeps the ordinary scan instead.
+                return Ok(None);
+            }
             state
                 .prepare(stream_ctx, ranges, labels, preparation, metrics)
                 .await

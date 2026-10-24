@@ -1995,11 +1995,6 @@ fn no_row_chunk(schema: &SeriesSchema, metric: MetricName) -> Result<EvaluatedCh
     EvaluatedChunk::try_new(series, true)
 }
 
-/// The root of one execution's owned runtime topology.
-struct RuntimeTree {
-    root: RuntimeNode,
-}
-
 /// A runtime operator and its directly owned children and metrics.
 struct RuntimeNode {
     metrics: Arc<NodeMetrics>,
@@ -2070,7 +2065,7 @@ struct InputSlot {
 /// nothing outside reaches into it, so a descent and the release that follows a failure are both
 /// borrows of this one owner.
 pub struct NativeExecutionState {
-    tree: RuntimeTree,
+    root: RuntimeNode,
     inputs: Vec<InputSlot>,
 }
 
@@ -2855,8 +2850,7 @@ impl NativeExecutionState {
                 "native tree has no input node".to_string(),
             ));
         }
-        let tree = RuntimeTree { root };
-        Ok(Self { tree, inputs })
+        Ok(Self { root, inputs })
     }
 
     /// Registers the metric handles of every node of this execution's tree with `set`.
@@ -2865,7 +2859,7 @@ impl NativeExecutionState {
     /// nodes' own counters and gauges, so a later read of it reports what they recorded and keeps
     /// no topology of this execution alive.
     pub(crate) fn register_metrics(&self, set: &ExecutionPlanMetricsSet, partition: usize) {
-        self.tree.root.register_metrics("root", set, partition);
+        self.root.register_metrics("root", set, partition);
     }
 
     pub fn reserved_bytes(&self) -> usize {
@@ -2873,7 +2867,7 @@ impl NativeExecutionState {
             .iter()
             .map(|slot| slot.state.buffer.reservation.size())
             .fold(0usize, usize::saturating_add)
-            .saturating_add(self.tree.root.reserved_bytes())
+            .saturating_add(self.root.reserved_bytes())
     }
 }
 
@@ -2889,7 +2883,7 @@ impl NativeExecutionState {
     /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
     /// down unchanged, because only a node that reads its whole input needs it.
     fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
-        self.tree.root.pull(&mut self.inputs, inputs_finished)
+        self.root.pull(&mut self.inputs, inputs_finished)
     }
 
     /// Refuses an input the caller never closed, and every node that ended inside a series.
@@ -2902,17 +2896,17 @@ impl NativeExecutionState {
         if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
             return Err(truncated_input(InputId::new(index)));
         }
-        self.tree.root.unclosed()
+        self.root.unclosed()
     }
 
     /// Merges what every window that collects its input has been handed, deepest first.
     fn flush_ready_merges(&mut self) -> Result<bool> {
-        self.tree.root.flush_ready_merges(&self.inputs)
+        self.root.flush_ready_merges(&self.inputs)
     }
 
     /// Whether any window still holds collected input that has not been merged.
     fn any_merge_pending(&self) -> bool {
-        self.tree.root.any_merge_pending()
+        self.root.any_merge_pending()
     }
 
     /// Closes the execution: finishes every window's evaluator and gives everything back.
@@ -2922,8 +2916,8 @@ impl NativeExecutionState {
     /// the caller reads the error either way, and holding the bytes past it would keep the query's
     /// memory in use for as long as the executor is alive.
     fn close(&mut self) -> Result<()> {
-        let finished = self.tree.root.finish_windows();
-        self.tree.root.release();
+        let finished = self.root.finish_windows();
+        self.root.release();
         // The slots are taken rather than only released: what a released slot still holds is its
         // schema and the grid that schema is addressed on, and a caller that keeps the stopped
         // executor would otherwise keep the input's schema and materialized timestamps alive past
@@ -2942,7 +2936,7 @@ impl NativeExecutionState {
     /// grid do not outlive it in an executor its caller still holds; a second call finds an empty
     /// vector and nothing left to take.
     fn release(&mut self) {
-        self.tree.root.release();
+        self.root.release();
         for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
