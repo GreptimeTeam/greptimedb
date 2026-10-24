@@ -17,7 +17,8 @@ mod units;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Instant;
 
 use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, info};
@@ -31,6 +32,7 @@ use store_api::storage::RegionId;
 use crate::compaction::CompactionOutput;
 use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::picker::history::{PickHistory, PickKey};
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
     Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
@@ -47,8 +49,8 @@ const LEVEL_COMPACTED: Level = 1;
 
 /// Scheduling priority of a window's pick. Earlier classes are scheduled first,
 /// and newer windows first within a class.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum PickClass {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum PickClass {
     /// Merges L0 files, which also absorbs late data of inactive windows.
     L0Merge,
     /// Merges files to reduce the window's file count.
@@ -66,6 +68,15 @@ struct WindowPick {
     inputs: Vec<FileHandle>,
     /// Number of sorted runs or units the strategy considered, for logs.
     found_runs: usize,
+}
+
+/// Snapshot-wide inputs shared by each independent window strategy.
+struct WindowPickContext<'a> {
+    region_id: RegionId,
+    active_window: Option<i64>,
+    time_window_size: Option<i64>,
+    region_sequence: u64,
+    mapper: &'a PrimaryKeyRangeMapper,
 }
 
 struct WindowOutputContext {
@@ -132,6 +143,8 @@ pub struct TwcsPicker {
     /// so a window that stopped receiving writes still gets its overlaps
     /// resolved.
     pub(crate) all_windows_inactive: bool,
+    /// Waiting state shared only with this loaded region, never across incarnations.
+    pub(crate) pick_history: Option<Arc<Mutex<PickHistory>>>,
 }
 
 impl TwcsPicker {
@@ -186,38 +199,82 @@ impl TwcsPicker {
                 let time_windows = time_windows.clone();
                 let primary_key_mapper = primary_key_mapper.clone();
                 handles.push(common_runtime::spawn_blocking_compact(move || {
-                    let pick = time_windows.get(&window).and_then(|files| {
-                        picker.pick_window(
-                            region_id,
-                            files,
-                            active_window,
-                            time_window_size,
-                            region_sequence,
-                            &primary_key_mapper,
-                        )
-                    });
-                    (window, pick)
+                    let mut picks = Vec::new();
+                    if let Some(files) = time_windows.get(&window) {
+                        picks.extend(
+                            picker
+                                .pick_window(
+                                    files,
+                                    &WindowPickContext {
+                                        region_id,
+                                        active_window,
+                                        time_window_size,
+                                        region_sequence,
+                                        mapper: &primary_key_mapper,
+                                    },
+                                )
+                                .into_iter()
+                                .map(|pick| (window, pick)),
+                        );
+                    }
+                    picks
                 }));
                 tokio::task::yield_now().await;
             }
             for result in futures::future::join_all(handles).await {
-                let (window, pick) = result.context(JoinSnafu)?;
-                picks.extend(pick.map(|pick| (window, pick)));
+                picks.extend(result.context(JoinSnafu)?);
             }
             // Windows are visited newest first, so older windows cannot displace
             // a full set of picks of the first class.
-            if picks
-                .iter()
-                .filter(|(_, pick)| pick.class == PickClass::L0Merge)
-                .count()
-                >= max_outputs
+            if self.pick_history.is_none()
+                && picks
+                    .iter()
+                    .filter(|(_, pick)| pick.class == PickClass::L0Merge)
+                    .count()
+                    >= max_outputs
             {
                 break;
             }
         }
 
-        // The stable sort keeps newer windows first within a class.
-        picks.sort_by_key(|(_, pick)| pick.class);
+        if let Some(history) = &self.pick_history {
+            let now = Instant::now();
+            let mut history = history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            history.observe(
+                picks.iter().map(|(window, pick)| PickKey {
+                    window: *window,
+                    class: pick.class,
+                }),
+                now,
+            );
+            picks.sort_by_key(|(window, pick)| {
+                history.priority(
+                    PickKey {
+                        window: *window,
+                        class: pick.class,
+                    },
+                    now,
+                )
+            });
+            // Alternatives in one window can share inputs or semantic dependencies.
+            // Select at most one, then use the existing cross-window closure rules.
+            let mut selected_windows = HashSet::new();
+            picks.retain(|(window, _)| selected_windows.insert(*window));
+            for (window, pick) in picks.iter().take(max_outputs) {
+                history.select(
+                    PickKey {
+                        window: *window,
+                        class: pick.class,
+                    },
+                    pick.inputs.iter().map(FileHandle::file_id).collect(),
+                );
+            }
+        } else {
+            // Manual/stateless callers retain the existing priority policy.
+            picks.sort_by_key(|(_, pick)| pick.class);
+        }
         if picks.len() > max_outputs {
             debug!(
                 "Region ({:?}) compaction output limit ({}) reached, remaining candidates discarded",
@@ -256,16 +313,16 @@ impl TwcsPicker {
         Ok(output)
     }
 
-    /// Picks the compaction inputs of one window, or `None` if it needs none.
-    fn pick_window(
-        &self,
-        region_id: RegionId,
-        window: &Window,
-        active_window: Option<i64>,
-        time_window_size: Option<i64>,
-        region_sequence: u64,
-        mapper: &PrimaryKeyRangeMapper,
-    ) -> Option<WindowPick> {
+    /// Prepares one window once. Fair discovery exposes independent alternatives;
+    /// stateless/manual discovery retains the first eligible strategy.
+    fn pick_window(&self, window: &Window, context: &WindowPickContext<'_>) -> Vec<WindowPick> {
+        let WindowPickContext {
+            region_id,
+            active_window,
+            time_window_size,
+            region_sequence,
+            mapper,
+        } = *context;
         let mut files: Vec<_> = window.files().cloned().collect();
         let quiet = is_quiet_window(&files, region_sequence);
 
@@ -294,28 +351,34 @@ impl TwcsPicker {
         } else if window.files.len() < self.inactive_window_trigger_file_num
             && l1_files.len() < self.inactive_window_l1_merge_trigger
         {
-            None
+            Vec::new()
         } else {
             let settling = !self.all_windows_inactive
                 && is_settling_window(window.time_window, active_window, time_window_size);
             let num_l1_files = l1_files.len();
-            self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet)
-                .or_else(|| {
-                    if self.merge_mode == MergeMode::LastNonNull
-                        || num_l1_files < self.inactive_window_l1_merge_trigger
-                    {
-                        return None;
-                    }
-                    // Include even append-mode files excluded from normal picks:
-                    // a small-file merge must not add conflicts with large peers.
-                    let pick = units::pick_small_l1(&window.files, mapper, self.pick_limits())?;
-                    Some(WindowPick {
-                        class: PickClass::FileReduction,
-                        branch: "inactive:pick_small_l1",
-                        inputs: pick.inputs,
-                        found_runs: pick.units,
-                    })
-                })
+            let mut picks = self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet);
+            let needs_reduction = if self.pick_history.is_some() {
+                !picks
+                    .iter()
+                    .any(|pick| pick.class == PickClass::FileReduction)
+            } else {
+                picks.is_empty()
+            };
+            if needs_reduction
+                && self.merge_mode != MergeMode::LastNonNull
+                && num_l1_files >= self.inactive_window_l1_merge_trigger
+                // Include even append-mode files excluded from normal picks:
+                // a small-file merge must not add conflicts with large peers.
+                && let Some(pick) = units::pick_small_l1(&window.files, mapper, self.pick_limits())
+            {
+                picks.push(WindowPick {
+                    class: PickClass::FileReduction,
+                    branch: "inactive:pick_small_l1",
+                    inputs: pick.inputs,
+                    found_runs: pick.units,
+                });
+            }
+            picks
         }
     }
 
@@ -326,6 +389,9 @@ impl TwcsPicker {
     /// 2. Otherwise, merge L1 files once they reach the L1 safety trigger. L1
     ///    files are merged separately from L0 files to avoid chained rewrites.
     ///
+    /// Fair discovery considers both strategies; stateless/manual discovery
+    /// stops at the first eligible one.
+    ///
     /// Overlaps are left for the window to resolve once it becomes inactive:
     /// resolving them while data keeps arriving rewrites the window repeatedly,
     /// and leaves a dominant run that blocks the inactive-window merge.
@@ -334,7 +400,8 @@ impl TwcsPicker {
         l0_files: Vec<FileHandle>,
         l1_files: Vec<FileHandle>,
         mapper: &PrimaryKeyRangeMapper,
-    ) -> Option<WindowPick> {
+    ) -> Vec<WindowPick> {
+        let mut picks = Vec::new();
         if l0_files.len() >= self.trigger_file_num {
             let (inputs, found_runs) = pick_candidate_files(
                 l0_files,
@@ -343,24 +410,29 @@ impl TwcsPicker {
                 mapper,
             );
             if !inputs.is_empty() {
-                return Some(WindowPick {
+                picks.push(WindowPick {
                     class: PickClass::L0Merge,
                     branch: "active:pick_count_first",
                     inputs,
                     found_runs,
                 });
+                if self.pick_history.is_none() {
+                    return picks;
+                }
             }
         }
-        if l1_files.len() < self.active_window_l1_merge_trigger {
-            return None;
+        // Fair discovery must expose L1 even when L0 has an eligible merge.
+        if l1_files.len() >= self.active_window_l1_merge_trigger
+            && let Some(pick) = units::pick_active_l1(&l1_files, mapper, self.pick_limits())
+        {
+            picks.push(WindowPick {
+                class: PickClass::FileReduction,
+                branch: "active:pick_l1_file_reduction",
+                inputs: pick.inputs,
+                found_runs: pick.units,
+            });
         }
-        let pick = units::pick_active_l1(&l1_files, mapper, self.pick_limits())?;
-        Some(WindowPick {
-            class: PickClass::FileReduction,
-            branch: "active:pick_l1_file_reduction",
-            inputs: pick.inputs,
-            found_runs: pick.units,
-        })
+        picks
     }
 
     /// An inactive window should converge at a bounded rewrite cost:
@@ -369,6 +441,9 @@ impl TwcsPicker {
     /// 2. Otherwise, merge a closed group of files that resolves overlaps or
     ///    removes files, see [`units::pick_closed_merge`]. Pure file reduction
     ///    waits for the L1 trigger; overlap resolution does not.
+    ///
+    /// Fair discovery keeps the L0 candidate and both closed-merge classes as
+    /// alternatives; stateless/manual discovery retains the fallback order.
     ///
     /// A `settling` window is the one right before the active window. Late data
     /// still lands there, and any rewrite of its overlapping files would be
@@ -393,8 +468,9 @@ impl TwcsPicker {
         mapper: &PrimaryKeyRangeMapper,
         settling: bool,
         quiet: bool,
-    ) -> Option<WindowPick> {
+    ) -> Vec<WindowPick> {
         let num_l1_files = l1_files.len();
+        let mut picks = Vec::new();
         if !l0_files.is_empty()
             && let Some((inputs, found_runs, branch)) = pick_inactive_l0(
                 l0_files.clone(),
@@ -403,39 +479,47 @@ impl TwcsPicker {
                 mapper,
             )
         {
-            return Some(WindowPick {
+            picks.push(WindowPick {
                 class: PickClass::L0Merge,
                 branch,
                 inputs,
                 found_runs,
             });
+            if self.pick_history.is_none() {
+                return picks;
+            }
         }
 
-        let mut files = l1_files;
-        files.extend(l0_files);
-        let pick = units::pick_closed_merge(
-            &files,
-            mapper,
-            ClosedMergeOptions {
-                limits: self.closed_merge_limits(),
-                allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
-                allow_conflicts: !settling,
-                allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
-            },
-        )?;
-        let (class, branch) = if pick.dense_fallback {
-            (PickClass::FileReduction, "inactive:dense_file_reduction")
-        } else if pick.reduces_files {
-            (PickClass::FileReduction, "inactive:pick_l1_file_reduction")
-        } else {
-            (PickClass::OverlapResolution, "inactive:pick_l1_overlap")
+        let options = ClosedMergeOptions {
+            limits: self.closed_merge_limits(),
+            allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
+            allow_conflicts: !settling,
+            allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
         };
-        Some(WindowPick {
-            class,
-            branch,
-            inputs: pick.inputs,
-            found_runs: pick.units,
-        })
+        let candidates = if self.pick_history.is_some() {
+            units::pick_closed_merge_by_class(&l1_files, mapper, options)
+        } else {
+            // Retain the legacy mixed closed merge for stateless/manual callers.
+            let mut files = l1_files;
+            files.extend(l0_files);
+            [units::pick_closed_merge(&files, mapper, options), None]
+        };
+        for pick in candidates.into_iter().flatten() {
+            let (class, branch) = if pick.dense_fallback {
+                (PickClass::FileReduction, "inactive:dense_file_reduction")
+            } else if pick.reduces_files {
+                (PickClass::FileReduction, "inactive:pick_l1_file_reduction")
+            } else {
+                (PickClass::OverlapResolution, "inactive:pick_l1_overlap")
+            };
+            picks.push(WindowPick {
+                class,
+                branch,
+                inputs: pick.inputs,
+                found_runs: pick.units,
+            });
+        }
+        picks
     }
 
     fn pick_limits(&self) -> PickLimits {
@@ -1431,6 +1515,7 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
+                pick_history: None,
             };
 
             let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1456,6 +1541,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
         let compaction_region = compaction_region_with_expired_sst().await;
 
@@ -1514,6 +1600,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker.pick(&compaction_region).await.unwrap().unwrap();
@@ -1578,6 +1665,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         assert!(picker.pick(&compaction_region).await.unwrap().is_none());
@@ -2148,6 +2236,7 @@ mod tests {
                 max_background_tasks: None,
                 time_range: None,
                 all_windows_inactive: false,
+                pick_history: None,
             }
             .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
             .await
@@ -2301,6 +2390,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         }
         .build_output_with_time_range(RegionId::from_u64(0), windows, active_window, None)
         .await
@@ -2374,6 +2464,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2424,6 +2515,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2460,6 +2552,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -2507,6 +2600,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2536,6 +2630,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let windows_no_limit = assign_to_windows(files.iter(), 3);
@@ -2585,6 +2680,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2639,6 +2735,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2688,6 +2785,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3);
@@ -2739,6 +2837,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -2790,6 +2889,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let active_window = find_latest_window_in_seconds(files.iter(), 3600);
@@ -2826,6 +2926,7 @@ mod tests {
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -2928,6 +3029,7 @@ mod tests {
                 Timestamp::new_millisecond(7_800),
             ),
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -2965,6 +3067,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -2995,6 +3098,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3026,6 +3130,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3057,6 +3162,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3087,6 +3193,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3132,6 +3239,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3142,6 +3250,155 @@ mod tests {
         assert_eq!(1, output.len());
         assert_eq!(DEFAULT_MAX_INPUT_FILES, output[0].inputs.len());
         assert!(!output[0].filter_deleted);
+    }
+
+    #[rstest::rstest]
+    #[case::historical_l1(0, PickClass::FileReduction, 1)]
+    #[case::same_window_l1(10, PickClass::FileReduction, 1)]
+    #[case::older_l0(0, PickClass::L0Merge, 0)]
+    #[case::historical_overlap(0, PickClass::OverlapResolution, 1)]
+    #[tokio::test]
+    async fn test_fair_picker_promotes_waiting_work_with_one_slot(
+        #[case] waiting_window: i64,
+        #[case] class: PickClass,
+        #[case] level: Level,
+    ) {
+        let overlap = class == PickClass::OverlapResolution;
+        let files = priority_test_files(10, 0, 40, false)
+            .into_iter()
+            .chain(priority_test_files(
+                waiting_window,
+                level,
+                if overlap { 100 } else { 40 },
+                overlap,
+            ))
+            .collect::<Vec<_>>();
+        let history = Arc::new(Mutex::new(PickHistory::default()));
+        let mut picker = priority_test_picker(1);
+        picker.pick_history = Some(history.clone());
+        let first = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, first.len());
+        assert!(first[0].inputs.iter().all(|f| f.level() == 0));
+        assert_eq!(10, output_window(&first[0]));
+
+        // Advance the waiting candidate's age without sleeping. Discovery must
+        // preserve it even while the hot window keeps supplying eligible L0.
+        let key = PickKey {
+            window: waiting_window,
+            class,
+        };
+        *history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = PickHistory::default();
+        history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observe([key].into_iter(), Instant::now() - Duration::from_secs(120));
+        let output = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, output.len());
+        assert_eq!(waiting_window, output_window(&output[0]));
+        assert!(output[0].inputs.iter().all(|f| f.level() == level));
+        let expected: HashSet<_> = files
+            .iter()
+            .filter(|f| f.level() == level && f.time_range().1.value() / 1000 == waiting_window)
+            .map(FileHandle::file_id)
+            .collect();
+        assert_eq!(
+            expected,
+            output[0].inputs.iter().map(FileHandle::file_id).collect()
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::active(0, MergeMode::LastRow, "active:pick_l1_file_reduction")]
+    #[case::inactive(10, MergeMode::LastRow, "inactive:pick_l1_file_reduction")]
+    #[case::settling_fallback(1, MergeMode::LastRow, "inactive:pick_small_l1")]
+    #[case::settling_last_non_null(1, MergeMode::LastNonNull, "")]
+    fn test_window_discovery_keeps_l1_alongside_l0(
+        #[case] active_window: i64,
+        #[case] merge_mode: MergeMode,
+        #[case] l1_branch: &str,
+    ) {
+        let files = priority_test_files(0, 0, 40, false)
+            .into_iter()
+            .chain(priority_test_files(0, 1, 20, true))
+            .collect::<Vec<_>>();
+        let windows = assign_to_windows(files.iter(), 1);
+        let mapper = primary_key_mapper_for_test();
+        let context = WindowPickContext {
+            region_id: RegionId::from_u64(1),
+            active_window: Some(active_window),
+            time_window_size: Some(1),
+            region_sequence: 100,
+            mapper: &mapper,
+        };
+        let mut picker = priority_test_picker(4);
+        picker.merge_mode = merge_mode;
+        let legacy = picker.pick_window(&windows[&0], &context);
+        assert_eq!(1, legacy.len());
+        assert_eq!(PickClass::L0Merge, legacy[0].class);
+
+        picker.pick_history = Some(Arc::new(Mutex::new(PickHistory::default())));
+        let picks = picker.pick_window(&windows[&0], &context);
+        assert_eq!(if l1_branch.is_empty() { 1 } else { 2 }, picks.len());
+        assert_eq!(PickClass::L0Merge, picks[0].class);
+        if !l1_branch.is_empty() {
+            assert_eq!(PickClass::FileReduction, picks[1].class);
+            assert_eq!(l1_branch, picks[1].branch);
+            assert_eq!(
+                files
+                    .iter()
+                    .filter(|file| file.level() == 1)
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>(),
+                picks[1]
+                    .inputs
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_fair_picker_does_not_schedule_same_window_alternatives_together() {
+        let files = priority_test_files(0, 0, 40, false)
+            .into_iter()
+            .chain(priority_test_files(0, 1, 40, false))
+            .collect::<Vec<_>>();
+        let mut picker = priority_test_picker(4);
+        picker.pick_history = Some(Arc::new(Mutex::new(PickHistory::default())));
+        let output = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(0),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, output.len());
+        assert!(output[0].inputs.iter().all(|f| f.level() == 0));
+        assert!(
+            !output[0].filter_deleted,
+            "unselected overlapping L1 must retain tombstones"
+        );
     }
 
     fn new_file(start: i64, end: i64, sequence: u64, file_size: u64) -> FileHandle {
@@ -3316,6 +3573,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         for (case, files, expected_level, expected_len) in [
@@ -3369,6 +3627,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3408,6 +3667,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3460,6 +3720,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3509,6 +3770,7 @@ mod tests {
             max_background_tasks: Some(max_background_tasks),
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         }
     }
 
@@ -3827,6 +4089,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3860,6 +4123,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3893,6 +4157,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -3926,6 +4191,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
@@ -4067,6 +4333,7 @@ mod tests {
             max_background_tasks: Some(1),
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         for (case, key_range, extra_size, overlapping_a, expected_inputs) in [
@@ -4319,6 +4586,7 @@ mod tests {
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: false,
+                pick_history: None,
             };
 
             for active_window in [Some(0), None] {
@@ -4414,6 +4682,7 @@ mod tests {
                 max_background_tasks: Some(1),
                 time_range: None,
                 all_windows_inactive: manual,
+                pick_history: None,
             };
             let mut files = window_files;
             files.push(l1_file(
@@ -4560,6 +4829,7 @@ mod tests {
             max_background_tasks: None,
             time_range: None,
             all_windows_inactive: false,
+            pick_history: None,
         };
 
         let output = picker
