@@ -34,7 +34,7 @@ snapshot isolation). It implements the `RegionEngine` trait from `store-api`.
 | `schedule` | `src/mito2/src/schedule/` | Local/remote background job scheduling |
 | `remap_manifest` | `src/mito2/src/remap_manifest.rs` | Manifest path remapping for region copy/migration |
 | `config` | `src/mito2/src/config.rs` | `MitoConfig` tuning knobs |
-| `temp_file_sweeper` | `src/mito2/src/temp_file_sweeper.rs` | Reclaims temporary files a crashed writer left in a region, triggered when the region becomes a writable leader (under the `hdfs-object-store` feature) |
+| `temp_file_sweeper` | `src/mito2/src/temp_file_sweeper.rs` | Reclaims temporary files a crashed writer left in a region, triggered when the region becomes a writable leader or a create opens an existing region (under the `hdfs-object-store` feature) |
 | `test_util` | `src/mito2/src/test_util.rs` | `TestEnv` and builders (under the `test` feature) |
 
 ## Write path
