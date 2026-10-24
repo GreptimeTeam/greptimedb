@@ -83,10 +83,15 @@ fn grid_of(len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(0, GRID_STEP, len).unwrap()).unwrap())
 }
 
+/// The raw fields the tree's input binds, which a scan below it has to be able to produce.
+fn raw_fields() -> Arc<[FieldSpec]> {
+    Arc::from([FieldSpec { name: FIELD.into() }])
+}
+
 /// The raw samples a scan hands over: one field, no grid.
 fn raw() -> NativeNode {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::from([FieldSpec { name: FIELD.into() }]),
+        fields: raw_fields(),
         eval_grid: None,
     }));
     NativeNode {
@@ -221,11 +226,23 @@ fn binding_of(tags: &[&str], len: u64) -> FusedSeriesBinding {
     }
 }
 
-/// The plan below the producer. The merge only records it, so its columns are the caller's business.
+/// The plan below the producer: a scan producing the raw fields the tree's input binds.
+///
+/// The producer checks that its child can produce every field its tree input declares, so the scan
+/// names them as nullable float columns; the merge itself reads none of them.
 fn scan() -> LogicalPlan {
+    let columns = raw_fields()
+        .iter()
+        .map(|field| {
+            (
+                None,
+                Arc::new(Field::new(field.name.as_ref(), DataType::Float64, true)),
+            )
+        })
+        .collect::<Vec<_>>();
     LogicalPlan::EmptyRelation(EmptyRelation {
         produce_one_row: false,
-        schema: Arc::new(DFSchema::empty()),
+        schema: Arc::new(DFSchema::new_with_metadata(columns, Default::default()).unwrap()),
     })
 }
 
