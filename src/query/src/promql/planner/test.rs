@@ -38,7 +38,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
+use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
@@ -1908,7 +1908,7 @@ fn find_metric_physical_scan(plan: &LogicalPlan) -> Option<datafusion::logical_e
         LogicalPlan::Extension(Extension { node }) => node
             .as_any()
             .downcast_ref::<FusedSeries>()
-            .and_then(|fused| match fused.inputs().first() {
+            .and_then(|fused| match fused.children().first() {
                 Some(LogicalPlan::TableScan(scan)) => Some(scan.clone()),
                 _ => None,
             }),
@@ -1929,29 +1929,60 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     plan.inputs().into_iter().find_map(find_fused_series)
 }
 
-/// Two occurrences of one selector over one scan plan as one input carrying both occurrences.
+/// Two occurrences of one selector over one scan plan as one child both occurrences read.
 #[tokio::test]
 async fn native_fused_binary_collapses_two_occurrences_onto_one_scan() {
     let plan = build_native_fused_plan("some_metric + some_metric", true).await;
     let fused = find_fused_series(&plan).expect("binary query uses native route");
-    assert_eq!(1, fused.fused_inputs().len());
-    let input = &fused.fused_inputs()[0];
+    assert_eq!(1, fused.children().len());
     assert!(
-        matches!(input.input, LogicalPlan::TableScan(_)),
-        "the input should be the selector's own scan: {:?}",
-        input.input
+        matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+        "the child should be the selector's own scan: {:?}",
+        fused.children()[0]
     );
-    // Both occurrences are recorded on the one source, because the tree reads two inputs and both
-    // of them read these rows.
-    let paths = input
-        .paths
-        .iter()
-        .map(|path| path.as_str().to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(2, paths.len(), "{paths:?}");
-    assert_ne!(paths[0], paths[1], "{paths:?}");
-    assert!(paths[0].starts_with("root.left"), "{paths:?}");
-    assert!(paths[1].starts_with("root.right"), "{paths:?}");
+    // Both occurrences name the one child, because the tree reads two inputs and both of them read
+    // these rows.
+    let inputs = tree_inputs(fused);
+    assert_eq!(
+        inputs,
+        vec![
+            ("root.left.input".to_string(), 0),
+            ("root.right.input".to_string(), 0)
+        ],
+        "the occurrences were not rebound to the one child"
+    );
+    // The columns a series is reported under are the node's: one binding names them for both
+    // occurrences, rather than each occurrence carrying its own copy.
+    let binding = fused.binding();
+    assert_eq!(binding.metric_name.as_deref(), Some("some_metric"));
+    assert_eq!(binding.time_index, "timestamp");
+    assert_eq!(binding.tags, vec!["tag_0".to_string()]);
+}
+
+/// Two occurrences that read one table over different bounds read different rows, so they are two
+/// actual sources and keep the existing plan.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_different_bounds() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        // One side reads a window ten seconds earlier than the other.
+        "some_metric{host!=\"\"} + some_metric{host!=\"\"} offset 10s",
+        // One side folds the same window around a fixed anchor, the other around every grid point.
+        "rate(some_metric{host!=\"\"}[5m]) + rate(some_metric{host!=\"\"}[5m] @ 300)",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// The raw input nodes of `fused`'s tree, as their structural path and the child each reads.
+fn tree_inputs(fused: &FusedSeries) -> Vec<(String, usize)> {
+    let mut inputs = Vec::new();
+    promql::native::metrics::walk(fused.tree().root(), &mut |node, path| {
+        if let NativeExpr::Input(bound) = &node.expr {
+            inputs.push((path.as_str().to_string(), bound.source_index));
+        }
+    });
+    inputs
 }
 
 /// Two occurrences whose matchers differ read different rows, so they keep the existing plan.
@@ -1990,28 +2021,28 @@ async fn build_identity_fused_plan(
     build_native_fused_plan_with_provider(query, native_fused, table_provider).await
 }
 
-/// The paths an admitted two-occurrence statement records on its one input.
+/// The input nodes an admitted two-occurrence statement binds, as their paths.
+///
+/// Both occurrences read the one child the statement was collapsed onto, so both are numbered after
+/// it: a plan that left the two occurrences on two children would hand each side of the match half
+/// the partitions, which is the shape this route declines.
 fn admitted_two_occurrence_paths(plan: &LogicalPlan) -> Vec<String> {
     let fused = find_fused_series(plan).expect("the statement should plan to one native node");
     assert_eq!(
         1,
-        fused.fused_inputs().len(),
-        "two occurrences over one scan are one input"
+        fused.children().len(),
+        "two occurrences over one scan are one child"
     );
-    let input = &fused.fused_inputs()[0];
     assert!(
-        matches!(input.input, LogicalPlan::TableScan(_)),
-        "the input should be the selector's own scan: {:?}",
-        input.input
+        matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+        "the child should be the selector's own scan: {:?}",
+        fused.children()[0]
     );
-    let paths = input
-        .paths
-        .iter()
-        .map(|path| path.as_str().to_string())
-        .collect::<Vec<_>>();
-    assert_eq!(2, paths.len(), "{paths:?}");
-    assert_ne!(paths[0], paths[1], "{paths:?}");
-    paths
+    let inputs = tree_inputs(fused);
+    assert_eq!(2, inputs.len(), "{inputs:?}");
+    assert_ne!(inputs[0].0, inputs[1].0, "{inputs:?}");
+    assert_eq!((0, 0), (inputs[0].1, inputs[1].1), "{inputs:?}");
+    inputs.into_iter().map(|(path, _)| path).collect()
 }
 
 /// Asserts `query` plans exactly as it does with the native route off.
@@ -2154,8 +2185,8 @@ async fn native_fused_two_occurrences_decline_metadata_key() {
     }
 }
 
-/// A statement that names its selector once reads one scan, so it records one path however many
-/// positional operands its tree has.
+/// A statement that names its selector once reads one scan, so it binds one child and one input,
+/// however many positional operands its tree has.
 #[tokio::test]
 async fn native_fused_one_occurrence_records_one_path() {
     for query in [
@@ -2170,14 +2201,15 @@ async fn native_fused_one_occurrence_records_one_path() {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan)
             .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent()));
-        assert_eq!(1, fused.fused_inputs().len(), "{query}");
-        let input = &fused.fused_inputs()[0];
+        assert_eq!(1, fused.children().len(), "{query}");
         assert!(
-            matches!(input.input, LogicalPlan::TableScan(_)),
+            matches!(fused.children()[0], LogicalPlan::TableScan(_)),
             "{query}: {:?}",
-            input.input
+            fused.children()[0]
         );
-        assert_eq!(1, input.paths.len(), "{query}: {:?}", input.paths);
+        let inputs = tree_inputs(fused);
+        assert_eq!(1, inputs.len(), "{query}: {inputs:?}");
+        assert_eq!(0, inputs[0].1, "{query}: {inputs:?}");
     }
 }
 

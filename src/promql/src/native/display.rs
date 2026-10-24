@@ -29,8 +29,8 @@ use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::metrics::{self, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundInput, BoundVectorOp, BoundWindow, Grouping, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
 use crate::select::SortOrder;
@@ -84,14 +84,11 @@ fn ordering(ordering: SeriesOrdering) -> &'static str {
 /// The operation a node computes, in the words of the query that produced it.
 fn describe(node: &NativeNode) -> String {
     match &node.expr {
-        NativeExpr::Input(input) => match &input.output {
-            NativeType::Samples(schema) if schema.eval_grid.is_some() => {
-                format!("evaluated samples{}", ordering(input.ordering))
-            }
-            NativeType::Samples(_) => format!("raw samples{}", ordering(input.ordering)),
-            NativeType::Scalar(grid) => format!("scalar on grid {}", grid_name(grid)),
-            NativeType::AggregateState(_) => "aggregate state".to_string(),
-        },
+        // The source index is part of the input: inputs over different sources are different
+        // inputs even when they hand over the same layout and ordering.
+        NativeExpr::Input(input) => {
+            format!("source={} {}", input.source_index, input_value(input))
+        }
         NativeExpr::Scalar(scalar) => scalar.value.to_string(),
         NativeExpr::Instant { op, .. } => format!(
             "lookback {}ms offset {} on grid {}",
@@ -162,6 +159,18 @@ fn describe(node: &NativeNode) -> String {
             },
             fill(matching.fill)
         ),
+    }
+}
+
+/// What an input hands over: its samples or state, with the ordering it guarantees.
+fn input_value(input: &BoundInput) -> String {
+    match &input.output {
+        NativeType::Samples(schema) if schema.eval_grid.is_some() => {
+            format!("evaluated samples{}", ordering(input.ordering))
+        }
+        NativeType::Samples(_) => format!("raw samples{}", ordering(input.ordering)),
+        NativeType::Scalar(grid) => format!("scalar on grid {}", grid_name(grid)),
+        NativeType::AggregateState(_) => "aggregate state".to_string(),
     }
 }
 

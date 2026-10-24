@@ -61,6 +61,7 @@ fn input() -> NativeNode {
     let output = raw();
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -74,6 +75,7 @@ fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
     let output = evaluated(Arc::new([]), grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
@@ -89,6 +91,7 @@ fn input_with_fields(count: usize) -> NativeNode {
     }));
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -101,6 +104,7 @@ fn interleaved_input() -> NativeNode {
     let output = raw();
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::Interleaved,
         }),
@@ -1182,6 +1186,7 @@ fn a_scalar_node_must_produce_a_scalar() {
 fn an_input_must_report_the_binding_it_was_bound_to() {
     let node = NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: raw(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -1197,6 +1202,7 @@ fn an_input_can_bind_aggregate_state() {
     let state = partial_aggregate(window_over(input(), None));
     let bound = NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: state.output.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
@@ -1210,6 +1216,7 @@ fn an_input_can_bind_aggregate_state() {
     // A fresh state allocation is a different binding, so it cannot be reported as the bound one.
     let other = NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: state.output.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),

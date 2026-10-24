@@ -107,9 +107,17 @@ fn input() -> NativeNode {
 
 /// The same raw source, declaring `ordering`.
 fn raw_input_with_ordering(ordering: SeriesOrdering) -> NativeNode {
+    raw_input_from(0, ordering)
+}
+
+/// A raw source bound to input source `source_index`, declaring `ordering`.
+///
+/// Two nodes built from one index read the same source: a chunk queued for it reaches both.
+fn raw_input_from(source_index: usize, ordering: SeriesOrdering) -> NativeNode {
     let output = NativeType::Samples(raw_schema());
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index,
             output: output.clone(),
             ordering,
         }),
@@ -122,6 +130,7 @@ fn raw_input_of(count: usize) -> NativeNode {
     let output = NativeType::Samples(raw_schema_of(field_count(count)));
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -139,6 +148,7 @@ fn evaluated_input_with_ordering(grid: Arc<EvalGrid>, ordering: SeriesOrdering) 
     let output = evaluated(grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering,
         }),
@@ -4207,6 +4217,7 @@ fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
     }));
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -5867,6 +5878,341 @@ fn a_queued_chunk_names_its_input() {
         "{error}"
     );
     assert_eq!(left, NodePath::root().left());
+}
+
+// ---------------------------------------------------------------------------
+// Source routing: one input source, one or more inputs reading it.
+// ---------------------------------------------------------------------------
+
+/// One queued chunk of a shared source reaches every input bound to it.
+///
+/// Both inputs read source 0, and the subtraction is not commutative: the right selection reads one
+/// step earlier, so a chunk that reached one input only would not produce this answer.
+#[test]
+fn a_raw_source_feeds_every_input_bound_to_it() {
+    let out = grid(0, 60_000, 3);
+    let shared = |source_index: usize| raw_input_from(source_index, SeriesOrdering::KeyThenTime);
+    let tree = NativeTree::try_new(binary_of(
+        instant(shared(0), 1, 0, Arc::clone(&out)),
+        instant(shared(0), 60_000, 60_000, Arc::clone(&out)),
+        binary_matching(BinaryOp::Sub),
+    ))
+    .unwrap();
+
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw_source(
+            0,
+            raw_chunk(
+                &raw_schema(),
+                &[0, 60_000, 120_000],
+                &[1.0, 10.0, 100.0],
+                true,
+            ),
+        )
+        .unwrap();
+
+    // p0 has no earlier sample for the right side, so the subtraction decides p1 and p2 only.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(1, Some(9.0)), (2, Some(90.0))]
+    );
+    // Both nodes were handed the same chunk, and each copy was released with its node.
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// Inputs bound to different sources are fed separately: a chunk reaches only the inputs bound to
+/// the index it was queued at.
+#[test]
+fn a_raw_source_reaches_only_the_inputs_bound_to_it() {
+    let out = grid(0, 60_000, 2);
+    let source = |source_index: usize| raw_input_from(source_index, SeriesOrdering::KeyThenTime);
+    let tree = NativeTree::try_new(binary_of(
+        instant(source(0), 1, 0, Arc::clone(&out)),
+        instant(source(1), 1, 0, Arc::clone(&out)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+
+    let schema = raw_schema();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_raw_source(
+            0,
+            raw_chunk_of(
+                &schema,
+                b"series-a",
+                metric(),
+                &[0, 60_000],
+                &[1.0, 2.0],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_raw_source(
+            1,
+            raw_chunk_of(
+                &schema,
+                b"series-b",
+                metric(),
+                &[0, 60_000],
+                &[10.0, 20.0],
+                true,
+            ),
+        )
+        .unwrap();
+
+    // The two sources hold one series each, and the add pairs them.
+    assert_eq!(
+        decided(&run(&mut execution)),
+        vec![(0, Some(11.0)), (1, Some(22.0))]
+    );
+}
+
+/// A chunk queued for a source no input is bound to is refused, and the execution stops holding
+/// anything, like any other refused chunk.
+#[test]
+fn a_chunk_for_an_unknown_source_stops_the_execution() {
+    let tree = NativeTree::try_new(instant(input(), 300_000, 0, grid(0, 60_000, 2))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let schema = raw_schema();
+
+    // The tree's one input is bound to source 0, so the queued chunk is held for it.
+    execution
+        .push_raw_source(0, raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap();
+    assert!(pool.reserved() > 0, "the queued chunk reserved nothing");
+
+    // Source 7 is read by no input of this tree: the chunk has nowhere to go, and reporting that
+    // must not leave the chunk already queued charged to the pool.
+    let error = execution
+        .push_raw_source(7, raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("no input bound to source 7"),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the stopped execution kept its queue");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    // The execution stopped rather than waiting for another chunk, so even a source it knows is
+    // refused from here on.
+    let again = execution
+        .push_raw_source(0, raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// A shared source whose second copy the pool refuses stops the execution and gives the first back.
+///
+/// Both inputs here read source 0, so one queued chunk is held by two queues: a budget of one copy
+/// admits the first queue and refuses the second, which leaves a copy already queued when the
+/// handover fails. Nothing of it may be handed out, and its bytes must go back while the executor
+/// is alive.
+#[test]
+fn a_refused_copy_of_a_shared_source_stops_the_execution() {
+    let out = grid(0, 60_000, 1);
+    let shared = || raw_input_from(0, SeriesOrdering::KeyThenTime);
+    let tree = NativeTree::try_new(binary_of(
+        instant(shared(), 1, 0, Arc::clone(&out)),
+        instant(shared(), 1, 0, Arc::clone(&out)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let chunk = raw_chunk(&schema, &[0], &[1.0], true);
+
+    // What one input charges for the chunk, which is the figure its queue grows by. The unbounded
+    // pool holds exactly one copy per input and nothing before them, so that figure is the budget
+    // that admits the first copy and refuses the second.
+    let one = raw_bytes(&chunk);
+    let reference = pool();
+    let mut measured = executor(
+        &tree,
+        Arc::clone(&reference),
+        &ExecutionPlanMetricsSet::new(),
+    );
+    assert_eq!(
+        measured.state().reserved_bytes(),
+        0,
+        "the tree holds bytes before its input"
+    );
+    measured.push_raw_source(0, chunk.clone()).unwrap();
+    assert_eq!(
+        reference.reserved(),
+        2 * one,
+        "one handover is not held once per input"
+    );
+
+    let pool = bounded_pool(one);
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    let error = execution.push_raw_source(0, chunk).unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    // The copy queued first is the left input's and the refused one the right's, so the handover
+    // reached one input and no further.
+    assert!(
+        error
+            .to_string()
+            .contains(NodePath::root().right().input().as_str()),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0, "the stopped execution kept the copy");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    // The half-fed tree hands nothing out, and another chunk of the same source is refused.
+    let pulled = execution.next_chunk().unwrap_err();
+    assert!(
+        pulled
+            .to_string()
+            .contains("stopped after an earlier error"),
+        "{pulled}"
+    );
+    let again = execution
+        .push_raw_source(0, raw_chunk(&schema, &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+/// Two layouts on one source index are refused before either input is handed a copy.
+///
+/// One queued chunk is the same columns for every input it reaches, so `[a, b]` and `[b, a]` --
+/// equal in width, different in order -- cannot share a handover. Nothing is queued, so neither
+/// input reports a batch nor reserves a byte, and the execution does not continue.
+#[test]
+fn a_shared_source_of_two_layouts_is_refused_before_any_copy() {
+    let out = grid(0, 60_000, 1);
+    let layout = |names: [&str; 2]| {
+        let fields: Arc<[FieldSpec]> = names
+            .iter()
+            .map(|name| FieldSpec {
+                name: (*name).into(),
+            })
+            .collect();
+        let schema = raw_schema_of(fields);
+        let output = NativeType::Samples(Arc::clone(&schema));
+        let node = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                source_index: 0,
+                output: output.clone(),
+                ordering: SeriesOrdering::KeyThenTime,
+            }),
+            output,
+        };
+        (schema, node)
+    };
+    let (schema, left) = layout(["a", "b"]);
+    let (_, right) = layout(["b", "a"]);
+    let tree = NativeTree::try_new(binary_of(
+        instant(left, 1, 0, Arc::clone(&out)),
+        instant(right, 1, 0, Arc::clone(&out)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let set = ExecutionPlanMetricsSet::new();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+    let error = execution
+        .push_raw_source(0, raw_chunk_repeated(&schema, &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::Execution(_)),
+        "a layout mismatch was answered by the pool: {error}"
+    );
+    assert!(
+        error.to_string().contains("source 0 feeds two layouts"),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(NodePath::root().right().input().as_str()),
+        "the refusal does not name the conflicting input: {error}"
+    );
+
+    // The check ran before the first copy, so neither input took the chunk.
+    for path in [
+        NodePath::root().left().input(),
+        NodePath::root().right().input(),
+    ] {
+        assert_eq!(count(&set, &path, NodeMetric::INPUT_BATCHES), 0, "{path}");
+    }
+    assert_eq!(pool.reserved(), 0, "a refused handover queued a copy");
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    // The execution stopped instead of waiting for a source it can feed.
+    let again = execution
+        .push_raw_source(0, raw_chunk_repeated(&schema, &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+    assert!(execution.next_chunk().is_err(), "a stopped tree answered");
+}
+
+/// A raw and an evaluated input on one source index are refused before either is fed.
+///
+/// `push_raw_source` hands raw chunks to every input it names, so an input bound to an evaluated
+/// series has no way to take one: the handover is refused whole, and the raw side keeps nothing.
+#[test]
+fn a_raw_and_an_evaluated_input_on_one_source_are_refused() {
+    let out = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(binary_of(
+        instant(
+            raw_input_from(0, SeriesOrdering::KeyThenTime),
+            1,
+            0,
+            Arc::clone(&out),
+        ),
+        evaluated_input_with_ordering(Arc::clone(&out), SeriesOrdering::KeyThenTime),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+
+    let set = ExecutionPlanMetricsSet::new();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool), &set);
+    let error = execution
+        .push_raw_source(0, raw_chunk(&raw_schema(), &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the input at root.right reads an evaluated series"),
+        "{error}"
+    );
+    assert_eq!(
+        count(
+            &set,
+            &NodePath::root().left().input(),
+            NodeMetric::INPUT_BATCHES
+        ),
+        0,
+        "the raw side took a copy of a refused handover"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+
+    let again = execution
+        .push_raw_source(0, raw_chunk(&raw_schema(), &[0], &[1.0], true))
+        .unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
 }
 
 /// A map above a binary, and a window above a binary, pull its result through their own loops.

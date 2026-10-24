@@ -497,9 +497,7 @@ mod test {
     use datatypes::schema::ColumnSchema;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{
-        FusedSeries, FusedSeriesBinding, FusedSeriesInput, RangeManipulate,
-    };
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, RangeManipulate};
     use promql_parser::parser;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -1585,23 +1583,10 @@ mod test {
         .unwrap();
         let binding = FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
-        };
-        // The tree names the destination its selector compiled to, which this test reads off the
-        // tree rather than assuming.
-        let mut paths = Vec::new();
-        promql::native::metrics::walk(tree.root(), &mut |node, path| {
-            if matches!(node.expr, promql::native::plan::NativeExpr::Input(_)) {
-                paths.push(path.clone());
-            }
-        });
-        let inputs = vec![FusedSeriesInput {
-            series_schema,
-            metric_name: Some("some_metric".into()),
             time_index: "ts".to_string(),
             tags: Vec::new(),
-            input,
-            paths,
-        }];
+            metric_name: Some(Arc::from("some_metric")),
+        };
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
                 vec![
@@ -1626,7 +1611,7 @@ mod test {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    inputs,
+                    vec![input],
                     output_schema,
                 )
                 .unwrap(),

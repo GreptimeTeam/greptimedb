@@ -15,16 +15,18 @@
 //! One node that runs a compiled native tree over raw series.
 //!
 //! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
-//! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
-//! half: it owns one execution of that tree per partition and decodes its input frames into raw
-//! series chunks and converts its evaluated chunks back into batches.
+//! tree itself, the binding it was compiled against and one logical child per actual source.
+//! [`FusedSeriesExec`] is the physical half: it owns one execution of that tree per partition and
+//! decodes its input frames into raw series chunks and converts its evaluated chunks back into
+//! batches.
 //!
-//! One actual source can feed several tree inputs: a query that names the same selector twice reads
-//! the same series twice. The binding therefore lists the tree input nodes its one plan feeds, and
-//! the node runs that plan once and queues the chunks it produced at every one of those positions.
-//! Several actual sources stay several plans: they run only when each has a single partition, so
-//! that one execution of the tree sees every series of every source and a match pairs them by
-//! label, which is the only pairing this node has.
+//! Which child produces a tree input is the input's own `source_index`, not a list beside the tree:
+//! one actual source can feed several tree inputs - a query that names the same selector twice reads
+//! the same series twice - so the tree says where every chunk goes. The logical node keeps its
+//! children in that index order and checks that every index is bound. The physical node runs one
+//! child: a second child would have to pair its series with the first by label, which needs an
+//! exchange this node does not have, and no child at all is a constant scalar, whose rows the
+//! conversion does not produce yet.
 //!
 //! The two halves show different things in `EXPLAIN`, which is the point of having both. The
 //! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
@@ -59,8 +61,8 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{
@@ -79,14 +81,13 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
-use futures::stream::{SelectAll, StreamExt};
-use store_api::region_engine::RawLabelSource;
+use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{self, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::plan::{NativeExpr, NativeTree, NativeType};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
@@ -101,43 +102,36 @@ const METRIC_NAME: &str = "__name__";
 /// A chunk that settles no batch is the cost this bounds: raw samples before the first evaluation
 /// point settle nothing, so an input of many such chunks would otherwise be read to its end inside
 /// one poll, holding the task's thread for an unbounded time and delaying both other tasks on it
-/// and the cancellation the consumer asked for. The budget does not bound how many child streams
-/// [`SelectAll`](futures::stream::SelectAll) polls to find readiness; it bounds only the chunks
-/// this node hands to the executor. A poll that stops early wakes itself, so nothing is lost.
+/// and the cancellation the consumer asked for. The budget bounds only the chunks this node hands
+/// to the executor. A poll that stops early wakes itself, so nothing is lost.
 const POLL_BUDGET: usize = 64;
 
-/// One actual source's decoded chunks, tagged with the tree input nodes they queue at.
+/// What the tree was compiled against, and how its output columns are named.
 ///
-/// The tag is a list because one source can feed several tree inputs: the chunks are the same rows
-/// at each of them, which is what reading one series twice means.
-type TaggedInputStream = Pin<
-    Box<
-        dyn Stream<
-                Item = (
-                    Vec<NodePath>,
-                    Result<RawSeriesChunk, common_error::ext::BoxedError>,
-                ),
-            > + Send,
-    >,
->;
-
-/// What the tree's input was compiled against, and how its output columns are named.
+/// The binding travels with the tree: a tree is legal only on the grid it was bound to, and a
+/// reader of the output needs to know which grid a chunk's absolute positions are on. Keeping these
+/// four facts in one value is what lets the logical node carry what the writer decided and the
+/// physical node take the same output columns from it.
 ///
-/// The binding travels with the tree: a tree is legal only against the schema it was bound to, and
-/// a reader of the output needs to know which grid a chunk's absolute positions are on. Keeping it
-/// in one value is what lets the logical node be built from the same description, and the physical
-/// node reads the same facts back off the tree rather than trusting a second copy of them.
+/// It is not a mirror of any schema: the raw layout a frame is decoded with is the one the tree's
+/// own input declares, read back off the tree on both sides. What the binding cannot check is
+/// whether the caller named the metric and tags the query meant, or whether [`time_index`] is the
+/// column the query reports positions in - from here both are indistinguishable from a correct
+/// binding, so picking them is the caller's obligation.
 ///
-/// What the logical node checks is that the schema the tree's input node declares is the one this
-/// binding names. What it cannot check is whether the caller meant *some other* schema with the
-/// same field names, or whether [`time_index`](Self::time_index) is the column the query reports
-/// positions in: from here both are indistinguishable from a correct binding, so picking them is
-/// the caller's obligation. The physical node reads neither the metric name nor a time column from
-/// the input — a raw frame carries the labels of each series and its own timestamps.
+/// [`metric_name`]: Self::metric_name
+/// [`tags`]: Self::tags
+/// [`time_index`]: Self::time_index
 #[derive(Clone, Debug)]
 pub struct FusedSeriesBinding {
     /// The statement's evaluation grid.
     pub grid: Arc<EvalGrid>,
+    /// The output column holding the grid timestamps.
+    pub time_index: String,
+    /// The logical tag columns of the output, `__name__` included when the query reports it.
+    pub tags: Vec<String>,
+    /// The metric name the scans below are read under, when the query binds one.
+    pub metric_name: Option<Arc<str>>,
 }
 
 impl PartialEq for FusedSeriesBinding {
@@ -145,6 +139,9 @@ impl PartialEq for FusedSeriesBinding {
         let a = self.grid.spec();
         let b = other.grid.spec();
         (a.start_ms, a.step_ms, a.len) == (b.start_ms, b.step_ms, b.len)
+            && self.time_index == other.time_index
+            && self.tags == other.tags
+            && self.metric_name == other.metric_name
     }
 }
 impl Eq for FusedSeriesBinding {}
@@ -152,48 +149,48 @@ impl Hash for FusedSeriesBinding {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let s = self.grid.spec();
         (s.start_ms, s.step_ms, s.len).hash(state);
+        self.time_index.hash(state);
+        self.tags.hash(state);
+        self.metric_name.hash(state);
     }
 }
 impl PartialOrd for FusedSeriesBinding {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         let a = self.grid.spec();
         let b = other.grid.spec();
-        (a.start_ms, a.step_ms, a.len).partial_cmp(&(b.start_ms, b.step_ms, b.len))
+        match (a.start_ms, a.step_ms, a.len).partial_cmp(&(b.start_ms, b.step_ms, b.len)) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.time_index.partial_cmp(&other.time_index) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        match self.tags.partial_cmp(&other.tags) {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
+        self.metric_name
+            .as_deref()
+            .partial_cmp(&other.metric_name.as_deref())
     }
-}
-
-/// One scan binding corresponding to one native tree input.
-#[derive(Clone, Debug)]
-pub struct FusedSeriesInput {
-    pub series_schema: Arc<SeriesSchema>,
-    pub metric_name: Option<Arc<str>>,
-    pub time_index: String,
-    pub tags: Vec<String>,
-    pub input: LogicalPlan,
-    /// The tree input nodes this one plan feeds.
-    ///
-    /// One actual source may be read at several tree inputs - a query that names the same selector
-    /// twice reads the same series twice - so a binding lists the destinations rather than owning
-    /// one. The list is never empty, and the destinations together are exactly the tree's raw
-    /// inputs, one binding each.
-    pub paths: Vec<NodePath>,
 }
 
 /// The logical plan of one node that runs a compiled native tree.
 ///
 /// The node adds nothing to the tree: it records the query the tree was compiled from, so
 /// `EXPLAIN` shows the reader their own query rather than the shape it compiled to, and it carries
-/// the binding the tree's input was compiled against so the execution plan can be built from it.
+/// the binding the tree was compiled against so the execution plan can be built from it.
 #[derive(Debug)]
 pub struct FusedSeries {
     /// The PromQL text this tree was compiled from.
     promql: Arc<str>,
     /// The compiled tree to run.
     tree: NativeTree,
-    /// What the tree's input was compiled against.
+    /// What the tree was compiled against.
     binding: FusedSeriesBinding,
-    /// The plan producing the input series.
-    inputs: Vec<FusedSeriesInput>,
+    /// The plans producing the input series, one per source index the tree binds.
+    children: Vec<LogicalPlan>,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
 }
@@ -204,20 +201,24 @@ impl FusedSeries {
         "FusedSeries"
     }
 
-    /// Creates the node, checking that `tree` is legal against `binding`.
+    /// Creates the node, checking that `tree` is legal against `binding` and `children`.
+    ///
+    /// The children are the tree's actual sources, in `source_index` order: which child feeds which
+    /// tree input is the input's own index, so this list carries no per-child description a caller
+    /// could let drift from the tree.
     pub fn try_new(
         promql: Arc<str>,
         tree: NativeTree,
         binding: FusedSeriesBinding,
-        inputs: Vec<FusedSeriesInput>,
+        children: Vec<LogicalPlan>,
         output_schema: DFSchemaRef,
     ) -> DataFusionResult<Self> {
-        validate_binding(&tree, &binding, &inputs)?;
+        validate_binding(&tree, &binding, &children)?;
         Ok(Self {
             promql,
             tree,
             binding,
-            inputs,
+            children,
             output_schema,
         })
     }
@@ -232,67 +233,47 @@ impl FusedSeries {
         &self.tree
     }
 
-    /// What the tree's input was compiled against.
+    /// What the tree was compiled against.
     pub fn binding(&self) -> &FusedSeriesBinding {
         &self.binding
     }
-    pub fn fused_inputs(&self) -> &[FusedSeriesInput] {
-        &self.inputs
+
+    /// The plans producing the input series, in `source_index` order.
+    pub fn children(&self) -> &[LogicalPlan] {
+        &self.children
     }
 
-    /// The physical node that runs `exec_inputs` as this node's inputs.
+    /// The physical node that runs `exec_children` as this node's children.
     ///
-    /// One execution input per bound source, in the order the bindings are listed. `label_source`
-    /// and `ordering` are the binding of the frames `exec_input` produces: the frame carries the
-    /// encoded key and, in explicit mode, the complete labels, but no schema can say which of the
-    /// two a producer meant or how it ordered the series, so the caller that built the frame passes
-    /// both on. Building the node rejects a tree the runtime cannot execute, a frame schema the
-    /// tree's input was not compiled against, and a schema the conversion cannot classify, so a
-    /// plan that is built is a plan that runs.
+    /// One execution input per child, in source order. `label_source` and `ordering` are the
+    /// binding of the frames that child produces: the frame carries the encoded key and, in explicit
+    /// mode, the complete labels, but no schema can say which of the two a producer meant or how it
+    /// ordered the series, so the caller that built the frame passes both on. Building the node
+    /// rejects a tree the runtime cannot execute, a frame schema the tree's input was not compiled
+    /// against, and a schema the conversion cannot classify, so a plan that is built is a plan that
+    /// runs.
     pub fn to_execution_plan(
         &self,
-        exec_inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        exec_children: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         // Arity is checked before the two lists are paired: a zip would silently drop whichever side
-        // is longer, and a node built from fewer inputs than it binds would run a tree over half its
-        // sources.
-        if exec_inputs.len() != self.inputs.len() {
+        // is longer, and a node built from fewer children than it binds would run a tree over half
+        // its sources.
+        if exec_children.len() != self.children.len() {
             return Err(DataFusionError::Plan(format!(
                 "FusedSeries binds {} inputs, but {} execution inputs were given",
-                self.inputs.len(),
-                exec_inputs.len()
+                self.children.len(),
+                exec_children.len()
             )));
         }
         let output_schema: SchemaRef = self.output_schema.inner().clone();
-        let bound = self
-            .inputs
-            .iter()
-            .zip(exec_inputs)
-            .map(|(input, (exec, source, ordering))| {
-                (
-                    exec,
-                    source,
-                    ordering,
-                    // The destinations are the binding's own, not read off the tree again: which
-                    // tree input a source feeds is a fact the binding carries, and a traversal
-                    // would have to agree with it rather than replace it.
-                    input.paths.clone(),
-                    Arc::clone(&input.series_schema),
-                )
-            })
-            .collect();
-        let Some(first) = self.inputs.first() else {
-            return Err(DataFusionError::Plan(
-                "FusedSeries binds no input to run its tree over".to_string(),
-            ));
-        };
         Ok(Arc::new(FusedSeriesExec::try_new(
             Arc::clone(&self.promql),
-            bound,
+            exec_children,
             Arc::new(self.tree.clone()),
             output_schema,
-            first.time_index.clone(),
-            first.tags.clone(),
+            self.binding.time_index.clone(),
+            self.binding.tags.clone(),
         )?))
     }
 }
@@ -303,7 +284,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn inputs(&self) -> Vec<&LogicalPlan> {
-        self.inputs.iter().map(|input| &input.input).collect()
+        self.children.iter().collect()
     }
 
     fn schema(&self) -> &DFSchemaRef {
@@ -325,25 +306,15 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
         _exprs: Vec<Expr>,
         inputs: Vec<LogicalPlan>,
     ) -> DataFusionResult<Self> {
-        if inputs.len() != self.inputs.len() {
+        if inputs.len() != self.children.len() {
             return Err(DataFusionError::Internal(format!(
                 "FusedSeries expected {} inputs",
-                self.inputs.len()
+                self.children.len()
             )));
         }
-        let inputs = self
-            .inputs
-            .iter()
-            .cloned()
-            .zip(inputs)
-            .map(|(mut binding, input)| {
-                binding.input = input;
-                binding
-            })
-            .collect();
-        // Rebuilt rather than patched: the destinations the bindings name are checked against the
-        // tree again, and the schema the node reports keeps its metadata. A rewrite that changed an
-        // input's shape therefore cannot leave a binding the tree no longer covers.
+        // Rebuilt rather than patched: the sources each tree input names are checked against the
+        // tree again, and the schema the node reports keeps its metadata. A rewrite that changed a
+        // child's shape therefore cannot leave a tree whose raw inputs no longer fit it.
         Self::try_new(
             Arc::clone(&self.promql),
             self.tree.clone(),
@@ -357,21 +328,14 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
 impl PartialEq for FusedSeries {
     fn eq(&self, other: &Self) -> bool {
         // `NativeTree` carries no structural equality, so the rendered tree stands in for it. The
-        // renderer names every node with its bound operation and grids, which is what makes two
-        // nodes the same computation; comparing the text alone would call two different trees
-        // equal whenever their PromQL happens to read the same.
+        // renderer names every node with its bound operation, its grids and the source index its
+        // input reads, which is what makes two nodes the same computation; comparing the PromQL
+        // text alone would call two different trees equal whenever their query happens to read the
+        // same.
         self.promql == other.promql
             && self.tree.to_string() == other.tree.to_string()
             && self.binding == other.binding
-            && self.inputs.len() == other.inputs.len()
-            && self.inputs.iter().zip(&other.inputs).all(|(a, b)| {
-                a.input == b.input
-                    && a.metric_name == b.metric_name
-                    && a.time_index == b.time_index
-                    && a.tags == b.tags
-                    && a.paths == b.paths
-                    && same_schema_fields(&a.series_schema, &b.series_schema)
-            })
+            && self.children == other.children
             && self.output_schema == other.output_schema
     }
 }
@@ -382,13 +346,7 @@ impl Hash for FusedSeries {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.promql.hash(state);
         self.binding.hash(state);
-        for input in &self.inputs {
-            input.input.hash(state);
-            input.metric_name.hash(state);
-            input.time_index.hash(state);
-            input.tags.hash(state);
-            input.paths.hash(state);
-        }
+        self.children.hash(state);
         self.output_schema.hash(state);
     }
 }
@@ -399,30 +357,13 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        let mine = self.binding.grid.spec();
-        let theirs = other.binding.grid.spec();
-        match (mine.start_ms, mine.step_ms, mine.len).partial_cmp(&(
-            theirs.start_ms,
-            theirs.step_ms,
-            theirs.len,
-        )) {
+        match self.binding.partial_cmp(&other.binding) {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        match self.inputs.len().partial_cmp(&other.inputs.len()) {
+        match self.children.partial_cmp(&other.children) {
             Some(Ordering::Equal) => {}
             ord => return ord,
-        }
-        for (mine, theirs) in self.inputs.iter().zip(&other.inputs) {
-            if mine.input != theirs.input
-                || mine.metric_name != theirs.metric_name
-                || mine.time_index != theirs.time_index
-                || mine.tags != theirs.tags
-                || mine.paths != theirs.paths
-                || !same_schema_fields(&mine.series_schema, &theirs.series_schema)
-            {
-                return None;
-            }
         }
         match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
             Some(Ordering::Equal) => {}
@@ -436,22 +377,16 @@ impl PartialOrd for FusedSeries {
     }
 }
 
-/// Checks that `bindings` names exactly the raw inputs of `tree`, each destination once.
+/// The raw series schema each source index of `tree` reads, in source order.
 ///
-/// A binding is one actual source and the destinations it feeds, so what has to hold is that every
-/// binding lists at least one destination, that no destination is listed twice or is not an input of
-/// this tree, that no input is left without a source, and that the schema a destination was compiled
-/// against is the one its source was bound to. Nothing here depends on the order of the walk or of a
-/// binding's list: each destination is looked up by its path, so neither list has to agree with the
-/// other position by position.
-fn validate_paths<'a>(
-    tree: &NativeTree,
-    bindings: impl IntoIterator<Item = (usize, &'a [NodePath], &'a SeriesSchema)>,
-) -> DataFusionResult<()> {
-    // The tree is the one authority on where its inputs sit and what they read: a caller's binding
-    // can only agree or disagree with it, and the frame this node reads has to be decoded against
-    // the same schema, so both halves read it here instead of each carrying a copy.
-    let mut nodes: Vec<(NodePath, Arc<SeriesSchema>)> = Vec::new();
+/// A derived view, never stored: the tree is the one authority on where its inputs sit, what they
+/// read and which child produces them, so both halves read it here instead of each keeping a copy
+/// that could drift. The result is `source_index`-indexed rather than in visit order, and it is
+/// exactly `0..len` - a tree that binds index `n` without binding every index below it is refused,
+/// since a child at an index no input reads would be a source the tree cannot use. A caller
+/// comparing it to a child list therefore only has to check that the lengths agree.
+fn tree_sources(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
+    let mut inputs: Vec<(usize, NodePath, Arc<SeriesSchema>)> = Vec::new();
     let mut not_raw: Option<NodePath> = None;
     metrics::walk(tree.root(), &mut |node, path| {
         if let NativeExpr::Input(input) = &node.expr {
@@ -460,7 +395,7 @@ fn validate_paths<'a>(
                 .samples()
                 .filter(|schema| schema.eval_grid.is_none())
             {
-                Some(schema) => nodes.push((path.clone(), Arc::clone(schema))),
+                Some(schema) => inputs.push((input.source_index, path.clone(), Arc::clone(schema))),
                 None => {
                     not_raw.get_or_insert_with(|| path.clone());
                 }
@@ -472,46 +407,84 @@ fn validate_paths<'a>(
             "FusedSeries runs a tree whose input `{path}` is not raw series"
         )));
     }
-    if nodes.is_empty() {
-        return Err(DataFusionError::Plan(
-            "FusedSeries runs a tree with 0 inputs, and it needs at least one".to_string(),
-        ));
+    // Indexed rather than pushed in visit order: a binary node whose operands name sources 1 and 0
+    // is the same legal tree as one naming them 0 and 1, and only the set of indices says so.
+    //
+    // Every index is bounded by the number of input occurrences first, before any width is computed
+    // or any slot is sized. A dense `0..n` set has n values of at most `n - 1`, so a legal tree
+    // always satisfies this; a tree naming `usize::MAX` or one far past its own input count is
+    // refused here instead of overflowing `index + 1` or reserving slots for indices no input reads.
+    if let Some((index, path, _)) = inputs.iter().find(|entry| entry.0 >= inputs.len()) {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries tree binds source index {index} at `{path}`, but it reads {} inputs in \
+             total: every source index has to be below that count",
+            inputs.len()
+        )));
     }
-    let mut covered: Vec<Option<(usize, &SeriesSchema)>> = vec![None; nodes.len()];
-    for (index, paths, schema) in bindings {
-        if paths.is_empty() {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeries input {index} names no tree input path"
-            )));
-        }
-        for path in paths {
-            let Some(at) = nodes.iter().position(|(node, _)| node == path) else {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeries input {index} names `{path}`, which is not an input of its tree"
-                )));
-            };
-            if covered[at].is_some() {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeries binds the tree input `{path}` more than once"
-                )));
+    let width = inputs
+        .iter()
+        .map(|(index, ..)| index + 1)
+        .max()
+        .unwrap_or_default();
+    let mut slots: Vec<Option<(NodePath, Arc<SeriesSchema>)>> = vec![None; width];
+    for (index, path, schema) in inputs {
+        match &slots[index] {
+            Some((first, declared)) => {
+                // One child can be read more than once, and both reads have to see the same layout:
+                // the one frame this child produces is decoded once, so a second schema would name
+                // a column the decode never fills.
+                if !same_schema_fields(declared, &schema) {
+                    return Err(DataFusionError::Plan(format!(
+                        "FusedSeries tree reads source {index} at `{first}` and `{path}` through two \
+                         raw series schemas, and one child has one layout"
+                    )));
+                }
             }
-            covered[at] = Some((index, schema));
+            None => slots[index] = Some((path, schema)),
         }
     }
-    for ((path, schema), bound) in nodes.iter().zip(covered) {
-        let Some((index, declared)) = bound else {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeries binds no source for the tree input `{path}`"
-            )));
-        };
-        if !same_schema_fields(schema, declared) {
-            return Err(DataFusionError::Plan(format!(
-                "FusedSeries input {index} binds a raw series schema the tree's input `{path}` was \
-                 not compiled against"
-            )));
-        }
-    }
-    Ok(())
+    slots
+        .into_iter()
+        .enumerate()
+        .map(|(index, slot)| match slot {
+            Some((_, schema)) => Ok(schema),
+            // `width` is the largest bound index plus one, so every hole has a bound index above
+            // it: the refused tree binds a source without the ones below it.
+            None => Err(DataFusionError::Plan(format!(
+                "FusedSeries tree binds source index {}, but not every index below it: source \
+                 {index} is unbound",
+                width - 1
+            ))),
+        })
+        .collect()
+}
+
+/// The raw series field names each source index of `tree` reads, in source order.
+///
+/// A caller asks the scan below for exactly these columns, so they are read off the tree that will
+/// consume them rather than kept in a second description beside it.
+pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
+    Ok(tree_sources(tree)?
+        .into_iter()
+        .map(|schema| {
+            schema
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect()
+        })
+        .collect())
+}
+
+/// Whether `tree` is the constant scalar `grid` claims and reads no raw input at all.
+///
+/// A scalar is declared by the type that produces it, not by a child: what makes one constant is
+/// that it is a bound [`NativeExpr::Scalar`], so this is the one tree that can be legal with no
+/// child. A tree whose root is samples cannot be: samples with no input would be an empty vector
+/// reported as an answer, which is the shape this node must never invent.
+fn is_constant_scalar(tree: &NativeTree, grid: &EvalGrid) -> bool {
+    matches!(tree.root().expr, NativeExpr::Scalar(_))
+        && matches!(&tree.root().output, NativeType::Scalar(spec) if spec.spec() == grid.spec())
 }
 
 /// Refuses a tree whose logical series can be split across the partitions this node runs.
@@ -621,7 +594,35 @@ fn same_schema_fields(left: &SeriesSchema, right: &SeriesSchema) -> bool {
             .all(|(a, b)| a.name == b.name)
 }
 
-/// Checks that `tree` reads the schema `binding` declares, on the grid it declares.
+/// Whether `schema` carries a field named `name`, as a column or inside a struct column.
+///
+/// A table scan names each series field as a column of its own, while a raw series frame names them
+/// inside its `fields` struct: both can hand the tree the field it read, and a child that names it
+/// nowhere cannot. This asks whether the layout can produce a field, which is all the tree needs; a
+/// label identity is not read off a schema, so nothing here stands in for a label binding.
+fn carries_field(schema: &DFSchema, name: &str) -> bool {
+    fn inside(data_type: &DataType, name: &str) -> bool {
+        match data_type {
+            DataType::Struct(fields) => fields
+                .iter()
+                .any(|field| field.name().as_str() == name || inside(field.data_type(), name)),
+            DataType::List(element) => inside(element.data_type(), name),
+            _ => false,
+        }
+    }
+    schema
+        .fields()
+        .iter()
+        .any(|field| field.name().as_str() == name || inside(field.data_type(), name))
+}
+
+/// Checks that `tree` reads what `children` can give it, on the grid `binding` declares.
+///
+/// The tree names its sources: every raw input carries the `source_index` of the child that feeds
+/// it, so what has to hold is that each of those indices names one of `children`, that every child
+/// is read by at least one input, and that the child at an index can produce the fields the inputs
+/// bound to it read. A tree with no raw input at all is legal only as a constant scalar, which reads
+/// nothing and is the one shape whose every row the node can produce without a child.
 ///
 /// The output grid is compared by [`EvalGrid::spec`], not by allocation: that is the rule
 /// [`NativeTree`]'s own validation and the kernels apply, and a chunk's timestamps already come
@@ -630,39 +631,55 @@ fn same_schema_fields(left: &SeriesSchema, right: &SeriesSchema) -> bool {
 fn validate_binding(
     tree: &NativeTree,
     binding: &FusedSeriesBinding,
-    inputs: &[FusedSeriesInput],
+    children: &[LogicalPlan],
 ) -> DataFusionResult<()> {
-    // The destinations are checked first, so a binding that names the wrong tree input is refused
-    // before anything is read off the input it names.
-    validate_paths(
-        tree,
-        inputs
-            .iter()
-            .enumerate()
-            .map(|(index, input)| (index, input.paths.as_slice(), input.series_schema.as_ref())),
-    )?;
-    for declared in inputs {
-        if declared.series_schema.eval_grid.is_some() {
+    if binding.tags.iter().any(|tag| tag == METRIC_NAME) && binding.metric_name.is_none() {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries declares a {METRIC_NAME:?} tag column but binds no metric name"
+        )));
+    }
+    // The sources are read first, so a child list of the wrong length is refused before anything is
+    // read off the children it names.
+    let sources = tree_sources(tree)?;
+    if sources.is_empty() {
+        if !children.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "FusedSeries runs a tree that reads no source, but {} children were given",
+                children.len()
+            )));
+        }
+        if !is_constant_scalar(tree, &binding.grid) {
             return Err(DataFusionError::Plan(
-                "FusedSeries binds a raw series schema, which cannot have an evaluation grid"
+                "FusedSeries runs a tree that reads no source, and only a constant scalar on the \
+                 statement's grid is legal without one"
                     .to_string(),
             ));
         }
-        if declared.tags.iter().any(|tag| tag == METRIC_NAME) && declared.metric_name.is_none() {
+    } else {
+        if children.len() != sources.len() {
             return Err(DataFusionError::Plan(format!(
-                "FusedSeries declares a {METRIC_NAME:?} tag column but binds no metric name"
+                "FusedSeries runs a tree that reads {} sources, but {} children were given",
+                sources.len(),
+                children.len()
             )));
         }
-    }
-    match tree.root().output.samples() {
-        Some(schema)
-            if schema
-                .eval_grid
-                .as_ref()
-                .is_some_and(|grid| grid.spec() == binding.grid.spec()) =>
-        {
-            Ok(())
+        for (index, (source, child)) in sources.iter().zip(children).enumerate() {
+            // Which child a tree input reads is the input's own index, so a field it declared has
+            // to be one *that* child can produce: reading it off another child, or off the tree
+            // alone, would decode a frame the child never produced.
+            for field in source.fields.iter() {
+                if !carries_field(child.schema(), field.name.as_ref()) {
+                    return Err(DataFusionError::Plan(format!(
+                        "FusedSeries child {index} has no column {:?} for the field the tree input \
+                         bound to it reads",
+                        field.name
+                    )));
+                }
+            }
         }
+    }
+    match tree.root().output.grid() {
+        Some(grid) if grid.spec() == binding.grid.spec() => Ok(()),
         _ => Err(DataFusionError::Plan(
             "FusedSeries runs a tree whose output is not evaluated on the statement's grid"
                 .to_string(),
@@ -816,33 +833,18 @@ fn classify_output(
     Ok(classification)
 }
 
-/// One child of [`FusedSeriesExec`], with everything the node has to know about it.
-///
-/// The plan produces the frames, and the other four are what those frames mean: which label source
-/// the producer chose, the ordering it declares, the tree input nodes the chunks are queued at - one
-/// actual source may feed several destinations - and the layout the frames were encoded against.
-/// They travel together because the node checks each of them against the tree before it runs, and a
-/// child that lost any one of them could not be checked.
-pub type FusedSeriesChild = (
-    Arc<dyn ExecutionPlan>,
-    RawLabelSource,
-    SeriesOrdering,
-    Vec<NodePath>,
-    Arc<SeriesSchema>,
-);
-
 /// The physical node that runs a compiled native tree over its input's raw series.
 pub struct FusedSeriesExec {
     /// The PromQL text the tree was compiled from, which is what the plan line shows.
     promql: Arc<str>,
     /// The tree this node runs, shared by every partition's execution.
     tree: Arc<NativeTree>,
-    input_bindings: Vec<(
-        Arc<SeriesSchema>,
-        RawLabelSource,
-        SeriesOrdering,
-        Vec<NodePath>,
-    )>,
+    /// The label source and ordering of each child's frames, in child order.
+    ///
+    /// The frame carries the encoded key and, in explicit mode, the complete labels, but no schema
+    /// can say which of the two a producer meant or how it ordered the series, so the caller that
+    /// built the frame passes both on and they are kept here to check a rebuilt child against.
+    child_bindings: Vec<(RawLabelSource, SeriesOrdering)>,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
@@ -851,7 +853,7 @@ pub struct FusedSeriesExec {
     /// The tag column names, indexed by [`OutputColumn::Tag`].
     tags: Arc<[String]>,
     /// The plans producing the raw series frames.
-    inputs: Vec<Arc<dyn ExecutionPlan>>,
+    children: Vec<Arc<dyn ExecutionPlan>>,
     /// The columns this node produces.
     output_schema: SchemaRef,
     /// The grid positions every label set in this plan's output already occupies, and what they
@@ -873,32 +875,97 @@ impl FusedSeriesExec {
     /// [`RawLabelSource::Explicit`]. `time_column` and `tags` name the columns of the output, which
     /// is a row table rather than a frame.
     ///
-    /// A child lists the tree input nodes it feeds, so the number of children is the number of scans
-    /// and not the number of tree inputs. Several children run only when each has one partition: what
-    /// pairs a series of one source with the matching series of another is the label, and this node
-    /// has no exchange that would move them together, so it refuses that shape instead of pairing
-    /// whatever a partition happens to hold.
+    /// The children are the tree's sources in `source_index` order, so their number must be the
+    /// number of sources the tree reads. Exactly one is executed: a second child would have to pair
+    /// its series with the first by label, which needs an exchange this node does not have, and no
+    /// child at all is a constant scalar, whose rows the conversion does not produce yet. Both are
+    /// refused rather than answered with an empty result.
+    ///
+    /// Which frame layout the child must produce is not passed in: it is the raw series schema the
+    /// tree's own input was compiled against, so there is no second description to drift from it.
+    /// The ordering the caller declares is checked against every input node's binding, so a
+    /// producer weaker than one of them is refused before the tree reads a frame.
     ///
     /// The parameters stay separate because each is a fact its own caller has: the query, the plans
     /// below, the frame's label binding and ordering, the tree, and the three things the output
     /// schema is classified by. A struct over them would be the same list under another name.
     pub fn try_new(
         promql: Arc<str>,
-        inputs: Vec<FusedSeriesChild>,
+        children: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
         tree: Arc<NativeTree>,
         output_schema: SchemaRef,
         time_column: String,
         tags: Vec<String>,
     ) -> DataFusionResult<Self> {
-        validate_paths(
-            &tree,
-            inputs
-                .iter()
-                .enumerate()
-                .map(|(index, (_, _, _, paths, schema))| {
-                    (index, paths.as_slice(), schema.as_ref())
-                }),
-        )?;
+        // Several children are refused on their count alone, before the tree is walked: what they
+        // would need is an exchange that pairs their series by label, and no tree shape makes that
+        // available to this node.
+        if children.len() > 1 {
+            return Err(DataFusionError::Plan(format!(
+                "FusedSeriesExec reads {} sources as one tree: pairing several sources needs an \
+                 exchange that pairs their series by label, which this node does not have",
+                children.len()
+            )));
+        }
+        let sources = tree_sources(&tree)?;
+        if children.len() != sources.len() {
+            return Err(DataFusionError::Plan(format!(
+                "FusedSeriesExec runs a tree that reads {} sources, but {} children were given",
+                sources.len(),
+                children.len()
+            )));
+        }
+        // No child is a constant scalar: a tree this node cannot run at all, and refused before the
+        // output schema is read, so the refusal names the missing conversion rather than a column.
+        if children.is_empty() {
+            return Err(DataFusionError::Plan(
+                "FusedSeriesExec runs a tree that reads no source: a constant scalar's rows are not \
+                 produced by this node yet"
+                    .to_string(),
+            ));
+        }
+        // One child and one tree source, which the arity check above has just made equal in count:
+        // taking both without indexing keeps this total even though neither can be empty here.
+        let (Some((child, source, ordering)), Some(tree_source)) =
+            (children.first(), sources.first())
+        else {
+            return Err(DataFusionError::Plan(
+                "FusedSeriesExec runs a tree whose sources do not pair with its children"
+                    .to_string(),
+            ));
+        };
+        // The producer's ordering is a promise each input node was compiled against, so it has to
+        // satisfy every one of them, not only the input the frames happen to reach first: a stream
+        // that may interleave two series cannot feed a node that reads one series to its last chunk,
+        // and merely contiguous frames are not yet the identity-then-time order an input may be
+        // bound to. Only one child is executed, and `tree_sources` has just made every input's
+        // source index name one of them, so all of them read this child's ordering.
+        let producer = *ordering;
+        let mut ordering_error: Option<String> = None;
+        metrics::walk(tree.root(), &mut |node, path| {
+            let NativeExpr::Input(bound) = &node.expr else {
+                return;
+            };
+            let required = bound.ordering;
+            let satisfied = match required {
+                // The weakest guarantee asks nothing of the producer, and an input declaring
+                // `Interleaved` is refused when the run state is built rather than here.
+                SeriesOrdering::Interleaved => true,
+                SeriesOrdering::Contiguous => producer != SeriesOrdering::Interleaved,
+                SeriesOrdering::KeyThenTime => producer == SeriesOrdering::KeyThenTime,
+            };
+            if !satisfied && ordering_error.is_none() {
+                let index = bound.source_index;
+                ordering_error = Some(format!(
+                    "FusedSeriesExec reads source {index} through {producer:?} frames, but the tree \
+                     input at `{path}` was bound to {required:?} frames, which is a stronger ordering \
+                     the producer does not provide"
+                ));
+            }
+        });
+        if let Some(message) = ordering_error {
+            return Err(DataFusionError::Plan(message));
+        }
         let _ = NativeExecutionState::try_new(
             &tree,
             Arc::new(UnboundedMemoryPool::default()),
@@ -920,76 +987,38 @@ impl FusedSeriesExec {
             })?
             .clone();
         let classification = classify_output(&output_schema, &root_schema, &tags, &time_column)?;
-        for (index, (input, source, _, _, schema)) in inputs.iter().enumerate() {
-            if input.properties().partitioning.partition_count() == 0 {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeriesExec input {index} has no partitions"
-                )));
-            }
-            ensure_frame_matches_label_source(input.schema().as_ref(), source)?;
-            unpack_raw_series(
-                Box::pin(RecordBatchStreamAdapter::new(
-                    input.schema(),
-                    futures::stream::empty(),
-                )),
-                Some(Arc::clone(schema)),
-            )?;
-        }
-        // One source runs one tree per partition, because the series producer keeps a whole series
-        // in one partition: each tree then owns every chunk of every series it reports, and a source
-        // that feeds several tree inputs feeds each of them the same chunks. Several sources cannot
-        // be executed that way without an exchange that pairs the matching series of each source, so
-        // they are refused unless each is one partition - there every series is in the one execution
-        // the tree sees, and a match pairs by label as it does in Prometheus.
-        let Some(first) = inputs.first() else {
+        let partition_count = child.properties().partitioning.partition_count();
+        if partition_count == 0 {
             return Err(DataFusionError::Plan(
-                "FusedSeriesExec has no child to run its tree over".to_string(),
+                "FusedSeriesExec child has no partitions".to_string(),
             ));
-        };
-        let partition_count = if inputs.len() == 1 {
-            first.0.properties().partitioning.partition_count()
-        } else {
-            if let Some((index, child)) = inputs
-                .iter()
-                .enumerate()
-                .find(|(_, child)| child.0.properties().partitioning.partition_count() > 1)
-            {
-                return Err(DataFusionError::Plan(format!(
-                    "FusedSeriesExec reads {} sources as one tree, and input {index} has {} \
-                     partitions: pairing several sources needs an exchange that pairs their series \
-                     by label, which this node does not have",
-                    inputs.len(),
-                    child.0.properties().partitioning.partition_count()
-                )));
-            }
-            1
-        };
+        }
+        // The frame is checked against the schema the tree's own input was compiled against, which
+        // is the one the decoder is given in `execute`: no other schema is stored, so a child that
+        // changed shape cannot be decoded with a stale layout.
+        ensure_frame_matches_label_source(child.schema().as_ref(), source)?;
+        unpack_raw_series(
+            Box::pin(RecordBatchStreamAdapter::new(
+                child.schema(),
+                futures::stream::empty(),
+            )),
+            Some(Arc::clone(tree_source)),
+        )?;
         reject_a_split_logical_series(&tree, partition_count)?;
-        let first = first.0.properties();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(partition_count),
-            first.emission_type,
-            first.boundedness,
+            child.properties().emission_type,
+            child.properties().boundedness,
         ));
-        let input_bindings = inputs
-            .iter()
-            .map(|(_, source, ordering, paths, schema)| {
-                (Arc::clone(schema), source.clone(), *ordering, paths.clone())
-            })
-            .collect();
-        let inputs = inputs
-            .into_iter()
-            .map(|(input, _, _, _, _)| input)
-            .collect();
         Ok(Self {
             promql,
             tree,
-            input_bindings,
+            child_bindings: vec![(source.clone(), *ordering)],
             classification: classification.into(),
             time_column,
             tags: tags.into(),
-            inputs,
+            children: vec![Arc::clone(child)],
             output_schema,
             labels: Arc::new(Mutex::new(LabelSets::default())),
             metric: ExecutionPlanMetricsSet::new(),
@@ -1036,7 +1065,7 @@ impl ExecutionPlan for FusedSeriesExec {
     fn input_distribution_requirements(&self) -> InputDistributionRequirements {
         InputDistributionRequirements::new(vec![
             Distribution::UnspecifiedDistribution;
-            self.inputs.len()
+            self.children.len()
         ])
     }
 
@@ -1044,11 +1073,11 @@ impl ExecutionPlan for FusedSeriesExec {
     /// answered by a second tree, which this node already runs, and raising the count is what an
     /// optimizer does by adding a round-robin exchange that reorders nothing it can rely on.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
-        vec![false; self.inputs.len()]
+        vec![false; self.children.len()]
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        self.inputs.iter().collect()
+        self.children.iter().collect()
     }
 
     fn apply_expressions(
@@ -1063,31 +1092,23 @@ impl ExecutionPlan for FusedSeriesExec {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        if children.len() != self.inputs.len() {
+        if children.len() != self.children.len() {
             return Err(DataFusionError::Plan(format!(
                 "FusedSeriesExec requires {} children, got {}",
-                self.inputs.len(),
+                self.children.len(),
                 children.len()
             )));
         }
-        // Rebuilt rather than patched: the new child's schema is what the frame is validated
-        // against, so a child that changed shape is refused instead of decoded with a stale layout.
-        // The destinations each child feeds are the binding's own, and they are checked against the
-        // tree again.
+        // Rebuilt rather than patched: the schema the tree names is what the new child's frame is
+        // validated against, so a child that changed shape is refused instead of decoded with a
+        // stale layout. A child keeps the position it had, and so the source index it feeds: which
+        // child a tree input reads is never inferred from a schema.
         Ok(Arc::new(Self::try_new(
             Arc::clone(&self.promql),
             children
                 .into_iter()
-                .zip(&self.input_bindings)
-                .map(|(input, (schema, source, ordering, paths))| {
-                    (
-                        input,
-                        source.clone(),
-                        *ordering,
-                        paths.clone(),
-                        Arc::clone(schema),
-                    )
-                })
+                .zip(&self.child_bindings)
+                .map(|(child, (source, ordering))| (child, source.clone(), *ordering))
                 .collect(),
             Arc::clone(&self.tree),
             self.output_schema.clone(),
@@ -1109,19 +1130,31 @@ impl ExecutionPlan for FusedSeriesExec {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach(&context.runtime_env().memory_pool);
-        // Each source is executed once, at the partition this node was asked for, because a series
+        // The child is executed once, at the partition this node was asked for, because a series
         // never spans two partitions: an execution of the tree owns every chunk of every series the
-        // source reports in that partition. A source that feeds several tree inputs hands those
-        // chunks to each of them, so the same series is read at both destinations.
-        let mut inputs = Vec::with_capacity(self.inputs.len());
-        for (input, (schema, source, _, paths)) in self.inputs.iter().zip(&self.input_bindings) {
-            let stream = input.execute(partition, Arc::clone(&context))?;
-            ensure_frame_matches_label_source(input.schema().as_ref(), source)?;
-            let stream = unpack_raw_series(stream, Some(Arc::clone(schema)))?;
-            let stream = materialize_raw_labels(stream)
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            inputs.push((paths.clone(), stream));
-        }
+        // child reports in that partition, and the chunks are queued at every tree input bound to
+        // source 0, so a tree that reads one series twice reads the same rows at both.
+        let (Some(child), Some((label_source, _))) =
+            (self.children.first(), self.child_bindings.first())
+        else {
+            return Err(DataFusionError::Execution(
+                "FusedSeriesExec executes one child, and its plan holds another number".to_string(),
+            ));
+        };
+        // The layout the frame is decoded against is the one the tree's own input was compiled
+        // against, read back off the tree here rather than kept on the node: a stored copy could
+        // only disagree with it. The walk is tree-sized and runs once per execution, not per chunk.
+        let sources = tree_sources(&self.tree)?;
+        let [tree_source] = sources.as_slice() else {
+            return Err(DataFusionError::Execution(
+                "FusedSeriesExec runs a tree that reads no source".to_string(),
+            ));
+        };
+        let stream = child.execute(partition, Arc::clone(&context))?;
+        ensure_frame_matches_label_source(child.schema().as_ref(), label_source)?;
+        let stream = unpack_raw_series(stream, Some(Arc::clone(tree_source)))?;
+        let stream =
+            materialize_raw_labels(stream).map_err(|e| DataFusionError::External(Box::new(e)))?;
         // The execution name is the partition it answers, which is the one it was asked for.
         let state = NativeExecutionState::try_new(
             &self.tree,
@@ -1131,13 +1164,8 @@ impl ExecutionPlan for FusedSeriesExec {
         )?;
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
-        let inputs = inputs.into_iter().map(|(paths, stream)| {
-            Box::pin(stream.map(move |item| (paths.clone(), item))) as TaggedInputStream
-        });
-        let mut input_streams = SelectAll::new();
-        input_streams.extend(inputs);
         Ok(Box::pin(FusedSeriesStream {
-            inputs: input_streams,
+            input: Some(stream),
             executor: Some(NativeExecutor::new(state)),
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
@@ -1503,7 +1531,8 @@ fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    inputs: SelectAll<TaggedInputStream>,
+    /// The one child's decoded chunks, or `None` once the stream let go of it.
+    input: Option<SendableRawSeriesStream>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Where each output column comes from.
@@ -1525,25 +1554,17 @@ pub struct FusedSeriesStream {
 }
 
 impl FusedSeriesStream {
-    /// Pushes one chunk of one actual source at every tree input it feeds.
+    /// Pushes one chunk of the child's frames at every tree input bound to its source.
     ///
-    /// The last destination takes the chunk by value and the ones before it take a copy: the same
-    /// rows have to reach each destination, and the chunk is what carries them.
-    fn push_at(&mut self, paths: &[NodePath], chunk: RawSeriesChunk) -> DataFusionResult<()> {
+    /// Which inputs those are is the tree's own binding: a tree that reads one series twice has two
+    /// input nodes on source 0, and the executor hands both the same rows.
+    fn push(&mut self, chunk: RawSeriesChunk) -> DataFusionResult<()> {
         let executor = self.executor.as_mut().ok_or_else(|| {
             DataFusionError::Execution(
                 "FusedSeriesExec stream pushed a chunk after its execution closed".into(),
             )
         })?;
-        let Some((last, rest)) = paths.split_last() else {
-            return Err(DataFusionError::Execution(
-                "FusedSeriesExec stream pushed a chunk for no tree input".into(),
-            ));
-        };
-        for path in rest {
-            executor.push_raw_at(path, chunk.clone())?;
-        }
-        executor.push_raw_at(last, chunk)?;
+        executor.push_raw_source(0, chunk)?;
         let mut settled = Vec::new();
         while let Some(chunk) = executor.next_chunk()? {
             settled.push(chunk);
@@ -1594,7 +1615,9 @@ impl FusedSeriesStream {
     fn fail(&mut self) {
         self.done = true;
         self.executor = None;
-        self.inputs.clear();
+        // The child's stream is dropped here: its plan, its decoder and whatever batch it was
+        // holding are released as soon as this node stops reading them.
+        self.input = None;
         // The label-set map and its charge are the plan's, so a stream stopping early gives back
         // nothing: the entries another partition is still checking against have to stay charged, and
         // are released when the plan itself is dropped.
@@ -1669,15 +1692,21 @@ impl Stream for FusedSeriesStream {
                 }
                 continue;
             }
-            match Pin::new(&mut this.inputs).poll_next(cx) {
+            let Some(input) = this.input.as_mut() else {
+                // Only `fail` lets go of the child, and it sets `done`, which the loop above
+                // returns on, so reaching this means nothing more will be read.
+                return Poll::Ready(None);
+            };
+            let polled = input.as_mut().poll_next(cx);
+            match polled {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some((_path, Err(error)))) => {
+                Poll::Ready(Some(Err(error))) => {
                     this.fail();
                     return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                Poll::Ready(Some((paths, Ok(chunk)))) => {
+                Poll::Ready(Some(Ok(chunk))) => {
                     budget -= 1;
-                    if let Err(error) = this.push_at(&paths, chunk) {
+                    if let Err(error) = this.push(chunk) {
                         this.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
@@ -1692,7 +1721,7 @@ impl Stream for FusedSeriesStream {
             }
         }
         // Reaching the chunk budget means there is productive input still to process. Wake the
-        // parent to continue; a genuinely pending SelectAll already registered child wakers.
+        // parent to continue; a genuinely pending input already registered its own waker.
         cx.waker().wake_by_ref();
         Poll::Pending
     }
