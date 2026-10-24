@@ -56,6 +56,7 @@ use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
+use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -498,6 +499,14 @@ fn validate_binding(
         )));
     }
     let schemas = collect_source_schemas(tree)?;
+    if schemas.is_empty()
+        && (!matches!(tree.root().expr, NativeExpr::Scalar(_))
+            || !matches!(tree.root().output, NativeType::Scalar(_)))
+    {
+        return Err(DataFusionError::Plan(
+            "FusedSeries without inputs requires a constant scalar root".into(),
+        ));
+    }
     if schemas.len() != child_count {
         return Err(DataFusionError::Plan(
             "FusedSeries source indexes must densely match its children".into(),
@@ -570,17 +579,7 @@ pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<
 
 fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
     let schemas = collect_source_schemas(tree)?;
-    if schemas.is_empty() {
-        return Err(DataFusionError::Plan(
-            "FusedSeries physical plan requires at least one raw source".into(),
-        ));
-    }
-    if !tree
-        .root()
-        .output
-        .samples()
-        .is_some_and(|schema| schema.eval_grid.is_some())
-    {
+    if tree.root().output.grid().is_none() {
         return Err(DataFusionError::Plan(
             "FusedSeries output is not evaluated samples".into(),
         ));
@@ -597,6 +596,37 @@ pub(crate) enum OutputColumn {
     Field(usize),
     /// Declared logical tag by index in the caller-supplied tag list.
     Tag(usize),
+}
+
+/// The caller-named value field used by the ordinary row conversion for a label-free scalar.
+fn scalar_root_fields(
+    output_schema: &SchemaRef,
+    tags: &[String],
+    time_column: &str,
+) -> DataFusionResult<Vec<FieldSpec>> {
+    if !tags.is_empty() {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeriesExec scalar root cannot produce {} tag columns",
+            tags.len()
+        )));
+    }
+    let mut values = output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.name().as_str() != time_column);
+    let Some(value) = values.next() else {
+        return Err(DataFusionError::Plan(
+            "missing value column in scalar root output schema".to_string(),
+        ));
+    };
+    if values.next().is_some() {
+        return Err(DataFusionError::Plan(
+            "scalar root output schema must contain exactly one value column".into(),
+        ));
+    }
+    Ok(vec![FieldSpec {
+        name: Arc::from(value.name().as_str()),
+    }])
 }
 
 /// Classifies every output column, rejecting anything the conversion cannot produce.
@@ -789,7 +819,7 @@ impl FusedSeriesExec {
         partial_fold: Option<BoundAggregate>,
     ) -> DataFusionResult<Self> {
         let raw_schemas = validate_physical_tree(&tree)?;
-        if inputs.len() != raw_schemas.len() || inputs.is_empty() {
+        if inputs.len() != raw_schemas.len() {
             return Err(DataFusionError::Plan(format!(
                 "FusedSeries physical input count {} does not match its {} raw sources",
                 inputs.len(),
@@ -798,11 +828,8 @@ impl FusedSeriesExec {
         }
         // Building a state proves the runtime executes this tree; drop the validation state now.
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
-        let output_series = tree
-            .root()
-            .output
-            .samples()
-            .ok_or_else(|| DataFusionError::Plan("FusedSeries output is not samples".into()))?;
+        let output_series = tree.root().output.samples();
+        let scalar_root = raw_schemas.is_empty();
         if let Some(op) = &partial_fold {
             aggregate_op(op)?;
         }
@@ -827,15 +854,24 @@ impl FusedSeriesExec {
         }
         let classification = if partial_fold.is_some() {
             Vec::new()
+        } else if scalar_root {
+            let scalar_fields = scalar_root_fields(&output_schema, &output_tags, &time_column)?;
+            classify_output(&output_schema, &scalar_fields, &output_tags, &time_column)?
         } else {
             classify_output(
                 &output_schema,
-                &output_series.fields,
+                &output_series
+                    .ok_or_else(|| {
+                        DataFusionError::Plan("FusedSeries output is not samples".into())
+                    })?
+                    .fields,
                 &output_tags,
                 &time_column,
             )?
         };
-        let partition_count = inputs[0].0.properties().partitioning.partition_count();
+        let partition_count = inputs.first().map_or(1, |(input, _, _)| {
+            input.properties().partitioning.partition_count()
+        });
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if count == 0 {
@@ -868,9 +904,19 @@ impl FusedSeriesExec {
         }
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(if inputs.len() > 1 { 1 } else { partition_count }),
-            inputs[0].0.properties().emission_type,
-            inputs[0].0.properties().boundedness,
+            Partitioning::UnknownPartitioning(if inputs.len() != 1 {
+                1
+            } else {
+                partition_count
+            }),
+            inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
+                input.properties().emission_type
+            }),
+            inputs
+                .first()
+                .map_or(Boundedness::Bounded, |(input, _, _)| {
+                    input.properties().boundedness
+                }),
         ));
         Ok(Self {
             promql,
@@ -989,9 +1035,9 @@ impl ExecutionPlan for FusedSeriesExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if self.inputs.len() > 1 && partition != 0 {
+        if partition >= self.properties.partitioning.partition_count() {
             return Err(DataFusionError::Execution(
-                "multi-source FusedSeries only has output partition 0".into(),
+                "FusedSeries output partition is out of range".into(),
             ));
         }
         let state = NativeExecutionState::try_new(
@@ -1047,9 +1093,13 @@ impl ExecutionPlan for FusedSeriesExec {
                 )
             })
             .transpose()?;
+        let mut executor = NativeExecutor::new(state);
+        if streams.is_empty() {
+            executor.end_of_input()?;
+        }
         Ok(Box::pin(FusedSeriesStream {
             inputs: streams,
-            executor: Some(NativeExecutor::new(state)),
+            executor: Some(executor),
             input_ids,
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),

@@ -703,6 +703,149 @@ fn run(executor: &mut NativeExecutor) -> Vec<EvaluatedChunk> {
     out
 }
 
+/// A scalar root answers its own value, once, on the grid it was bound to.
+///
+/// It reads nothing, so what it reports is not a series it was handed: one unlabelled chunk holding
+/// one value per grid point and closing on that same chunk. Nothing above it exists, so the value's
+/// field is the only field, and the chunk is addressed on the statement's grid rather than on one of
+/// its own.
+#[test]
+fn scalar_root_emits_one_unlabelled_grid_chunk() {
+    let grid = grid(10, 5, 3);
+    let tree = NativeTree::try_new(scalar(2.5, Arc::clone(&grid))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(
+        chunk.series.metric,
+        SeriesLabels::try_new(None, Vec::new()).unwrap(),
+        "a scalar carries no metric name and no labels"
+    );
+    assert_eq!(chunk.series.fields.len(), 1, "one value per grid point");
+    assert_eq!(sample_values(&chunk), vec![Some(2.5); 3]);
+    assert_eq!(chunk.series.time.len(), 3);
+    assert_eq!(
+        chunk.series.time.timestamps().unwrap().as_ref(),
+        grid.timestamps().unwrap().as_ref(),
+        "the chunk's positions are the statement's grid"
+    );
+    assert!(chunk.is_last, "the one chunk closes the value it reports");
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a scalar owes one chunk and no second one"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// The scalar's chunk is reserved before it is allocated, and its own node reports it.
+///
+/// The pool is asked first, so a low budget refuses the chunk instead of allocating it: the failure
+/// leaves nothing held, and an execution stopped by it gives back everything it took. What the node
+/// reports is the one batch and the values it produced, and no input at all, because it reads none.
+#[test]
+fn scalar_root_reserves_before_allocating_and_counts_its_output() {
+    let grid = grid(0, 1, 4);
+    let tree = NativeTree::try_new(scalar(2.0, Arc::clone(&grid))).unwrap();
+    let zero_pool = bounded_pool(0);
+    let mut rejected = executor(&tree, Arc::clone(&zero_pool));
+    rejected.end_of_input().unwrap();
+    let error = rejected.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("memory"), "{error}");
+    assert_eq!(rejected.state().reserved_bytes(), 0);
+    assert_eq!(zero_pool.reserved(), 0);
+    // A stopped execution holds nothing either, and says so rather than answering again.
+    assert!(rejected.next_chunk().is_err());
+
+    let pool = pool();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let state = NativeExecutionState::try_new(&tree, Arc::clone(&pool)).unwrap();
+    state.register_metrics(&metrics, 0);
+    let mut execution = NativeExecutor::new(state);
+    execution.end_of_input().unwrap();
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&chunk), vec![Some(2.0); 4]);
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(pool.reserved(), 0);
+    let peak = "native.p0.root.peak_reserved_bytes";
+    assert!(gauge(&metrics, peak) >= 4 * std::mem::size_of::<f64>());
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_BATCHES), 1);
+    assert_eq!(count(&metrics, "root", NodeMetric::OUTPUT_VALUES), 4);
+    assert_eq!(
+        count(&metrics, "root", NodeMetric::EVALUATED_GRID_POINTS),
+        4
+    );
+    assert_eq!(count(&metrics, "root", NodeMetric::COMPLETED_SERIES), 1);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 0);
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_SAMPLES), 0);
+}
+
+/// A scalar can produce its value before the input ends.
+///
+/// Nothing arrives for it, so waiting would be waiting for a chunk no producer will send. Ending the
+/// input afterwards changes nothing: the chunk was handed over once and the tree owes no second one.
+#[test]
+fn scalar_root_settles_before_the_input_ends() {
+    let tree = NativeTree::try_new(scalar(3.0, grid(0, 1, 3))).unwrap();
+    let mut execution = executor(&tree, pool());
+    assert_eq!(
+        sample_values(&execution.next_chunk().unwrap().unwrap()),
+        vec![Some(3.0); 3]
+    );
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution.end_of_input().unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// Stopped executors do not retain the scalar grid after handing off or rejecting the value.
+#[test]
+fn scalar_root_releases_grid_after_success_and_memory_failure() {
+    let pool = pool();
+    let (mut execution, weak_grid) = {
+        let grid = grid(0, 1, 3);
+        let tree = NativeTree::try_new(scalar(3.0, Arc::clone(&grid))).unwrap();
+        let weak = Arc::downgrade(&grid);
+        (executor(&tree, Arc::clone(&pool)), weak)
+    };
+    let chunk = execution.next_chunk().unwrap().unwrap();
+    assert!(weak_grid.upgrade().is_some());
+    drop(chunk);
+    execution.end_of_input().unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(weak_grid.upgrade().is_none());
+
+    let bounded = bounded_pool(0);
+    let (mut rejected, weak_grid) = {
+        let grid = grid(0, 1, 3);
+        let tree = NativeTree::try_new(scalar(3.0, Arc::clone(&grid))).unwrap();
+        let weak = Arc::downgrade(&grid);
+        (executor(&tree, Arc::clone(&bounded)), weak)
+    };
+    rejected.end_of_input().unwrap();
+    assert!(rejected.next_chunk().is_err());
+    assert_eq!(bounded.reserved(), 0);
+    assert!(weak_grid.upgrade().is_none());
+}
+
+/// Non-finite values and signed zero retain their bits rather than becoming missing samples.
+#[test]
+fn scalar_root_preserves_nan_negative_zero_and_infinity() {
+    for value in [f64::NAN, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let tree = NativeTree::try_new(scalar(value, grid(0, 1, 1))).unwrap();
+        let mut execution = executor(&tree, pool());
+        execution.end_of_input().unwrap();
+        let chunk = execution.next_chunk().unwrap().unwrap();
+        let actual = sample_values(&chunk)[0].expect("the point holds the constant");
+        assert_eq!(
+            actual.to_bits(),
+            value.to_bits(),
+            "the constant {value} is reported bit for bit"
+        );
+    }
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }

@@ -109,8 +109,8 @@
 //!
 //! Vector matching is bound with each selector's own input, including the labels and cardinality
 //! written on a vector–vector operation. A scalar has no input of its own: it is bound next to the
-//! vector that gives it something to broadcast over, while a statement whose value is only a scalar
-//! has nothing to read and is refused.
+//! vector that gives it something to broadcast over, while a statement whose value is only a
+//! constant is bound by [`compile_statement`] as that constant on the statement's grid.
 //!
 //! An aggregate is bound as [`AggregateStage::Complete`], which is a claim about the whole execution
 //! rather than about the node: it says that every contribution to every group is in this execution's
@@ -289,7 +289,21 @@ pub fn compile(
     Ok(compiled.tree)
 }
 
-/// Compiles a statement and returns a binding record for each selector occurrence.
+/// Compiles a constant statement to a scalar on the statement's grid, reading no input.
+///
+/// A value that depends on data or on the evaluation time is refused, which the same fold
+/// [`compile_expr`] uses for a constant operand decides ([`constant_value`]).
+pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
+    let value = constant_value(&stmt.expr)
+        .ok_or_else(|| not_implemented(&format!("the expression `{}`", stmt.expr)))?;
+    let grid = statement_grid(stmt)?;
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(grid),
+    })
+}
+
+/// Compiles `stmt` into a tree and returns a binding record for each selector occurrence.
 ///
 /// `bindings` is called once per selector with its requirements. The resulting source indices are
 /// occurrence numbers in compiler traversal order; the caller maps them to scan children.
@@ -305,6 +319,8 @@ pub fn compile_selectors(
              series may not interleave",
         ));
     }
+    // A tree with selector inputs reports evaluated vector samples. A constant root has no input
+    // and is bound separately by [`compile_statement`].
     if stmt.expr.value_type() != ValueType::Vector {
         return Err(not_implemented(&format!(
             "the expression `{}`, which is a {} where a tree reports evaluated samples",
@@ -1808,7 +1824,8 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// semantics for `%`, `^` and `atan2` live, the last two through `go_math`, so defining them again
 /// here would be a second answer for the two to disagree over. An operator with no
 /// [`ArithmeticOp`] — a comparison, `and`, `or`, `unless` — is not arithmetic and does not fold.
-fn constant_value(expr: &PromExpr) -> Option<f64> {
+/// Visible to the planner, which asks whether a statement's value is a constant before binding it.
+pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
     match expr {
         PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
         PromExpr::Paren(paren) => constant_value(&paren.expr),

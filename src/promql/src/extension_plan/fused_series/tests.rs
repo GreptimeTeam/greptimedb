@@ -1900,14 +1900,238 @@ async fn later_source_error_drops_all_gathered_inputs() {
     assert_eq!(0, pool.reserved());
 }
 
-/// The physical boundary rejects zero sources and mismatched physical source counts.
+/// A literal scalar runs as one schema-checked, one-partition output without scan children.
+#[tokio::test]
+async fn physical_plan_accepts_scalar_root_without_sources() {
+    let statement_grid = grid();
+    let tree = scalar_tree(Arc::clone(&statement_grid), 4.0);
+    let binding = FusedSeriesBinding {
+        grid: statement_grid,
+        metric_name: None,
+        time_index: TIME.to_string(),
+        tags: vec![],
+    };
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]));
+    let node = FusedSeries::try_new(
+        Arc::from("4"),
+        tree,
+        binding.clone(),
+        Vec::new(),
+        schema.to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node.to_execution_plan(Vec::new()).unwrap();
+    assert_eq!(1, exec.properties().output_partitioning().partition_count());
+    let rebuilt = exec.clone().with_new_children(Vec::new()).unwrap();
+    assert!(matches!(
+        exec.properties().boundedness,
+        Boundedness::Bounded
+    ));
+    assert!(exec.children().is_empty());
+    assert!(rebuilt.children().is_empty());
+    let zero_pool = Arc::new(GreedyMemoryPool::new(0));
+    let mut rejected = exec.execute(0, task_context(&zero_pool)).unwrap();
+    assert!(rejected.next().await.unwrap().is_err());
+    drop(rejected);
+    assert_eq!(0, zero_pool.reserved());
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(stream.next().await.is_none());
+    assert!(stream.next().await.is_none());
+    drop(stream);
+    let batches = vec![first];
+    assert_eq!(1, batches.len());
+    assert_eq!(schema.as_ref(), batches[0].schema().as_ref());
+    assert_eq!(GRID_LEN as usize, batches[0].num_rows());
+    let timestamps = batches[0]
+        .column_by_name(TIME)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    assert_eq!(grid_timestamps(), timestamps.values().as_ref());
+    let values = batches[0]
+        .column_by_name(VALUE)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!(values.iter().all(|value| value == Some(4.0)));
+    assert_eq!(0, pool.reserved());
+    let rebuilt_pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let rebuilt_batches = rebuilt
+        .execute(0, task_context(&rebuilt_pool))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(1, rebuilt_batches.len());
+    assert_eq!(batches[0].schema(), rebuilt_batches[0].schema());
+    assert_eq!(batches[0].columns(), rebuilt_batches[0].columns());
+    assert_eq!(0, rebuilt_pool.reserved());
+    let drop_pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let unpolled = rebuilt.execute(0, task_context(&drop_pool)).unwrap();
+    drop(unpolled);
+    assert_eq!(0, drop_pool.reserved());
+    let mut early = rebuilt.execute(0, task_context(&drop_pool)).unwrap();
+    let early_batch = early.next().await.unwrap().unwrap();
+    drop(early);
+    assert_eq!(0, drop_pool.reserved());
+    drop(early_batch);
+    assert_eq!(0, drop_pool.reserved());
+    assert!(exec.execute(1, task_context(&pool)).is_err());
+    let metrics = exec.metrics().unwrap();
+    assert_eq!(1, count(&metrics, "native.root.output_batches"));
+    assert_eq!(
+        GRID_LEN as usize,
+        count(&metrics, "native.root.output_values")
+    );
+    assert_eq!(
+        GRID_LEN as usize,
+        count(&metrics, "native.root.evaluated_grid_points")
+    );
+    assert_eq!(1, count(&metrics, "native.root.completed_series"));
+    assert_eq!(0, count(&metrics, "native.root.input_batches"));
+    assert_eq!(0, count(&metrics, "native.root.input_samples"));
+    let partial_error = FusedSeries::try_new_partial(
+        Arc::from("4"),
+        scalar_tree(grid(), 4.0),
+        binding,
+        vec![],
+        partial_op(AggregateKind::Sum, &[]),
+    )
+    .expect_err("scalar roots cannot be partial folds");
+    assert!(partial_error.to_string().contains("one raw child"));
+}
+
+#[tokio::test]
+async fn physical_scalar_rejects_malformed_output_schema() {
+    let tree = scalar_tree(grid(), 4.0);
+    let binding = FusedSeriesBinding {
+        grid: grid(),
+        metric_name: None,
+        time_index: TIME.to_string(),
+        tags: vec![],
+    };
+    let schemas = [
+        Schema::new(vec![Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )]),
+        Schema::new(vec![Field::new(VALUE, DataType::Float64, true)]),
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(OTHER, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(TIME, DataType::Float64, false),
+        ]),
+    ];
+    for schema in schemas {
+        let node = FusedSeries::try_new(
+            Arc::from("4"),
+            tree.clone(),
+            binding.clone(),
+            Vec::new(),
+            Arc::new(schema).to_dfschema_ref().unwrap(),
+        )
+        .unwrap();
+        assert!(node.to_execution_plan(Vec::new()).is_err());
+    }
+    let tagged = FusedSeries::try_new(
+        Arc::from("4"),
+        tree,
+        FusedSeriesBinding {
+            tags: vec![HOST.to_string()],
+            ..binding
+        },
+        Vec::new(),
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    assert!(tagged.to_execution_plan(Vec::new()).is_err());
+}
+
+#[tokio::test]
+async fn physical_scalar_conversion_preserves_special_float_bits() {
+    for value in [f64::NAN, -0.0, f64::INFINITY, f64::NEG_INFINITY] {
+        let statement_grid = grid();
+        let tree = scalar_tree(Arc::clone(&statement_grid), value);
+        let binding = FusedSeriesBinding {
+            grid: statement_grid,
+            metric_name: None,
+            time_index: TIME.to_string(),
+            tags: vec![],
+        };
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]));
+        let node = FusedSeries::try_new(
+            Arc::from("4"),
+            tree,
+            binding,
+            Vec::new(),
+            schema.to_dfschema_ref().unwrap(),
+        )
+        .unwrap();
+        let exec = node.to_execution_plan(Vec::new()).unwrap();
+        let batches = exec
+            .execute(0, SessionContext::default().task_ctx())
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(1, batches.len());
+        assert_eq!(GRID_LEN as usize, batches[0].num_rows());
+        let actual = batches[0]
+            .column_by_name(VALUE)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(
+            actual
+                .iter()
+                .all(|actual| actual.unwrap().to_bits() == value.to_bits())
+        );
+    }
+}
+
 #[test]
 fn physical_plan_requires_matching_source_count() {
     let node = fused(rate_tree());
     let zero = node
         .to_execution_plan(Vec::new())
-        .expect_err("physical execution cannot run with zero sources");
-    assert!(zero.to_string().contains("source") || zero.to_string().contains("input"));
+        .expect_err("a raw-series tree cannot run with zero sources");
+    assert!(zero.to_string().contains("count") || zero.to_string().contains("source"));
 
     let source = memory_exec(Vec::new());
     let tuple = || {
