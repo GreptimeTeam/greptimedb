@@ -1,0 +1,61 @@
+-- Legacy SQLness regression: these TQL EVAL cases pin the legacy PromQL planner.
+-- The native fused-series route is verified by test_prometheus_native_promql_route and
+-- test_native_promql_route_plans_the_query in tests-integration/tests/http.rs.
+CREATE TABLE native_scalar_entry (
+    ts TIMESTAMP(3) TIME INDEX,
+    host STRING PRIMARY KEY,
+    val DOUBLE,
+);
+
+Affected Rows: 0
+
+INSERT INTO native_scalar_entry VALUES
+    (0, 'host1', 1.0),
+    (0, 'host2', 2.0),
+    (1000, 'host1', 3.0),
+    (1000, 'host2', 4.0);
+
+Affected Rows: 4
+
+TQL EVAL (0, 2, '1s') 1 + 2;
+
++---------------------+-------+
+| time                | value |
++---------------------+-------+
+| 1970-01-01T00:00:00 | 3.0   |
+| 1970-01-01T00:00:01 | 3.0   |
+| 1970-01-01T00:00:02 | 3.0   |
++---------------------+-------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 2, '1s') native_scalar_entry * 100;
+
++-------+---------------------+--------------------+
+| host  | ts                  | val * Float64(100) |
++-------+---------------------+--------------------+
+| host1 | 1970-01-01T00:00:00 | 100.0              |
+| host1 | 1970-01-01T00:00:01 | 300.0              |
+| host1 | 1970-01-01T00:00:02 | 300.0              |
+| host2 | 1970-01-01T00:00:00 | 200.0              |
+| host2 | 1970-01-01T00:00:01 | 400.0              |
+| host2 | 1970-01-01T00:00:02 | 400.0              |
++-------+---------------------+--------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 2, '1s') -native_scalar_entry;
+
++-------+---------------------+---------+
+| host  | ts                  | (- val) |
++-------+---------------------+---------+
+| host1 | 1970-01-01T00:00:00 | -1.0    |
+| host1 | 1970-01-01T00:00:01 | -3.0    |
+| host1 | 1970-01-01T00:00:02 | -3.0    |
+| host2 | 1970-01-01T00:00:00 | -2.0    |
+| host2 | 1970-01-01T00:00:01 | -4.0    |
+| host2 | 1970-01-01T00:00:02 | -4.0    |
++-------+---------------------+---------+
+
+DROP TABLE native_scalar_entry;
+
+Affected Rows: 0
+
