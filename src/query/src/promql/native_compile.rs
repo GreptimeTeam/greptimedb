@@ -75,11 +75,11 @@
 //! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
 //! `<expression>` → `Window` whose input is evaluated (the subquery, whose input grid is its own),
 //! `<expression>` → `Map` (a pointwise math function over what its argument evaluates to) and, over
-//! any of those, `Binary` (an arithmetic or comparison operation with a constant on one side),
-//! `Scalar` (that constant), `Aggregate` (one of the nine aggregators that fold a group's values
-//! into one value per grid point, optionally grouped) and `Vector` (an operation over the whole
-//! vector at each point: a sort, `absent`, a classic histogram function, a selecting aggregator or
-//! `count_values`). Everything else is a
+//! any of those, `Binary` (an arithmetic or comparison operation between vectors or with a
+//! constant on one side), `Scalar` (that constant), `Aggregate` (one of the nine aggregators that
+//! fold a group's values into one value per grid point, optionally grouped) and `Vector` (an
+//! operation over the whole vector at each point: a sort, `absent`, a classic histogram function, a
+//! selecting aggregator or `count_values`). Everything else is a
 //! [`DataFusionError::NotImplemented`] that names what was found and quotes the shapes above,
 //! because rejecting a query the compiler does not understand is the only honest alternative to
 //! compiling it into something else.
@@ -105,11 +105,10 @@
 //! its own: `-x` binds as the multiplication by `-1` that it is, which the multiplication kernel
 //! already computes.
 //!
-//! What a tree cannot yet express is deliberate too. The one input binding carries the ordering it
-//! guarantees and what it produces, but not the selector it reads, so a tree with two selectors
-//! cannot tell its inputs apart and an operation between two vectors is refused. A statement whose
-//! value is a scalar has nothing to read, so it is refused as well: a constant is bound next to a
-//! vector that gives it something to broadcast over.
+//! Vector matching is bound with each selector's own input, including the labels and cardinality
+//! written on a vector–vector operation. A scalar has no input of its own: it is bound next to the
+//! vector that gives it something to broadcast over, while a statement whose value is only a scalar
+//! has nothing to read and is refused.
 //!
 //! An aggregate is bound as [`AggregateStage::Complete`], which is a claim about the whole execution
 //! rather than about the node: it says that every contribution to every group is in this execution's
@@ -145,7 +144,9 @@ use promql::native::plan::{
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
-use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use promql::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, binary_output_schema,
+};
 use promql_parser::label::MatchOp as ParserMatchOp;
 use promql_parser::label::Matchers;
 use promql_parser::parser::token::TokenType;
@@ -258,12 +259,14 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          optionally omitted as `[<range>:]`, where the subquery's `<expression>` \
                          is any shape here, so a subquery nests on a grid of its own as in \
                          `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
-                         `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
-                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a label function over any of them \
+                         `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; vector \
+                         matching between two such vectors (`a + b`, `a / on(job) group_left b`, \
+                         `a > bool ignoring(zone) b`); a math function over any of them \
+                         (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a label function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a constant (`2 / (x + 1)`, \
-                         `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
-                         that folds a group's values into one value per grid point — \
+                         `x > bool 0`), a negation of one of them (`-x`), or one of \
+                         the aggregators that fold a group's values into one value per grid point — \
                          `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
@@ -296,9 +299,10 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
 /// backstop for a tree built some other way.
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
-/// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
-/// is fine while a tree has one selector; a tree that reads two scans is refused here, and
-/// [`compile_selectors`] is what a caller that knows which scan feeds which selector calls.
+/// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. A
+/// tree that reads two scans is therefore paired with [`CompiledInput`]s, which carry each
+/// selector's requirement; this entry refuses such a statement rather than answering with a tree
+/// whose inputs no caller can tell apart.
 pub fn compile(
     stmt: &EvalStmt,
     input: Arc<SeriesSchema>,
@@ -506,13 +510,10 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
     ))
 }
 
-/// Compiles a binary operation whose operands are not both vectors.
+/// Compiles a binary operation, preserving written operand order and vector matching modifiers.
 ///
-/// The tree holds one input binding, and that binding carries the ordering it guarantees and what it
-/// produces but not the selector it reads, so two vectors cannot be told apart: `a + b` and `a + a`
-/// would compile to the same tree. That is why a vector–vector operation is refused until an input
-/// names its selector, and why an operation over one vector and one scalar is the shape the tree can
-/// bind: a scalar carries no labels, so broadcasting it is unambiguous.
+/// A scalar carries no labels, so broadcasting it over a vector is unambiguous. Vector operands
+/// retain their own input bindings and matching, including a fill on either side.
 fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
     // A set operator combines two vectors' series rather than their values, and the tree has no node
     // for it at all. Its name is reported before the operands are looked at, so a set operation
@@ -532,16 +533,35 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
             binary.op
         )));
     };
-    // Two vectors are refused before the modifier is looked at, so a vector–vector query with
-    // matching says what is actually missing. The refusal names the missing identity rather than the
-    // query, because that is what whoever adds it has to add.
+    // Two vectors are matched by their labels, so the node carries the modifiers the query wrote and
+    // each operand is compiled from its own selector.
     if binary.lhs.value_type() == ValueType::Vector && binary.rhs.value_type() == ValueType::Vector
     {
-        return Err(not_implemented(&format!(
-            "the binary operation `{binary}` between two vectors, which needs each input to name \
-             the selector it reads: an input binding carries its ordering and what it produces, but \
-             not which selector it was bound to"
-        )));
+        // Both operands are compiled before the node is built, so `a + b` binds one input per
+        // selector and `(a + b) / c` nests. Left before right, because a non-commutative operator
+        // means what that order says.
+        let left = compile_expr(&context.with_path(context.path.left()), &binary.lhs)?;
+        let right = compile_expr(&context.with_path(context.path.right()), &binary.rhs)?;
+        // A vector-typed expression compiles to evaluated samples, so a side that is not one is a
+        // compiler defect rather than a query error: the type check above is what a query has to
+        // pass.
+        let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+            return Err(DataFusionError::Internal(format!(
+                "the binary operation `{binary}` compiled a vector operand to something other than \
+                 samples: a vector-typed expression compiles to samples, so the two disagree"
+            )));
+        };
+        // The output is the kernel's own schema: the two grids have to agree, and the fields are
+        // paired by position and named after the left side.
+        let output = NativeType::Samples(binary_output_schema(lhs, rhs)?);
+        return Ok(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(left),
+                right: Box::new(right),
+                matching: vector_matching(binary, op)?,
+            },
+            output,
+        });
     }
     // What is left has a constant on one side, and a modifier is refused rather than dropped. This
     // is deliberately narrower than Prometheus, which drops an `on` or `ignoring` written on a
@@ -626,12 +646,71 @@ fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
     }
 }
 
+/// The matching a vector–vector operation records.
+///
+/// Each part is read from the modifier the query wrote, and a modifier it did not write is the
+/// default PromQL applies: every label but `__name__` matches (`ignoring` nothing), and the
+/// cardinality is one-to-one. Fill fields retain the parser's left/right values, which name the
+/// sides as written: the kernel swaps them together with the operands under `group_right`.
+///
+/// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] refuses before
+/// asking for a matching, so reaching it means the two disagree; it is reported as a shape with no
+/// node rather than panicking on a path a query cannot take today.
+fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> {
+    let modifier = binary.modifier.as_ref();
+    // `Include` is `on`, `Exclude` is `ignoring`: a label list is matched as the names it holds, and
+    // `__name__` is only a match label when `on` names it.
+    let labels = match modifier.and_then(|modifier| modifier.matching.as_ref()) {
+        None => MatchingLabels::Ignoring(Vec::new()),
+        Some(LabelModifier::Include(labels)) => MatchingLabels::On(label_names(&labels.labels)),
+        Some(LabelModifier::Exclude(labels)) => {
+            MatchingLabels::Ignoring(label_names(&labels.labels))
+        }
+    };
+    let cardinality = match modifier.map(|modifier| &modifier.card) {
+        None | Some(VectorMatchCardinality::OneToOne) => Cardinality::OneToOne,
+        Some(VectorMatchCardinality::ManyToOne(labels)) => {
+            Cardinality::ManyToOne(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::OneToMany(labels)) => {
+            Cardinality::OneToMany(label_names(&labels.labels))
+        }
+        Some(VectorMatchCardinality::ManyToMany) => {
+            return Err(not_implemented(&format!(
+                "the many-to-many matching in `{binary}`, which is the cardinality of a set \
+                 operator: it combines two vectors' series, and this node is an arithmetic or \
+                 comparison operation over values"
+            )));
+        }
+    };
+    // The fields keep the parser's operand names: `fill_values.lhs` is `fill_left`, and
+    // `fill_values.rhs` is `fill_right`. They name the side written in the query, which is what the
+    // kernel fills under every cardinality: since prometheus/prometheus#19939 the values swap with
+    // the operands, so `group_right` fills the query's left and right sides rather than the
+    // matching's one and many sides.
+    let fill = modifier.map_or_else(FillValues::default, |modifier| FillValues {
+        lhs: modifier.fill_values.lhs,
+        rhs: modifier.fill_values.rhs,
+    });
+    Ok(BinaryMatching {
+        op,
+        return_bool: binary.return_bool(),
+        labels,
+        cardinality,
+        fill,
+    })
+}
+
+/// The label names of a parser label list, as the matching and the copied-label lists hold them.
+fn label_names(labels: &[String]) -> Vec<Arc<str>> {
+    labels.iter().map(|name| Arc::from(name.as_str())).collect()
+}
+
 /// The binary operator a PromQL token denotes, or `None` when there is no node for it.
 ///
-/// A comparison is bound like an arithmetic operator, because the node carries `return_bool`
-/// separately: `x > 0` and `x > bool 0` are one operator with one field changed. [`arithmetic_op`]
-/// is not reused because it decides what a *fold* may do at compile time and a comparison folds
-/// nothing, while this map decides what a *node* computes once the query runs.
+/// A comparison carries `return_bool` separately, so `x > 0` and `x > bool 0` use the same
+/// operator. Unlike [`arithmetic_op`], which decides what a constant fold may compute, this map
+/// selects the operation the runtime executes.
 fn binary_op(op: &TokenType) -> Option<BinaryOp> {
     match op.id() {
         token::T_ADD => Some(BinaryOp::Add),
