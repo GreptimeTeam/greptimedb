@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-node metric handles for native PromQL execution and their temporary DataFusion export.
+//! Per-node metric handles for native PromQL execution and their DataFusion registration.
 //!
-//! Node metrics retain no names or tree topology. Runtime callers may export their handles into a
-//! fresh temporary DataFusion metrics set using names collected for that export.
+//! Node metrics retain no names or tree topology: [`NodeMetrics::register`] names the handles for
+//! one registration, and the set holds them from there. What outlives an execution is therefore its
+//! counters and gauges, not the nodes that recorded them.
 
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::metrics::{
@@ -124,12 +125,12 @@ fn partitioned(name: &str, metric: &str, partition: usize) -> String {
 }
 
 impl NodeMetrics {
-    /// Exports this node's metrics under its temporary `name` into `set`.
+    /// Registers this node's handles under `name` into `set`.
     ///
-    /// Callers must invoke this only when collecting a runtime execution into a fresh temporary
-    /// metrics set. Names belong to that export and are not retained by this node. `partition` is
-    /// part of the DataFusion registration, and the peak name includes it because peaks must not be
-    /// summed across partitions.
+    /// A caller registers once per execution, before that execution starts, so what `set` holds
+    /// afterwards follows what this node records as it runs. The name belongs to that registration
+    /// and is not retained here. `partition` is part of the DataFusion registration, and the peak
+    /// name includes it because peaks must not be summed across partitions.
     pub fn register(&self, name: &str, set: &ExecutionPlanMetricsSet, partition: usize) {
         fn count(set: &ExecutionPlanMetricsSet, partition: usize, name: String, count: &Count) {
             MetricBuilder::new(set)

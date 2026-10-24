@@ -61,7 +61,7 @@ use datafusion::execution::memory_pool::{
 };
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
-use datafusion::physical_plan::metrics::MetricsSet;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
@@ -77,7 +77,6 @@ use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::InputId;
-use crate::native::execute::RuntimeTreeHandle;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
 use crate::native::runs::{Run, absorb};
@@ -793,8 +792,12 @@ pub struct FusedSeriesExec {
     ///
     /// Plan-level rather than per-partition: see [`LabelSets`].
     labels: SharedLabelSets,
-    /// Runtime roots from executions of the tree, retained for fresh metrics exports.
-    runtimes: Mutex<Vec<(usize, RuntimeTreeHandle)>>,
+    /// The metric handles every execution of this plan registered, reported by [`Self::metrics`].
+    ///
+    /// An execution registers its tree's node handles here before it starts, so what this keeps is
+    /// those counters and gauges and not the runtime topology they were registered from. The set
+    /// synchronizes its own registration and reads.
+    metrics: ExecutionPlanMetricsSet,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -895,7 +898,7 @@ impl FusedSeriesExec {
             input,
             output_schema,
             labels,
-            runtimes: Mutex::new(Vec::new()),
+            metrics: ExecutionPlanMetricsSet::new(),
             properties,
         })
     }
@@ -1009,11 +1012,9 @@ impl ExecutionPlan for FusedSeriesExec {
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
-        let runtime = state.runtime_tree();
-        self.runtimes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((partition, runtime));
+        // Registered once, before the first chunk is pulled: what this plan reports afterwards is
+        // the handles the nodes update as they run, and the execution itself stays with the stream.
+        state.register_metrics(&self.metrics, partition);
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
         Ok(Box::pin(FusedSeriesStream {
@@ -1030,15 +1031,7 @@ impl ExecutionPlan for FusedSeriesExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        let runtimes = self.runtimes.lock().unwrap_or_else(|e| e.into_inner());
-        let mut metrics = MetricsSet::new();
-        for (partition, runtime) in runtimes.iter() {
-            let runtime = runtime.lock().unwrap_or_else(|e| e.into_inner());
-            for metric in runtime.export_metrics(*partition).iter() {
-                metrics.push(Arc::clone(metric));
-            }
-        }
-        Some(metrics)
+        Some(self.metrics.clone_inner())
     }
 }
 

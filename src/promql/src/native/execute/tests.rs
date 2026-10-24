@@ -15,11 +15,11 @@
 //! What the runtime has to get right: each layer's grid, per-node accounting, rejection and
 //! release.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-use datafusion::physical_plan::metrics::MetricValue;
+use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue};
 use datatypes::arrow::array::{Array, Float64Array, UInt32Array};
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::{
@@ -34,8 +34,8 @@ use datatypes::series::{Label, MetricName, SeriesOrdering};
 
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeState, RuntimeOp, RuntimeTreeHandle, absorb_rebuilds, evaluated_bytes, grid_end_ms,
-    map_chunk, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    NodeState, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms, map_chunk,
+    operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -766,29 +766,57 @@ fn decided(chunks: &[EvaluatedChunk]) -> Vec<(usize, Option<f64>)> {
         .collect()
 }
 
-/// The count `metric` of the node called `name`, exported fresh from `runtime`.
+/// The handles the nodes of `execution`'s tree record into, registered before it does any work.
 ///
-/// The handles are read from the execution's own runtime tree, so a read here sees what the nodes
+/// A caller registers once per execution, so what the returned set holds follows what the nodes
+/// record from here on, and it keeps none of the execution's topology.
+fn metrics_of(execution: &NativeExecutor) -> ExecutionPlanMetricsSet {
+    let metrics = ExecutionPlanMetricsSet::new();
+    execution.state().register_metrics(&metrics, 0);
+    metrics
+}
+
+/// Every node of `execution`'s tree as a weak handle to the metrics it records into, root first.
+///
+/// What a node records into is its own, so a weak handle says whether the node still exists: the
+/// registered set holds the counters, not the nodes, and dropping the execution must drop both the
+/// topology and the handles it held.
+fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
+    fn walk(node: &RuntimeNode, out: &mut Vec<Weak<NodeMetrics>>) {
+        out.push(Arc::downgrade(&node.metrics));
+        match &node.op {
+            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Instant { input, .. }
+            | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Vector { input, .. } => walk(input, out),
+            RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
+                walk(left, out);
+                walk(right, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&execution.state().tree.root, &mut out);
+    out
+}
+
+/// The count `metric` of the node called `name`, read from the handles `set` holds.
+///
+/// The set was registered from the execution's own tree, so a read here sees what the nodes
 /// recorded even after the execution stopped or was dropped.
-fn count(runtime: &RuntimeTreeHandle, name: &str, metric: &str) -> usize {
+fn count(set: &ExecutionPlanMetricsSet, name: &str, metric: &str) -> usize {
     let full = format!("native.{name}.{metric}");
-    let exported = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .export_metrics(0);
-    match exported.sum_by_name(&full) {
+    match set.clone_inner().sum_by_name(&full) {
         Some(MetricValue::Count { count, .. }) => count.value(),
         other => panic!("no count named {full}: {other:?}"),
     }
 }
 
-/// The gauge called `name` — its full exported name — read fresh from `runtime`.
-fn gauge(runtime: &RuntimeTreeHandle, name: &str) -> usize {
-    let exported = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .export_metrics(0);
-    match exported.sum_by_name(name) {
+/// The gauge called `name` — its full registered name — read from `set`.
+fn gauge(set: &ExecutionPlanMetricsSet, name: &str) -> usize {
+    match set.clone_inner().sum_by_name(name) {
         Some(MetricValue::Gauge { gauge, .. }) => gauge.value(),
         other => panic!("no gauge named {name}: {other:?}"),
     }
@@ -798,15 +826,10 @@ fn gauge(runtime: &RuntimeTreeHandle, name: &str) -> usize {
 ///
 /// A window's evaluator, an instant node's buffered series and a binary node's retained operands all
 /// belong to the node that owns them, so what is read here is the root operator and nothing below
-/// it: the trees these tests build have one node of that kind, and it is the root. The runtime
-/// tree's lock is taken and dropped inside this call, so the execution can be polled again after
-/// it returns.
+/// it: the trees these tests build have one node of that kind, and it is the root. The state owns
+/// that tree, so the read is a borrow of it and the execution can be polled again afterwards.
 fn root_holds(execution: &NativeExecutor, holds: fn(&RuntimeOp) -> bool) -> bool {
-    let runtime = execution.state().runtime_tree();
-    let guard = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    holds(&guard.root.op)
+    holds(&execution.state().tree.root.op)
 }
 
 /// The payload a window root holds: its range evaluator.
@@ -1069,7 +1092,7 @@ fn a_downstream_window_emits_before_its_input_series_ends() {
     let tail = evaluated_chunk(&schema, 3, vec![4.0, 5.0], true);
 
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution.push_evaluated(InputId::new(0), head).unwrap();
 
     let mut early = Vec::new();
@@ -1233,7 +1256,7 @@ fn each_node_records_its_own_metrics() {
     );
     let tree = NativeTree::try_new(root).unwrap();
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     let schema = raw_schema();
     execution
         .push_raw(
@@ -1300,13 +1323,12 @@ fn each_node_records_its_own_metrics() {
     );
 }
 
-/// A tree whose left operand is a broadcast exports its whole runtime topology, the constant
-/// included.
+/// A tree whose left operand is a broadcast registers every node it runs, the constant included.
 ///
 /// The tree is `(2 + in0) + in1`: the root is a binary, its left operand a broadcast over the first
-/// input, its right operand the second. Each of the five nodes keeps its own handles, so a fresh
-/// export names one entry per node and per metric a node reports, and the branches carry what each
-/// node did with the input it was handed.
+/// input, its right operand the second. Each of the five nodes keeps its own handles, so one
+/// registration names one entry per node and per metric a node reports, and the branches carry what
+/// each node did with the input it was handed.
 #[test]
 fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     let out_grid = grid(0, 60_000, 2);
@@ -1325,14 +1347,10 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
 
-    // One direct pattern per level, on the nodes the constructor made; the lock goes before the
+    // One direct pattern per level, on the nodes the constructor made; the borrow ends before the
     // first push.
     {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Binary { left, right, .. } = &guard.root.op else {
+        let RuntimeOp::Binary { left, right, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the binary node the tree built");
         };
         let RuntimeOp::Broadcast {
@@ -1378,7 +1396,7 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     let out = run(&mut execution);
     assert_eq!(decided(&out), vec![(0, Some(13.0)), (1, Some(24.0))]);
 
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     // Each leaf closed the one series it was handed; the constant closed none.
     assert_eq!(
         count(&metrics, "root.left.right", NodeMetric::COMPLETED_SERIES),
@@ -1419,11 +1437,9 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
         }
     }
     expected.sort();
-    let exported = |runtime: &RuntimeTreeHandle| -> Vec<String> {
-        let mut names: Vec<String> = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .export_metrics(0)
+    let exported = |metrics: &ExecutionPlanMetricsSet| -> Vec<String> {
+        let mut names: Vec<String> = metrics
+            .clone_inner()
             .iter()
             .map(|metric| metric.value().name().to_string())
             .collect();
@@ -1431,7 +1447,8 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
         names
     };
     assert_eq!(exported(&metrics), expected);
-    // A second fresh export repeats no name, which a doubled entry in the sorted list would show.
+    // Reading the registered handles again repeats no name, which a doubled entry in the sorted
+    // list would show: a read registers nothing.
     assert_eq!(exported(&metrics), expected);
 
     // The execution closed itself, so every node gave its bytes back.
@@ -1457,7 +1474,7 @@ fn an_error_releases_the_reservation() {
     let schema = raw_schema();
 
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     assert_eq!(pool.reserved(), 0);
     assert!(
         root_holds(&execution, holds_window),
@@ -1541,7 +1558,7 @@ fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
     // Room for the first chunk and what the window keeps of it, not for the second one.
     let pool = bounded_pool(16 << 10);
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
 
     execution
         .push_raw(InputId::new(0), raw_chunk(&schema, &[0], &[1.0], false))
@@ -1749,7 +1766,7 @@ fn an_input_that_ends_inside_a_collected_series_is_reported() {
     let schema = evaluated_schema(Arc::clone(&inner_grid));
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
 
     // One piece of a series that never says it ended: the collector keeps it and reports nothing.
     execution
@@ -2090,7 +2107,7 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
     let schema = evaluated_schema(Arc::clone(&inner_grid));
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
         execution
             .push_evaluated(
@@ -2106,13 +2123,9 @@ fn a_window_that_merges_its_input_releases_what_it_collected() {
     );
     let held = execution.state().reserved_bytes();
     // The root is the window that collected the fragments, so its own reservation is what the peak
-    // below has to cover. The lock is dropped before the close below.
+    // below has to cover. The borrow ends before the close below.
     let window_held = {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Window { state, .. } = &guard.root.op else {
+        let RuntimeOp::Window { state, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the window the tree built");
         };
         state.buffer.reservation.size()
@@ -2182,14 +2195,10 @@ fn a_merge_flush_reserves_every_queued_output() {
     assert!(first.is_last, "a merged series is handed over closed");
 
     // What the root holds once one of the two answers left: the answer still queued, the label sets
-    // the node handed out under, and the evaluator that evaluated them. The figures are read under
-    // the runtime tree's lock, which is dropped before the next pull.
+    // the node handed out under, and the evaluator that evaluated them. The borrow ends before the
+    // next pull.
     let (queued, queued_bytes, retained, emitted, held) = {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Window { window, state, .. } = &guard.root.op else {
+        let RuntimeOp::Window { window, state, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the window the tree built");
         };
         let queued_bytes = state.queued.iter().map(|(_, bytes)| *bytes).sum::<usize>();
@@ -2228,15 +2237,15 @@ fn a_merge_flush_reserves_every_queued_output() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// Dropping the execution releases a root a caller still holds the handle of, and keeps the tree.
+/// Dropping the execution releases everything it held and every node it built, and the counters
+/// the caller registered still read what those nodes did.
 ///
-/// A plan keeps the runtime tree's handle after a partition's stream is gone, to export what the
-/// nodes recorded. What the handle keeps is the node structure and its metrics, not what the nodes
-/// hold: dropping the execution takes the evaluator, the collected input, the queued answers and
-/// the reservation with it, so the root reads released and the pool reads empty, while the leaf the
-/// window was built over is still where it was.
+/// The state owns its tree, so the drop takes the evaluator, the collected input, the queued answers,
+/// the reservation and the topology with it. What outlives the execution is what the caller
+/// registered before it started: the nodes' own counters and gauges, not the nodes, so a weak
+/// handle to any of them is dead while the peak the tree reached still stands.
 #[test]
-fn dropping_the_execution_releases_a_retained_root() {
+fn dropping_the_execution_releases_its_tree_and_keeps_the_registered_metrics() {
     let inner_grid = grid(0, 60_000, 2);
     let outer_grid = grid(60_000, 60_000, 1);
     let tree = NativeTree::try_new(window_with(
@@ -2250,7 +2259,14 @@ fn dropping_the_execution_releases_a_retained_root() {
     let schema = evaluated_schema(Arc::clone(&inner_grid));
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let runtime = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
+    // Every node the tree built, watched by a handle that says whether it still exists.
+    let nodes = node_metrics(&execution);
+    assert_eq!(
+        nodes.len(),
+        3,
+        "the tree is a window over a map over an input"
+    );
     for (name, values) in [("a", vec![Some(1.0), None]), ("b", vec![None, Some(3.0)])] {
         execution
             .push_evaluated(
@@ -2266,15 +2282,12 @@ fn dropping_the_execution_releases_a_retained_root() {
     );
     // The root holds the evaluator and the collected input before the input ends.
     {
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let RuntimeOp::Window {
             input,
             window,
             merge,
             state,
-        } = &guard.root.op
+        } = &execution.state().tree.root.op
         else {
             panic!("the root is not the window the tree built");
         };
@@ -2301,15 +2314,12 @@ fn dropping_the_execution_releases_a_retained_root() {
     // The flush took the collected input, so what is left to release is the evaluator and the
     // answer the caller has not pulled yet.
     {
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let RuntimeOp::Window {
             window,
             merge,
             state,
             ..
-        } = &guard.root.op
+        } = &execution.state().tree.root.op
         else {
             panic!("the root is not the window the tree built");
         };
@@ -2319,46 +2329,27 @@ fn dropping_the_execution_releases_a_retained_root() {
         assert!(state.buffer.reservation.size() > 0);
     }
     assert!(pool.reserved() > 0, "the root reserved nothing to release");
+    assert!(
+        nodes.iter().all(|node| node.upgrade().is_some()),
+        "a node went before the execution it belongs to"
+    );
 
     drop(execution);
 
-    // The handle is what is left, and it reads a released tree while the peak it reached stands.
+    // What the caller registered before the run is all that is left, and it reads the released
+    // nodes: the peak they reached stands, and nothing they held is charged any more.
     let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
     let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
-    assert_eq!(gauge(&runtime, &current), 0);
+    assert_eq!(gauge(&metrics, &current), 0);
     assert!(
-        gauge(&runtime, &peak) > 0,
+        gauge(&metrics, &peak) > 0,
         "the peak the node reached did not survive the release"
     );
+    assert_eq!(count(&metrics, "root", NodeMetric::INPUT_BATCHES), 2);
     assert_eq!(pool.reserved(), 0);
-    let guard = runtime
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let RuntimeOp::Window {
-        input,
-        window,
-        merge,
-        state,
-    } = &guard.root.op
-    else {
-        panic!("the dropped execution took the root with it");
-    };
-    assert!(window.is_none(), "the dropped execution kept the evaluator");
     assert!(
-        merge.is_none(),
-        "the dropped execution kept the collected input"
-    );
-    assert!(
-        state.queued.is_empty(),
-        "the dropped execution kept a queued answer"
-    );
-    assert_eq!(state.buffer.reservation.size(), 0);
-    let RuntimeOp::Map { input: leaf, .. } = &input.op else {
-        panic!("the window's input is not the map the tree built");
-    };
-    assert!(
-        matches!(&leaf.op, RuntimeOp::Input(id) if id.index() == 0),
-        "the released tree lost the leaf the window was built over"
+        nodes.iter().all(|node| node.upgrade().is_none()),
+        "the dropped execution kept the tree it was built from"
     );
 }
 
@@ -4156,7 +4147,7 @@ fn a_series_with_no_selectable_sample_closes_once() {
     let out_grid = grid(0, 60_000, 3);
     let tree = NativeTree::try_new(instant(input(), 300_000, 0, Arc::clone(&out_grid))).unwrap();
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     let schema = raw_schema();
     execution
         .push_raw(
@@ -5038,7 +5029,7 @@ fn a_binary_pairs_the_fields_of_each_operand() {
         eval_grid: Some(grid),
     });
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution
         .push_evaluated(
             InputId::new(0),
@@ -5658,7 +5649,7 @@ fn a_binary_beneath_the_executor_reserves_what_it_retains() {
             .fold(0usize, usize::saturating_add);
 
     let mut execution = executor(&tree, bounded_pool(1 << 22));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution.push_evaluated(left, first).unwrap();
     execution.push_evaluated(left, second).unwrap();
     // Nothing is queued on the right, so the pull retains both chunks of the left operand and
@@ -5941,7 +5932,7 @@ fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
     let (retained, assembly) = binary_charge(&schema, &left_chunk, &right_chunk);
     let pool = bounded_pool(retained + assembly - 1);
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution.push_evaluated(left, left_chunk).unwrap();
     execution.push_evaluated(right, right_chunk).unwrap();
     // Both operands are retained before anything is assembled, and nothing is answered: the refusal
@@ -6700,7 +6691,7 @@ fn a_binary_counts_each_closed_result_once() {
     let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 2);
     let schema = evaluated_schema(grid);
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution
         .push_evaluated(left, evaluated_chunk(&schema, 0, vec![1.0, 2.0], true))
         .unwrap();
@@ -7099,7 +7090,7 @@ fn an_aggregate_drops_every_label_and_adds_its_group_per_point() {
     ))
     .unwrap();
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     for (metric, values) in [
         (
             job_instance_metric("requests", "api", "a"),
@@ -7658,7 +7649,7 @@ fn a_window_above_a_broadcast_merges_the_series_it_collapses() {
     ))
     .unwrap();
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     // Two series that only differ by name, each holding the half of the grid the other leaves empty.
     execution
         .push_evaluated(
@@ -7933,7 +7924,7 @@ fn a_broadcast_reports_one_chunk_in_for_each_chunk_out() {
     ))
     .unwrap();
     let mut execution = executor(&tree, pool());
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution
         .push_evaluated(
             InputId::new(0),
@@ -7999,7 +7990,7 @@ fn a_broadcast_over_a_streaming_window_hands_over_the_points_it_settles() {
     .unwrap();
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let metrics = execution.state().runtime_tree();
+    let metrics = metrics_of(&execution);
     execution
         .push_evaluated(
             InputId::new(0),
@@ -8148,11 +8139,7 @@ fn an_aggregate_answers_nothing_until_its_whole_input_ends() {
     // The root is the aggregate the tree built, and the fold is its own payload: what is read
     // below is a copy of the flag, not a borrow held across the pulls.
     let computed = |execution: &NativeExecutor| {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Aggregate { aggregate, .. } = &guard.root.op else {
+        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         aggregate
@@ -8344,14 +8331,10 @@ fn aggregate_runtime_queue_keeps_only_backing_after_pops_until_release() {
     assert_eq!(first.series.time.positions().count(), 1);
     let entry = std::mem::size_of::<(NativeChunk, usize)>();
     // What the root's queue holds, what the first chunk in it was queued with, the node's
-    // reservation and the backing the queue grew to. The lock is dropped inside the call, so the
-    // pull below is taken with nothing held.
+    // reservation and the backing the queue grew to. The borrow ends inside the call, so the pull
+    // below is taken with nothing held.
     let queue = |execution: &NativeExecutor| -> (usize, usize, usize, usize) {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Aggregate { state, .. } = &guard.root.op else {
+        let RuntimeOp::Aggregate { state, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         (
@@ -8428,14 +8411,10 @@ fn aggregate_fold_state_is_released_after_input() {
         )
         .unwrap();
     assert!(execution.next_chunk().unwrap().is_none());
-    // The root is the aggregate the tree built: its fold holds one group and has not run. The lock
-    // is dropped before the close below takes the state again.
+    // The root is the aggregate the tree built: its fold holds one group and has not run. The
+    // borrow ends before the close below takes the state again.
     {
-        let runtime = execution.state().runtime_tree();
-        let guard = runtime
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let RuntimeOp::Aggregate { aggregate, .. } = &guard.root.op else {
+        let RuntimeOp::Aggregate { aggregate, .. } = &execution.state().tree.root.op else {
             panic!("the root is not the aggregate the tree built");
         };
         let aggregate = aggregate.as_ref().expect("the root holds an aggregate");
@@ -9275,13 +9254,14 @@ fn a_label_change_admits_the_label_it_writes_before_building_it() {
     assert_eq!(pool.reserved(), 0);
 }
 
-/// An execution that ended keeps its topology and its counters, and nothing the input was read
+/// An ended execution keeps its tree and its registered counters, and nothing the input was read
 /// with: the schema the leaf was bound to and the grid that schema is addressed on go with it.
 ///
-/// The leaf itself stays -- the root still says which routing slot it is, and the metrics an
-/// observer keeps the runtime tree for still read -- but the slot that fed it is taken, so an
-/// executor kept alive past the execution holds no input schema and no materialized grid. Both ways
-/// an execution ends are covered: the answer is drained, and a rejected push stops it first.
+/// The leaf itself stays -- the root still says which routing slot it is, and the handles the caller
+/// registered before the run still read what the nodes recorded -- but the slot that fed it is
+/// taken, so an executor kept alive past the execution holds no input schema and no materialized
+/// grid. Both ways an execution ends are covered: the answer is drained, and a rejected push stops
+/// it first.
 #[test]
 fn an_ended_execution_keeps_no_input_schema_or_grid() {
     for fails in [false, true] {
@@ -9301,7 +9281,7 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
 
         let pool = pool();
         let mut execution = executor(&tree, Arc::clone(&pool));
-        let runtime = execution.state().runtime_tree();
+        let metrics = metrics_of(&execution);
         drop(tree);
         drop(schema);
         drop(out_grid);
@@ -9349,7 +9329,7 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
             drop(refused);
         }
 
-        // What an observer keeping the runtime tree alive sees is the topology and the counters.
+        // What the caller registered before the run sees is what the nodes recorded.
         assert!(
             schema_weak.upgrade().is_none(),
             "the ended execution kept the schema its input was bound to"
@@ -9371,13 +9351,13 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
         );
         let current = format!("native.root.{}", NodeMetric::CURRENT_RESERVED_BYTES);
         assert_eq!(
-            gauge(&runtime, &current),
+            gauge(&metrics, &current),
             0,
             "the ended execution still charges its leaf"
         );
         let peak = format!("native.p0.root.{}", NodeMetric::PEAK_RESERVED_BYTES);
         assert!(
-            gauge(&runtime, &peak) > 0,
+            gauge(&metrics, &peak) > 0,
             "the peak the leaf reached did not survive the end of the execution"
         );
         assert!(

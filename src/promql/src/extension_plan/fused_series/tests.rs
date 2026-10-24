@@ -1222,8 +1222,9 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
     assert_eq!(1, count(&metrics, "native.root.input.completed_series"));
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
 
-    // Exporting a snapshot repeatedly does not register another copy of the runtime metrics.
-    let repeated = exec.metrics().expect("metrics can be exported repeatedly");
+    // Reading the plan's metrics again registers nothing: the same handles are read, so the set
+    // keeps its cardinality and what the nodes recorded.
+    let repeated = exec.metrics().expect("metrics can be read repeatedly");
     assert_eq!(metrics.iter().count(), repeated.iter().count());
     assert_eq!(1, count(&repeated, "native.root.input.completed_series"));
     assert_eq!(1, count(&repeated, "native.root.completed_series"));
@@ -1260,7 +1261,7 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )
         .expect("the node rebuilds over another input");
-    // No execution of the rebuilt node has run, so it holds no runtime root to report.
+    // No execution of the rebuilt node has run, so it registered no handles to report.
     let before = rebuilt
         .metrics()
         .expect("a plan that has not run reports an empty set rather than none");
@@ -1287,7 +1288,7 @@ async fn a_rebuilt_node_reports_only_its_own_execution() {
     assert_eq!(original.iter().count(), after.iter().count());
     let retained = exec
         .metrics()
-        .expect("the original keeps its runtime roots");
+        .expect("the original keeps the handles its execution registered");
     assert_eq!(original.iter().count(), retained.iter().count());
     assert_eq!(1, count(&retained, "native.root.completed_series"));
     assert_eq!(1, count(&retained, "native.root.input.completed_series"));
@@ -1365,6 +1366,136 @@ async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
     // Nothing was converted into an output batch, so no label set was ever claimed and the plan's
     // ledger was never charged: dropping the execution gives back everything it took.
     assert_eq!(0, pool.reserved(), "the dropped execution holds no bytes");
+}
+
+/// A plan registers its tree's handles once per execution, and reading them back registers nothing.
+///
+/// A caller reads a plan's metrics as often as it likes: every read clones the same registered
+/// entries, so the set keeps rather than grows, and it keeps the handles themselves rather than a
+/// copy of the tree's counters. Dropping the execution leaves those handles reporting what the nodes
+/// did — the peak they reached and the batches they read — and nothing they held. A second execution
+/// of the same plan registers its own handles, so what it adds is its own counters and not a second
+/// registration of the first one's.
+#[tokio::test]
+async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
+    let schema = frame_schema();
+    let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let exec = plan(
+        rate_tree(),
+        staged(schema.clone(), move || {
+            Box::pin(StagedStream::new(schema.clone(), vec![partial.clone()]).pending_after(1))
+        }),
+    )
+    .expect("the runtime executes a rate tree");
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+    // The source hands one unclosed chunk over and parks, so the window holds it while the plan's
+    // metrics are read: the reads below happen while an execution is alive.
+    assert!(futures::poll!(stream.next()).is_pending());
+
+    let first = exec
+        .metrics()
+        .expect("the metrics are registered before the run");
+    let names = |metrics: &MetricsSet| -> Vec<String> {
+        metrics
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect()
+    };
+    let second = exec.metrics().expect("metrics can be read repeatedly");
+    assert_eq!(
+        names(&first),
+        names(&second),
+        "reading the metrics again registered another copy of them"
+    );
+    assert_eq!(
+        first.iter().count(),
+        second.iter().count(),
+        "the second read changed how many metrics the plan reports"
+    );
+    // A read hands back the very entries the execution records into, not a fresh registration.
+    for (early, late) in first.iter().zip(second.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the second read registered {} again",
+            late.value().name()
+        );
+    }
+
+    drop(stream);
+    // What the execution recorded is still readable once it is gone, and nothing it held is charged
+    // any more.
+    let after = exec
+        .metrics()
+        .expect("the handles outlive the execution they were registered for");
+    assert_eq!(
+        names(&first),
+        names(&after),
+        "dropping the execution changed the metrics the plan reports"
+    );
+    let current = after
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    let peak = after
+        .sum_by_name("native.p0.root.peak_reserved_bytes")
+        .expect("the peak-bytes gauge is registered");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "the dropped execution holds nothing: {current:?}"
+    );
+    assert!(
+        matches!(&peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the peak is what the execution did, not what it holds: {peak:?}"
+    );
+    assert_eq!(
+        1,
+        count(&after, "native.root.input.input_batches"),
+        "the counter of the batches the leaf read did not survive the execution"
+    );
+    assert_eq!(0, pool.reserved(), "the dropped execution holds no bytes");
+
+    // A second execution of the same plan registers its own tree's handles. It is dropped without
+    // being polled, so what it adds is its own counters at zero -- the first execution's figures are
+    // untouched -- and no part of the tree it built outlives it.
+    let registered = after.iter().count();
+    let second_stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the plan runs a second time");
+    drop(second_stream);
+    let twice = exec
+        .metrics()
+        .expect("the metrics of both executions are read");
+    assert_eq!(
+        twice.iter().count(),
+        registered * 2,
+        "the second execution did not register its own node handles"
+    );
+    assert_eq!(
+        count(&twice, "native.root.input.input_batches"),
+        1,
+        "the second execution's leaf counted the batches of the first"
+    );
+    let current = twice
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "an execution that did nothing kept bytes: {current:?}"
+    );
+    assert_eq!(0, pool.reserved(), "the dropped executions hold no bytes");
+
+    // Reading both executions' metrics is still a read: the same entries come back.
+    let again = exec.metrics().expect("metrics can be read repeatedly");
+    assert_eq!(twice.iter().count(), again.iter().count());
+    for (early, late) in twice.iter().zip(again.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the read registered {} again",
+            late.value().name()
+        );
+    }
 }
 
 /// A tree the runtime does not execute is refused when the execution plan is built.

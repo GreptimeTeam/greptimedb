@@ -15,16 +15,16 @@
 //! Running a bound tree, node by node.
 //!
 //! Each execution owns a recursive runtime tree; the compiled [`NativeTree`] remains immutable and
-//! can be used to build independent executions. Per-node metric handles are exported only when
-//! requested, using temporary names derived by traversing the runtime tree.
+//! can be used to build independent executions. A caller registers the tree's per-node metric
+//! handles into its own metrics set once, before the execution starts.
 
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
+use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::HistogramView;
@@ -1995,11 +1995,8 @@ fn no_row_chunk(schema: &SeriesSchema, metric: MetricName) -> Result<EvaluatedCh
     EvaluatedChunk::try_new(series, true)
 }
 
-/// The recursive runtime tree shared with observers of one execution.
-pub(crate) type RuntimeTreeHandle = Arc<Mutex<RuntimeTree>>;
-
 /// The root of one execution's owned runtime topology.
-pub(crate) struct RuntimeTree {
+struct RuntimeTree {
     root: RuntimeNode,
 }
 
@@ -2068,8 +2065,12 @@ struct InputSlot {
 }
 
 /// State for one execution of a bound tree.
+///
+/// The state owns its runtime tree outright: the topology is the one the compiled tree built, and
+/// nothing outside reaches into it, so a descent and the release that follows a failure are both
+/// borrows of this one owner.
 pub struct NativeExecutionState {
-    runtime: RuntimeTreeHandle,
+    tree: RuntimeTree,
     inputs: Vec<InputSlot>,
 }
 
@@ -2345,20 +2346,12 @@ impl RuntimeNode {
     }
 }
 
-impl RuntimeTree {
-    pub(crate) fn export_metrics(&self, partition: usize) -> MetricsSet {
-        let set = ExecutionPlanMetricsSet::new();
-        self.root.register_metrics("root", &set, partition);
-        set.clone_inner()
-    }
-}
-
 /// What the driver asks of one node.
 ///
 /// A node reads its own children directly instead of being told which node to read: a pull descends
-/// the part of the tree it needs and returns, and the one lock the state takes around the root is
-/// what makes the whole descent exclusive. No node therefore has to know where in the tree it sits,
-/// and the topology stays the one the tree was built with.
+/// the part of the tree it needs and returns, and the exclusive borrow the state takes of its root
+/// is what makes the whole descent exclusive. No node therefore has to know where in the tree it
+/// sits, and the topology stays the one the tree was built with.
 impl RuntimeNode {
     /// Pulls the next chunk this node hands over, taking what its children owe it.
     ///
@@ -2764,8 +2757,8 @@ impl RuntimeNode {
     ///
     /// The operation's payload goes first: it is what the reservation was taken for, and dropping
     /// it after the reservation went back would hand the pool bytes it cannot admit while they are
-    /// still read. Both arms of a binary or broadcast node are released rather than the variant
-    /// being replaced, so the metrics an observer exported still describe the tree that ran.
+    /// still read. A released node keeps its shape — an input keeps its routing slot, a binary both
+    /// of its operands — because what a node is does not change when the bytes it held go back.
     fn release(&mut self) {
         match &mut self.op {
             // A source keeps its queue in the caller-owned slot, which is released beside the tree,
@@ -2862,45 +2855,41 @@ impl NativeExecutionState {
                 "native tree has no input node".to_string(),
             ));
         }
-        let runtime = Arc::new(Mutex::new(RuntimeTree { root }));
-        Ok(Self { runtime, inputs })
+        let tree = RuntimeTree { root };
+        Ok(Self { tree, inputs })
     }
 
-    pub(crate) fn runtime_tree(&self) -> RuntimeTreeHandle {
-        Arc::clone(&self.runtime)
+    /// Registers the metric handles of every node of this execution's tree with `set`.
+    ///
+    /// A caller invokes this once, before the execution starts: what `set` holds afterwards is the
+    /// nodes' own counters and gauges, so a later read of it reports what they recorded and keeps
+    /// no topology of this execution alive.
+    pub(crate) fn register_metrics(&self, set: &ExecutionPlanMetricsSet, partition: usize) {
+        self.tree.root.register_metrics("root", set, partition);
     }
+
     pub fn reserved_bytes(&self) -> usize {
         self.inputs
             .iter()
             .map(|slot| slot.state.buffer.reservation.size())
             .fold(0usize, usize::saturating_add)
-            .saturating_add(
-                self.runtime
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .root
-                    .reserved_bytes(),
-            )
+            .saturating_add(self.tree.root.reserved_bytes())
     }
 }
 
 /// What the driver asks of one execution's state.
 ///
-/// Every operation locks the tree once, does all of its work on the nodes below inside that lock,
-/// and drops the guard before returning. Dropping it there is what keeps a caller that stops the
-/// execution after an error from waiting on itself: stopping it locks the tree again to release
-/// what the failed operation left behind.
+/// Every operation borrows the tree this state owns — exclusively to pull, shared to inspect it —
+/// while it works on the nodes below, and gives the borrow back before returning. Nothing else
+/// reaches into the tree, so a failed operation leaves nothing held behind it and the release that
+/// follows a failure borrows the same tree again.
 impl NativeExecutionState {
     /// Pulls the next chunk the root of this state's tree hands over.
     ///
     /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
     /// down unchanged, because only a node that reads its whole input needs it.
     fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
-        let mut tree = self
-            .runtime
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        tree.root.pull(&mut self.inputs, inputs_finished)
+        self.tree.root.pull(&mut self.inputs, inputs_finished)
     }
 
     /// Refuses an input the caller never closed, and every node that ended inside a series.
@@ -2913,29 +2902,17 @@ impl NativeExecutionState {
         if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
             return Err(truncated_input(InputId::new(index)));
         }
-        let tree = self
-            .runtime
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        tree.root.unclosed()
+        self.tree.root.unclosed()
     }
 
     /// Merges what every window that collects its input has been handed, deepest first.
     fn flush_ready_merges(&mut self) -> Result<bool> {
-        let mut tree = self
-            .runtime
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        tree.root.flush_ready_merges(&self.inputs)
+        self.tree.root.flush_ready_merges(&self.inputs)
     }
 
     /// Whether any window still holds collected input that has not been merged.
     fn any_merge_pending(&self) -> bool {
-        self.runtime
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .root
-            .any_merge_pending()
+        self.tree.root.any_merge_pending()
     }
 
     /// Closes the execution: finishes every window's evaluator and gives everything back.
@@ -2945,20 +2922,13 @@ impl NativeExecutionState {
     /// the caller reads the error either way, and holding the bytes past it would keep the query's
     /// memory in use for as long as the executor is alive.
     fn close(&mut self) -> Result<()> {
-        let finished = {
-            let mut tree = self
-                .runtime
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let finished = tree.root.finish_windows();
-            tree.root.release();
-            finished
-        };
+        let finished = self.tree.root.finish_windows();
+        self.tree.root.release();
         // The slots are taken rather than only released: what a released slot still holds is its
         // schema and the grid that schema is addressed on, and a caller that keeps the stopped
-        // executor -- as one holding the runtime tree does -- would otherwise keep the input's
-        // schema and materialized timestamps alive past the execution. The leaf itself stays: the
-        // root keeps its `Input(InputId)` and the metrics an observer reads, and it holds neither.
+        // executor would otherwise keep the input's schema and materialized timestamps alive past
+        // the execution. The leaf itself stays -- the root keeps its `Input(InputId)` and the
+        // nodes keep their metric handles -- and it holds neither.
         for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
@@ -2969,16 +2939,10 @@ impl NativeExecutionState {
     /// they reserved.
     ///
     /// The slots are taken here as they are when the execution closes, so the input's schema and
-    /// grid do not outlive it in the executor an observer still holds; a second call finds an empty
+    /// grid do not outlive it in an executor its caller still holds; a second call finds an empty
     /// vector and nothing left to take.
     fn release(&mut self) {
-        {
-            let mut tree = self
-                .runtime
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            tree.root.release();
-        }
+        self.tree.root.release();
         for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
@@ -2988,9 +2952,9 @@ impl NativeExecutionState {
 impl Drop for NativeExecutionState {
     /// Returns what the execution never gave back itself.
     ///
-    /// An observer can keep the tree alive past the executor -- the metrics handles are shared
-    /// through it -- so the payloads and the reservations are given back here rather than with the
-    /// tree: what outlives the execution is its topology and the counters it recorded.
+    /// The tree goes with this state, so its payloads would be dropped here in any case; the
+    /// release is what gives the pool their bytes back and leaves the counters reporting what the
+    /// nodes did rather than what they held.
     fn drop(&mut self) {
         self.release();
     }
