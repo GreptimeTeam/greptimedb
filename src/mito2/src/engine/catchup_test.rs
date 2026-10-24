@@ -14,6 +14,7 @@
 
 use std::assert_matches;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use api::v1::Rows;
 use common_error::ext::ErrorExt;
@@ -536,7 +537,10 @@ async fn scan_region(engine: &MitoEngine, region_id: RegionId) -> RecordBatches 
 }
 
 #[apply(single_raft_engine_log_store_factory)]
-async fn test_local_catchup(factory: Option<LogStoreFactory>) {
+async fn test_local_catchup(
+    factory: Option<LogStoreFactory>,
+    #[values(false, true)] reopen_before_catchup: bool,
+) {
     use store_api::region_engine::SettableRegionRoleState;
 
     use crate::test_util::LogStoreImpl;
@@ -599,6 +603,10 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         rows: build_rows(8, 9),
     };
     put_rows(&leader_engine, region_id, rows).await;
+    let old_region = leader_engine.get_region(region_id).unwrap();
+    if !reopen_before_catchup {
+        old_region.version_control.update_last_sequence(10);
+    }
     let resp = leader_engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         .await
@@ -606,27 +614,27 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
     let last_entry_id = get_last_entry_id(resp);
     assert_eq!(last_entry_id.unwrap(), 3);
 
-    close_region(&leader_engine, region_id).await;
-    // Reopen the region, and skip the wal replay.
-    leader_engine
-        .handle_request(
-            region_id,
-            RegionRequest::Open(RegionOpenRequest {
-                engine: String::new(),
-                table_dir: table_dir.clone(),
-                options: HashMap::new(),
-                skip_wal_replay: true,
-                path_type: PathType::Bare,
-                checkpoint: None,
-                requirements: Default::default(),
-            }),
-        )
-        .await
-        .unwrap();
+    assert_eq!(old_region.version_control.committed_sequence(), 7);
 
-    // The last entry id should be 1.
-    let region = leader_engine.get_region(region_id).unwrap();
-    assert_eq!(region.version_control.current().last_entry_id, 1);
+    if reopen_before_catchup {
+        close_region(&leader_engine, region_id).await;
+        open_region(&leader_engine, region_id, table_dir, true).await;
+    }
+    let region_before_catchup = leader_engine.get_region(region_id).unwrap();
+    let current = region_before_catchup.version_control.current();
+    if reopen_before_catchup {
+        assert!(current.version.memtables.is_empty());
+        assert_eq!(
+            (
+                current.last_sequence,
+                current.committed_sequence,
+                current.last_entry_id
+            ),
+            (3, 3, 1)
+        );
+    } else {
+        assert!(!current.version.memtables.is_empty());
+    }
 
     // There are 2 entries in the log store.
     let (start, end) = log_store.span(&RaftEngineProvider::new(region_id.into()));
@@ -644,9 +652,24 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         )
         .await;
     assert!(resp.is_ok());
-    // After catchup, the last entry id should be 3.
     let region = leader_engine.get_region(region_id).unwrap();
-    assert_eq!(region.version_control.current().last_entry_id, 3);
+    assert_eq!(
+        Arc::ptr_eq(
+            &region_before_catchup.version_control,
+            &region.version_control
+        ),
+        reopen_before_catchup
+    );
+    let expected_last_sequence = if reopen_before_catchup { 3 } else { 10 };
+    let current = region.version_control.current();
+    assert_eq!(
+        (
+            current.last_sequence,
+            current.committed_sequence,
+            current.last_entry_id
+        ),
+        (expected_last_sequence, 3, 3)
+    );
 
     // The log store has been obsoleted these 2 entries.
     let (start, end) = log_store.span(&RaftEngineProvider::new(region_id.into()));
@@ -654,7 +677,7 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
     assert_eq!(end, None);
 
     // For local WAL, entries are not replayed during catchup.
-    // Therefore, any rows that were not flushed before closing the region will not be visible.
+    // Therefore, any rows that were not flushed before reopening the region will not be visible.
     let batches = scan_region(&leader_engine, region_id).await;
     let expected = "\
 +-------+---------+---------------------+
@@ -672,6 +695,11 @@ async fn test_local_catchup(factory: Option<LogStoreFactory>) {
         rows: build_rows(4, 7),
     };
     put_rows(&leader_engine, region_id, rows).await;
+    let current = region.version_control.current();
+    assert_eq!(
+        (current.last_sequence, current.committed_sequence),
+        (expected_last_sequence + 3, expected_last_sequence + 3)
+    );
 
     let batches = scan_region(&leader_engine, region_id).await;
     let expected = "\
