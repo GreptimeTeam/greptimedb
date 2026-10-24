@@ -40,7 +40,7 @@ use promql_parser::parser::{
     VectorMatchFillValues,
 };
 
-use super::{SelectorRequirement, SelectorTiming, compile, compile_selectors};
+use super::{SelectorRequirement, SelectorTiming, compile, compile_selectors, validate_inputs};
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -4631,4 +4631,63 @@ fn selector_bindings_follow_structural_input_paths() {
             assert_eq!(*tree_ordering, bound.ordering, "query: {query}");
         }
     }
+}
+
+/// A record paired with the other side of a binary operation is refused, by path and by allocation.
+///
+/// `1 / x` reads its input on the right and `x / 2` on the left, so the other side's path names no
+/// input node in either tree.
+#[test]
+fn recorded_input_paths_are_checked_against_the_tree_they_were_bound_for() {
+    for (query, other_side) in [
+        ("1 / x", NodePath::root().left().input()),
+        ("x / 2", NodePath::root().right().input()),
+    ] {
+        let schema = raw_schema();
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(Arc::clone(&schema)),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        validate_inputs(compiled.tree.root(), &compiled.inputs)
+            .unwrap_or_else(|error| panic!("`{query}` failed its own check: {error}"));
+        let recorded = compiled.inputs[0].clone();
+        assert_ne!(recorded.path, other_side, "query: {query}");
+
+        let mut swapped = recorded.clone();
+        swapped.path = other_side;
+        let error = validate_inputs(compiled.tree.root(), &[swapped]).unwrap_err();
+        assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("not its input nodes"), "{error}");
+
+        // Same fields, another allocation: still not the binding the node carries.
+        let mut rebound = recorded;
+        rebound.schema = raw_schema();
+        let error = validate_inputs(compiled.tree.root(), &[rebound]).unwrap_err();
+        assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("not its input nodes"), "{error}");
+    }
+}
+
+/// One record per input node: a missing record and a repeated one are both refused.
+#[test]
+fn recorded_inputs_are_exactly_the_trees_input_nodes() {
+    let compiled = compile_selectors(
+        &eval_stmt("rate(x[5m])"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let recorded = compiled.inputs[0].clone();
+    assert_eq!(recorded.path, NodePath::root().input());
+    validate_inputs(compiled.tree.root(), &compiled.inputs).unwrap();
+
+    let error = validate_inputs(compiled.tree.root(), &[]).unwrap_err();
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    assert!(error.to_string().contains("not its input nodes"), "{error}");
+
+    let error = validate_inputs(compiled.tree.root(), &[recorded.clone(), recorded]).unwrap_err();
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    assert!(error.to_string().contains("not its input nodes"), "{error}");
 }

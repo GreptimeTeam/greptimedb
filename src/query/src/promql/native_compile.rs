@@ -138,7 +138,7 @@ use promql::histogram_eval::HistogramFunction;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
-use promql::native::metrics::NodePath;
+use promql::native::metrics::{NodePath, walk};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -325,7 +325,8 @@ pub fn compile(
 /// the answer is asked per selector rather than once per statement.
 ///
 /// Each selector's path is recorded as its recursive node is compiled, so its requirement and
-/// schema stay structurally paired with the input the executor names at that position.
+/// schema stay structurally paired with the input the executor names at that position; the finished
+/// tree is then walked once to check that pairing ([`validate_inputs`]).
 pub fn compile_selectors(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
@@ -369,17 +370,48 @@ pub fn compile_selectors(
     // illegal in another.
     let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
     let inputs = inputs.into_inner();
+    validate_inputs(tree.root(), &inputs)?;
     Ok(CompiledTree {
         tree,
         inputs: inputs.into(),
     })
 }
 
-/// What every node of one compilation derives from the statement rather than from the expression.
+/// Checks that the recorded inputs are exactly the tree's input nodes, in the order it reads them.
 ///
-/// The three are the same for the whole tree: one statement decides the grid, the lookback and the
-/// anchors, one caller binds the raw input, and one scan guarantees the ordering. Passing them as
-/// one value is what lets [`compile_expr`] recurse without restating what it was handed.
+/// A missing, repeated or mispaired record would make the executor read one scan's samples as
+/// another's, which is a compiler defect rather than a statement a client wrote.
+fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
+    let mut recorded = inputs.iter();
+    let mut valid = true;
+    walk(root, &mut |node, path| {
+        let NativeExpr::Input(bound) = &node.expr else {
+            return;
+        };
+        // An input bound to aggregate state produces no samples, which no record matches.
+        valid &= recorded.next().is_some_and(|input| {
+            input.path == *path
+                && bound
+                    .output
+                    .samples()
+                    .is_some_and(|schema| Arc::ptr_eq(schema, &input.schema))
+        });
+    });
+    if valid && recorded.next().is_none() {
+        return Ok(());
+    }
+    Err(DataFusionError::Internal(
+        "a compiled tree's recorded inputs are not its input nodes, one record per node in the \
+         order they are read"
+            .to_string(),
+    ))
+}
+
+/// What one node of a compilation derives from the statement, its caller and its own position.
+///
+/// The statement, the bindings, the ordering and the input list belong to the whole tree; a subquery
+/// replaces the grid for its subtree, and every wrapper hands its child the path segment that names
+/// the child's node.
 struct Context<'a> {
     /// The statement being compiled.
     stmt: &'a EvalStmt,
