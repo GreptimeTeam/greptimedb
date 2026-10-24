@@ -31,7 +31,9 @@
 //! chunk, carrying the series' encoded key, its finality, its timestamps and its fields, plus the
 //! complete labels when the frame is explicit — with each series' rows contiguous and its
 //! timestamps ascending, which is what the caller's [`SeriesOrdering`] names. The output is one
-//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column.
+//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column; a
+//! node built in frame mode ([`FusedSeries::try_new_evaluated`]) emits the same chunks as rows of
+//! [`super::evaluated_frame`]'s layout instead.
 //! Everything the tree cannot do is rejected when the execution plan is built, not when the first
 //! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
 //! was not compiled against, or an output schema the conversion cannot classify.
@@ -52,8 +54,8 @@ use datafusion::arrow::array::{
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{DFSchemaRef, ToDFSchema};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{
@@ -69,7 +71,9 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, Series, SeriesSchema};
+use datatypes::series::samples::{
+    DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesSchema,
+};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
@@ -78,9 +82,11 @@ use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
 use crate::native::execute::InputId;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
-use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
+use crate::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
+
+use super::evaluated_frame::{pack, schema as frame_schema};
 
 #[cfg(test)]
 mod tests;
@@ -233,6 +239,13 @@ pub struct FusedSeries {
     input: LogicalPlan,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
+    /// Whether this node emits evaluated frames instead of the field, tag and time row table.
+    ///
+    /// A frame node packs every evaluated chunk into one row of [`super::evaluated_frame`]'s
+    /// layout, which carries the chunk's own labels, absolute grid positions and finality, and its
+    /// `output_schema` is that layout. The modes are different outputs of one computation, so the
+    /// flag is part of the identity.
+    output_frames: bool,
 }
 
 impl FusedSeries {
@@ -256,6 +269,40 @@ impl FusedSeries {
             binding,
             input,
             output_schema,
+            output_frames: false,
+        })
+    }
+
+    /// Creates the node in frame mode: every evaluated chunk leaves as one row of
+    /// [`super::evaluated_frame`]'s layout, so a consumer above rebuilds the tree's own chunks.
+    ///
+    /// The output schema is that layout, so the tree needs two facts the row table does not: its
+    /// output has exactly one field on the statement's grid, and it reads one series at a time,
+    /// because a frame names the series whose chunk it holds and nothing about its vector.
+    pub(crate) fn try_new_evaluated(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        input: LogicalPlan,
+    ) -> DataFusionResult<Self> {
+        validate_binding(&tree, &binding)?;
+        if reads_across_series(tree.root()) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries cannot emit a tree that reads across series as evaluated frames: a \
+                 frame carries one series' chunk"
+                    .to_string(),
+            ));
+        }
+        // The chunk a frame holds is packed against the tree's own output schema.
+        let _ = evaluated_series_schema(&tree)?;
+        let output_schema = frame_schema().to_dfschema_ref()?;
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            input,
+            output_schema,
+            output_frames: true,
         })
     }
 
@@ -282,6 +329,9 @@ impl FusedSeries {
     /// the frame passes both on. Building the node rejects a tree the runtime cannot execute, a
     /// frame schema the tree's input was not compiled against, and a schema the conversion cannot
     /// classify, so a plan that is built is a plan that runs.
+    ///
+    /// A frame-mode node builds a frame-mode execution: the mode is not a property of the input or
+    /// of the tree, so it travels with the node.
     pub fn to_execution_plan(
         &self,
         exec_input: Arc<dyn ExecutionPlan>,
@@ -289,7 +339,7 @@ impl FusedSeries {
         ordering: SeriesOrdering,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
-        Ok(Arc::new(FusedSeriesExec::try_new(
+        Ok(Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             exec_input,
             label_source,
@@ -298,6 +348,7 @@ impl FusedSeries {
             output_schema,
             self.binding.time_index.clone(),
             self.binding.tags.clone(),
+            self.output_frames,
         )?))
     }
 }
@@ -322,6 +373,9 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
+        if self.output_frames {
+            return write!(f, "FusedSeries: evaluated frames for {}", self.promql);
+        }
         write!(f, "FusedSeries: {}", self.promql)
     }
 
@@ -343,6 +397,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             binding: self.binding.clone(),
             input,
             output_schema: Arc::clone(&self.output_schema),
+            output_frames: self.output_frames,
         })
     }
 }
@@ -358,6 +413,7 @@ impl PartialEq for FusedSeries {
             && self.binding == other.binding
             && self.input == other.input
             && self.output_schema == other.output_schema
+            && self.output_frames == other.output_frames
     }
 }
 
@@ -369,6 +425,7 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.input.hash(state);
         self.output_schema.hash(state);
+        self.output_frames.hash(state);
     }
 }
 
@@ -389,6 +446,10 @@ impl PartialOrd for FusedSeries {
         match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
             Some(Ordering::Equal) => {}
             ord => return ord,
+        }
+        match self.output_frames.cmp(&other.output_frames) {
+            Ordering::Equal => {}
+            ord => return Some(ord),
         }
         if self.output_schema == other.output_schema {
             Some(Ordering::Equal)
@@ -615,9 +676,34 @@ fn validate_binding(
     }
 }
 
+/// The series schema a tree's own output is evaluated on, which an evaluated frame is packed
+/// against: exactly one field, on the grid the tree evaluated on, whose `Arc` is kept as it is.
+fn evaluated_series_schema(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
+    let output = tree
+        .root()
+        .output
+        .samples()
+        .filter(|output| output.eval_grid.is_some())
+        .ok_or_else(|| {
+            DataFusionError::Plan(
+                "FusedSeries cannot emit a tree whose output is not samples on a grid as \
+                 evaluated frames"
+                    .to_string(),
+            )
+        })?;
+    if output.fields.len() != 1 {
+        return Err(DataFusionError::Plan(format!(
+            "FusedSeries cannot emit a tree of {} output fields as evaluated frames, which carry \
+             one field",
+            output.fields.len()
+        )));
+    }
+    Ok(Arc::clone(output))
+}
+
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
-enum OutputColumn {
+pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
@@ -627,9 +713,12 @@ enum OutputColumn {
 }
 
 /// Classifies every output column, rejecting anything the conversion cannot produce.
-fn classify_output(
+///
+/// `fields` are the fields of the schema the chunks were evaluated against: those, and not the
+/// whole schema, are what a reader of such a schema has to hand.
+pub(crate) fn classify_output(
     output_schema: &SchemaRef,
-    series_schema: &SeriesSchema,
+    fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
@@ -644,11 +733,7 @@ fn classify_output(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
             )));
         }
-        if series_schema
-            .fields
-            .iter()
-            .any(|field| field.name.as_ref() == tag)
-        {
+        if fields.iter().any(|field| field.name.as_ref() == tag) {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
@@ -656,7 +741,7 @@ fn classify_output(
     }
 
     let mut time_seen = false;
-    let mut field_seen = vec![false; series_schema.fields.len()];
+    let mut field_seen = vec![false; fields.len()];
     let mut tag_seen = vec![false; tags.len()];
     let mut classification = Vec::with_capacity(output_schema.fields().len());
     for field in output_schema.fields() {
@@ -684,11 +769,7 @@ fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_schema
-            .fields
-            .iter()
-            .position(|field| field.name.as_ref() == name)
-        {
+        if let Some(index) = fields.iter().position(|field| field.name.as_ref() == name) {
             if std::mem::replace(&mut field_seen[index], true) {
                 return Err(DataFusionError::Plan(format!(
                     "duplicate field column {name:?} in FusedSeriesExec output schema"
@@ -746,7 +827,7 @@ fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_schema.fields[index].name
+                fields[index].name
             )));
         }
     }
@@ -776,8 +857,14 @@ pub struct FusedSeriesExec {
     ordering: SeriesOrdering,
     /// Which of the tree's inputs every raw chunk a partition reads enters at.
     input_id: InputId,
-    /// Where each output column comes from.
+    /// Where each output column comes from, or empty in frame mode, whose output is the layout.
     classification: Arc<[OutputColumn]>,
+    /// The series schema each evaluated chunk is packed against, and `None` when this node emits
+    /// the row table instead.
+    ///
+    /// It is the tree's own output schema, read off the tree at construction, so a frame cannot be
+    /// labelled with a schema the tree that produced it does not have.
+    evaluated_output: Option<Arc<SeriesSchema>>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
     /// child without losing which column its time came from.
     time_column: String,
@@ -824,13 +911,63 @@ impl FusedSeriesExec {
         time_column: String,
         tags: Vec<String>,
     ) -> DataFusionResult<Self> {
+        Self::build(
+            promql,
+            input,
+            label_source,
+            ordering,
+            tree,
+            output_schema,
+            time_column,
+            tags,
+            false,
+        )
+    }
+
+    /// Creates the node in either mode: `output_frames` says whether every evaluated chunk leaves
+    /// as one row of [`super::evaluated_frame`]'s layout rather than as rows of the declared table.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        promql: Arc<str>,
+        input: Arc<dyn ExecutionPlan>,
+        label_source: RawLabelSource,
+        ordering: SeriesOrdering,
+        tree: Arc<NativeTree>,
+        output_schema: SchemaRef,
+        time_column: String,
+        tags: Vec<String>,
+        output_frames: bool,
+    ) -> DataFusionResult<Self> {
         let tree_input = tree_input(&tree)?;
         // Building a state is what proves the runtime executes this tree: a node kind it does not
         // run yet is refused here, so a plan that is built is a plan that starts. The throwaway
         // state is dropped at once, returning its (unbounded) reservations.
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
-        let classification =
-            classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
+        let evaluated_output = if output_frames {
+            Some(evaluated_series_schema(&tree)?)
+        } else {
+            None
+        };
+        // A frame's columns are its own layout, so a frame node classifies nothing and checks that
+        // it was given that layout instead.
+        let classification: Arc<[OutputColumn]> = if evaluated_output.is_some() {
+            if output_schema.as_ref() != frame_schema().as_ref() {
+                return Err(DataFusionError::Plan(
+                    "FusedSeriesExec emits evaluated frames but its output schema is not the frame \
+                     layout"
+                        .to_string(),
+                ));
+            }
+            Arc::from(Vec::new())
+        } else {
+            classify_output(
+                &output_schema,
+                &tree_input.schema.fields,
+                &tags,
+                &time_column,
+            )?
+            .into()
+        };
         // Read here rather than below, because whether the split below can happen decides whether
         // the tree shape is one this node may run at all.
         let input_properties = input.properties();
@@ -892,7 +1029,8 @@ impl FusedSeriesExec {
             label_source,
             ordering,
             input_id: tree_input.input_id,
-            classification: classification.into(),
+            classification,
+            evaluated_output,
             time_column,
             tags: tags.into(),
             input,
@@ -973,8 +1111,8 @@ impl ExecutionPlan for FusedSeriesExec {
             ))
         })?;
         // Rebuilt rather than patched: the new child's schema is what the frame is validated
-        // against, so a child that changed shape is refused instead of decoded with a stale layout.
-        Ok(Arc::new(Self::try_new(
+        // against. The mode comes along, so a frame node stays one; label sets and roots are fresh.
+        Ok(Arc::new(Self::build(
             Arc::clone(&self.promql),
             child,
             self.label_source.clone(),
@@ -983,6 +1121,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.evaluated_output.is_some(),
         )?))
     }
 
@@ -999,6 +1138,12 @@ impl ExecutionPlan for FusedSeriesExec {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .attach(&context.runtime_env().memory_pool);
+        // A producer is one execution of the tree: the partition this stream runs.
+        let producer = u64::try_from(partition).map_err(|_| {
+            DataFusionError::Execution(format!(
+                "FusedSeriesExec partition {partition} does not fit an evaluated frame's producer"
+            ))
+        })?;
         let input = self.input.execute(partition, Arc::clone(&context))?;
         // Batches become raw series chunks through the shared frame decoder, which is the inverse of
         // what the producer packed: one chunk per frame row, each series closed exactly once by the
@@ -1022,6 +1167,9 @@ impl ExecutionPlan for FusedSeriesExec {
             executor: Some(NativeExecutor::new(state)),
             input_id: self.input_id,
             classification: Arc::clone(&self.classification),
+            evaluated_output: self.evaluated_output.clone(),
+            producer,
+            next_ordinal: 0,
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             labels: Arc::clone(&self.labels),
@@ -1038,8 +1186,9 @@ impl ExecutionPlan for FusedSeriesExec {
 /// Converts one evaluated chunk into one output batch.
 ///
 /// The time column is the absolute grid positions the chunk carries, missing samples are nulls and
-/// ordinary NaN stays a value.
-fn series_to_record_batch(
+/// ordinary NaN stays a value. `classification` is what [`classify_output`] answered for
+/// `output_schema`.
+pub(crate) fn series_to_record_batch(
     classification: &[OutputColumn],
     tags: &[String],
     output_schema: &SchemaRef,
@@ -1172,7 +1321,7 @@ fn render_labels(labels: &LabelSet) -> String {
 /// later partitions are checked against stayed: everything the map held after the first partition
 /// was unaccounted for.
 #[derive(Default)]
-struct LabelSets {
+pub(crate) struct LabelSets {
     /// The grid positions each final label set already occupies, one run list per field of the
     /// series schema. Each list is sorted, disjoint and has the runs that touch joined, which is
     /// what lets a claim look a position up instead of walking the history.
@@ -1187,7 +1336,7 @@ impl LabelSets {
     ///
     /// Later executions keep the first reservation: it already pays for what `seen` holds, and
     /// moving it to another pool would drop the bytes other partitions are still growing.
-    fn attach(&mut self, pool: &Arc<dyn MemoryPool>) {
+    pub(crate) fn attach(&mut self, pool: &Arc<dyn MemoryPool>) {
         if self.reservation.is_none() {
             self.reservation =
                 Some(MemoryConsumer::new("FusedSeriesExec label sets").register(pool));
@@ -1201,7 +1350,7 @@ impl LabelSets {
     /// legal, and so are series that fill the same points field by field: Prometheus merges both
     /// into one output series, while this node emits them as separate batches and defers that merge
     /// to matrix assembly, so every sample survives.
-    fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
+    pub(crate) fn claim(&mut self, series: &Series) -> DataFusionResult<()> {
         let runs = occupied_runs(series)?;
         // A chunk holding no value occupies nothing, so there is no collision to remember and no
         // entry to write. Such a chunk is not rare: a selection over a series that staleness or the
@@ -1383,6 +1532,10 @@ fn colliding_field(stored: &[Vec<Run>], runs: &[Vec<Run>]) -> Option<usize> {
 }
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
+///
+/// An ordinary stream yields the row table; a frame-mode stream yields one row of
+/// [`super::evaluated_frame`]'s layout per chunk, numbered by this partition as its producer and by
+/// its position in this whole stream as its ordinal.
 pub struct FusedSeriesStream {
     /// The input frames, read as raw series chunks, or `None` once the stream ended in an error.
     ///
@@ -1394,8 +1547,19 @@ pub struct FusedSeriesStream {
     executor: Option<NativeExecutor>,
     /// The position of the tree's input node, which is where every chunk read enters.
     input_id: InputId,
-    /// Where each output column comes from.
+    /// Where each output column comes from, or empty in frame mode.
     classification: Arc<[OutputColumn]>,
+    /// The series schema each chunk is packed against, `None` for the row table and once this
+    /// stream has ended.
+    ///
+    /// It is the tree's own output schema, so holding it past the last chunk would keep the grid it
+    /// names - and the timestamps that grid materializes - alive in an ended stream a consumer
+    /// keeps, for rows that can no longer be produced.
+    evaluated_output: Option<Arc<SeriesSchema>>,
+    /// The producer every frame of this stream names: the partition this execution runs.
+    producer: u64,
+    /// The ordinal the next frame carries, counted across the whole stream rather than per series.
+    next_ordinal: u64,
     /// The tag column names, indexed by `OutputColumn::Tag`.
     tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
@@ -1455,8 +1619,12 @@ impl FusedSeriesStream {
         };
         match executor.next_chunk() {
             Ok(Some(chunk)) => Ok(Some(chunk)),
+            // Nothing more will be settled - not an input EOF, which still flushes through
+            // `Ok(Some)` above - so the schema the rows were packed against is released with the
+            // execution, rather than staying alive in an ended stream a consumer keeps.
             Ok(None) => {
                 self.executor = None;
+                self.evaluated_output = None;
                 Ok(None)
             }
             Err(error) => Err(error),
@@ -1472,6 +1640,9 @@ impl FusedSeriesStream {
         self.done = true;
         self.executor = None;
         self.input = None;
+        // Nothing can be packed any more, so the schema the rows were packed against - and the grid
+        // its positions were read on - goes with the run that produced them.
+        self.evaluated_output = None;
         // The label-set map and its charge are the plan's, so a stream stopping early gives back
         // nothing: the entries another partition is still checking against have to stay charged, and
         // are released when the plan itself is dropped.
@@ -1483,17 +1654,34 @@ impl FusedSeriesStream {
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
         for chunk in &chunks {
             // The label set is claimed before its batch is queued, so a collision surfaces at the
-            // chunk that reached it and nothing this plan would refuse is handed out after it.
+            // chunk that reached it and nothing this plan would refuse is handed out after it. A
+            // frame leaves with the same claim as a row: the tree decides which series closes.
             self.labels
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .claim(&chunk.series)?;
-            let batch = series_to_record_batch(
-                &self.classification,
-                &self.tags,
-                &self.output_schema,
-                chunk,
-            )?;
+            let batch = match self.evaluated_output.as_ref() {
+                // Packing validates the chunk against the tree's schema and carries its labels,
+                // positions, nulls and finality. The ordinal is advanced only once the row exists,
+                // so a packing error cannot leave a gap another frame would not fill.
+                Some(schema) => {
+                    let (ordinal, producer) = (self.next_ordinal, self.producer);
+                    let batch = pack(chunk, schema, producer, ordinal)?;
+                    self.next_ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                        DataFusionError::Execution(format!(
+                            "FusedSeriesExec evaluated frame {ordinal} of producer {producer} \
+                             cannot be incremented"
+                        ))
+                    })?;
+                    batch
+                }
+                None => series_to_record_batch(
+                    &self.classification,
+                    &self.tags,
+                    &self.output_schema,
+                    chunk,
+                )?,
+            };
             self.ready.push_back(batch);
         }
         Ok(())

@@ -41,7 +41,8 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use promql::extension_plan::{FusedSeries, HistogramFold};
+use promql::extension_plan::{FusedSeries, HistogramFold, VectorSelect};
+use promql::native::plan::reads_across_series;
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -1772,12 +1773,77 @@ fn find_metric_physical_scan(plan: &LogicalPlan) -> Option<datafusion::logical_e
             .and_then(|fused| match fused.inputs().first() {
                 Some(LogicalPlan::TableScan(scan)) => Some(scan.clone()),
                 _ => None,
+            })
+            // An extension node that is not the per-series one - a `VectorSelect` over one - has
+            // the scan one level further down.
+            .or_else(|| {
+                plan.inputs()
+                    .into_iter()
+                    .find_map(find_metric_physical_scan)
             }),
         _ => plan
             .inputs()
             .into_iter()
             .find_map(find_metric_physical_scan),
     }
+}
+
+/// A two-field table on the engine the native route accepts, with both fields `Float64`.
+async fn two_float_field_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        2,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
+
+/// Plans `query` and reports the error the planner answered with.
+///
+/// A shape the existing planner refuses is one this route has to refuse the same way, so the test
+/// comparing them reads the answer rather than the plan.
+async fn build_native_fused_plan_error(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+) -> String {
+    let eval_stmt = build_eval_stmt(query);
+    PromPlanner::stmt_to_plan_with_annotations(
+        table_provider,
+        &eval_stmt,
+        &build_query_engine_state(),
+        None,
+        native_fused,
+    )
+    .await
+    .expect_err("the existing planner refuses a ranking over a multi-value input")
+    .to_string()
+}
+
+/// The scan filters the native route built, as text, so a test can read the bounds it planned.
+fn native_scan_filters(plan: &LogicalPlan) -> String {
+    let scan = find_metric_physical_scan(plan).expect("the native route keeps the physical scan");
+
+    scan.filters
+        .iter()
+        .map(|filter| format!("{filter:?}"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn find_vector_select(plan: &LogicalPlan) -> Option<&VectorSelect> {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && let Some(select) = node.as_any().downcast_ref::<VectorSelect>()
+    {
+        return Some(select);
+    }
+
+    plan.inputs().into_iter().find_map(find_vector_select)
 }
 
 fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
@@ -1911,6 +1977,58 @@ async fn native_fused_tag_partitioned_table_still_plans_fused_series() {
     let plan =
         build_native_fused_plan_with_provider("rate(some_metric[5m])", true, table_provider).await;
     assert!(plan.display_indent().to_string().contains("FusedSeries"));
+}
+
+/// A partitioned table keeps the existing plan for a ranking: the frames are numbered by the
+/// region-local partition index, so more than one region cannot be told apart. The per-series route
+/// over the same table is untouched, and the fallback is the whole existing plan.
+#[tokio::test]
+async fn native_fused_topk_declines_a_partitioned_table() {
+    let native = build_native_fused_plan_with_provider(
+        "topk(2, rate(some_metric[5m]))",
+        true,
+        native_engine_provider(vec![0]).await,
+    )
+    .await;
+    let legacy = build_native_fused_plan_with_provider(
+        "topk(2, rate(some_metric[5m]))",
+        false,
+        native_engine_provider(vec![0]).await,
+    )
+    .await;
+
+    assert!(
+        find_vector_select(&native).is_none(),
+        "{}",
+        native.display_indent()
+    );
+    assert!(
+        find_fused_series(&native).is_none(),
+        "{}",
+        native.display_indent()
+    );
+    assert_eq!(
+        native.display_indent().to_string(),
+        legacy.display_indent().to_string(),
+        "a partitioned table must keep the whole existing plan"
+    );
+}
+
+/// The other series-selecting operations are not rankings over a per-series prefix, and the
+/// existing planner already refuses them. The native route neither admits nor changes them: with
+/// the flag on, the query fails with the same answer it fails with when the flag is off.
+#[tokio::test]
+async fn native_fused_limit_operations_keep_the_existing_answer() {
+    for query in ["limitk(2, some_metric)", "limit_ratio(0.5, some_metric)"] {
+        let native =
+            build_native_fused_plan_error(query, true, native_engine_provider(vec![]).await).await;
+        let legacy =
+            build_native_fused_plan_error(query, false, native_engine_provider(vec![]).await).await;
+        assert_eq!(
+            native, legacy,
+            "`{query}` must answer exactly what it answers without the flag"
+        );
+    }
 }
 
 /// Metric logical scans retain their table-id restriction on the direct fused scan input.
@@ -2155,14 +2273,27 @@ async fn native_fused_non_numeric_field_falls_back() {
 }
 
 /// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
+///
+/// A ranking is the only whole-vector root with a per-series prefix under it, and it needs a
+/// prefix that reads one series at a time: a `topk` over a fold reads across series at both nodes,
+/// so no part of it is placed region-side.
 #[tokio::test]
 async fn native_fused_whole_vector_operation_falls_back() {
-    for query in ["sort(some_metric)", "absent(some_metric)"] {
+    for query in [
+        "sort(some_metric)",
+        "count_values(\"v\", some_metric)",
+        "topk(2, sum(rate(some_metric[5m])))",
+        "absent(some_metric)",
+    ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
         assert!(
             find_fused_series(&native).is_none(),
             "`{query}` reads the whole vector and must not be placed region-side"
+        );
+        assert!(
+            find_vector_select(&native).is_none(),
+            "`{query}` is not a ranking over a per-series prefix"
         );
         assert_eq!(
             native.display_indent().to_string(),
@@ -2229,6 +2360,209 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
     );
+}
+
+/// The statement root is one ranking over a per-series prefix.
+///
+/// The ranking reads the whole vector at a grid point, so it cannot run inside one scan partition;
+/// the prefix under it answers one series from one series' rows, so it still can. The plan therefore
+/// splits exactly there: the root becomes a [`VectorSelect`] and the prefix below it a frame-mode
+/// `FusedSeries`.
+#[tokio::test]
+async fn native_fused_topk_plans_a_vector_select_over_the_prefix() {
+    let plan = build_native_fused_plan("topk(2, rate(some_metric[5m]))", true).await;
+
+    assert!(
+        matches!(
+            &plan,
+            LogicalPlan::Extension(Extension { node }) if node.as_any().is::<VectorSelect>()
+        ),
+        "{}",
+        plan.display_indent()
+    );
+    let select = find_vector_select(&plan).expect("the root is planned as a VectorSelect");
+    assert_eq!(1, select.inputs().len());
+    // What the ranking reads is the prefix alone: no part of it reads across series.
+    let prefix = find_fused_series(&plan).expect("the ranking reads a per-series prefix");
+    assert!(
+        !reads_across_series(prefix.tree().root()),
+        "{}",
+        prefix.tree()
+    );
+    // A ranking keeps the input's own fields, so the node's output is the per-series one.
+    assert_eq!(
+        vec!["timestamp", "field_0", "tag_0"],
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// `bottomk` is the other ranking that answers with its input's own series, over a prefix that ends
+/// in a point-wise map.
+#[tokio::test]
+async fn native_fused_bottomk_plans_a_vector_select_over_the_prefix() {
+    let plan = build_native_fused_plan("bottomk(3, abs(rate(some_metric[5m])))", true).await;
+
+    assert!(
+        find_vector_select(&plan).is_some(),
+        "{}",
+        plan.display_indent()
+    );
+    let prefix = find_fused_series(&plan).expect("the ranking reads a per-series prefix");
+    assert!(
+        !reads_across_series(prefix.tree().root()),
+        "{}",
+        prefix.tree()
+    );
+}
+
+/// A written grouping is bound inside the ranking, so it neither declines the route nor moves to the
+/// prefix. The text shown for the node is the statement a reader wrote.
+#[tokio::test]
+async fn native_fused_grouped_topk_keeps_the_statement() {
+    let plan = build_native_fused_plan("topk(2, rate(some_metric[5m])) by (tag_0)", true).await;
+
+    assert!(
+        find_vector_select(&plan).is_some(),
+        "{}",
+        plan.display_indent()
+    );
+    let prefix = find_fused_series(&plan).expect("the ranking reads a per-series prefix");
+    assert!(
+        !reads_across_series(prefix.tree().root()),
+        "{}",
+        prefix.tree()
+    );
+    // The node shows the statement as the parser re-renders it, grouping clause included once.
+    let display = plan.display_indent().to_string();
+    assert!(
+        display.contains("VectorSelect: topk by (tag_0) (2, rate(some_metric[5m]))"),
+        "{display}"
+    );
+}
+
+/// The flag off: a whole statement keeps the existing plan, whose ranking the existing planner
+/// performs.
+#[tokio::test]
+async fn native_fused_topk_flag_off_keeps_the_existing_plan() {
+    let plan = build_native_fused_plan("topk(2, rate(some_metric[5m]))", false).await;
+
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{display}");
+    assert!(!display.contains("VectorSelect"), "{display}");
+    assert!(display.contains("PromRangeManipulate"), "{display}");
+}
+
+/// A ranking carries one value per grid position, so a second field has nowhere to go.
+///
+/// The existing planner refuses a ranking over a multi-value input, so falling back means reporting
+/// the same refusal rather than producing a plan of its own. The per-series route keeps its own
+/// multi-field support.
+#[tokio::test]
+async fn native_fused_topk_declines_a_second_field() {
+    let native = build_native_fused_plan_error(
+        "topk(2, some_metric)",
+        true,
+        two_float_field_provider().await,
+    )
+    .await;
+    let legacy = build_native_fused_plan_error(
+        "topk(2, some_metric)",
+        false,
+        two_float_field_provider().await,
+    )
+    .await;
+
+    assert!(
+        native.contains("multi-value input"),
+        "the ranking must keep the refusal the existing planner reports: {native}"
+    );
+    assert_eq!(
+        native, legacy,
+        "a second field must keep the existing planner's answer"
+    );
+
+    let per_series = build_native_fused_plan_with_provider(
+        "rate(some_metric[5m])",
+        true,
+        two_float_field_provider().await,
+    )
+    .await;
+    assert!(
+        find_fused_series(&per_series).is_some(),
+        "{}",
+        per_series.display_indent()
+    );
+}
+
+/// A field the ranking's frame cannot carry keeps the existing plan even though the raw scan could
+/// serve it: `Float32` is numeric, and one value per grid position is a `Float64`.
+///
+/// A field the scan cannot serve at all - a string, a boolean, a decimal - is refused earlier, by
+/// the raw-series gate above this one, and `native_fused_non_numeric_field_falls_back` covers it.
+#[tokio::test]
+async fn native_fused_topk_declines_a_non_float64_field() {
+    let field_type = ConcreteDataType::float32_datatype();
+    let native = build_native_fused_plan_with_provider(
+        "topk(2, some_metric)",
+        true,
+        build_test_table_provider_with_field_type(field_type.clone()).await,
+    )
+    .await;
+    let legacy = build_native_fused_plan_with_provider(
+        "topk(2, some_metric)",
+        false,
+        build_test_table_provider_with_field_type(field_type.clone()).await,
+    )
+    .await;
+
+    assert!(
+        find_fused_series(&native).is_none(),
+        "{field_type} must not reach the native route"
+    );
+    assert!(find_vector_select(&native).is_none(), "{field_type}");
+    assert_eq!(
+        native.display_indent().to_string(),
+        legacy.display_indent().to_string(),
+        "{field_type} must keep the existing plan"
+    );
+}
+
+/// The ranking's scan is bounded to the range its own expression reads, not to the statement's
+/// lookback: a five-minute window under a `topk` reads five minutes of history.
+#[tokio::test]
+async fn native_fused_topk_scan_covers_the_inner_range() {
+    for (query, bounds) in [
+        (
+            "topk(2, rate(some_metric[5m]))",
+            (
+                "TimestampMillisecond(-299999, None)",
+                "TimestampMillisecond(100000000, None)",
+            ),
+        ),
+        (
+            "topk(2, rate(some_metric[5m] offset 10s))",
+            (
+                "TimestampMillisecond(-309999, None)",
+                "TimestampMillisecond(99990000, None)",
+            ),
+        ),
+        (
+            "topk(2, rate(some_metric[5m] @ 300))",
+            (
+                "TimestampMillisecond(1, None)",
+                "TimestampMillisecond(300000, None)",
+            ),
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let filters = native_scan_filters(&plan);
+        assert!(filters.contains(bounds.0), "`{query}`: {filters}");
+        assert!(filters.contains(bounds.1), "`{query}`: {filters}");
+    }
 }
 
 #[tokio::test]

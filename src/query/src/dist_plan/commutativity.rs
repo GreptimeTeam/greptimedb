@@ -22,6 +22,7 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
+    VectorSelect,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -279,6 +280,11 @@ impl Categorizer {
                 // placement is a proof of concept over one region.
                 Commutativity::Commutative
             }
+            // A ranking answers over the whole vector: it keeps `k` of all the series at a grid
+            // point, so it needs every series at once and one region holds only part of them.
+            // `Unsupported` would expand it just the same, but this node is refused on purpose
+            // rather than because its name is unknown.
+            name if name == VectorSelect::name() => Commutativity::NonCommutative,
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>
@@ -532,6 +538,67 @@ mod tests {
         })
     }
 
+    /// A `VectorSelect` ranking the frames of `raw_input`, bound to the tree the compiler builds for
+    /// `topk(2, some_metric)`.
+    ///
+    /// A statement root that ranks instead of folding is planned as this node, which builds the
+    /// per-series prefix it reads over `raw_input`: the root a `topk` statement is planned to is the
+    /// ranking over that prefix over its scan.
+    fn vector_select_plan(raw_input: LogicalPlan) -> LogicalPlan {
+        let mut stmt = native_statement();
+        stmt.expr = parser::parse("topk(2, some_metric)").unwrap();
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile(
+            &stmt,
+            Arc::clone(&series_schema),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let binding = FusedSeriesBinding {
+            series_schema,
+            grid: statement_grid(&stmt).unwrap(),
+            metric_name: Some(Arc::from("some_metric")),
+            time_index: "ts".to_string(),
+            tags: Vec::new(),
+        };
+        // A ranking answers with its input's own series, so the node's output is the per-series one.
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![
+                    (
+                        None,
+                        Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                    ),
+                    (
+                        None,
+                        Arc::new(Field::new(
+                            "ts",
+                            ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                            false,
+                        )),
+                    ),
+                ],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                VectorSelect::try_new(
+                    Arc::from("topk(2, some_metric)"),
+                    tree,
+                    binding,
+                    raw_input,
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
+    }
+
     /// The region's own view of the metric's table: a scan whose provider is the region provider.
     fn table_scan_plan() -> LogicalPlan {
         let provider = mock_table_provider(RegionId::new(1, 1));
@@ -552,6 +619,25 @@ mod tests {
             return true;
         }
         plan.inputs().into_iter().any(holds_fused_series)
+    }
+
+    fn holds_vector_select(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<VectorSelect>()
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(holds_vector_select)
+    }
+
+    /// The first `FusedSeries` node in `plan`, as the plan node it is.
+    fn first_fused_series(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+        if let LogicalPlan::Extension(extension) = plan
+            && extension.node.as_any().is::<FusedSeries>()
+        {
+            return Some(plan);
+        }
+        plan.inputs().into_iter().find_map(first_fused_series)
     }
 
     /// An extension node with no `ExtensionSerializer` branch: neither one under its own name nor
@@ -801,6 +887,182 @@ mod tests {
         assert!(
             any_remote_input_holds(&in_process, holds_fused_series),
             "the analyzer kept the node on the frontend although regions are reached in process: {in_process}"
+        );
+    }
+
+    /// The categorizer refuses the ranking itself: it answers over the whole vector, not per series.
+    #[test]
+    fn vector_select_is_not_commutative_and_its_prefix_still_is() {
+        let plan = vector_select_plan(table_scan_plan());
+
+        // The prefix under the ranking is still one series at a time.
+        let inputs = plan.inputs();
+        let [prefix] = inputs.as_slice() else {
+            panic!("expected the ranking to have one input: {plan}");
+        };
+        assert!(matches!(
+            Categorizer::check_plan(prefix, None).unwrap(),
+            Commutativity::Commutative
+        ));
+        assert!(matches!(
+            Categorizer::check_plan(&plan, None).unwrap(),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    /// The ranking stays on the frontend and the prefix under it is what a region builds: the
+    /// region read is the prefix over its own scan, and no part of the ranking is inside it.
+    #[test]
+    fn vector_select_root_keeps_the_ranking_above_the_region_read() {
+        let analyzed = analyze(
+            DistPlannerAnalyzer::new(true),
+            vector_select_plan(table_scan_plan()),
+        );
+
+        assert!(
+            matches!(
+                &analyzed,
+                LogicalPlan::Extension(extension) if extension.node.as_any().is::<VectorSelect>()
+            ),
+            "the ranking left the frontend although regions are reached in process: {analyzed}"
+        );
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_vector_select),
+            "the analyzer placed the ranking although it answers over the whole vector: {analyzed}"
+        );
+
+        let merge_scan = first_merge_scan(&analyzed)
+            .unwrap_or_else(|| panic!("expected the prefix to be a region read in: {analyzed}"));
+        let prefix = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
+            panic!("expected the region read to be the per-series prefix in: {analyzed}")
+        });
+        let inputs = prefix.inputs();
+        assert_eq!(
+            1,
+            inputs.len(),
+            "expected the prefix to read exactly one input in: {analyzed}"
+        );
+        assert!(
+            matches!(inputs.as_slice(), [LogicalPlan::TableScan(_)]),
+            "expected the prefix to read the series scan itself in: {analyzed}"
+        );
+    }
+
+    /// Over the wire the plan is still cut where it stops encoding, which is below both native
+    /// nodes: the region receives the bare scan and nothing of either node.
+    #[test]
+    fn vector_select_root_over_the_wire_places_neither_native_node() {
+        let plan = vector_select_plan(table_scan_plan());
+        // Neither node has a serializer branch, so the plan cannot leave the frontend as bytes.
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the native nodes encode now, so the encoding gate decides nothing"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::new(false), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_fused_series),
+            "the analyzer placed the prefix although its plan has to encode: {analyzed}"
+        );
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_vector_select),
+            "the analyzer placed the ranking although its plan has to encode: {analyzed}"
+        );
+    }
+
+    /// `EXPLAIN ANALYZE` wraps the rewritten root, and the exception is decided on the plan inside
+    /// it: the same placement, made once.
+    #[test]
+    fn analyze_root_over_a_vector_select_places_the_prefix_the_same_way() {
+        let plan = LogicalPlanBuilder::from(vector_select_plan(table_scan_plan()))
+            .explain(false, true)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            matches!(plan, LogicalPlan::Analyze(_)),
+            "expected an analyze root: {plan}"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::new(true), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_vector_select),
+            "the analyzer placed the ranking although it answers over the whole vector: {analyzed}"
+        );
+        let merge_scan = first_merge_scan(&analyzed)
+            .unwrap_or_else(|| panic!("expected the prefix to be a region read in: {analyzed}"));
+        let prefix = first_fused_series(merge_scan.input()).unwrap_or_else(|| {
+            panic!("expected the region read to be the per-series prefix in: {analyzed}")
+        });
+        assert!(
+            matches!(prefix.inputs().as_slice(), [LogicalPlan::TableScan(_)]),
+            "expected the prefix to read the series scan itself in: {analyzed}"
+        );
+    }
+
+    /// The exception is the root's own shape, not a search for a native node below it: a plan that
+    /// wraps the prefix in something else keeps the ordinary per-node encoding checks, so the prefix
+    /// stays on the frontend.
+    #[test]
+    fn a_wrapper_around_the_prefix_keeps_the_encoding_gate() {
+        let plan = unserializable_plan(fused_series_plan(table_scan_plan()));
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the wrapper and the prefix both have to stay unencodable for this to prove anything"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::new(true), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_fused_series),
+            "the analyzer placed the prefix although its root is not the node itself: {analyzed}"
+        );
+    }
+
+    /// A ranking is a native root only over the prefix it builds, and the check reads the node's
+    /// actual child: a ranking over anything else keeps the encoding gate, so the prefix below it
+    /// stays on the frontend even though its own shape would be placeable.
+    #[test]
+    fn a_ranking_over_something_else_keeps_the_encoding_gate() {
+        let ranking = vector_select_plan(table_scan_plan());
+        let inputs = ranking.inputs();
+        let [prefix] = inputs.as_slice() else {
+            panic!("expected the ranking to have one input: {ranking}");
+        };
+        let prefix = *prefix;
+        // The prefix with one projection in between: the same nodes, no longer the shape a region
+        // builds as it was planned.
+        let projected = LogicalPlanBuilder::from(prefix.clone())
+            .project(
+                prefix
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| datafusion_expr::col(field.name()))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = ranking.with_new_exprs(vec![], vec![projected]).unwrap();
+        assert!(
+            DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .is_err(),
+            "the prefix has to stay unencodable for this to prove anything"
+        );
+
+        let analyzed = analyze(DistPlannerAnalyzer::new(true), plan);
+
+        assert!(
+            !any_remote_input_holds(&analyzed, holds_fused_series),
+            "the analyzer placed the prefix although the ranking does not read it directly: {analyzed}"
         );
     }
 

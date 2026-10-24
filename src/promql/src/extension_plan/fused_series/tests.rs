@@ -29,12 +29,10 @@
 //! second per second, so the value it has to produce is exactly 1 (or 2) at every grid point and
 //! any position or finalization mistake shows up as a wrong, missing or duplicated row.
 
-use std::collections::VecDeque;
 use std::fmt::{self, Display, Formatter};
-use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::{Context, Poll};
+use std::sync::{Arc, Weak};
+use std::task::Context;
 
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
@@ -42,32 +40,25 @@ use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit}
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ToDFSchema;
 use datafusion::common::config::ConfigOptions;
-use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
-use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
-use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
-use datafusion::physical_plan::execution_plan::{
-    Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
-};
+use datafusion::physical_plan::execution_plan::{ChildrenPropertiesMode, ReplaceChildrenOptions};
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream, collect, displayable,
-};
+use datafusion::physical_plan::{Distribution, ExecutionPlan, collect, displayable};
 use datafusion::prelude::SessionContext;
 use datatypes::series::frame::{RawLabelMode, pack_raw_series_chunk, raw_series_frame_schema};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
 use super::{
@@ -75,6 +66,10 @@ use super::{
     occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::evaluated_frame::{
+    read as read_frame, schema as evaluated_frame_schema,
+};
+use crate::extension_plan::test_util::{StagedStream, staged, task_context};
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
@@ -448,186 +443,6 @@ fn memory_exec_partitioned_with(
 fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
     memory_exec_partitioned_with(frame_schema(), partitions)
 }
-
-/// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
-fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
-    let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
-        .build()
-        .expect("the runtime environment builds");
-    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
-}
-
-/// A physical input whose one partition's stream `make` builds.
-fn staged(
-    schema: SchemaRef,
-    make: impl Fn() -> SendableRecordBatchStream + Send + Sync + 'static,
-) -> Arc<dyn ExecutionPlan> {
-    Arc::new(StagedPlan {
-        properties: Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        )),
-        make: Box::new(make),
-    })
-}
-
-/// A physical input, so a test can stage what a memory source cannot: a pending poll, an error
-/// after some rows, and a stream whose drop it can see.
-struct StagedPlan {
-    make: Box<dyn Fn() -> SendableRecordBatchStream + Send + Sync>,
-    properties: Arc<PlanProperties>,
-}
-
-impl std::fmt::Debug for StagedPlan {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StagedPlan").finish()
-    }
-}
-
-impl DisplayAs for StagedPlan {
-    fn fmt_as(&self, _t: DisplayFormatType, _f: &mut Formatter) -> fmt::Result {
-        Ok(())
-    }
-}
-
-impl ExecutionPlan for StagedPlan {
-    fn name(&self) -> &str {
-        "StagedPlan"
-    }
-
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.properties
-    }
-
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        Vec::new()
-    }
-
-    fn apply_expressions(
-        &self,
-        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
-    ) -> DataFusionResult<TreeNodeRecursion> {
-        Ok(TreeNodeRecursion::Continue)
-    }
-
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-
-    fn execute(
-        &self,
-        partition: usize,
-        _context: Arc<TaskContext>,
-    ) -> DataFusionResult<SendableRecordBatchStream> {
-        // A scan answers the partitions it declares and no others, which is what makes an index
-        // past this plan's count an error the node above has to pass on.
-        if partition >= self.properties.partitioning.partition_count() {
-            return Err(DataFusionError::Execution(format!(
-                "StagedPlan has no partition {partition}"
-            )));
-        }
-        Ok((self.make)())
-    }
-}
-
-/// The stream a [`StagedPlan`] hands over: `batches`, then an optional error, with a pending poll
-/// and a drop a test can observe.
-struct StagedStream {
-    schema: SchemaRef,
-    batches: VecDeque<RecordBatch>,
-    handed: usize,
-    /// Hand this many batches, then answer [`Poll::Pending`] once.
-    pending_after: Option<usize>,
-    /// The error to report once the batches are exhausted.
-    error: Option<&'static str>,
-    /// Set when this stream is dropped, so a test can see the input being released.
-    dropped: Option<Arc<AtomicBool>>,
-    /// Counts the batches this stream has handed over, so a test can see how far one poll read.
-    handed_out: Option<Arc<AtomicUsize>>,
-}
-
-impl StagedStream {
-    fn new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
-        Self {
-            schema,
-            batches: batches.into(),
-            handed: 0,
-            pending_after: None,
-            error: None,
-            dropped: None,
-            handed_out: None,
-        }
-    }
-
-    fn pending_after(mut self, batches: usize) -> Self {
-        self.pending_after = Some(batches);
-        self
-    }
-
-    fn error(mut self, message: &'static str) -> Self {
-        self.error = Some(message);
-        self
-    }
-
-    fn dropped(mut self, flag: &Arc<AtomicBool>) -> Self {
-        self.dropped = Some(Arc::clone(flag));
-        self
-    }
-
-    fn counted(mut self, counter: &Arc<AtomicUsize>) -> Self {
-        self.handed_out = Some(Arc::clone(counter));
-        self
-    }
-}
-
-impl Stream for StagedStream {
-    type Item = DataFusionResult<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = &mut *self;
-        if this.pending_after == Some(this.handed) {
-            this.pending_after = None;
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
-        match this.batches.pop_front() {
-            Some(batch) => {
-                this.handed += 1;
-                if let Some(counter) = &this.handed_out {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                }
-                Poll::Ready(Some(Ok(batch)))
-            }
-            None => match this.error.take() {
-                Some(message) => {
-                    Poll::Ready(Some(Err(DataFusionError::Execution(message.to_string()))))
-                }
-                None => Poll::Ready(None),
-            },
-        }
-    }
-}
-
-impl RecordBatchStream for StagedStream {
-    fn schema(&self) -> SchemaRef {
-        self.schema.clone()
-    }
-}
-
-impl Drop for StagedStream {
-    fn drop(&mut self) {
-        if let Some(dropped) = &self.dropped {
-            dropped.store(true, Ordering::SeqCst);
-        }
-    }
-}
-
 fn fused(tree: NativeTree) -> FusedSeries {
     let binding = binding(&tree);
     FusedSeries::try_new(
@@ -1320,7 +1135,7 @@ async fn cancelling_after_partial_input_clears_current_bytes_and_keeps_peak() {
     .expect("the runtime executes a rate tree");
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut stream = exec
-        .execute(0, task_context(&pool))
+        .execute(0, task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>))
         .expect("the node executes");
 
     // One unclosed series chunk is accepted; the source then parks before another arrives, so the
@@ -1389,7 +1204,7 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     .expect("the runtime executes a rate tree");
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut stream = exec
-        .execute(0, task_context(&pool))
+        .execute(0, task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>))
         .expect("the node executes");
     // The source hands one unclosed chunk over and parks, so the window holds it while the plan's
     // metrics are read: the reads below happen while an execution is alive.
@@ -1461,7 +1276,7 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     // untouched -- and no part of the tree it built outlives it.
     let registered = after.iter().count();
     let second_stream = exec
-        .execute(0, task_context(&pool))
+        .execute(0, task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>))
         .expect("the plan runs a second time");
     drop(second_stream);
     let twice = exec
@@ -2156,7 +1971,7 @@ async fn a_label_set_stays_charged_after_its_first_stream_ends() {
         "this test needs one series in each of two partitions"
     );
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let context = task_context(&pool);
+    let context = task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>);
 
     // The first partition claims the label set, answers it and ends.
     let mut stream = exec
@@ -3173,4 +2988,569 @@ fn a_chunk_reaching_back_still_merges() {
         absorb_rebuilds() - before,
         "a chunk starting before the last stored run was appended rather than merged"
     );
+}
+
+/// The series schema the `rate(x[5m])` tree's own output is evaluated on, which a frame is packed
+/// and read against.
+fn rate_output() -> Arc<SeriesSchema> {
+    rate_tree()
+        .root()
+        .output
+        .samples()
+        .expect("a rate tree produces samples")
+        .clone()
+}
+
+/// The frame-mode node of `tree`: its output is the frame layout, so it is built from the binding
+/// and the input alone.
+fn evaluated_node(tree: NativeTree) -> FusedSeries {
+    let binding = binding(&tree);
+    FusedSeries::try_new_evaluated(Arc::from(PROMQL), tree, binding, input_plan(frame_schema()))
+        .expect("the binding matches the tree")
+}
+
+/// Every frame `batches` hold, read back with the tree's own evaluated output schema.
+///
+/// A batch may hold several rows and a row is one chunk, so every row is read: that is what makes a
+/// producer's frames comparable to the rows the ordinary node yields.
+fn read_frames(batches: &[RecordBatch]) -> Vec<(u64, u64, EvaluatedChunk)> {
+    let schema = rate_output();
+    let mut frames = Vec::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            frames.push(read_frame(batch, row, &schema).expect("the node packs the frame layout"));
+        }
+    }
+    frames
+}
+
+/// The rows the chunks of `frames` hold, in the shape the ordinary path yields: timestamp, value,
+/// host and metric name.
+fn frame_rows(frames: &[(u64, u64, EvaluatedChunk)]) -> Vec<Row> {
+    let grid = grid_timestamps();
+    let mut rows = Vec::new();
+    for (_, _, chunk) in frames {
+        // The tree has one output field, and a series' field list is never empty.
+        let samples = &chunk.series.fields.as_slice()[0];
+        let host = chunk.series.metric.get(HOST).map(str::to_string);
+        let name = chunk.series.metric.get(NAME).map(str::to_string);
+        let mut samples = samples.iter();
+        for (position, _) in chunk.series.time.positions() {
+            let value = match samples.next().expect("one sample per carried row") {
+                SampleRef::Float(value) => Some(value),
+                SampleRef::Missing => None,
+                SampleRef::Histogram(_) => panic!("rate produces float samples"),
+            };
+            rows.push((grid[position], value, host.clone(), name.clone()));
+        }
+    }
+    rows
+}
+
+/// The producer and ordinal of every frame, which is what a consumer orders frames by.
+fn frame_numbers(frames: &[(u64, u64, EvaluatedChunk)]) -> Vec<(u64, u64)> {
+    frames
+        .iter()
+        .map(|(producer, ordinal, _)| (*producer, *ordinal))
+        .collect()
+}
+
+/// Three partitions each frame the series it read, numbered as one producer per partition.
+///
+/// A frame names the producer whose output it belongs to and its position in that producer's
+/// output, and a producer is one execution of the tree: the partition. Three partitions therefore
+/// report three producers, each starting at ordinal 0, and each frame carries the labels and grid
+/// positions of the series that partition read.
+#[tokio::test]
+async fn three_partitions_frame_their_own_series() {
+    let partitions = [1.0, 2.0, 3.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scale)| {
+            vec![frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(scale),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let exec = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec_partitioned(partitions),
+    )
+    .expect("the runtime executes a rate tree");
+    assert_eq!(evaluated_frame_schema(), exec.schema());
+
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("each partition runs its own tree");
+    // Partitions settle in whatever order they finish, and a frame says which producer it belongs
+    // to, so the frames are ordered by what they say rather than by how they arrived.
+    let mut frames = read_frames(&batches);
+    frames.sort_by_key(|(producer, ordinal, _)| (*producer, *ordinal));
+    assert_eq!(
+        3,
+        frames.len(),
+        "one evaluated chunk per partition: {frames:?}"
+    );
+    assert_eq!(
+        vec![(0, 0), (1, 0), (2, 0)],
+        frame_numbers(&frames),
+        "one producer per partition, each starting at ordinal 0"
+    );
+    assert!(
+        frames.iter().all(|(_, _, chunk)| chunk.is_last),
+        "each frame holds the chunk that closes its one series"
+    );
+    for (index, (_, _, chunk)) in frames.iter().enumerate() {
+        let host = format!("web-{index}");
+        assert_eq!(Some(host.as_str()), chunk.series.metric.get(HOST));
+        assert_eq!(
+            None,
+            chunk.series.metric.get(NAME),
+            "rate drops the metric name, and the frame carries the labels the tree produced"
+        );
+        assert_eq!(GRID_LEN as usize, chunk.series.time.len());
+    }
+
+    let rows = frame_rows(&frames);
+    for (index, scale) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+        let host = format!("web-{index}");
+        let series = rows
+            .iter()
+            .filter(|row| row.2.as_deref() == Some(host.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_series_rates(&series, &[(scale, host.as_str())]);
+    }
+}
+
+/// One series split over three input chunks followed by a whole second series is framed chunk by
+/// chunk, and its frames hold exactly the rows the version that arrived whole does.
+///
+/// The ordinal counts the stream rather than the series: a closing frame ends a series, not a
+/// producer, so the second series continues the numbering the first closed on.
+#[tokio::test]
+async fn a_series_split_over_chunks_keeps_its_rows_when_framed() {
+    // The same two series twice: whole, then with the first one split over three chunks. Both
+    // series share the one partition, so the second arrives after the first one closed.
+    let whole = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec(frames(&[
+            series_chunk("web-1", &series_samples(1.0), true),
+            series_chunk("web-2", &series_samples(2.0), true),
+        ])),
+    )
+    .expect("the runtime executes a rate tree");
+    let whole = read_frames(
+        &collect(whole, SessionContext::default().task_ctx())
+            .await
+            .expect("the node runs"),
+    );
+    let split = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec(
+            one_series_frames()
+                .into_iter()
+                .chain(frames(&[series_chunk("web-2", &series_samples(2.0), true)]))
+                .collect(),
+        ),
+    )
+    .expect("the runtime executes a rate tree");
+    let split = read_frames(
+        &collect(split, SessionContext::default().task_ctx())
+            .await
+            .expect("the node runs"),
+    );
+
+    // Same rows from both sources: a frame carries the chunk's own absolute positions, so a chunk
+    // boundary is not a row boundary.
+    assert_eq!(frame_rows(&whole), frame_rows(&split));
+    let rows = frame_rows(&split);
+    let two = 2 * GRID_LEN as usize;
+    assert_eq!(
+        grid_timestamps()
+            .into_iter()
+            .chain(grid_timestamps())
+            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the frames cover the whole grid for both series, in order"
+    );
+    assert_eq!(
+        [
+            vec![Some(1.0); GRID_LEN as usize],
+            vec![Some(2.0); GRID_LEN as usize]
+        ]
+        .concat(),
+        rows.iter().map(|row| row.1).collect::<Vec<_>>()
+    );
+    assert!(
+        rows.iter().enumerate().all(|(index, row)| {
+            let host = if index < GRID_LEN as usize {
+                "web-1"
+            } else {
+                "web-2"
+            };
+            row.2.as_deref() == Some(host) && row.3.is_none()
+        }),
+        "every row carries the labels of the series it belongs to: {rows:?}"
+    );
+    assert_eq!(two, rows.len());
+
+    // One producer, ordinals from 0 without gaps across both series: the first series' close ends
+    // the series, not the producer, so the second series continues the numbering.
+    let numbers = frame_numbers(&split);
+    assert!(
+        numbers.len() > 1,
+        "the chunks settled separately: {numbers:?}"
+    );
+    let expected = (0..numbers.len() as u64)
+        .map(|ordinal| (0, ordinal))
+        .collect::<Vec<_>>();
+    assert_eq!(expected, numbers);
+    let closes = split
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, chunk))| chunk.is_last)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        2,
+        closes.len(),
+        "each series closes exactly once, on one frame: {closes:?}"
+    );
+    let next = split
+        .get(closes[0] + 1)
+        .expect("the second series is framed after the first one closed");
+    assert_eq!(
+        (0, closes[0] as u64 + 1),
+        (next.0, next.1),
+        "the ordinal continues across the first series' close"
+    );
+    assert_eq!(
+        Some("web-2"),
+        next.2.series.metric.get(HOST),
+        "the frame after the close belongs to the second series"
+    );
+    assert!(
+        split.last().expect("the series settle").2.is_last,
+        "the second series' closing frame is the stream's last"
+    );
+}
+
+/// A closing chunk that holds no row is still a frame: the series' labels and its finality travel
+/// in a row with no position and no value.
+#[tokio::test]
+async fn an_empty_closing_chunk_is_still_a_frame() {
+    // One sample at 0s, while every grid point's window is left-open: no window holds a sample, so
+    // `rate` decides no position and the series closes on an empty chunk.
+    let exec = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec(frames(&[series_chunk(
+            "web-1",
+            &series_samples(1.0)[..1],
+            true,
+        )])),
+    )
+    .expect("the runtime executes a rate tree");
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the node runs");
+    assert_eq!(
+        1,
+        batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+        "the empty chunk is one frame row"
+    );
+    let frames = read_frames(&batches);
+    assert_eq!(vec![(0, 0)], frame_numbers(&frames));
+    let (_, _, chunk) = frames.first().expect("the series closes on a frame");
+    assert!(chunk.is_last, "the row is the chunk that closes the series");
+    assert_eq!(0, chunk.series.time.len(), "no position was decided");
+    assert_eq!(
+        Some("web-1"),
+        chunk.series.metric.get(HOST),
+        "the closing row still names the series it closes"
+    );
+}
+
+/// The frame path claims each label set before it packs anything, exactly as the row path does: two
+/// partitions whose series land on one label set are still refused, and the refusal is the claim's
+/// rather than something a consumer above would have to notice.
+#[tokio::test]
+async fn a_duplicate_label_set_is_refused_before_a_frame_is_packed() {
+    let series = frame(&series_chunk("web-1", &series_samples(1.0), true));
+    let exec = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec_partitioned(vec![vec![series.clone()], vec![series]]),
+    )
+    .expect("the runtime executes a rate tree");
+    let error = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect_err("the second partition lands on the label set the first one claimed");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {message}"
+    );
+}
+
+/// The output mode is part of the node's identity, and `EXPLAIN` says which one it is.
+#[test]
+fn the_output_mode_is_part_of_the_nodes_identity() {
+    let tree = rate_tree();
+    let frames = evaluated_node(tree.clone());
+    // The same output schema, but built as the ordinary node: only the mode can tell them apart.
+    let ordinary = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        input_plan(frame_schema()),
+        evaluated_frame_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the binding matches the tree");
+    assert_eq!(ordinary.schema(), frames.schema());
+    assert_ne!(ordinary, frames);
+    assert_ne!(
+        Some(std::cmp::Ordering::Equal),
+        ordinary.partial_cmp(&frames)
+    );
+    assert_eq!(
+        "FusedSeries: rate(x[5m])",
+        Explain(&ordinary).to_string(),
+        "the ordinary line stays what it was"
+    );
+    assert_eq!(
+        "FusedSeries: evaluated frames for rate(x[5m])",
+        Explain(&frames).to_string()
+    );
+}
+
+/// A rebuilt frame node is a frame node again, with fresh label sets: the same series is packed a
+/// second time, numbered from ordinal 0.
+#[tokio::test]
+async fn a_rebuilt_frame_node_stays_a_frame_node() {
+    let exec = plan_of(
+        evaluated_node(rate_tree()),
+        memory_exec(one_series_frames()),
+    )
+    .expect("the runtime executes a rate tree");
+    let first = read_frames(
+        &collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+            .await
+            .expect("the node runs"),
+    );
+    assert_eq!(evaluated_frame_schema(), exec.schema());
+
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec(one_series_frames())],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("the node rebuilds over another input");
+    assert_eq!(
+        evaluated_frame_schema(),
+        rebuilt.schema(),
+        "the rebuilt node kept the frame layout"
+    );
+    let before = rebuilt
+        .metrics()
+        .expect("a plan that has not run reports a set");
+    assert_eq!(0, before.iter().count(), "the rebuild inherited a run");
+
+    let again = read_frames(
+        &collect(Arc::clone(&rebuilt), SessionContext::default().task_ctx())
+            .await
+            .expect("the rebuilt node runs"),
+    );
+    assert_eq!(frame_rows(&first), frame_rows(&again));
+    assert_eq!(
+        frame_numbers(&first),
+        frame_numbers(&again),
+        "the rebuilt plan's label sets were empty, so the same series is framed again"
+    );
+    assert_eq!(
+        1,
+        count(
+            &rebuilt.metrics().expect("the node reports its execution"),
+            "native.root.completed_series"
+        )
+    );
+}
+
+/// A tree a frame cannot hold is refused when the node is built: a frame carries one series' chunk
+/// of one field, so neither a tree that answers across series nor one of two output fields fits.
+#[test]
+fn a_tree_a_frame_cannot_hold_is_refused() {
+    let across = aggregate_tree();
+    let error = FusedSeries::try_new_evaluated(
+        Arc::from(PROMQL),
+        across.clone(),
+        binding_of(&across, raw_schema(), vec![HOST.to_string()]),
+        input_plan(frame_schema()),
+    )
+    .expect_err("an aggregate reads the whole vector at a grid point");
+    assert!(
+        error.to_string().contains("reads across series"),
+        "refused for another reason: {error}"
+    );
+
+    let two_fields = rate_tree_of(two_field_schema());
+    let error = FusedSeries::try_new_evaluated(
+        Arc::from(PROMQL),
+        two_fields.clone(),
+        binding_of(&two_fields, two_field_schema(), vec![HOST.to_string()]),
+        input_plan(frame_schema()),
+    )
+    .expect_err("a frame carries one value per position");
+    assert!(
+        error.to_string().contains("output fields"),
+        "refused for another reason: {error}"
+    );
+}
+
+/// The evaluated schema and the grid a frame-mode stream packs against, watched weakly.
+///
+/// Only the `Weak`s leave this helper. A strong handle held here would keep alive exactly what the
+/// tests below measure, and the test's own handles are dropped before it looks.
+fn evaluated_weak(tree: &NativeTree) -> (Weak<SeriesSchema>, Weak<EvalGrid>) {
+    let output = tree
+        .root()
+        .output
+        .samples()
+        .expect("a rate tree's output is samples");
+    let grid = output
+        .eval_grid
+        .clone()
+        .expect("a rate tree's output is evaluated on a grid");
+    (Arc::downgrade(output), Arc::downgrade(&grid))
+}
+
+/// A frame-mode stream releases what its rows were packed against once it ends.
+///
+/// The chunks are packed against the tree's own output schema, so a stream that kept that handle
+/// past its last chunk would keep the schema, the grid it names and the grid's materialized
+/// timestamps alive in a consumer that keeps an ended stream. The plan is dropped before the stream
+/// runs here, so after it ends the only handle left would be the stream's own.
+#[tokio::test]
+async fn an_ended_frame_stream_releases_the_evaluated_schema() {
+    let tree = rate_tree();
+    let output = tree
+        .root()
+        .output
+        .samples()
+        .expect("a rate tree's output is samples")
+        .clone();
+    let (schema, grid) = evaluated_weak(&tree);
+    let exec = plan_of(evaluated_node(tree), memory_exec(one_series_frames()))
+        .expect("the runtime executes a rate tree");
+    let mut stream = exec
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the node executes");
+    // The plan holds the tree it runs and the schema it packs against, and the input it hands over
+    // holds raw frames: neither may be what keeps the evaluated schema alive after this point.
+    drop(exec);
+
+    // Read every frame with the test's own handle while it still exists: the rows, the closing one
+    // included, are handed out before anything is released.
+    let mut frames = Vec::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.expect("the node runs");
+        for row in 0..batch.num_rows() {
+            frames.push(read_frame(&batch, row, &output).expect("every row is a frame"));
+        }
+    }
+    let rows = frame_rows(&frames);
+    assert_eq!(
+        grid_timestamps(),
+        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the whole series is answered before the release"
+    );
+    assert!(
+        frames.last().expect("the series settles").2.is_last,
+        "the closing frame is the last one packed"
+    );
+    // A decoded chunk names the grid it was read on, so the rows go before the schema is measured.
+    drop(rows);
+    drop(frames);
+    drop(output);
+
+    assert!(
+        schema.upgrade().is_none(),
+        "the ended stream still holds the evaluated schema"
+    );
+    assert!(
+        grid.upgrade().is_none(),
+        "the ended stream still holds the grid the schema names"
+    );
+    // An ended stream answers nothing, and asks nothing of what it released.
+    assert!(stream.next().await.is_none());
+}
+
+/// The same release happens when the stream ends in an error rather than at its input's end: a
+/// stopped run cannot pack another row, so it holds on to nothing it would pack one against.
+#[tokio::test]
+async fn a_failed_frame_stream_releases_the_evaluated_schema() {
+    let tree = rate_tree();
+    let output = tree
+        .root()
+        .output
+        .samples()
+        .expect("a rate tree's output is samples")
+        .clone();
+    let (schema, grid) = evaluated_weak(&tree);
+    let frames = frame_schema();
+    let exec = plan_of(
+        evaluated_node(tree),
+        staged(frames.clone(), move || {
+            Box::pin(
+                StagedStream::new(frames.clone(), one_series_frames()).error("a source defect"),
+            )
+        }),
+    )
+    .expect("the runtime executes a rate tree");
+    let mut stream = exec
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the node executes");
+    drop(exec);
+
+    let mut packed = Vec::new();
+    let error = loop {
+        match stream.next().await {
+            Some(Ok(batch)) => packed.push(batch),
+            Some(Err(error)) => break error,
+            None => panic!("the source's error was not reported"),
+        }
+    };
+    assert!(
+        error.to_string().contains("a source defect"),
+        "reported for another reason: {error}"
+    );
+    // The source's own chunks are read and packed before it fails, so the error costs no rows the
+    // source had already handed up; the failure itself releases the schema those rows were packed
+    // against.
+    assert!(
+        !packed.is_empty(),
+        "the chunks the source handed up are packed before it fails"
+    );
+    let mut positions = 0;
+    for frame in &packed {
+        let (_, _, chunk) = read_frame(frame, 0, &output)
+            .expect("a packed frame reads back against the tree's schema");
+        positions += chunk.series.time.len();
+    }
+    assert_eq!(
+        GRID_LEN as usize, positions,
+        "every row the source handed up, the closing one included, is packed before it fails"
+    );
+
+    drop(output);
+    assert!(
+        schema.upgrade().is_none(),
+        "the failed stream still holds the evaluated schema"
+    );
+    assert!(
+        grid.upgrade().is_none(),
+        "the failed stream still holds the grid the schema names"
+    );
+    assert!(stream.next().await.is_none());
 }

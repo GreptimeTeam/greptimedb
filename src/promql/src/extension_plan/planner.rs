@@ -25,7 +25,7 @@ use table::table::scan::RegionScanExec;
 
 use crate::extension_plan::{
     Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
-    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn, VectorSelect,
 };
 
 pub struct PromExtensionPlanner;
@@ -72,6 +72,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 physical_inputs,
                 session.config_options().execution.target_partitions,
             )
+        } else if let Some(node) = node.as_any().downcast_ref::<VectorSelect>() {
+            plan_vector_select(node, physical_inputs)
         } else {
             Ok(None)
         }
@@ -164,4 +166,24 @@ fn plan_fused_series(
     fused
         .to_execution_plan(series_scan, label_source, ordering)
         .map(Some)
+}
+
+/// Builds the physical node of a [`VectorSelect`] over the one input it reads.
+///
+/// The node gathers what its input's partitions hand up and answers across the whole vector, so it
+/// takes exactly one input; the ranking itself is the node's own work. A plan with another number
+/// of inputs is a node the query planner did not build, so it is reported instead of being planned
+/// from whichever input happened to come first.
+fn plan_vector_select(
+    select: &VectorSelect,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
+    let [input] = physical_inputs else {
+        return Err(DataFusionError::Plan(format!(
+            "the VectorSelect node takes exactly one input, but {} were planned",
+            physical_inputs.len()
+        )));
+    };
+
+    select.to_execution_plan(Arc::clone(input)).map(Some)
 }
