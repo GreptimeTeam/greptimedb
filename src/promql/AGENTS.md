@@ -34,8 +34,21 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   requires one selector, a direct scan with a bound metric name, and no residual
   label matchers or `__field__` matcher that narrows the scan, plus an eligible
   raw-series table/field set and supported expression/grid. Metric scans retain
-  the static `__table_id` predicate. Hybrid CTEs and CREATE VIEW TQL creation
-  currently fall back to the existing planner.
+  the static `__table_id` predicate. Hybrid CTEs keep the existing plan. The
+  operator also disables native planning for a programmatic TQL view so its
+  persisted Substrait plan remains serializable; `CREATE VIEW ... AS TQL EVAL`
+  syntax is a separate change.
+- **Admission and SQL output:** the guards live in
+  `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
+  (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the
+  existing plan; the latter preserves legacy per-series delta summation.
+  Allowing query fallback through the engine option, session variable or
+  `query_fallback` hint also disables native admission. Native SQL/TQL output
+  has column order `time index, fields, tags`, raw field names with nullable
+  `Float64` values, and nullable `Utf8` tags (including integer table tags).
+  Unlike a legacy raw selector, it does not preserve tag types; legacy function
+  expressions can also use different field names and column order. The native
+  time index is a non-nullable millisecond timestamp without a time zone.
 
 ## Change coupling
 
@@ -45,9 +58,9 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` is
   the exception: it is not serialized to a datanode. Its distributed placement
   is restricted to a direct table scan, a bound metric name and trees that read
-  one series at a time. The single-region placement warning in
-  `commutativity.rs` remains important: do not assume a series stays in one
-  region.
+  one series at a time, and it is only correct because native admission refuses a
+  table whose partition columns are not all tag columns: that is what keeps a
+  series inside one region. Keep that admission and this placement together.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.

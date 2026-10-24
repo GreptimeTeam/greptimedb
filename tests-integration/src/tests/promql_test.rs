@@ -20,6 +20,7 @@ use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use common_base::Plugins;
+use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
@@ -30,7 +31,7 @@ use datatypes::arrow::array::{
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
-use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
@@ -39,6 +40,10 @@ use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContext;
+use sql::ast::{Ident, ObjectName, ObjectNamePart};
+use sql::statements::create::CreateView;
+use sql::statements::statement::Statement as SqlStatement;
+use sql::statements::tql::{Tql, TqlEval};
 
 use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
@@ -1774,6 +1779,11 @@ impl NativePlanObserver {
             .take()
             .expect("native fused plan was captured")
     }
+
+    /// The fused node the last wrapped plan contained, if any; `take` requires one instead.
+    fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        self.0.lock().unwrap().clone()
+    }
 }
 
 impl PhysicalPlanWrapper for NativePlanObserver {
@@ -1867,6 +1877,90 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
     rows
 }
 
+/// [`native_result_rows`] plus each row's OTLP temporality marker, sorted by label then time.
+async fn native_marker_rows(output: Output) -> Vec<(i64, String, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let hosts = cast(
+            batch.column_by_name("host").unwrap().as_ref(),
+            &DataType::Utf8,
+        )
+        .unwrap();
+        let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+        let markers = cast(
+            batch
+                .column_by_name(OTLP_AGGREGATION_TEMPORALITY_LABEL)
+                .unwrap()
+                .as_ref(),
+            &DataType::Utf8,
+        )
+        .unwrap();
+        let markers = markers.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = batch
+            .columns()
+            .iter()
+            .filter(|column| column.data_type() == &DataType::Float64)
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 1, "expected one Float64 value column");
+        let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(
+            markers.null_count(),
+            0,
+            "every row must keep its temporality label"
+        );
+        assert_eq!(values.null_count(), 0);
+        for row in 0..batch.num_rows() {
+            rows.push((
+                timestamps.value(row),
+                hosts.value(row).to_string(),
+                markers.value(row).to_string(),
+                values.value(row),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| (left.1.as_str(), left.0).cmp(&(right.1.as_str(), right.0)));
+    rows
+}
+
+/// Compares the whole answer against `expected`, in the same label order, key by key and value by
+/// value; a duplicated or missing series therefore fails on the keys rather than on the count.
+fn assert_delta_rows(
+    rows: &[(i64, String, String, f64)],
+    expected: &[(i64, &str, &str, f64)],
+    context: &str,
+) {
+    let actual = rows
+        .iter()
+        .map(|(ts, host, marker, value)| (*ts, host.as_str(), marker.as_str(), *value))
+        .collect::<Vec<_>>();
+    assert_eq!(actual.len(), expected.len(), "{context}: rows {actual:?}");
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(
+            (actual.0, actual.1, actual.2),
+            (expected.0, expected.1, expected.2),
+            "{context}: row {actual:?}"
+        );
+        assert!(
+            (actual.3 - expected.3).abs() <= 1e-9 * expected.3.abs().max(1.0),
+            "{context}: series {:?} must report {}, found {}",
+            actual.1,
+            expected.3,
+            actual.3
+        );
+    }
+}
+
 fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     use datafusion::physical_plan::metrics::MetricValue;
 
@@ -1893,8 +1987,27 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
     );
 }
 
+/// A standalone instance with the native route opted in, and an observer of the plans it runs.
 async fn native_test_instance(
     builder: GreptimeDbStandaloneBuilder,
+) -> (
+    crate::standalone::GreptimeDbStandalone,
+    Arc<NativePlanObserver>,
+) {
+    native_test_instance_with_options(
+        builder,
+        QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// [`native_test_instance`] with the engine-wide query options spelled out by the caller.
+async fn native_test_instance_with_options(
+    builder: GreptimeDbStandaloneBuilder,
+    options: QueryOptions,
 ) -> (
     crate::standalone::GreptimeDbStandalone,
     Arc<NativePlanObserver>,
@@ -1903,10 +2016,6 @@ async fn native_test_instance(
     let plugins = Plugins::new();
     let wrapper: PhysicalPlanWrapperRef = observer.clone();
     plugins.insert(wrapper);
-    let options = QueryOptions {
-        experimental_native_promql: true,
-        ..Default::default()
-    };
     let standalone = builder
         .with_plugin(plugins)
         .with_query_options(options)
@@ -2024,12 +2133,30 @@ async fn native_promql_view_fallback_preserves_native_hint() {
     execute_all(&instance, "CREATE TABLE native_view_source (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_view_source VALUES (0, 'a', 2)", QueryContext::arc()).await;
     let ctx = native_query_context(true, 4);
     let expected_extensions = ctx.extensions();
-    execute_all(
-        &instance,
-        "CREATE VIEW native_view AS TQL EVAL (0, 0, '1s', '5m') native_view_source",
-        ctx.clone(),
-    )
-    .await;
+    // The AST the parser would build for `CREATE VIEW native_view AS TQL EVAL (0, 0, '1s', '5m')
+    // native_view_source`; the statement's spelling is covered by the separate view case.
+    let create_view = SqlStatement::CreateView(CreateView {
+        name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("native_view"))]),
+        columns: vec![],
+        query: Box::new(SqlStatement::Tql(Tql::Eval(TqlEval {
+            start: "0".to_string(),
+            end: "0".to_string(),
+            step: "1s".to_string(),
+            lookback: Some("5m".to_string()),
+            query: "native_view_source".to_string(),
+            alias: None,
+        }))),
+        or_replace: false,
+        if_not_exists: false,
+    });
+    instance
+        .statement_executor()
+        .execute_stmt(QueryStatement::Sql(create_view), ctx.clone())
+        .await
+        .unwrap();
+    // The view's stored plan must not depend on the caller's native hint, so reading it runs the
+    // plan the view was created with rather than one that needs the hint to be readable.
+    observer.clear();
     let view = instance
         .do_query("SELECT * FROM native_view", ctx.clone())
         .await
@@ -2038,14 +2165,11 @@ async fn native_promql_view_fallback_preserves_native_hint() {
     let view_rows = native_result_rows(view).await;
     assert_eq!(ctx.extensions(), expected_extensions);
     assert_eq!(view_rows, vec![(0, "a".to_string(), 2.0)]);
-    let create_view = instance
-        .do_query("SHOW CREATE VIEW native_view", ctx.clone())
-        .await
-        .remove(0)
-        .unwrap();
-    let create_view_text = native_output_text(create_view).await;
-    assert!(create_view_text.contains("TQL EVAL"));
-    assert!(create_view_text.contains("5m"));
+    assert!(
+        observer.fused().is_none(),
+        "a view plan must be readable without the native hint"
+    );
+    // The hint is still the caller's: the same context keeps folding a direct query.
     observer.clear();
     let direct = instance
         .do_query("TQL EVAL (0, 0, '1s') native_view_source", ctx)
@@ -2100,5 +2224,235 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
         assert_eq!(native_rows, legacy_rows);
+    }
+}
+
+/// OTLP delta temporality on the public TQL route: a `delta`-marked series answers the raw sample
+/// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0. The fused node
+/// computes one cumulative window for every series, so it must decline a marker-bearing table
+/// instead of reporting 0 for the delta series.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_delta_temporality_rate_and_increase_match_legacy() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_delta_temporality";
+    const CONTROL: &str = "native_delta_control";
+    // Samples at 60s and 120s, evaluated at 120s over a 2m window: the `delta` series' samples are
+    // raw deltas, so its increase is their sum 10 + 10; the `cumulative` one did not rise, so 0.
+    const DELTA_INCREASE: f64 = 20.0;
+    const CUMULATIVE_INCREASE: f64 = 0.0;
+    const DELTA_RATE: f64 = 20.0 / 120.0;
+    const CUMULATIVE_RATE: f64 = 0.0;
+
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_delta_temporality",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            r#"CREATE TABLE {TABLE} (
+                host STRING,
+                ts TIMESTAMP(3) TIME INDEX,
+                val DOUBLE,
+                otlp_aggregation_temporality STRING,
+                PRIMARY KEY (host, otlp_aggregation_temporality)
+            ) ENGINE=mito;
+            INSERT INTO {TABLE} (host, ts, val, otlp_aggregation_temporality) VALUES
+                ('delta', 60000, 10, '{GREPTIME_TEMPORALITY_DELTA}'),
+                ('delta', 120000, 10, '{GREPTIME_TEMPORALITY_DELTA}'),
+                ('cumulative', 60000, 10, 'cumulative'),
+                ('cumulative', 120000, 10, 'cumulative');
+            CREATE TABLE {CONTROL} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) ENGINE=mito;
+            INSERT INTO {CONTROL} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30);"#
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    for (query, delta, cumulative) in [
+        (
+            format!("increase({TABLE}[2m])"),
+            DELTA_INCREASE,
+            CUMULATIVE_INCREASE,
+        ),
+        (format!("rate({TABLE}[2m])"), DELTA_RATE, CUMULATIVE_RATE),
+        (
+            format!("abs(increase({TABLE}[2m]))"),
+            DELTA_INCREASE,
+            CUMULATIVE_INCREASE,
+        ),
+        (
+            format!("abs(rate({TABLE}[2m]))"),
+            DELTA_RATE,
+            CUMULATIVE_RATE,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        // Both series are in the window, in label order, with their own marker and value.
+        let expected = [
+            (120_000, "cumulative", "cumulative", cumulative),
+            (120_000, "delta", GREPTIME_TEMPORALITY_DELTA, delta),
+        ];
+        // Values before routes: a wrong number is the regression, a declined plan is not.
+        let legacy_rows = native_marker_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_delta_rows(&legacy_rows, &expected, &format!("native-off `{query}`"));
+        observer.clear();
+        let native_rows = native_marker_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_delta_rows(&native_rows, &expected, &format!("native-on `{query}`"));
+        assert_eq!(
+            native_rows, legacy_rows,
+            "`{query}`: same rows on both routes"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: the native route must decline a table that carries the temporality marker"
+        );
+    }
+
+    // The control: a marker-free table (samples 10 and 30 here, unlike the table above) still fuses
+    // and agrees with the existing plan, so the decline is about the marker, not the table shape.
+    let control_sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({CONTROL}[2m])");
+    observer.clear();
+    let control_native =
+        native_result_rows(native_tql_output(&instance, &control_sql, true).await).await;
+    assert_eq!(
+        control_native,
+        vec![(120_000, "a".to_string(), 40.0)],
+        "the fused control reports the sampled sum"
+    );
+    assert_eq!(observer.take().name(), "FusedSeriesExec");
+    let control_legacy =
+        native_result_rows(native_tql_output(&instance, &control_sql, false).await).await;
+    assert_eq!(
+        control_native, control_legacy,
+        "the control agrees with the existing plan"
+    );
+}
+
+/// Enabling query fallback — by the engine option or by the per-request `query_fallback` hint — must
+/// keep an otherwise fusible query on the existing plan without changing its answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_fallback_options_keep_expected_answer() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_fallback_control";
+    // One eligible selector, so only the fallback settings decide the route. `sum_over_time` is
+    // exact over the two samples in the window: 10 + 30 for `a`, 10 + 70 for `b`.
+    let query = format!("sum_over_time({TABLE}[2m])");
+    let expected = vec![
+        (120_000, "a".to_string(), 40.0),
+        (120_000, "b".to_string(), 80.0),
+    ];
+    for (tag, allow_query_fallback) in [("engine_off", false), ("engine_on", true)] {
+        let (standalone, observer) = native_test_instance_with_options(
+            GreptimeDbStandaloneBuilder::new(&format!("native_promql_fallback_{tag}")),
+            QueryOptions {
+                experimental_native_promql: true,
+                allow_query_fallback,
+                ..Default::default()
+            },
+        )
+        .await;
+        let instance = standalone.fe_instance().clone();
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) ENGINE=mito; \
+                 INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
+                 ('b', 60000, 10), ('b', 120000, 70);"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        let mut hinted = native_query_context(true, 4).as_ref().clone();
+        hinted.set_extension(QUERY_FALLBACK_HINT, "true");
+        for (route, ctx) in [
+            ("plain", native_query_context(true, 4)),
+            ("fallback-hint", Arc::new(hinted)),
+        ] {
+            let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+            observer.clear();
+            let rows =
+                native_result_rows(instance.do_query(&sql, ctx).await.remove(0).unwrap()).await;
+            assert_eq!(
+                rows, expected,
+                "{tag} {route}: the answer must not depend on the fallback settings"
+            );
+            if allow_query_fallback || route == "fallback-hint" {
+                // A fallback rewrites every table scan into `MergeScan`, which the fused node
+                // cannot read, so a query allowed to fall back keeps the existing plan.
+                assert!(
+                    observer.fused().is_none(),
+                    "{tag} {route}: enabling the fallback must keep the existing plan"
+                );
+            } else {
+                assert_eq!(
+                    observer.take().name(),
+                    "FusedSeriesExec",
+                    "{tag} {route}: with no fallback enabled this query must be fused"
+                );
+            }
+        }
+    }
+}
+
+/// A store configured for the columnar series format must not change the answer of a query over a
+/// field that format cannot serve: the columnar samples carry `Float64` series only, so an integer
+/// field has no raw frame to fold and the route has to decline it while the existing plan answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_config_falls_back_for_integer_field() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_columnar_int";
+    // Both functions are exact over the two samples inside the window: 10 + 30 and their mean.
+    const SUM: f64 = 40.0;
+    const AVG: f64 = 20.0;
+    let mito_config = mito2::config::MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_columnar_fallback")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val BIGINT, PRIMARY KEY (host)) ENGINE=mito; \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected) in [
+        (format!("sum_over_time({TABLE}[2m])"), SUM),
+        (format!("avg_over_time({TABLE}[2m])"), AVG),
+    ] {
+        let sql = format!("TQL EVAL (120, 120, '1m') {query}");
+        observer.clear();
+        let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            native_rows.len(),
+            1,
+            "native-on `{query}`: one row for the one series"
+        );
+        assert_eq!(native_rows[0].0, 120_000, "native-on `{query}`: ts");
+        assert_eq!(native_rows[0].1, "a", "native-on `{query}`: label");
+        assert!(
+            (native_rows[0].2 - expected).abs() <= 1e-9 * expected.abs().max(1.0),
+            "native-on `{query}`: expected {expected}, found {}",
+            native_rows[0].2
+        );
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "`{query}`: same rows on both routes"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "`{query}`: the native route must decline a field the columnar samples cannot serve"
+        );
     }
 }

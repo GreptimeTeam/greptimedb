@@ -46,7 +46,7 @@ fn format_tql(
 ) -> std::fmt::Result {
     write!(f, "({start}, {end}, '{step}'")?;
     if let Some(lookback) = lookback {
-        write!(f, ", '{lookback}'")?;
+        write!(f, ", {lookback}")?;
     }
     if let Some(alias) = alias {
         write!(f, ") {query} AS {alias}")

@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
+use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
@@ -102,8 +103,9 @@ impl PromPlanner {
     /// caller plans it with the existing planner as if this method did not exist. The two ways that
     /// happens are a shape the compiler refuses (`DataFusionError::NotImplemented`, which names
     /// what it found) and a query this route cannot bind faithfully — more than one selector, a
-    /// label matcher the bare scan below the node would not apply, an `__field__` matcher that
-    /// narrows the field set, a missing table, a native histogram field, or an unusable grid.
+    /// label matcher the bare scan below the node would not apply, alternative (`or`) matchers, an
+    /// `__field__` matcher that narrows the field set, a missing table, a field that is not
+    /// `Float64`, a `rate`/`increase` over a delta-temporality table, or an unusable grid.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -125,6 +127,11 @@ impl PromPlanner {
             return Ok(None);
         };
 
+        // These matchers are alternatives the one scan below the node cannot represent, so the
+        // query keeps the plan the existing path builds for it.
+        if !selector.matchers.or_matchers.is_empty() {
+            return Ok(None);
+        }
         // Resolve the selector the way the existing planner does, and take what is left as the
         // rows it selects. The scan below the node is the selector's own scan, unfiltered, so a
         // matcher that survives preprocessing selects fewer rows here than the scan reads.
@@ -153,6 +160,18 @@ impl PromPlanner {
         // A series with no field has nothing to fold, and the tree's input would be an empty
         // schema, which no window can read.
         if fields.is_empty() {
+            return Ok(None);
+        }
+        // On a delta-temporality table a series' samples are increments, which the existing
+        // planner sums over the window for `increase` and divides by the range for `rate`
+        // ([`PromPlanner::select_delta_range_math`]), per series because the tag can differ between
+        // them. A compiled tree computes both for a cumulative series, so any `rate`/`increase`
+        // over such a table keeps the existing plan; a bare selector still folds.
+        if tags
+            .iter()
+            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)
+            && calls_rate_or_increase(prom_expr)
+        {
             return Ok(None);
         }
 
@@ -258,17 +277,13 @@ impl PromPlanner {
             };
             scan.filters.push(filter);
         }
-        // A window over a native histogram yields a histogram, which the output schema below
-        // cannot declare; the existing path evaluates those with its own kernels.
-        if Self::field_columns_contain_native_histogram(input.schema(), &fields) {
-            return Ok(None);
-        }
-        // The region's raw series preflight serves a field only when it is numeric or a native
-        // histogram, and the physical layer turns that refusal into a planning error because the
-        // logical plan is already fixed by then. A table whose selected fields are, say, a string
-        // and a boolean therefore has to be declined here, while the existing plan is still the
-        // fallback - `stringsfield` over such a table answered normally before this route existed.
-        if !Self::field_columns_are_raw_series_servable(input.schema(), &fields) {
+        // The region's columnar series-index samples, one of the readers this scan may be served
+        // by, store `Float64` fields only, and the logical plan cannot tell which reader arrives.
+        // So every field has to be `Float64`: an integer, a `Float32`, a decimal, a string or a
+        // native histogram field keeps the existing plan, which the physical layer still serves.
+        if !fields.iter().all(|field| {
+            Self::field_column_type(input.schema(), field) == Some(&ArrowDataType::Float64)
+        }) {
             return Ok(None);
         }
         let Some(stmt) = self.native_statement(prom_expr) else {
@@ -481,6 +496,20 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
             }
         }
         _ => {}
+    }
+}
+
+/// Whether `expr` calls `rate`/`increase`, the functions the existing planner rewrites per series
+/// for a delta-temporality table. Only nested calls and parentheses can hold one in an expression
+/// this route accepts; every other shape names no single selector or reads across series.
+fn calls_rate_or_increase(expr: &PromExpr) -> bool {
+    match expr {
+        PromExpr::Call(call) => {
+            matches!(call.func.name, "rate" | "increase")
+                || call.args.args.iter().any(|arg| calls_rate_or_increase(arg))
+        }
+        PromExpr::Paren(ParenExpr { expr }) => calls_rate_or_increase(expr),
+        _ => false,
     }
 }
 

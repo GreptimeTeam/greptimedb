@@ -972,6 +972,73 @@ async fn native_engine_provider(partition_key_indices: Vec<usize>) -> DfTableSou
     .await
 }
 
+/// A delta-temporality table on the engine the native route accepts.
+///
+/// The OTLP receiver writes the aggregation temporality as a tag of every series, so a table with
+/// that tag can hold delta and cumulative series side by side: the existing planner sums the
+/// increments of a delta series instead of rating its counter. The value field is the `Float64`
+/// this route folds.
+async fn native_engine_temporality_marker_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            OTLP_AGGREGATION_TEMPORALITY_LABEL.to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        ),
+        ColumnSchema::new(
+            greptime_timestamp().to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ]));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .engine(NATIVE_ENGINE.to_string())
+        .primary_key_indices(vec![0, 1])
+        .value_indices(vec![3])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .name("some_metric")
+        .meta(table_meta)
+        .build()
+        .unwrap();
+    let table = EmptyTable::from_table_info(&table_info);
+
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "some_metric".to_string(),
+                table_id: 1024,
+                table,
+            })
+            .is_ok()
+    );
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn build_test_table_provider_with_options(
     table_name_tuples: &[(String, String)],
@@ -2132,19 +2199,23 @@ async fn native_fused_engine_without_raw_series_falls_back() {
     );
 }
 
-/// A value field the region's raw scan cannot serve keeps the existing plan.
+/// A value field the raw-series readers cannot both serve keeps the existing plan.
 ///
-/// The preflight serves numeric columns and native histograms only, and the physical layer turns
-/// its refusal into a planning error once the logical plan is fixed. A bare selector over a string
-/// field answered normally before this route existed, so it must keep doing that.
+/// The region's preflight serves numeric columns and native histograms, while the columnar
+/// series-index samples the scan may be read through store `Float64` fields only, and the logical
+/// plan cannot tell which reader the region prepares. So only `Float64` is admitted; a bare
+/// selector over any other field type answered normally before this route existed.
 #[tokio::test]
-async fn native_fused_non_numeric_field_falls_back() {
+async fn native_fused_unsupported_field_type_falls_back() {
     for field_type in [
         ConcreteDataType::string_datatype(),
         ConcreteDataType::boolean_datatype(),
         // Arrow's `is_numeric` includes the decimals while the region's preflight does not, so
         // asking Arrow would let a decimal field through to a planning error.
         ConcreteDataType::decimal128_datatype(10, 2),
+        // Numeric, but not the `Float64` the columnar samples store.
+        ConcreteDataType::int64_datatype(),
+        ConcreteDataType::float32_datatype(),
     ] {
         let native = build_native_fused_plan_with_provider(
             "some_metric",
@@ -2166,6 +2237,122 @@ async fn native_fused_non_numeric_field_falls_back() {
             native.display_indent().to_string(),
             without_flag.display_indent().to_string(),
             "{field_type} must keep the existing plan"
+        );
+    }
+}
+
+/// The `Float64` field every raw reader serves controls the field-type decline above.
+#[tokio::test]
+async fn native_fused_float64_field_is_accepted() {
+    let plan = build_native_fused_plan_with_provider(
+        "some_metric",
+        true,
+        build_test_table_provider_with_field_type(ConcreteDataType::float64_datatype()).await,
+    )
+    .await;
+
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "a `Float64` field must still fold: {}",
+        plan.display_indent()
+    );
+}
+
+/// Alternative (`or`) matchers keep the existing plan.
+///
+/// `a{x="1" or x="2"}` names alternative matchers, which the one scan below the node cannot
+/// represent. These queries are only asserted to fall back: what the existing plan answers for
+/// them is its own question, not one this route claims to have fixed.
+#[tokio::test]
+async fn native_fused_or_matchers_fall_back() {
+    for query in [
+        r#"some_metric{tag_0="a" or tag_0="b"}"#,
+        r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let without_flag = build_native_fused_plan(query, false).await;
+        assert!(
+            find_fused_series(&native).is_none(),
+            "`{query}` names alternative matchers: {}",
+            native.display_indent()
+        );
+        assert_eq!(
+            native.display_indent().to_string(),
+            without_flag.display_indent().to_string(),
+            "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A `rate`/`increase` over a delta-temporality table keeps the existing plan, which sums each
+/// series' increments.
+///
+/// The samples of a series tagged `delta` are increments, which the existing planner sums over the
+/// window for `increase` and divides by the range for `rate`, while a cumulative series is rated
+/// from its counter; it picks that per series. A compiled tree rates every series the same way, so
+/// these queries fall back. The same queries over a table without the marker still fold, which is
+/// what makes the decline the marker's doing rather than the shape's.
+#[tokio::test]
+async fn native_fused_delta_temporality_rates_fall_back() {
+    for query in [
+        "rate(some_metric[5m])",
+        "increase(some_metric[5m])",
+        // Below another call and inside parentheses, which are the same decline one level down.
+        "abs(rate(some_metric[5m]))",
+        "abs(increase(some_metric[5m]))",
+        "(rate(some_metric[5m]))",
+    ] {
+        let marked = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_engine_temporality_marker_provider().await,
+        )
+        .await;
+        let marked_without_flag = build_native_fused_plan_with_provider(
+            query,
+            false,
+            native_engine_temporality_marker_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&marked).is_none(),
+            "`{query}` needs the per-series delta math: {}",
+            marked.display_indent()
+        );
+        assert_eq!(
+            marked.display_indent().to_string(),
+            marked_without_flag.display_indent().to_string(),
+            "`{query}` must keep the existing plan, not the counter form for every series"
+        );
+
+        let unmarked = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_engine_provider(vec![]).await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&unmarked).is_some(),
+            "`{query}` over a table without the marker must still fold: {}",
+            unmarked.display_indent()
+        );
+    }
+}
+
+/// The marker alone does not decline a query: only `rate`/`increase` are refused.
+#[tokio::test]
+async fn native_fused_delta_temporality_non_counter_math_still_folds() {
+    for query in ["some_metric", "abs(some_metric)"] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_engine_temporality_marker_provider().await,
+        )
+        .await;
+        assert!(
+            find_fused_series(&plan).is_some(),
+            "`{query}` needs no per-series delta math and must still fold: {}",
+            plan.display_indent()
         );
     }
 }
