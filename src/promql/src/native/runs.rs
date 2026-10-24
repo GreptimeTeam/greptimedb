@@ -21,12 +21,9 @@
 //! merged away, while a chunk that fills positions the set left empty merges cleanly, as
 //! [`crate::grid_series::merge_same_labelset`] does.
 //!
-//! The state is kept per label set, per field, as runs, so a chunk of many positions costs one run
-//! rather than one entry per position. Keeping it in one place is what keeps the two layers that
-//! check it — the native runtime's own [`crate::native::execute::Emitted`] table and the
-//! cross-partition [`crate::extension_plan::fused_series::LabelSets`] — from drifting apart: both
-//! ask the same functions for the same answers, so the fast path one of them earned is the fast path
-//! the other gets.
+//! The native runtime's partition-local [`crate::native::execute::Emitted`] table keeps this state
+//! per label set and field as runs, so a chunk of many positions costs one run rather than one
+//! entry per position.
 
 /// One run of grid positions, half-open, that hold a value in one field.
 #[derive(Clone, Copy, Debug)]

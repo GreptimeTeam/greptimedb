@@ -16,38 +16,57 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
 | Kernels | `src/promql/src/functions.rs`, `src/promql/src/functions/` | PromQL functions |
 | Matching | `src/promql/src/vector_match.rs` | Binary vector matching |
 | Extension operators | `src/promql/src/extension_plan.rs`, `src/promql/src/extension_plan/` | Logical nodes and execution plans |
-| Native model | `src/promql/src/native/` | Compiled tree, chunks, display, metrics |
+| Native model | `src/promql/src/native/` | Compiled tree, chunks, display, metrics and execution |
 
-## Two evaluation paths, and their status
+## Evaluation paths
 
-The easiest thing to get wrong here. Both exist; only one runs.
-
-- **Extension operators are live.** `PromPlanner` builds `SeriesDivide`,
-  `SeriesNormalize`, `RangeManipulate`, `InstantManipulate`, `EmptyMetric` and
-  `UnionDistinctOn`; `PromExtensionPlanner`
-  (`src/promql/src/extension_plan/planner.rs`) maps each logical node to its
-  execution plan, one branch per node, `None` for anything else.
-- **Nothing plans into the native model yet.** `src/query/src/promql/native_compile.rs`
-  compiles a statement into a `NativeTree`, but no planner calls it, so a tree
-  built here reaches no execution. `src/promql/src/native/` holds the tree, the
-  chunk protocol, display and metrics, and — once a runtime lands — the driver
-  that runs a tree node by node. Compiling and running are separate concerns
-  owned by separate files; do not assume a tree is executable because it
-  compiles.
+- **Extension operators:** the existing PromQL path plans operators such as
+  `SeriesDivide`, `SeriesNormalize`, `RangeManipulate`, `InstantManipulate`,
+  `EmptyMetric` and `UnionDistinctOn`. `PromExtensionPlanner`
+  (`src/promql/src/extension_plan/planner.rs`) maps the logical nodes to their
+  execution plans.
+- **Experimental fused native-series POC (default off):** the query planner offers
+  a PromQL statement only when the engine's `in_process_region_transport` and
+  `QueryOptions::experimental_native_promql` options are enabled and the per-request
+  `query.experimental_native_promql` extension is true. Admission is limited to a
+  bare vector selector (parentheses allowed) and unary `rate`, `increase`,
+  `sum_over_time`, and `abs` calls over a selector; range selectors occur only
+  inside those calls. It is a standalone route: unsupported expressions and all
+  other cases use the existing planner. Accepted plans use process-local
+  `FusedSeries`, with ordinary `RecordBatch` output collected through DataFusion.
+  Scan N→Fused N retains region/partition parallelism, but this POC does not merge
+  one logical series across regions or scan partitions, guarantee canonical final
+  labels across them, or use global label-set occupancy; `NativeExecutor` retains
+  its partition-local `Emitted` state. Repartitioning redistributes rows but does not perform
+  semantic series merging. A future gather/repartition plus merge/finalize is
+  outside this POC. Metric scans retain the static `__table_id` predicate.
+- **Admission and SQL output:** the guards live in
+  `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
+  (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the
+  existing plan; the latter preserves legacy per-series delta summation.
+  Allowing query fallback through the engine option, session variable or
+  `query_fallback` hint also disables native admission. Native SQL/TQL output
+  has column order `time index, fields, tags`, raw field names with nullable
+  `Float64` values, and nullable `Utf8` tags (including integer table tags).
+  Unlike a legacy raw selector, it does not preserve tag types; legacy function
+  expressions can also use different field names and column order. The native
+  time index is a non-nullable millisecond timestamp without a time zone.
 
 ## Change coupling
 
-- **An extension node reaches a datanode only if three things line up**: a payload
-  branch in `src/common/substrait/src/extension_serializer.rs`, a physical branch
-  in `PromExtensionPlanner`, and a `Commutativity::Commutative` arm in
-  `check_extension_plan` (`src/query/src/dist_plan/commutativity.rs`). Missing the
-  third is silent: the node falls through to `Unsupported`, the distributed
-  boundary is placed above it, and it never reaches a region — with no error.
+- Distributed extension operators need matching handling in the Substrait
+  serializer (`src/common/substrait/src/extension_serializer.rs`), the physical
+  `PromExtensionPlanner`, and `check_extension_plan`
+  (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` is
+  the exception: it is not serialized to a datanode. Its distributed placement
+  is restricted to a direct table scan, a bound metric name and trees that read
+  one series at a time. Native admission requires partition columns to be tags,
+  but region/partition-local execution does not merge a logical series across
+  regions or scan partitions; do not treat that placement guard as a global
+  series-merge or final-label guarantee.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.
-- User-visible changes need planner coverage plus a sqlness case under
-  `tests/cases/standalone/common/promql/`.
 
 ## Gotchas
 
@@ -72,9 +91,9 @@ The easiest thing to get wrong here. Both exist; only one runs.
   the producer ordering the adapter adds. Nothing in that metadata binds the key
   to a decode — the frame decoder compares those format keys and the field list,
   and never a label identity. `unpack_raw_series` therefore requires a
-  caller-supplied `RawLabelSource`: decode with the source that was actually bound
-  when the stream was produced, because the frame schema does not replace that
-  binding. The metadata describes format, not label identity.
+  caller-supplied `RawLabelSource`: decode with the source that was actually
+  bound when the stream was produced, because the frame schema does not replace
+  that binding. The metadata describes format, not label identity.
 - **A wrong label binding is silently wrong, not an error.** Storage validates the
   binding it is given (metadata identity, tag-ness, name matches, no duplicates)
   but cannot tell whether that set is the one the query meant, and the metric name
@@ -85,26 +104,5 @@ The easiest thing to get wrong here. Both exist; only one runs.
 ```bash
 cargo nextest run -p promql
 cargo nextest run -p query          # planner and native-compile changes
-cargo sqlness bare -t <case>        # PromQL cases live under tests/cases/standalone/common/promql/
+cargo sqlness bare -t <case>        # PromQL cases under tests/cases/standalone/common/promql/
 ```
-
-## Not wired up yet
-
-The storage side of the raw path exists; what is missing is planner wiring. Both
-gaps below are structural, not bugs.
-
-- **The native tree has no planner entry point.** `native_compile::compile` has no
-  caller, and a `NativeTree` becomes a physical plan only once something builds it
-  while it still holds the AST and the selector binding — the point where the
-  matchers, `__field__` and the lookback are still available. Compiling later, from
-  a plan, loses them.
-- **No planner reaches a raw scan.** mito2 implements
-  `RegionScanner::raw_series_schema` (`mito2/src/read/series_scan.rs`), so
-  `RegionScanExec::try_to_series_scan` can build `SeriesScanExec` from a prepared
-  scanner; the trait's `Ok(None)` default only refuses engines that have not
-  implemented it. What is missing is the planner side: nothing selects that
-  conversion, and `SeriesScanExec::children()` is empty, so wrapping a
-  `RegionScanExec` before partition preparation leaves `ParallelizeScan` unable to
-  assign partitions. Either give the partitioner a child it can see, or convert to
-  the native leaf only after partition preparation — the second is the contract
-  `RegionScanExec::try_to_series_scan` documents.

@@ -78,6 +78,9 @@ pub struct FrontendBuilder {
     procedure_executor: ProcedureExecutorRef,
     process_manager: ProcessManagerRef,
     local_file_access: LocalFileAccess,
+    /// Whether this frontend reaches the regions of its datanodes in process. Declared by whoever
+    /// assembles the frontend, because only it knows what its node manager talks to.
+    in_process_region_transport: bool,
 }
 
 impl FrontendBuilder {
@@ -105,6 +108,7 @@ impl FrontendBuilder {
             procedure_executor,
             process_manager,
             local_file_access: LocalFileAccess::Disabled,
+            in_process_region_transport: false,
         }
     }
 
@@ -154,6 +158,20 @@ impl FrontendBuilder {
 
     pub fn with_local_file_access(mut self, local_file_access: LocalFileAccess) -> Self {
         self.local_file_access = local_file_access;
+        self
+    }
+
+    /// Declares that every region this frontend queries is read in this very process.
+    ///
+    /// The caller must own the node manager this frontend was built with, and know that its
+    /// `DatanodeManager` hands region reads to a `RegionServer` in this process — as standalone
+    /// startup does, since it passes the datanode's own region server to the node manager it
+    /// installs. The distributed planner then hands a region a `LogicalPlan` instead of Substrait
+    /// bytes, which `RegionServer::handle_read` accepts. A frontend whose node manager reaches
+    /// remote datanodes must leave it off: those datanodes only accept Substrait bytes
+    /// (`RegionServer::handle_remote_read`), so a plan that does not encode would fail there.
+    pub fn with_in_process_region_transport(mut self) -> Self {
+        self.in_process_region_transport = true;
         self
     }
 
@@ -315,7 +333,7 @@ impl FrontendBuilder {
 
         let mut query_options = self.options.query.clone();
         query_options.enable_per_region_metrics = self.options.logging.enable_per_region_metrics;
-        let query_engine = QueryEngineFactory::try_new_with_plugins(
+        let query_engine = QueryEngineFactory::try_new_with_plugins_and_region_transport(
             self.catalog_manager.clone(),
             Some(partition_manager.clone()),
             Some(region_query_handler.clone()),
@@ -323,6 +341,7 @@ impl FrontendBuilder {
             Some(procedure_service_handler),
             Some(Arc::new(flow_service)),
             true,
+            self.in_process_region_transport,
             plugins.clone(),
             query_options,
         )

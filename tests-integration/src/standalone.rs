@@ -91,6 +91,7 @@ pub struct GreptimeDbStandaloneBuilder {
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
     mito_config: Option<mito2::config::MitoConfig>,
+    query_options: query::options::QueryOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -112,7 +113,15 @@ impl GreptimeDbStandaloneBuilder {
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
             mito_config: None,
+            query_options: query::options::QueryOptions::default(),
         }
+    }
+
+    /// Overrides query options for this standalone test instance.
+    #[must_use]
+    pub fn with_query_options(mut self, options: query::options::QueryOptions) -> Self {
+        self.query_options = options;
+        self
     }
 
     /// Overrides the Mito configuration for this test instance.
@@ -316,6 +325,7 @@ impl GreptimeDbStandaloneBuilder {
             procedure_executor.clone(),
             Arc::new(ProcessManager::new(server_addr, None)),
         )
+        .with_in_process_region_transport()
         .with_local_file_access(local_file_access)
         .with_plugin(plugins.clone())
         .try_build()
@@ -389,6 +399,7 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            query: self.query_options.clone(),
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
                 table: self.table_batcher.clone(),

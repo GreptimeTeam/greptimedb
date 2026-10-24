@@ -734,6 +734,9 @@ impl StartCommand {
             procedure_executor.clone(),
             process_manager,
         )
+        // The region servers this frontend reads are the ones built above, in this process, so a
+        // region input can travel as a logical plan instead of Substrait bytes.
+        .with_in_process_region_transport()
         .with_local_file_access(local_file_access);
 
         plugins::setup_frontend_plugins_post_build(&mut plugins, &plugin_opts, &fe_instance)

@@ -25,13 +25,14 @@ use datafusion::execution::TaskContext;
 use datafusion::physical_plan::{ExecutionPlan, metrics::ExecutionPlanMetricsSet};
 use datafusion_expr::{col, lit};
 use datatypes::prelude::ConcreteDataType;
+use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SampleRef;
 use object_store::ObjectStore;
 use object_store::layers::mock::{self, MockLayerBuilder, oio};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::region_engine::{
-    BoundTag, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
+    BoundTag, PartitionRange, PrepareRequest, QueryScanContext, RegionEngine, RegionScanner,
 };
 use store_api::region_request::{
     RegionBuildIndexRequest, RegionDeleteRequest, RegionPutRequest, RegionRequest,
@@ -51,6 +52,10 @@ use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_wit
 use crate::test_util::{TestEnv, flush_region};
 
 async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
+    fixture_with(false).await
+}
+
+async fn fixture_with(experimental_series_scan_v2: bool) -> (TestEnv, MitoEngine, MitoRegionRef) {
     let mut env = TestEnv::with_prefix("prepared-columnar").await;
     let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
     metadata
@@ -66,6 +71,7 @@ async fn fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
         MitoConfig {
             experimental_enable_series_index: true,
             experimental_series_index_format: SelectedFormat::Columnar,
+            experimental_series_scan_v2,
             experimental_series_index_maintenance_interval: Duration::from_secs(3600),
             min_compaction_interval: Duration::from_secs(3600),
             ..Default::default()
@@ -192,6 +198,41 @@ impl mock::Read for ReadRecorder {
     }
 }
 
+/// Fails reads of the selected artifact paths so tests can prove that object-store failures
+/// surface as errors instead of being classified as not-ready fallbacks.
+struct FailingReader {
+    inner: oio::Reader,
+    fail: bool,
+}
+impl mock::Read for FailingReader {
+    async fn read(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+        if self.fail {
+            return Err(injected_failure());
+        }
+        self.inner.read(range).await
+    }
+
+    async fn open(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        if self.fail {
+            return Err(injected_failure());
+        }
+        self.inner.open(range).await
+    }
+}
+
+fn injected_failure() -> mock::Error {
+    mock::Error::new(
+        mock::ErrorKind::Unexpected,
+        "injected series manifest read failure",
+    )
+}
+
 fn scanner(region: &MitoRegionRef, store: ObjectStore) -> SeriesScan {
     scanner_with_format(region, store, SelectedFormat::Columnar)
 }
@@ -267,6 +308,35 @@ fn rows(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, i64, f64)> {
             })
         })
         .collect()
+}
+
+fn samples(chunks: &[RawSeriesChunk]) -> Vec<(i64, f64)> {
+    rows(chunks)
+        .into_iter()
+        .map(|(_, time, value)| (time, value))
+        .collect()
+}
+
+/// Reads the raw path of every partition, checks each stream declares `ordering`, and returns the
+/// samples ordered by time so a check does not depend on how range grouping spread a memtable.
+async fn all_raw_samples(
+    scanner: &dyn RegionScanner,
+    ctx: &QueryScanContext,
+    metrics: &ExecutionPlanMetricsSet,
+    binding: &RawLabelSource,
+    ordering: SeriesOrdering,
+) -> Vec<(i64, f64)> {
+    let mut collected = Vec::new();
+    for partition in 0..scanner.properties().num_partitions().max(1) {
+        let stream = scanner
+            .scan_series_partition(ctx, metrics, partition, binding)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ordering, stream.ordering());
+        collected.extend(samples(&stream.try_collect::<Vec<_>>().await.unwrap()));
+    }
+    collected.sort_unstable_by_key(|(time, _)| *time);
+    collected
 }
 
 #[tokio::test]
@@ -386,89 +456,133 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     engine.stop().await.unwrap();
 }
 
+#[rstest::rstest]
+#[case::legacy(false)]
+#[case::two_phase(true)]
 #[tokio::test]
-async fn native_scan_reports_incomplete_coverage_and_uses_prepared_source() {
-    let (_env, engine, region) = fixture().await;
+async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v2: bool) {
+    let (_env, engine, region) = fixture_with(v2).await;
     let request = ScanRequest {
         distribution: Some(TimeSeriesDistribution::PerSeries),
         ..Default::default()
     };
-    // Three files are below the automatic index threshold.
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    // The three flushed SSTs only have columnar artifacts after `build`.
+    let fallback_ordering = if v2 {
+        SeriesOrdering::Contiguous
+    } else {
+        SeriesOrdering::KeyThenTime
+    };
     let raw_scanner = engine
         .handle_query(region.region_id, request.clone())
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
-    assert!(raw_scanner.raw_series_schema(&binding).is_err());
-    assert!(
-        raw_scanner
-            .scan_series_partition(
-                &QueryScanContext::default(),
-                &ExecutionPlanMetricsSet::new(),
-                0,
-                &binding,
-            )
-            .is_err()
+    assert_eq!(fallback_ordering, raw_scanner.raw_series_ordering());
+    assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
+    assert_eq!(
+        vec![(1000, 1.0), (2000, 1.0)],
+        all_raw_samples(
+            raw_scanner.as_ref(),
+            &ctx,
+            &metrics,
+            &binding,
+            fallback_ordering
+        )
+        .await
     );
+    // Known unready coverage selects the ordinary scan instead of a prepared source.
     assert!(
         raw_scanner
-            .prepare_series(
-                &QueryScanContext::default(),
-                &ExecutionPlanMetricsSet::new(),
-                &binding
-            )
+            .prepare_series(&ctx, &metrics, &binding)
             .await
-            .is_err()
+            .unwrap()
+            .is_none()
     );
+
     build(&engine, &region).await;
-    let raw_scanner = engine
+    let mut raw_scanner = engine
         .handle_query(region.region_id, request.clone())
         .await
         .unwrap();
+    // Move every assigned range into a new last partition: readiness, the ordering guarantee and
+    // the reader must all follow the new assignment, not the pre-prepare partition list.
+    let assigned = raw_scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    raw_scanner
+        .prepare(PrepareRequest::default().with_ranges(vec![vec![], assigned]))
+        .unwrap();
+    assert_eq!(2, raw_scanner.properties().num_partitions());
     let binding = labels(raw_scanner.metadata());
+    assert_eq!(
+        SeriesOrdering::KeyThenTime,
+        raw_scanner.raw_series_ordering()
+    );
+    let source = raw_scanner
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(1, source.num_series());
+    // The first partition owns no range and the second owns all of them.
+    assert_eq!(
+        vec![(1000, 1.0), (2000, 1.0)],
+        all_raw_samples(
+            raw_scanner.as_ref(),
+            &ctx,
+            &metrics,
+            &binding,
+            SeriesOrdering::KeyThenTime
+        )
+        .await
+    );
     let plan = Arc::new(RegionScanExec::new(raw_scanner, request.clone(), None).unwrap())
         .try_to_series_scan(binding.clone())
         .unwrap()
         .unwrap();
-    let frame = plan.execute(0, Arc::new(TaskContext::default())).unwrap();
-    let chunks = unpack_raw_series(frame, Some(plan.series_schema().clone()))
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
+    assert_eq!(SeriesOrdering::KeyThenTime, plan.raw_series_ordering());
+    let frame = plan.execute(1, Arc::new(TaskContext::default())).unwrap();
+    let unpacked = unpack_raw_series(frame, Some(plan.series_schema().clone())).unwrap();
+    // The packed frame declares the same guarantee the plan advertises.
+    assert_eq!(plan.raw_series_ordering(), unpacked.ordering());
     assert_eq!(
-        vec![1000, 2000],
-        rows(&chunks).iter().map(|(_, t, _)| *t).collect::<Vec<_>>()
+        vec![(1000, 1.0), (2000, 1.0)],
+        samples(&unpacked.try_collect::<Vec<_>>().await.unwrap())
     );
+
+    // An assigned memtable is known unready, so the raw path keeps the ordinary scan and must
+    // still return the new row.
     write(&engine, &region, 0, 3000, Some(4.0)).await;
     let raw_scanner = engine
         .handle_query(region.region_id, request)
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
-    assert!(raw_scanner.raw_series_schema(&binding).is_err());
+    assert_eq!(fallback_ordering, raw_scanner.raw_series_ordering());
+    assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
     assert!(
         raw_scanner
-            .scan_series_partition(
-                &QueryScanContext::default(),
-                &ExecutionPlanMetricsSet::new(),
-                0,
-                &binding,
-            )
-            .is_err()
-    );
-    assert!(
-        raw_scanner
-            .prepare_series(
-                &QueryScanContext::default(),
-                &ExecutionPlanMetricsSet::new(),
-                &binding
-            )
+            .prepare_series(&ctx, &metrics, &binding)
             .await
-            .err()
             .unwrap()
-            .output_msg()
-            .contains("memtables")
+            .is_none()
+    );
+    assert_eq!(
+        vec![(1000, 1.0), (2000, 1.0), (3000, 4.0)],
+        all_raw_samples(
+            raw_scanner.as_ref(),
+            &ctx,
+            &metrics,
+            &binding,
+            fallback_ordering
+        )
+        .await
     );
     engine.stop().await.unwrap();
 }
@@ -1046,7 +1160,8 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
     };
     let mut context = make_context();
     let ranges = context.partition_ranges();
-    validate_inputs(&context, &ranges).unwrap();
+    // Complete columnar coverage is the only ready answer.
+    assert!(validate_inputs(&context, &ranges).unwrap());
     context.ranges[ranges[0].identifier].row_group_indices = vec![RowGroupIndex {
         index: context.input.num_files(),
         row_group_index: -1,
@@ -1083,30 +1198,30 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             .contains("foreign SST")
     );
 
+    // Missing columnar samples are a not-ready answer, not an error.
     let mut context = make_context();
     let index = context.input.series_index.as_mut().unwrap();
     index.version = Arc::new(SeriesIndexVersion {
         series_indexes: index.version.series_indexes.clone(),
         ..Default::default()
     });
+    assert!(!validate_inputs(&context, &ranges).unwrap());
+    // Invalid assignments remain errors even when sample coverage is incomplete.
+    let mut invalid = ranges.clone();
+    invalid.push(PartitionRange {
+        identifier: ranges[0].identifier + ranges.len(),
+        ..ranges[0]
+    });
     assert!(
-        validate_inputs(&context, &ranges)
+        validate_inputs(&context, &invalid)
             .unwrap_err()
             .to_string()
-            .contains("no columnar samples")
+            .contains("invalid prepared scan range")
     );
     let scan = SeriesScan::new(context.input, false);
     let binding = labels(scan.metadata());
-    assert!(scan.raw_series_schema(&binding).is_err());
-    assert!(
-        scan.scan_series_partition(
-            &QueryScanContext::default(),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-            &binding
-        )
-        .is_err()
-    );
+    // The raw path stays available for the ordinary scan and preparation is skipped.
+    assert!(scan.raw_series_schema(&binding).unwrap().is_some());
     assert!(
         scan.prepare_series(
             &QueryScanContext::default(),
@@ -1114,8 +1229,49 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             &binding
         )
         .await
-        .is_err()
+        .unwrap()
+        .is_none()
     );
     assert!(reads.lock().unwrap().is_empty());
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn series_artifact_read_failure_propagates() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    // The published catalog is complete; the injected manifest read failure must still propagate.
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(|path, _, inner| {
+                Box::new(FailingReader {
+                    inner,
+                    fail: path.contains("/series/") && path.ends_with("/manifest.json"),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let context = StreamContext::seq_scan_ctx(scan_input(
+        &region,
+        store,
+        SelectedFormat::Columnar,
+        (0..region.version().metadata.column_metadatas.len()).collect(),
+    ));
+    let ranges = context.partition_ranges();
+    assert!(validate_inputs(&context, &ranges).unwrap());
+    let scan = SeriesScan::new(context.input, false);
+    let binding = labels(scan.metadata());
+    assert!(scan.raw_series_schema(&binding).unwrap().is_some());
+    let error = scan
+        .prepare_series(
+            &QueryScanContext::default(),
+            &ExecutionPlanMetricsSet::new(),
+            &binding,
+        )
+        .await
+        .err()
+        .expect("a failed artifact read must not report a not-ready source");
+    assert!(error.output_msg().contains("injected"), "{error}");
     engine.stop().await.unwrap();
 }
