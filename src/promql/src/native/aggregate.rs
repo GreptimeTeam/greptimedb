@@ -39,7 +39,6 @@ use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::series_bytes;
 use crate::map::validate_float_series;
 use crate::native::execute::{NodeBuffer, evaluated_bytes};
-use crate::native::metrics::NodePath;
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, Grouping as BoundGrouping,
 };
@@ -152,7 +151,6 @@ impl AggregateRuntime {
     /// what makes a group's answer its whole group's answer once the input ends.
     pub(crate) fn accumulate(
         &mut self,
-        path: &NodePath,
         chunk: EvaluatedChunk,
         buffer: &mut NodeBuffer,
         pending: usize,
@@ -161,8 +159,12 @@ impl AggregateRuntime {
         // another schema; the states are indexed by absolute position on this node's grid, so a
         // chunk of another field count or another grid would be folded into the wrong places.
         validate_float_series(&self.schema, &chunk.series)
-            .map_err(|error| folded_chunk(path, &self.describe(), error))?;
-        let accumulator = self.accumulator.as_mut().ok_or_else(|| no_fold(path))?;
+            .map_err(|error| folded_chunk(&self.describe(), error))?;
+        let aggregate = self.describe();
+        let accumulator = self
+            .accumulator
+            .as_mut()
+            .ok_or_else(|| no_fold(&aggregate))?;
         // Keep the chunk covered while the fold decides whether it needs a new group or block.
         accumulator.update_budgeted(&chunk.series, |fold_bytes| {
             buffer.resize(pending.saturating_add(fold_bytes))
@@ -183,7 +185,6 @@ impl AggregateRuntime {
     /// a fold whose states are gone.
     pub(crate) fn compute(
         &mut self,
-        path: &NodePath,
         buffer: &mut NodeBuffer,
         queue_bytes: usize,
     ) -> Result<Option<Vec<Series>>> {
@@ -191,13 +192,13 @@ impl AggregateRuntime {
             return Ok(None);
         }
         if self.accumulator.is_none() {
-            return Err(no_fold(path));
+            return Err(no_fold(&self.describe()));
         }
         self.computed = true;
         let output = self
             .accumulator
             .take()
-            .ok_or_else(|| no_fold(path))?
+            .ok_or_else(|| no_fold(&self.describe()))?
             .finish_budgeted(|total| buffer.resize(total.saturating_add(queue_bytes)))?;
         let output_bytes = output.iter().fold(0usize, |bytes, series| {
             bytes.saturating_add(series_bytes(series))
@@ -225,19 +226,19 @@ impl AggregateRuntime {
 /// kernel saying it does not compute this shape at all -- a native histogram in a float aggregate,
 /// for instance -- and a caller that falls back to another planner on `NotImplemented` still can.
 /// Wrapping that one in an `Execution` would deny it.
-fn folded_chunk(path: &NodePath, aggregate: &str, error: DataFusionError) -> DataFusionError {
+fn folded_chunk(aggregate: &str, error: DataFusionError) -> DataFusionError {
     match error {
         DataFusionError::NotImplemented(_) => error,
         error => DataFusionError::Execution(format!(
-            "the `{aggregate}` aggregate at {path} folds chunks bound to its own schema, and this \
+            "the `{aggregate}` aggregate folds chunks bound to its own schema, and this \
              one is not: {error}"
         )),
     }
 }
 
 /// The error for a fold that has already been finished.
-fn no_fold(path: &NodePath) -> DataFusionError {
+fn no_fold(aggregate: &str) -> DataFusionError {
     DataFusionError::Execution(format!(
-        "the aggregate at {path} already finished its fold, so it takes no more input"
+        "the `{aggregate}` aggregate already finished its fold, so it takes no more input"
     ))
 }

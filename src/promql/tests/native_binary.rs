@@ -23,7 +23,6 @@
 use std::sync::Arc;
 
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
 use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -32,8 +31,7 @@ use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
-use promql::native::execute::{NativeExecutionState, NativeExecutor};
-use promql::native::metrics::NodePath;
+use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     BoundInput, BoundMap, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
@@ -155,21 +153,17 @@ fn bound_tree(schema: &Arc<SeriesSchema>) -> NativeTree {
 ///
 /// Nothing is handed out while the inputs are still arriving: a binary node needs both operands
 /// whole, so the chunks it is given are retained and the root answers on [`NativeExecutor::finish`].
-fn run(tree: &NativeTree, pushes: Vec<(&NodePath, EvaluatedChunk)>) -> Vec<EvaluatedChunk> {
+fn run(tree: &NativeTree, pushes: Vec<(InputId, EvaluatedChunk)>) -> Vec<EvaluatedChunk> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let metrics = ExecutionPlanMetricsSet::new();
-    let state = NativeExecutionState::try_new(tree, Arc::clone(&pool), &metrics, 0)
+    let state = NativeExecutionState::try_new(tree, Arc::clone(&pool))
         .expect("the runtime executes this tree");
     let mut executor = NativeExecutor::new(state);
-    for (path, chunk) in pushes {
+    for (input_id, chunk) in pushes {
         executor
-            .push_evaluated_at(path, chunk)
-            .expect("the chunk is bound to the input it is pushed at");
+            .push_evaluated(input_id, chunk)
+            .expect("the chunk is bound to the input slot it is pushed at");
         let pulled = executor.next_chunk().expect("the pull succeeds");
-        assert!(
-            pulled.is_none(),
-            "answered at {path} before its input ended"
-        );
+        assert!(pulled.is_none(), "answered before its input ended");
     }
     let chunks = executor.finish().expect("every series closed");
     assert_eq!(executor.state().reserved_bytes(), 0, "nothing held");
@@ -214,11 +208,10 @@ fn public_nested_binary_map_is_addressed() {
     let grid = grid();
     let schema = evaluated_schema(&grid);
     let tree = bound_tree(&schema);
-    // The root is the map; its input is the subtraction, whose right input is the division.
-    let minuend = NodePath::root().input();
-    let a = minuend.left();
-    let b = minuend.right().left();
-    let c = minuend.right().right();
+    // Inputs receive slots in left-to-right depth-first order: A, then B, then C.
+    let a = InputId::new(0);
+    let b = InputId::new(1);
+    let c = InputId::new(2);
 
     // What each input holds: A has no value at p3, B none at p1 and C none at p1 or p3.
     let a_rows: &[(usize, f64)] = &[(0, -2.0), (1, 100.0), (2, 10.0), (4, -3.0)];
@@ -229,9 +222,9 @@ fn public_nested_binary_map_is_addressed() {
     let whole = run(
         &tree,
         vec![
-            (&b, chunk(&schema, "b", b_rows, true)),
-            (&c, chunk(&schema, "c", c_rows, true)),
-            (&a, chunk(&schema, "a", a_rows, true)),
+            (b, chunk(&schema, "b", b_rows, true)),
+            (c, chunk(&schema, "c", c_rows, true)),
+            (a, chunk(&schema, "a", a_rows, true)),
         ],
     );
     assert_addressed_result(&whole, &grid);
@@ -241,12 +234,12 @@ fn public_nested_binary_map_is_addressed() {
     let split = run(
         &tree,
         vec![
-            (&b, chunk(&schema, "b", &b_rows[..1], false)),
-            (&c, chunk(&schema, "c", &c_rows[..1], false)),
-            (&a, chunk(&schema, "a", &a_rows[..2], false)),
-            (&c, chunk(&schema, "c", &c_rows[1..], true)),
-            (&a, chunk(&schema, "a", &a_rows[2..], true)),
-            (&b, chunk(&schema, "b", &b_rows[1..], true)),
+            (b, chunk(&schema, "b", &b_rows[..1], false)),
+            (c, chunk(&schema, "c", &c_rows[..1], false)),
+            (a, chunk(&schema, "a", &a_rows[..2], false)),
+            (c, chunk(&schema, "c", &c_rows[1..], true)),
+            (a, chunk(&schema, "a", &a_rows[2..], true)),
+            (b, chunk(&schema, "b", &b_rows[1..], true)),
         ],
     );
     assert_addressed_result(&split, &grid);

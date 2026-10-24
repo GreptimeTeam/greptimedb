@@ -47,13 +47,16 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
+use datafusion::physical_plan::execution_plan::{
+    Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
+};
+use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
@@ -69,7 +72,7 @@ use store_api::region_engine::RawLabelSource;
 
 use super::{FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET, series_to_record_batch};
 use crate::evaluated::EvaluatedChunk;
-use crate::native::execute::{NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundWindow, Grouping, NativeExpr,
     NativeNode, NativeTree, NativeType,
@@ -371,6 +374,15 @@ fn memory_exec_partitioned_with(
 /// A physical input producing each of `partitions`' batches in a partition of its own.
 fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
     memory_exec_partitioned_with(frame_schema(), partitions)
+}
+
+/// A task context whose memory pool is `pool`, so the execution's reservations can be observed.
+fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
+        .build()
+        .expect("the runtime environment builds");
+    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
 }
 
 /// A physical input whose one partition's stream `make` builds.
@@ -743,7 +755,7 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
 
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
 const DUPLICATE_LABEL_SET: &str =
-    "the node at root produces two series under the label set [(\"host\", \"web-1\")]";
+    "the node produces two series under the label set [(\"host\", \"web-1\")]";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -826,24 +838,22 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(
-            &tree,
-            Arc::new(UnboundedMemoryPool::default()),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-        )
-        .expect("the runtime executes a rate tree"),
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+            .expect("the runtime executes a rate tree"),
     );
     let samples = series_samples(1.0);
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            METRIC,
-            metric(&[(HOST, "web-1")], Some(METRIC)),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                METRIC,
+                metric(&[(HOST, "web-1")], Some(METRIC)),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the first series is a legal raw chunk");
     assert!(
         execution
@@ -853,14 +863,17 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
         "the first series is answered"
     );
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            "http_errors_total",
-            metric(&[(HOST, "web-1")], Some("http_errors_total")),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                "http_errors_total",
+                metric(&[(HOST, "web-1")], Some("http_errors_total")),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the second series is a legal raw chunk");
     let error = execution
         .next_chunk()
@@ -1751,4 +1764,185 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         Some(std::cmp::Ordering::Equal),
         left_node.partial_cmp(&right_node)
     );
+}
+
+/// Rebuilding keeps execution metrics independent from those of the original plan.
+#[tokio::test]
+async fn a_rebuilt_node_reports_only_its_own_execution() {
+    let exec = plan(rate_tree(), memory_exec(one_series_frames()))
+        .expect("the runtime executes a rate tree");
+    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .expect("the node runs");
+    let first_rows = rows(&batches);
+    assert_eq!(
+        grid_timestamps(),
+        first_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the series is answered at every grid position"
+    );
+    let original = exec
+        .metrics()
+        .expect("the node reports its runtime's metrics");
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    // Rebuilt over a fresh input of the same frames, the way an optimizer replaces a child.
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec(one_series_frames())],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("the node rebuilds over another input");
+    // No execution of the rebuilt node has run, so it registered no handles to report.
+    let before = rebuilt
+        .metrics()
+        .expect("a plan that has not run reports an empty set rather than none");
+    assert_eq!(
+        0,
+        before.iter().count(),
+        "the rebuilt node inherited an execution's metrics"
+    );
+    // Rebuilding does not reset the node it was built from.
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    let rebuilt_batches = collect(Arc::clone(&rebuilt), SessionContext::default().task_ctx())
+        .await
+        .expect("the rebuilt node runs");
+    assert_eq!(first_rows, rows(&rebuilt_batches));
+
+    let after = rebuilt
+        .metrics()
+        .expect("the rebuilt node reports the execution it ran");
+    assert_eq!(1, count(&after, "native.root.completed_series"));
+    assert_eq!(1, count(&after, "native.root.input.completed_series"));
+    // One execution's set, not two: a copy of the original's roots would answer 2 here.
+    assert_eq!(original.iter().count(), after.iter().count());
+    let retained = exec
+        .metrics()
+        .expect("the original keeps the handles its execution registered");
+    assert_eq!(original.iter().count(), retained.iter().count());
+    assert_eq!(1, count(&retained, "native.root.completed_series"));
+    assert_eq!(1, count(&retained, "native.root.input.completed_series"));
+}
+
+/// Reading metrics retains handles, not runtime ownership or duplicate registrations.
+#[tokio::test]
+async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
+    let schema = frame_schema();
+    let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let exec = plan(
+        rate_tree(),
+        staged(schema.clone(), move || {
+            Box::pin(StagedStream::new(schema.clone(), vec![partial.clone()]).pending_after(1))
+        }),
+    )
+    .expect("the runtime executes a rate tree");
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+    // The source hands one unclosed chunk over and parks, so the window holds it while the plan's
+    // metrics are read: the reads below happen while an execution is alive.
+    assert!(futures::poll!(stream.next()).is_pending());
+
+    let first = exec
+        .metrics()
+        .expect("the metrics are registered before the run");
+    let names = |metrics: &MetricsSet| -> Vec<String> {
+        metrics
+            .iter()
+            .map(|metric| metric.value().name().to_string())
+            .collect()
+    };
+    let second = exec.metrics().expect("metrics can be read repeatedly");
+    assert_eq!(
+        names(&first),
+        names(&second),
+        "reading the metrics again registered another copy of them"
+    );
+    assert_eq!(
+        first.iter().count(),
+        second.iter().count(),
+        "the second read changed how many metrics the plan reports"
+    );
+    // A read hands back the very entries the execution records into, not a fresh registration.
+    for (early, late) in first.iter().zip(second.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the second read registered {} again",
+            late.value().name()
+        );
+    }
+
+    drop(stream);
+    // What the execution recorded is still readable once it is gone, and nothing it held is charged
+    // any more.
+    let after = exec
+        .metrics()
+        .expect("the handles outlive the execution they were registered for");
+    assert_eq!(
+        names(&first),
+        names(&after),
+        "dropping the execution changed the metrics the plan reports"
+    );
+    let current = after
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    let peak = after
+        .sum_by_name("native.p0.root.peak_reserved_bytes")
+        .expect("the peak-bytes gauge is registered");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "the dropped execution holds nothing: {current:?}"
+    );
+    assert!(
+        matches!(&peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the peak is what the execution did, not what it holds: {peak:?}"
+    );
+    assert_eq!(
+        1,
+        count(&after, "native.root.input.input_batches"),
+        "the counter of the batches the leaf read did not survive the execution"
+    );
+    assert_eq!(0, pool.reserved(), "the dropped execution holds no bytes");
+
+    // A second execution of the same plan registers its own tree's handles. It is dropped without
+    // being polled, so what it adds is its own counters at zero -- the first execution's figures are
+    // untouched -- and no part of the tree it built outlives it.
+    let registered = after.iter().count();
+    let second_stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the plan runs a second time");
+    drop(second_stream);
+    let twice = exec
+        .metrics()
+        .expect("the metrics of both executions are read");
+    assert_eq!(
+        twice.iter().count(),
+        registered * 2,
+        "the second execution did not register its own node handles"
+    );
+    assert_eq!(
+        count(&twice, "native.root.input.input_batches"),
+        1,
+        "the second execution's leaf counted the batches of the first"
+    );
+    let current = twice
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "an execution that did nothing kept bytes: {current:?}"
+    );
+    assert_eq!(0, pool.reserved(), "the dropped executions hold no bytes");
+
+    // Reading both executions' metrics is still a read: the same entries come back.
+    let again = exec.metrics().expect("metrics can be read repeatedly");
+    assert_eq!(twice.iter().count(), again.iter().count());
+    for (early, late) in twice.iter().zip(again.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the read registered {} again",
+            late.value().name()
+        );
+    }
 }

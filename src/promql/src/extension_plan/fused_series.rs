@@ -70,9 +70,8 @@ use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
-use crate::native::execute::{NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{self, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
+use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
 use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
@@ -397,9 +396,8 @@ impl PartialOrd for FusedSeries {
 /// can only agree or disagree with it, and the frame this node reads has to be decoded against the
 /// same schema, so both halves read it here instead of each carrying a copy.
 struct TreeInput {
-    /// The position the tree's raw chunks enter at: a position is how the runtime addresses a node,
-    /// so nothing on the node has to carry an identity that the tree itself does not.
-    path: NodePath,
+    /// The input leaf where the runtime receives raw chunks, not an operator's position in the tree.
+    input_id: InputId,
     /// The raw series schema the tree's input node was compiled against.
     schema: Arc<SeriesSchema>,
 }
@@ -407,31 +405,16 @@ struct TreeInput {
 /// Reads what the tree's input node was compiled against, rejecting a tree this node cannot feed.
 ///
 /// A node feeds one raw input, and its output is addressed on a grid; a tree that does not have
-/// that shape is one this layer cannot hand chunks to or read positions from.
+/// that shape is one this layer cannot hand chunks to. Since it accepts exactly one input, that
+/// input is the first leaf and receives [`InputId::new(0)`].
 fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
-    let mut sources = 0;
-    let mut input_path = None;
-    let mut schema = None;
-    metrics::walk(tree.root(), &mut |node, path| {
-        let NativeExpr::Input(input) = &node.expr else {
-            return;
-        };
-        sources += 1;
-        input_path.get_or_insert_with(|| path.clone());
-        // Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was
-        // compiled against an already-evaluated schema would read the wrong thing.
-        schema = input
-            .output
-            .samples()
-            .filter(|schema| schema.eval_grid.is_none())
-            .map(Arc::clone);
-    });
+    let (sources, schema) = input_leaves(tree.root());
     if sources != 1 {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries runs a tree with {sources} inputs, and it needs exactly one"
         )));
     }
-    let (Some(path), Some(schema)) = (input_path, schema) else {
+    let Some(schema) = schema else {
         return Err(DataFusionError::Plan(
             "FusedSeries runs a tree whose input is not raw series".to_string(),
         ));
@@ -446,7 +429,35 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
             "FusedSeries runs a tree whose output is not evaluated on a grid".to_string(),
         ));
     }
-    Ok(TreeInput { path, schema })
+    Ok(TreeInput {
+        input_id: InputId::new(0),
+        schema,
+    })
+}
+
+/// Counts the input leaves and reads the raw schema the sole accepted leaf declares.
+fn input_leaves(node: &NativeNode) -> (usize, Option<Arc<SeriesSchema>>) {
+    match &node.expr {
+        NativeExpr::Input(input) => (
+            1,
+            input
+                .output
+                .samples()
+                .filter(|schema| schema.eval_grid.is_none())
+                .map(Arc::clone),
+        ),
+        NativeExpr::Scalar(_) => (0, None),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => input_leaves(input),
+        NativeExpr::Binary { left, right, .. } => {
+            let (sources, schema) = input_leaves(left);
+            let (right_sources, right_schema) = input_leaves(right);
+            (sources + right_sources, right_schema.or(schema))
+        }
+    }
 }
 
 /// Checks that `tree` reads the schema `binding` declares, on the grid it declares.
@@ -659,8 +670,8 @@ pub struct FusedSeriesExec {
     label_source: RawLabelSource,
     /// The ordering the input frames guarantee.
     ordering: SeriesOrdering,
-    /// The position of the tree's input node, where every raw chunk a partition reads enters.
-    input_path: NodePath,
+    /// The id of the tree's input node, where every raw chunk a partition reads enters.
+    input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
@@ -704,12 +715,7 @@ impl FusedSeriesExec {
         // Building a state is what proves the runtime executes this tree: a node kind it does not
         // run yet is refused here, so a plan that is built is a plan that starts. The throwaway
         // state is dropped at once, returning its (unbounded) reservations.
-        let _ = NativeExecutionState::try_new(
-            &tree,
-            Arc::new(UnboundedMemoryPool::default()),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-        )?;
+        let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let classification =
             classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
         let input_properties = input.properties();
@@ -765,7 +771,7 @@ impl FusedSeriesExec {
             series_schema: tree_input.schema,
             label_source,
             ordering,
-            input_path: tree_input.path,
+            input_id: tree_input.input_id,
             classification: classification.into(),
             time_column,
             tags: tags.into(),
@@ -876,13 +882,12 @@ impl ExecutionPlan for FusedSeriesExec {
         let state = NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-            &self.metric,
-            partition,
         )?;
+        state.register_metrics(&self.metric, partition);
         Ok(Box::pin(FusedSeriesStream {
             input: Some(input),
             executor: Some(NativeExecutor::new(state)),
-            input_path: self.input_path.clone(),
+            input_id: self.input_id,
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
@@ -996,8 +1001,8 @@ pub struct FusedSeriesStream {
     input: Option<SendableRawSeriesStream>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
-    /// The position of the tree's input node, which is where every chunk read enters.
-    input_path: NodePath,
+    /// The id of the tree's input node, which is where every chunk read enters.
+    input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The tag column names, indexed by `OutputColumn::Tag`.
@@ -1018,9 +1023,8 @@ impl FusedSeriesStream {
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        // The chunk enters at the tree's input node by position: a position is how the runtime
-        // addresses a node, and a tree that gains a second input names them the same way.
-        executor.push_raw_at(&self.input_path, chunk)?;
+        // The chunk enters at the tree's first input, which is the only input this plan accepts.
+        executor.push_raw(self.input_id, chunk)?;
         let mut settled = Vec::new();
         while let Some(chunk) = executor.next_chunk()? {
             settled.push(chunk);
