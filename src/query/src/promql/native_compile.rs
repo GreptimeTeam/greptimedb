@@ -126,6 +126,7 @@
 //! chunks of different series that interleave, so an `Interleaved` ordering is refused once, at the
 //! entry, and [`NativeNode::validate`] refuses the same ordering for a tree built some other way.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -137,6 +138,7 @@ use promql::histogram_eval::HistogramFunction;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
+use promql::native::metrics::{NodePath, walk};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -145,6 +147,7 @@ use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 use promql_parser::label::MatchOp as ParserMatchOp;
+use promql_parser::label::Matchers;
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -154,6 +157,94 @@ use promql_parser::parser::{
 };
 
 use crate::promql::label_values::signed_millis_since_epoch;
+
+/// The time horizon one selector reads.
+///
+/// A selector reads either one instant per grid point, within the statement's lookback, or a window
+/// before it. The two differ in which side of the lookback or range their scan starts on, so the
+/// distinction travels with the requirement rather than being re-derived by each caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectorTiming {
+    /// Instant selection excludes the lookback's lower boundary, except at lookback zero.
+    Instant { lookback_ms: i64 },
+    /// A range selector excludes its window's lower boundary.
+    Window { range_ms: i64 },
+}
+
+/// What one selector asks a scan for, apart from the layout it is bound to.
+///
+/// The grid is the grid this selector is evaluated on, whose final point may precede the statement's
+/// `end`. To derive the raw scan interval, shift grid points by `offset_ms`; an instant selection
+/// extends its lower bound by the lookback, a window by its range. For an anchored window, the anchor
+/// stands in for the grid endpoints. Instant bounds are closed only at lookback zero; window bounds
+/// are open on the left. These bounds form a scan hull: with a sparse grid they may include
+/// timestamps that contribute to no evaluation point.
+#[derive(Clone, Debug)]
+pub struct SelectorRequirement {
+    /// The metric the selector names, when it names one.
+    pub metric: Option<String>,
+    /// The selector's label matchers, as written.
+    pub matchers: Matchers,
+    /// Selector offset; positive reads earlier samples.
+    pub offset_ms: i64,
+    /// The resolved `@` anchor, if the selector has one.
+    pub at_ms: Option<i64>,
+    /// The first point of the grid this selector is evaluated on.
+    pub grid_start_ms: i64,
+    /// The last point of that grid, which may precede the statement's end.
+    pub grid_end_ms: i64,
+    /// What this selector reads around each point.
+    pub timing: SelectorTiming,
+}
+
+impl SelectorRequirement {
+    /// The raw scan endpoints this requirement covers and whether the lower one is included.
+    pub fn raw_scan_bounds(&self) -> Result<(i64, i64, bool)> {
+        let end = self
+            .at_ms
+            .unwrap_or(self.grid_end_ms)
+            .checked_sub(self.offset_ms)
+            .ok_or_else(|| DataFusionError::Plan("selector scan end overflows".into()))?;
+        // An anchored selector reads the same point at every step, so the anchor stands in for the
+        // grid's first point on both edges; unanchored, the earliest point the selector reads is the
+        // grid's own start.
+        let lower_base = self
+            .at_ms
+            .unwrap_or(self.grid_start_ms)
+            .checked_sub(self.offset_ms)
+            .ok_or_else(|| DataFusionError::Plan("selector scan start overflows".into()))?;
+        let (duration, inclusive) = match self.timing {
+            SelectorTiming::Instant { lookback_ms } => (lookback_ms, lookback_ms == 0),
+            SelectorTiming::Window { range_ms } => (range_ms, false),
+        };
+        let start = lower_base
+            .checked_sub(duration)
+            .ok_or_else(|| DataFusionError::Plan("selector scan start overflows".into()))?;
+        Ok((start, end, inclusive))
+    }
+}
+
+/// One input a compiled tree reads, and the selector it was bound to.
+#[derive(Clone, Debug)]
+pub struct CompiledInput {
+    /// Where the executor reads this input in the compiled tree.
+    pub path: NodePath,
+    /// What the selector asked the scan for.
+    pub requirement: SelectorRequirement,
+    /// The layout the caller bound this selector to.
+    pub schema: Arc<SeriesSchema>,
+    /// The ordering the caller's scan guarantees for this input.
+    pub ordering: SeriesOrdering,
+}
+
+/// A compiled tree and the inputs it reads.
+#[derive(Clone, Debug)]
+pub struct CompiledTree {
+    /// The bound tree to run.
+    pub tree: NativeTree,
+    /// One entry per input node, in the order the executor visits them.
+    pub inputs: Arc<[CompiledInput]>,
+}
 
 /// The shapes this compiler accepts, quoted in every rejection.
 ///
@@ -172,8 +263,8 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a constant (`2 / (x + 1)`, \
                          `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
-                         that folds a group's values into one value per grid point — `sum`, `avg`, \
-                         `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         that folds a group's values into one value per grid point — \
+                         `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
@@ -206,13 +297,41 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
 ///
 /// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
 /// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
-/// is fine while a tree has one selector; a tree with two inputs will need each `Input` to name its
-/// selector.
+/// is fine while a tree has one selector; a tree that reads two scans is refused here, and
+/// [`compile_selectors`] is what a caller that knows which scan feeds which selector calls.
 pub fn compile(
     stmt: &EvalStmt,
     input: Arc<SeriesSchema>,
     ordering: SeriesOrdering,
 ) -> Result<NativeTree> {
+    let compiled = compile_selectors(stmt, &|_requirement| Ok(Arc::clone(&input)), ordering)?;
+    // The compatibility entry answers with the tree alone, so a statement that needs more than one
+    // input would lose the identity of all but one of them here. Callers that know which scan feeds
+    // which selector call [`compile_selectors`] instead.
+    if compiled.inputs.len() > 1 {
+        return Err(not_implemented(&format!(
+            "`compile` with {} selectors; use `compile_selectors` to bind each input",
+            compiled.inputs.len()
+        )));
+    }
+    Ok(compiled.tree)
+}
+
+/// Compiles `stmt` into a tree and the inputs it reads, binding each selector through `bindings`.
+///
+/// `bindings` answers what a scan of one selector produces, given everything that selector asks for:
+/// its metric and matchers, its offset and anchor, the grid it is evaluated on and whether it reads
+/// an instant or a window. Two selectors of one statement may be fed differently shaped samples, so
+/// the answer is asked per selector rather than once per statement.
+///
+/// Each selector's path is recorded as its recursive node is compiled, so its requirement and
+/// schema stay structurally paired with the input the executor names at that position; the finished
+/// tree is then walked once to check that pairing ([`validate_inputs`]).
+pub fn compile_selectors(
+    stmt: &EvalStmt,
+    bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    ordering: SeriesOrdering,
+) -> Result<CompiledTree> {
     // Every shape this compiler accepts reads one series to its last chunk before the next, so raw
     // samples whose chunks of different series interleave cannot be fed to any of them. The refusal
     // is here rather than in a shape's branch so that a shape added later inherits it.
@@ -235,30 +354,74 @@ pub fn compile(
             stmt.expr.value_type()
         )));
     }
+    let inputs = RefCell::new(Vec::new());
     let context = Context {
         stmt,
-        input,
+        bindings,
         ordering,
+        inputs: &inputs,
         // The grid is built once for the whole compilation rather than per node: every node of a
         // tree without a subquery lands on this one, and a subquery replaces it for its own subtree.
         grid: statement_grid(stmt)?,
+        path: NodePath::root(),
     };
     // The whole tree is validated once, here: a node compiled as another node's input is checked as
     // part of the tree rather than on its own, so the same node cannot be legal in one place and
     // illegal in another.
-    NativeTree::try_new(compile_expr(&context, &stmt.expr)?)
+    let tree = NativeTree::try_new(compile_expr(&context, &stmt.expr)?)?;
+    let inputs = inputs.into_inner();
+    validate_inputs(tree.root(), &inputs)?;
+    Ok(CompiledTree {
+        tree,
+        inputs: inputs.into(),
+    })
 }
 
-/// What every node of one compilation derives from the statement rather than from the expression.
+/// Checks that the recorded inputs are exactly the tree's input nodes, in the order it reads them.
 ///
-/// The three are the same for the whole tree: one statement decides the grid, the lookback and the
-/// anchors, one caller binds the raw input, and one scan guarantees the ordering. Passing them as
-/// one value is what lets [`compile_expr`] recurse without restating what it was handed.
+/// A missing, repeated or mispaired record would make the executor read one scan's samples as
+/// another's, which is a compiler defect rather than a statement a client wrote.
+fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
+    let mut recorded = inputs.iter();
+    let mut valid = true;
+    walk(root, &mut |node, path| {
+        let NativeExpr::Input(bound) = &node.expr else {
+            return;
+        };
+        // An input bound to aggregate state produces no samples, which no record matches.
+        valid &= recorded.next().is_some_and(|input| {
+            input.path == *path
+                && bound
+                    .output
+                    .samples()
+                    .is_some_and(|schema| Arc::ptr_eq(schema, &input.schema))
+        });
+    });
+    if valid && recorded.next().is_none() {
+        return Ok(());
+    }
+    Err(DataFusionError::Internal(
+        "a compiled tree's recorded inputs are not its input nodes, one record per node in the \
+         order they are read"
+            .to_string(),
+    ))
+}
+
+/// What one node of a compilation derives from the statement, its caller and its own position.
+///
+/// The statement, the bindings, the ordering and the input list belong to the whole tree; a subquery
+/// replaces the grid for its subtree, and every wrapper hands its child the path segment that names
+/// the child's node.
 struct Context<'a> {
     /// The statement being compiled.
     stmt: &'a EvalStmt,
-    /// The raw series the caller bound; shared by every input node rather than copied per node.
-    input: Arc<SeriesSchema>,
+    /// The layout to feed each selector in, asked once per selector.
+    bindings: &'a dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
+    /// The inputs bound so far, in the order they were bound.
+    ///
+    /// Shared rather than owned because a subquery compiles its body through a context of its own,
+    /// and the inputs that body binds are still this compilation's inputs.
+    inputs: &'a RefCell<Vec<CompiledInput>>,
     /// The ordering the caller's scan guarantees.
     ordering: SeriesOrdering,
     /// The grid the expression being compiled is evaluated on.
@@ -268,6 +431,21 @@ struct Context<'a> {
     /// not at the statement's steps. Carrying it here is what lets [`compile_expr`] recurse into a
     /// subquery without every node builder having to ask which grid it is on.
     grid: Arc<EvalGrid>,
+    /// Structural location of the node being compiled.
+    path: NodePath,
+}
+
+impl Context<'_> {
+    fn with_path(&self, path: NodePath) -> Context<'_> {
+        Context {
+            stmt: self.stmt,
+            bindings: self.bindings,
+            inputs: self.inputs,
+            ordering: self.ordering,
+            grid: Arc::clone(&self.grid),
+            path,
+        }
+    }
 }
 
 /// Compiles `expr` into the node it denotes, recursing into whatever it is made of.
@@ -322,7 +500,7 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
     // the tree should see the same order the query was written in.
     Ok(broadcast(
         scalar_node(context, -1.0),
-        compile_expr(context, operand)?,
+        compile_expr(&context.with_path(context.path.right()), operand)?,
         BinaryOp::Mul,
         false,
     ))
@@ -395,8 +573,8 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     // is bound by [`compile_expr`]'s fold, which is what makes it a scalar node rather than an
     // expression the tree would have to run.
     Ok(broadcast(
-        compile_expr(context, &binary.lhs)?,
-        compile_expr(context, &binary.rhs)?,
+        compile_expr(&context.with_path(context.path.left()), &binary.lhs)?,
+        compile_expr(&context.with_path(context.path.right()), &binary.rhs)?,
         op,
         binary.return_bool(),
     ))
@@ -545,7 +723,7 @@ fn aggregate_expr(context: &Context, aggregate: &AggregateExpr) -> Result<Native
             )));
         }
     };
-    let input = compile_expr(context, expr)?;
+    let input = compile_expr(&context.with_path(context.path.input()), expr)?;
     // A complete aggregate folds each group's values and reports them on its input's grid, one value
     // per input field, so its layout is its input's.
     let output = input.output.clone();
@@ -732,7 +910,7 @@ fn map_call(context: &Context, name: &str, op: MapOp, vector: &PromExpr) -> Resu
             vector.value_type()
         )));
     }
-    let input = compile_expr(context, vector)?;
+    let input = compile_expr(&context.with_path(context.path.input()), vector)?;
     let output = input.output.clone();
     Ok(NativeNode {
         expr: NativeExpr::Map {
@@ -759,7 +937,7 @@ fn vector_call(
             vector.value_type()
         )));
     }
-    let input = compile_expr(context, vector)?;
+    let input = compile_expr(&context.with_path(context.path.input()), vector)?;
     let output = input.output.clone();
     Ok(NativeNode {
         expr: NativeExpr::Vector {
@@ -908,15 +1086,28 @@ fn window_selection(
     let output_grid = Arc::clone(&context.grid);
 
     // A range function reports one value per input field, so the layout is the input's.
+    let (start_ms, end_ms) = grid_endpoints(&output_grid)?;
+    let raw_schema = bind_selector(
+        context,
+        SelectorRequirement {
+            metric: vs.name.clone(),
+            matchers: vs.matchers.clone(),
+            offset_ms,
+            at_ms: anchor_ms,
+            grid_start_ms: start_ms,
+            grid_end_ms: end_ms,
+            timing: SelectorTiming::Window { range_ms },
+        },
+    )?;
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&context.input.fields),
+        fields: Arc::clone(&raw_schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
 
     // One allocation shared by the binding and the node's output: `NativeTree::try_new` compares
     // them by identity, because a compiler that meant one schema has no reason to allocate it
     // twice.
-    let raw = NativeType::Samples(Arc::clone(&context.input));
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
 
     Ok(NativeNode {
         expr: NativeExpr::Window {
@@ -1022,17 +1213,25 @@ fn subquery_window(
     let inner = compile_expr(
         &Context {
             stmt: context.stmt,
-            input: Arc::clone(&context.input),
+            bindings: context.bindings,
+            inputs: context.inputs,
             ordering: context.ordering,
             grid: Arc::clone(&child_grid),
+            path: context.path.input(),
         },
         expr,
     )?;
 
-    // A range function reports one value per input field, and the inner expression reports one per
-    // field of the same raw input, so the layout is the input's.
+    // A range function reports one value per field of what it folds, so the layout is the inner
+    // expression's: `rate(x[5m:1m])` folds one evaluated field per field `x` was bound to, and a
+    // nested subquery keeps passing that same field set outward.
+    let inner_schema = inner.output.samples().ok_or_else(|| {
+        DataFusionError::Internal(
+            "a subquery's body is a vector, so it reports samples rather than a scalar".into(),
+        )
+    })?;
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&context.input.fields),
+        fields: Arc::clone(&inner_schema.fields),
         eval_grid: Some(Arc::clone(&context.grid)),
     }));
 
@@ -1072,13 +1271,27 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
     let output_grid = Arc::clone(&context.grid);
 
     // An instant selection reports one value per input field, so the layout is the input's.
+    let (start_ms, end_ms) = grid_endpoints(&output_grid)?;
+    let raw_schema = bind_selector(
+        context,
+        SelectorRequirement {
+            metric: selector.name.clone(),
+            matchers: selector.matchers.clone(),
+            offset_ms,
+            // An `@` anchor was refused above, so an instant selection never has one.
+            at_ms: None,
+            grid_start_ms: start_ms,
+            grid_end_ms: end_ms,
+            timing: SelectorTiming::Instant { lookback_ms },
+        },
+    )?;
     let output = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: Arc::clone(&context.input.fields),
+        fields: Arc::clone(&raw_schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
 
     // One allocation shared by the binding and the node's output, as in the window shape.
-    let raw = NativeType::Samples(Arc::clone(&context.input));
+    let raw = NativeType::Samples(Arc::clone(&raw_schema));
 
     Ok(NativeNode {
         expr: NativeExpr::Instant {
@@ -1097,6 +1310,39 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
         },
         output,
     })
+}
+
+/// Binds the layout `selector` will be fed in, and records what it asked the scan for.
+///
+/// The callback decides one thing — what a scan of this selector produces — while the requirement
+/// records what the selector named, how it shifts time and which points it is read at. The input
+/// path is carried through recursive compilation, so the binding is paired with its tree node here.
+fn bind_selector(context: &Context, requirement: SelectorRequirement) -> Result<Arc<SeriesSchema>> {
+    let schema = (context.bindings)(&requirement)?;
+    context.inputs.borrow_mut().push(CompiledInput {
+        path: context.path.input(),
+        requirement,
+        schema: Arc::clone(&schema),
+        ordering: context.ordering,
+    });
+    Ok(schema)
+}
+
+/// The first and last point of `grid`, as milliseconds since the Unix epoch.
+///
+/// Read off the specification rather than the materialised timestamps: a subquery's grid can be
+/// deferred, and asking it for its points would allocate a vector the size of the range before
+/// anything has been evaluated.
+fn grid_endpoints(grid: &EvalGrid) -> Result<(i64, i64)> {
+    let spec = grid.spec();
+    let last = ((spec.len - 1) as i128)
+        .checked_mul(i128::from(spec.step_ms))
+        .and_then(|offset| i128::from(spec.start_ms).checked_add(offset))
+        .and_then(|last| i64::try_from(last).ok())
+        .ok_or_else(|| {
+            DataFusionError::Internal("an evaluation grid's last point overflows".into())
+        })?;
+    Ok((spec.start_ms, last))
 }
 
 /// The grid the statement is evaluated on: `(end - start) / step + 1` points, the last of which

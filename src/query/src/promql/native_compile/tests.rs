@@ -27,18 +27,20 @@ use datatypes::series::{Label, MetricName};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
+use promql::native::metrics::{NodePath, walk};
 use promql::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
-    MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundWindow,
+    Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql_parser::label::MatchOp;
 use promql_parser::parser::{
     AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
     VectorMatchFillValues,
 };
 
-use super::compile;
+use super::{SelectorRequirement, SelectorTiming, compile, compile_selectors, validate_inputs};
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -4307,4 +4309,385 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
     )
     .unwrap_err();
     assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+}
+
+/// Every selector is bound through the callback, so each input reports the layout its own selector
+/// asked for and the requirement beside it names the series and the matchers that selector wrote.
+#[test]
+fn selector_binding_returns_requirement_and_input_path() {
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::new([
+            FieldSpec {
+                name: "bound_a".into(),
+            },
+            FieldSpec {
+                name: "bound_b".into(),
+            },
+        ]),
+        eval_grid: None,
+    });
+    let compiled = compile_selectors(
+        &eval_stmt("abs(rate(x{job=\"api\", env!=\"test\"}[10s] @ end() offset 2s))"),
+        &|requirement| {
+            assert_eq!(requirement.metric.as_deref(), Some("x"));
+            assert_eq!(requirement.matchers.matchers.len(), 2);
+            assert!(
+                requirement
+                    .matchers
+                    .matchers
+                    .iter()
+                    .any(|m| m.name == "job" && m.op == MatchOp::Equal && m.value == "api")
+            );
+            assert!(
+                requirement
+                    .matchers
+                    .matchers
+                    .iter()
+                    .any(|m| m.name == "env" && m.op == MatchOp::NotEqual && m.value == "test")
+            );
+            assert_eq!(requirement.offset_ms, 2_000);
+            assert_eq!(requirement.at_ms, Some(100_000));
+            assert_eq!(
+                (requirement.grid_start_ms, requirement.grid_end_ms),
+                (0, 100_000)
+            );
+            assert_eq!(
+                requirement.timing,
+                SelectorTiming::Window { range_ms: 10_000 }
+            );
+            Ok(Arc::clone(&schema))
+        },
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(compiled.inputs.len(), 1);
+    let input = &compiled.inputs[0];
+    assert_eq!(input.path, NodePath::root().input().input());
+    assert!(Arc::ptr_eq(&input.schema, &schema));
+    assert_eq!(input.ordering, SeriesOrdering::KeyThenTime);
+    let NativeExpr::Map {
+        input: map_input, ..
+    } = &compiled.tree.root().expr
+    else {
+        panic!("outer expression is not a map");
+    };
+    let NativeExpr::Window {
+        input: window_input,
+        ..
+    } = &map_input.expr
+    else {
+        panic!("inner expression is not a window");
+    };
+    let NativeExpr::Input(BoundInput {
+        output: NativeType::Samples(bound_schema),
+        ordering,
+    }) = &window_input.expr
+    else {
+        panic!(
+            "window child is not the expected raw input: {:?}",
+            window_input.expr
+        );
+    };
+    assert!(Arc::ptr_eq(bound_schema, &schema));
+    assert_eq!(*ordering, SeriesOrdering::KeyThenTime);
+}
+
+/// Scan bounds follow the grid the selector is actually evaluated on, open a window's lower edge, and
+/// close an instant one's only when the lookback is zero.
+#[test]
+fn selector_requirement_bounds_account_for_grid_end_open_edges_and_zero_lookback() {
+    let compiled = compile_selectors(
+        &eval_stmt_over("rate(x[10s])", Duration::from_secs(97)),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.inputs[0].requirement.raw_scan_bounds().unwrap(),
+        (-10_000, 95_000, false)
+    );
+
+    let mut instant = eval_stmt_over("x offset 2s", Duration::from_secs(97));
+    instant.lookback_delta = Duration::from_secs(5);
+    let compiled =
+        compile_selectors(&instant, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime).unwrap();
+    assert_eq!(
+        compiled.inputs[0].requirement.raw_scan_bounds().unwrap(),
+        (-7_000, 93_000, false)
+    );
+
+    let mut zero = eval_stmt("x");
+    zero.lookback_delta = Duration::ZERO;
+    let compiled =
+        compile_selectors(&zero, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime).unwrap();
+    assert_eq!(
+        compiled.inputs[0].requirement.raw_scan_bounds().unwrap(),
+        (0, 100_000, true)
+    );
+}
+
+/// An anchored instant selection reads one point rather than every grid point, so both edges of its
+/// scan come from the anchor. Taking the lower edge from the grid instead would scan from the
+/// statement's start, which for an anchor before the statement is the wrong side of the data and
+/// for an anchor after it skips the sample the selection reads.
+#[test]
+fn an_anchored_instant_selector_scans_from_its_anchor() {
+    // `x @ 50 offset 2s` with a five-second lookback: the sample is read at 48s, so the window it is
+    // selected from is 43s..=48s even though the statement starts at the epoch.
+    let requirement = SelectorRequirement {
+        metric: None,
+        matchers: promql_parser::label::Matchers::empty(),
+        offset_ms: 2_000,
+        at_ms: Some(50_000),
+        grid_start_ms: 0,
+        grid_end_ms: 100_000,
+        timing: SelectorTiming::Instant { lookback_ms: 5_000 },
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (43_000, 48_000, false)
+    );
+
+    // An anchor before the statement scans before it too: the same rule, the other direction. The
+    // grid's own start would have put the lower edge at a time the anchor never reads.
+    let requirement = SelectorRequirement {
+        at_ms: Some(-30_000),
+        ..requirement
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (-37_000, -32_000, false)
+    );
+
+    // A zero lookback closes both edges on the one sample, anchored or not.
+    let requirement = SelectorRequirement {
+        at_ms: Some(50_000),
+        offset_ms: 0,
+        timing: SelectorTiming::Instant { lookback_ms: 0 },
+        ..requirement
+    };
+    assert_eq!(
+        requirement.raw_scan_bounds().unwrap(),
+        (50_000, 50_000, true)
+    );
+}
+
+/// An anchor replaces the grid's endpoints on both edges, and a bound that does not fit is reported
+/// rather than wrapped.
+#[test]
+fn selector_requirement_bounds_apply_offset_and_anchor_and_check_overflow() {
+    let compiled = compile_selectors(
+        &eval_stmt("rate(x[10s] offset 2s @ 50)"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(
+        compiled.inputs[0].requirement.raw_scan_bounds().unwrap(),
+        (38_000, 48_000, false)
+    );
+
+    let requirement = SelectorRequirement {
+        metric: None,
+        matchers: promql_parser::label::Matchers::empty(),
+        offset_ms: 0,
+        at_ms: None,
+        grid_start_ms: i64::MIN,
+        grid_end_ms: 0,
+        timing: SelectorTiming::Window { range_ms: 1 },
+    };
+    assert!(requirement.raw_scan_bounds().is_err());
+}
+
+#[test]
+fn selector_binding_propagates_callback_errors() {
+    let error = compile_selectors(
+        &eval_stmt("rate(x[1m])"),
+        &|_| Err(DataFusionError::Plan("binding failed".into())),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("binding failed"));
+}
+
+/// Subquery selector requirements describe the actual inner grid, not the outer statement grid.
+#[test]
+fn subquery_selector_requirements_report_the_inner_scan_hull() {
+    let cases = [
+        // The subquery's `(−270s, 90s]` interval at 30s steps has grid points −270s..90s.
+        // The inner rate opens a further 60s range, producing the raw scan hull `(−330s, 90s]`.
+        (
+            "max_over_time(rate(x[1m])[5m:30s])",
+            (-270_000, 90_000, 0, None, 60_000, (-330_000, 90_000, false)),
+        ),
+        // The subquery anchor resolves to 1174s after its 60s offset; its interval
+        // `(874s, 1174s]` has 30s boundaries 900s..1170s. The inner selector has no
+        // separate anchor or offset. Its child grid starts at 900s, so the 60s rate range
+        // scans `(840s, 1170s]`.
+        (
+            "max_over_time(rate(x[1m])[5m:30s] @ 1234 offset 1m)",
+            (
+                900_000,
+                1_170_000,
+                0,
+                None,
+                60_000,
+                (840_000, 1_170_000, false),
+            ),
+        ),
+    ];
+
+    for (query, (grid_start, grid_end, offset, anchor, range, scan)) in cases {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(compiled.inputs.len(), 1, "query: {query}");
+        let requirement = &compiled.inputs[0].requirement;
+        assert_eq!(requirement.metric.as_deref(), Some("x"), "query: {query}");
+        assert_eq!(requirement.grid_start_ms, grid_start, "query: {query}");
+        assert_eq!(requirement.grid_end_ms, grid_end, "query: {query}");
+        assert_eq!(requirement.offset_ms, offset, "query: {query}");
+        assert_eq!(requirement.at_ms, anchor, "query: {query}");
+        assert_eq!(
+            requirement.timing,
+            SelectorTiming::Window { range_ms: range }
+        );
+        assert_eq!(
+            requirement.raw_scan_bounds().unwrap(),
+            scan,
+            "query: {query}"
+        );
+    }
+}
+
+/// Selector bindings keep the path of their input through every recursive wrapper shape.
+#[test]
+fn selector_bindings_follow_structural_input_paths() {
+    let cases = [
+        ("x", "root.input"),
+        ("rate(x[5m])", "root.input"),
+        ("abs(x)", "root.input.input"),
+        ("sum(x)", "root.input.input"),
+        ("1 / x", "root.right.input"),
+        ("x / 2", "root.left.input"),
+        ("-x", "root.right.input"),
+        ("rate(x[5m:1m])", "root.input.input"),
+        ("rate(abs(x)[5m:1m])", "root.input.input.input"),
+        ("sort(x)", "root.input.input"),
+        ("absent(x)", "root.input.input"),
+        ("histogram_quantile(0.9, x)", "root.input.input"),
+        ("year(x)", "root.input.input"),
+        ("rate(x[5m:1m] @ 1234 offset 1m)", "root.input.input"),
+        ("rate(x[5m:1m] offset 1m @ 1234)", "root.input.input"),
+        ("rate(rate(x[5m:1m])[5m:1m])", "root.input.input.input"),
+    ];
+    for (query, expected_path) in cases {
+        let schema = raw_schema();
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|requirement| {
+                assert_eq!(requirement.metric.as_deref(), Some("x"), "query: {query}");
+                Ok(Arc::clone(&schema))
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("query {query}: {error}"));
+        assert_eq!(compiled.inputs.len(), 1, "query: {query}");
+        let input = &compiled.inputs[0];
+        assert_eq!(input.path.as_str(), expected_path, "query: {query}");
+        assert_eq!(
+            input.requirement.metric.as_deref(),
+            Some("x"),
+            "query: {query}"
+        );
+        assert!(Arc::ptr_eq(&input.schema, &schema), "query: {query}");
+        assert_eq!(
+            input.ordering,
+            SeriesOrdering::KeyThenTime,
+            "query: {query}"
+        );
+
+        // Compare the callback records with the inputs actually reachable in the returned tree,
+        // using the same traversal rule as native metrics. This checks both directions and ordering.
+        let mut tree_inputs = Vec::new();
+        walk(compiled.tree.root(), &mut |node, path| {
+            if let NativeExpr::Input(BoundInput {
+                output: NativeType::Samples(bound_schema),
+                ordering,
+            }) = &node.expr
+            {
+                tree_inputs.push((path.clone(), Arc::clone(bound_schema), *ordering));
+            }
+        });
+        assert_eq!(tree_inputs.len(), compiled.inputs.len(), "query: {query}");
+        for ((path, tree_schema, tree_ordering), bound) in
+            tree_inputs.iter().zip(compiled.inputs.iter())
+        {
+            assert_eq!(path, &bound.path, "query: {query}");
+            assert!(Arc::ptr_eq(tree_schema, &bound.schema), "query: {query}");
+            assert_eq!(*tree_ordering, bound.ordering, "query: {query}");
+        }
+    }
+}
+
+/// A record paired with the other side of a binary operation is refused, by path and by allocation.
+///
+/// `1 / x` reads its input on the right and `x / 2` on the left, so the other side's path names no
+/// input node in either tree.
+#[test]
+fn recorded_input_paths_are_checked_against_the_tree_they_were_bound_for() {
+    for (query, other_side) in [
+        ("1 / x", NodePath::root().left().input()),
+        ("x / 2", NodePath::root().right().input()),
+    ] {
+        let schema = raw_schema();
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(Arc::clone(&schema)),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        validate_inputs(compiled.tree.root(), &compiled.inputs)
+            .unwrap_or_else(|error| panic!("`{query}` failed its own check: {error}"));
+        let recorded = compiled.inputs[0].clone();
+        assert_ne!(recorded.path, other_side, "query: {query}");
+
+        let mut swapped = recorded.clone();
+        swapped.path = other_side;
+        let error = validate_inputs(compiled.tree.root(), &[swapped]).unwrap_err();
+        assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("not its input nodes"), "{error}");
+
+        // Same fields, another allocation: still not the binding the node carries.
+        let mut rebound = recorded;
+        rebound.schema = raw_schema();
+        let error = validate_inputs(compiled.tree.root(), &[rebound]).unwrap_err();
+        assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+        assert!(error.to_string().contains("not its input nodes"), "{error}");
+    }
+}
+
+/// One record per input node: a missing record and a repeated one are both refused.
+#[test]
+fn recorded_inputs_are_exactly_the_trees_input_nodes() {
+    let compiled = compile_selectors(
+        &eval_stmt("rate(x[5m])"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let recorded = compiled.inputs[0].clone();
+    assert_eq!(recorded.path, NodePath::root().input());
+    validate_inputs(compiled.tree.root(), &compiled.inputs).unwrap();
+
+    let error = validate_inputs(compiled.tree.root(), &[]).unwrap_err();
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    assert!(error.to_string().contains("not its input nodes"), "{error}");
+
+    let error = validate_inputs(compiled.tree.root(), &[recorded.clone(), recorded]).unwrap_err();
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    assert!(error.to_string().contains("not its input nodes"), "{error}");
 }
