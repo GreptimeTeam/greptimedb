@@ -37,7 +37,7 @@ use crate::access_layer::{
 };
 use crate::cache::{CacheManager, CacheManagerRef};
 use crate::compaction::picker::PickerOutput;
-use crate::compaction::reader::CompactionSstReaderBuilder;
+use crate::compaction::reader::{CompactionSstReaderBuilder, spawn_merge};
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionOutput, find_dynamic_options};
 use crate::config::MitoConfig;
@@ -59,6 +59,7 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::region_dir_from_table_dir;
 use crate::sst::parquet::metadata::extract_primary_key_range;
+use crate::sst::parquet::parallel_writer::EncodeRuntime;
 use crate::sst::parquet::{SstInfo, WriteOptions};
 use crate::sst::version::{SstVersion, SstVersionRef};
 
@@ -590,8 +591,11 @@ impl SstMerger for DefaultSstMerger {
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
+            read_parallelism: context
+                .engine_config
+                .experimental_compaction_output_parallelism,
         };
-        let source = builder.build_flat_sst_reader().await?;
+        let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
         let mut metrics = Metrics::new(WriteType::Compaction);
         let region_metadata = context.region_metadata.clone();
@@ -753,6 +757,10 @@ impl<M: SstMerger> DefaultCompactor<M> {
                         max_file_size: unit.max_file_size,
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
+                        encode_parallelism: context
+                            .engine_config
+                            .experimental_compaction_output_parallelism,
+                        encode_runtime: EncodeRuntime::Compact,
                     },
                 )
                 .await?;
@@ -796,6 +804,10 @@ where
                 max_file_size: picker_output.max_file_size,
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
+                encode_parallelism: compaction_region
+                    .engine_config
+                    .experimental_compaction_output_parallelism,
+                encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();
             let context = context.clone();
@@ -1244,6 +1256,7 @@ mod tests {
                 filter_deleted: true,
                 time_range: None,
                 merge_mode: MergeMode::LastRow,
+                read_parallelism: 1,
             }
             .build_flat_sst_reader()
             .await

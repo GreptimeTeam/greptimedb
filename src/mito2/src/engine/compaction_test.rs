@@ -2890,16 +2890,19 @@ async fn test_worker_shutdown_fails_picking_waiter() {
 
 #[tokio::test]
 async fn test_compaction_region() {
-    test_compaction_region_with_format(false).await;
-    test_compaction_region_with_format(true).await;
+    for parallelism in [1, 4] {
+        test_compaction_region_with_format(false, parallelism).await;
+        test_compaction_region_with_format(true, parallelism).await;
+    }
 }
 
-async fn test_compaction_region_with_format(flat_format: bool) {
+async fn test_compaction_region_with_format(flat_format: bool, output_parallelism: usize) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::new().await;
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: flat_format,
+            experimental_compaction_output_parallelism: output_parallelism,
             ..Default::default()
         })
         .await;

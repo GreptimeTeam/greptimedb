@@ -590,6 +590,11 @@ compress_manifest = false
 ## @toml2docs:none-default="wait"
 #+ experimental_compaction_on_exhausted = "wait"
 
+## Max number of threads one compaction output uses to decode its input files
+## and to encode its SST columns. Values below 2 disable both.
+## @toml2docs:none-default="1"
+#+ experimental_compaction_output_parallelism = 1
+
 ## Interval to auto flush a region if it has not flushed yet.
 auto_flush_interval = "10m"
 

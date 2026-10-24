@@ -51,7 +51,7 @@ use crate::read::scan_util::{
     SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
     scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
-use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
+use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream, spawn_compact_stream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
 use crate::region::options::MergeMode;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
@@ -200,15 +200,18 @@ impl SeqScan {
             partition_ranges.len(),
             sources.len()
         );
-        Self::build_flat_reader_from_sources(
-            stream_ctx,
-            sources,
-            None,
-            None,
-            false,
-            compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE),
-        )
-        .await
+        let channel_size = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
+        let parallelism = stream_ctx.input.compaction_read_parallelism;
+        if parallelism > 1 && sources.len() > 1 {
+            // Decodes inputs ahead of the merge, at most `parallelism` at a time.
+            let semaphore = Arc::new(Semaphore::new(parallelism));
+            sources = sources
+                .into_iter()
+                .map(|source| spawn_compact_stream(source, channel_size, Some(semaphore.clone())))
+                .collect();
+        }
+        Self::build_flat_reader_from_sources(stream_ctx, sources, None, None, false, channel_size)
+            .await
     }
 
     /// Builds a flat reader to read sources that returns RecordBatch.
