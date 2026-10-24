@@ -32,7 +32,7 @@ use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures_util::Stream;
 use snafu::Location;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
@@ -132,8 +132,8 @@ fn validate_mapping(
             return Err(invalid("field must be Float64 or native histogram"));
         }
     }
-    // MetricName validates logical label names and duplicate tags through its canonical path.
-    MetricName::try_new(
+    // SeriesLabels validates logical label names and duplicate tags through its canonical path.
+    SeriesLabels::try_new(
         mapping.metric_name.clone(),
         mapping
             .tags
@@ -274,7 +274,7 @@ impl InputStream {
                 });
             }
         }
-        let metric = MetricName::try_new(metric_name, labels).map_err(codec_error)?;
+        let metric = SeriesLabels::try_new(metric_name, labels).map_err(codec_error)?;
         RawSeriesChunk::try_new(
             &self.schema,
             Buffer::from(key),

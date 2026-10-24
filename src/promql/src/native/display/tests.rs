@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
@@ -436,7 +436,7 @@ fn a_vector_operation_names_its_binding() {
         ),
         (
             BoundVectorOp::Absent {
-                labels: MetricName::try_new(
+                labels: SeriesLabels::try_new(
                     None,
                     vec![Label {
                         name: "job".into(),

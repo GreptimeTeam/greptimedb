@@ -21,7 +21,7 @@ use common_query::prometheus::is_prometheus_stale_nan;
 use datafusion::arrow::array::{Array, Float64Array};
 use datafusion::arrow::buffer::Buffer;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::CounterResetHint;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{
@@ -318,7 +318,7 @@ fn flush_batch(
 struct SeriesState {
     /// `None` for evaluated input, which arrives as one complete series.
     primary_key: Option<Buffer>,
-    metric: MetricName,
+    metric: SeriesLabels,
     /// Largest source timestamp retained so far, or `None` while the series holds no sample: a
     /// closing chunk of a series that never produced a value carries no position to read.
     last_ts: Option<i64>,

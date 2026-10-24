@@ -643,7 +643,7 @@ mod acceptance {
     use arrow::array::Float64Array;
 
     use super::super::{EvalGrid, GridRanges, GridSpan, GridSpec, TimeAxis};
-    use crate::series::MetricName;
+    use crate::series::SeriesLabels;
     use crate::series::samples::{
         FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
     };
@@ -692,7 +692,7 @@ mod acceptance {
         ]));
         let series = Series::try_new(
             &schema,
-            MetricName::try_new(Some(Arc::from("m")), vec![]).unwrap(),
+            SeriesLabels::try_new(Some(Arc::from("m")), vec![]).unwrap(),
             time,
             SeriesFields::try_from_vec(vec![a, b]).unwrap(),
         )

@@ -31,7 +31,7 @@ use datatypes::series::samples::{
     DenseSamplesRef, FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
 use super::{
     BinaryRuntime, Emitted, NativeChunk, NativeExecutionState, NativeExecutor, NodeBuffer,
@@ -96,8 +96,8 @@ fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
     NativeType::Samples(evaluated_schema(grid))
 }
 
-fn metric() -> MetricName {
-    MetricName::try_new(Some("requests".into()), Vec::new()).unwrap()
+fn metric() -> SeriesLabels {
+    SeriesLabels::try_new(Some("requests".into()), Vec::new()).unwrap()
 }
 
 /// The raw source every supported tree starts from.
@@ -277,7 +277,7 @@ fn raw_chunk(
 fn raw_chunk_of(
     schema: &SeriesSchema,
     key: &[u8],
-    metric: MetricName,
+    metric: SeriesLabels,
     timestamps: &[i64],
     values: &[f64],
     is_last: bool,
@@ -576,7 +576,7 @@ fn evaluated_chunk(
 /// evaluated result carries where it had nothing to report.
 fn evaluated_chunk_of(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     values: Vec<Option<f64>>,
     is_last: bool,
@@ -590,7 +590,7 @@ fn evaluated_chunk_of(
 /// Arrow allocation, which is what a source handing over the chunks of one batch does.
 fn evaluated_array_chunk_of(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     values: Float64Array,
     is_last: bool,
@@ -613,7 +613,7 @@ fn evaluated_array_chunk_of(
 /// same shape hold two allocations of the same size.
 fn evaluated_histogram_chunk_of(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     indices: Vec<Option<u32>>,
     table: &Arc<HistogramBatch>,
@@ -649,8 +649,8 @@ fn histogram_table_bytes(table: &Arc<HistogramBatch>) -> usize {
 }
 
 /// The series `name{job="job"}`, so two series can share the label a map leaves behind.
-fn named_metric(name: &str, job: &str) -> MetricName {
-    MetricName::try_new(
+fn named_metric(name: &str, job: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         vec![Label {
             name: "job".into(),
@@ -664,7 +664,7 @@ fn named_metric(name: &str, job: &str) -> MetricName {
 ///
 /// The two are distinct series to a scan — an empty tag value is a present label, an absent one is
 /// not — and the same label set to everything that drops empty-valued labels, as Prometheus does.
-fn host_metric(zone: Option<&str>) -> MetricName {
+fn host_metric(zone: Option<&str>) -> SeriesLabels {
     let mut tags = vec![Label {
         name: "host".into(),
         value: "web-1".into(),
@@ -675,7 +675,7 @@ fn host_metric(zone: Option<&str>) -> MetricName {
             value: zone.into(),
         });
     }
-    MetricName::try_new(Some("requests".into()), tags).unwrap()
+    SeriesLabels::try_new(Some("requests".into()), tags).unwrap()
 }
 
 fn pool() -> Arc<dyn MemoryPool> {
@@ -2141,7 +2141,7 @@ fn two_series_onto_one_label_set_after_a_window_are_rejected() {
         .push_raw(raw_chunk_of(
             &schema,
             b"series-b",
-            MetricName::try_new(
+            SeriesLabels::try_new(
                 Some("requests".into()),
                 vec![Label {
                     name: "host".into(),
@@ -2932,7 +2932,7 @@ fn two_series_with_no_result_do_not_collide() {
             .push_raw(raw_chunk_of(
                 &schema,
                 name.as_bytes(),
-                MetricName::try_new(Some(name.into()), vec![]).unwrap(),
+                SeriesLabels::try_new(Some(name.into()), vec![]).unwrap(),
                 &[0],
                 &[1.0],
                 true,
@@ -2960,7 +2960,7 @@ fn two_series_with_no_result_do_not_collide() {
 /// positions the chunk does not hold.
 fn sparse_chunk(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     spans: &[(usize, usize)],
     values: Vec<f64>,
     is_last: bool,
@@ -4222,7 +4222,7 @@ fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
 /// One evaluated chunk of `metric` whose fields carry `columns`, one column per field.
 fn evaluated_columns(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     columns: Vec<Vec<Option<f64>>>,
     is_last: bool,
@@ -4238,7 +4238,7 @@ fn evaluated_columns(
 /// on its way in.
 fn evaluated_on(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     rows: usize,
     columns: Vec<Vec<Option<f64>>>,
@@ -4267,7 +4267,7 @@ fn evaluated_on(
 /// `len` positions from `start`.
 fn evaluated_histograms(
     schema: &SeriesSchema,
-    metric: MetricName,
+    metric: SeriesLabels,
     start: usize,
     buckets: i32,
     len: usize,
@@ -4307,8 +4307,8 @@ fn histogram_counts(chunk: &EvaluatedChunk) -> Vec<f64> {
 }
 
 /// A source bound in label mode: `name{job="api",pod="a"}` and the other series here.
-fn pod_metric(name: &str, job: &str, pod: &str) -> MetricName {
-    MetricName::try_new(
+fn pod_metric(name: &str, job: &str, pod: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         vec![
             Label {
@@ -4325,8 +4325,8 @@ fn pod_metric(name: &str, job: &str, pod: &str) -> MetricName {
 }
 
 /// The one side of a `group_left` match: `one{job=...,instance=...}`.
-fn one_metric(job: &str, instance: &str) -> MetricName {
-    MetricName::try_new(
+fn one_metric(job: &str, instance: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some("one".into()),
         vec![
             Label {
@@ -6596,8 +6596,8 @@ fn sum_grouping(group: Grouping) -> BoundAggregate {
 }
 
 /// `name{job=...,instance=...}`, the two labels these tests group by.
-fn job_instance_metric(name: &str, job: &str, instance: &str) -> MetricName {
-    MetricName::try_new(
+fn job_instance_metric(name: &str, job: &str, instance: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         vec![
             Label {
@@ -7016,7 +7016,7 @@ fn a_histogram_function_maps_the_histogram_positions() {
 fn a_histogram_function_names_an_emptied_closing_chunk_like_its_kernel() {
     let grid = grid(0, 60_000, 2);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let metric = MetricName::try_new(
+    let metric = SeriesLabels::try_new(
         Some("a".into()),
         vec![Label {
             name: "__type__".into(),
@@ -7637,7 +7637,7 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
     let first_metric =
-        MetricName::try_new(Some("requests".to_string().into()), Vec::new()).unwrap();
+        SeriesLabels::try_new(Some("requests".to_string().into()), Vec::new()).unwrap();
     execution
         .push_evaluated(evaluated_chunk_of(
             &schema,
@@ -7657,7 +7657,7 @@ fn a_broadcast_refuses_two_series_that_share_a_label_set_and_releases_the_reserv
     );
 
     let second_metric =
-        MetricName::try_new(Some("requests_total".to_string().into()), Vec::new()).unwrap();
+        SeriesLabels::try_new(Some("requests_total".to_string().into()), Vec::new()).unwrap();
     execution
         .push_evaluated(evaluated_chunk_of(
             &schema,
@@ -8275,7 +8275,7 @@ fn absent_answers_where_the_input_holds_nothing() {
     let grid = grid(0, 60_000, 3);
     let schema = evaluated_schema(Arc::clone(&grid));
     // What `absent_labels` derives from `up{job="x"}`: the name is not one of them.
-    let labels = MetricName::try_new(
+    let labels = SeriesLabels::try_new(
         None,
         vec![Label {
             name: "job".into(),
@@ -8460,7 +8460,7 @@ fn histogram_quantile_reads_the_buckets_of_the_whole_vector() {
     ))
     .unwrap();
     let bucket = |le: &str| {
-        MetricName::try_new(
+        SeriesLabels::try_new(
             Some("m".into()),
             vec![
                 Label {
@@ -8508,7 +8508,7 @@ fn histogram_quantile_reads_the_pieces_of_one_label_set_as_one_series() {
     ))
     .unwrap();
     let metric = |tags: &[(&str, &str)]| {
-        MetricName::try_new(
+        SeriesLabels::try_new(
             Some("m".into()),
             tags.iter()
                 .map(|(name, value)| Label {

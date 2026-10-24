@@ -20,7 +20,7 @@ use snafu::OptionExt;
 
 use crate::error::{InvalidSeriesSnafu, Result};
 use crate::series::samples::{SeriesFields, SeriesSchema};
-use crate::series::{MetricName, invalid_series};
+use crate::series::{SeriesLabels, invalid_series};
 
 /// Strictly increasing source timestamps in milliseconds for a raw series chunk.
 ///
@@ -98,7 +98,7 @@ pub struct RawSeriesChunk {
     pub primary_key: Buffer,
     /// `None` denotes an encoded key under bound-label mode; `Some` contains complete
     /// explicit labels and retains their identity.
-    pub metric: Option<MetricName>,
+    pub metric: Option<SeriesLabels>,
     /// Source timestamps aligned with every field.
     pub time: RawTimestamps,
     /// Field values aligned with the source timestamps.
@@ -116,7 +116,7 @@ impl RawSeriesChunk {
     pub fn try_new(
         schema: &SeriesSchema,
         primary_key: Buffer,
-        metric: Option<MetricName>,
+        metric: Option<SeriesLabels>,
         time: RawTimestamps,
         fields: SeriesFields,
         is_last: bool,

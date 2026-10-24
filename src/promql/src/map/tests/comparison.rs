@@ -347,7 +347,7 @@ fn a_bool_comparison_keeps_the_axis_of_a_sparse_input() {
     crate::grid_series::reference::assert_result_eq(
         Some(&output),
         &expected,
-        &MetricName::try_new(
+        &SeriesLabels::try_new(
             None,
             vec![Label {
                 name: "host".into(),

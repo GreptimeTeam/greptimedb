@@ -564,7 +564,7 @@ pub struct SeriesInfo {
     pub primary_key: datatypes::arrow::buffer::Buffer,
     /// Complete explicit metric name and labels, not a partial label projection; or `None` for
     /// primary-key label binding (undecoded, not nameless). The metric name itself may be absent.
-    pub metric: Option<datatypes::series::MetricName>,
+    pub metric: Option<datatypes::series::SeriesLabels>,
 }
 
 /// An immutable, finite selected set of series prepared for independent range reads.

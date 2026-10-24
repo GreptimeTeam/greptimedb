@@ -23,7 +23,7 @@ use std::fmt::{self, Write};
 use std::sync::Arc;
 
 use datatypes::series::time::EvalGrid;
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
@@ -309,7 +309,7 @@ fn binary_op(op: BinaryOp) -> &'static str {
 }
 
 /// The labels of `metric` as `name="value"` pairs, the metric name first.
-fn label_pairs(metric: &MetricName) -> String {
+fn label_pairs(metric: &SeriesLabels) -> String {
     metric
         .name()
         .map(|name| format!("__name__={name:?}"))

@@ -34,7 +34,7 @@ use datatypes::series::samples::{
     SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
@@ -108,8 +108,8 @@ fn grid(start_ms: i64, step_ms: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start_ms, step_ms, len).unwrap()).unwrap())
 }
 
-fn metric(host: u64) -> MetricName {
-    MetricName::try_new(
+fn metric(host: u64) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(Arc::from("http_requests")),
         vec![Label {
             name: Arc::from("host"),
@@ -135,7 +135,7 @@ fn per_point_probe_evaluator(
 }
 
 /// The metric of a result of `function` over the series of `metric(host)`.
-fn output_metric(function: RangeFunction, host: u64) -> MetricName {
+fn output_metric(function: RangeFunction, host: u64) -> SeriesLabels {
     let mut metric = metric(host);
     if function.drops_metric_name() {
         metric.remove("__name__");
@@ -356,7 +356,7 @@ fn fold_chunks(chunks: &[EvaluatedChunk], schema: &Arc<SeriesSchema>) -> Option<
 fn dense_series(
     rows: &[Option<Vec<Option<GridSample>>>],
     schema: Arc<SeriesSchema>,
-    metric: MetricName,
+    metric: SeriesLabels,
 ) -> Option<Series> {
     let start = rows.iter().position(Option::is_some)?;
     let end = rows.iter().rposition(Option::is_some)? + 1;
@@ -2992,7 +2992,7 @@ fn range_functions_drop_metadata_labels() {
             })
             .collect()
     };
-    let input = MetricName::try_new(
+    let input = SeriesLabels::try_new(
         Some(Arc::from("m")),
         labels(&["__type__", "__unit__", "host"]),
     )
@@ -3004,7 +3004,7 @@ fn range_functions_drop_metadata_labels() {
         modifier: None,
     };
     let rows: Vec<Row> = vec![(1_000, vec![Some(1.0)]), (2_000, vec![Some(2.0)])];
-    let nameless = MetricName::try_new(None, labels(&["host"])).unwrap();
+    let nameless = SeriesLabels::try_new(None, labels(&["host"])).unwrap();
     for (function, expected) in [
         (RangeFunction::Rate, nameless.clone()),
         (RangeFunction::MadOverTime, nameless.clone()),
@@ -3401,7 +3401,7 @@ fn absent_over_time_is_absent_over_present_over_time() {
         };
         let actual = absent(&schema, &present, absent_labels(&matchers).unwrap()).unwrap();
         let (expected, labels) = expected.unwrap_or_else(|| {
-            let none = MetricName::try_new(None, Vec::new()).unwrap();
+            let none = SeriesLabels::try_new(None, Vec::new()).unwrap();
             (vec![vec![None]; grid_spec[2] as usize], none)
         });
         // `absent` over single-field inputs writes a value at every point where it is absent, so
@@ -3598,7 +3598,7 @@ fn evaluated_histograms_drop_counter_reset_hints() {
 fn empty_series(
     schema: &Arc<SeriesSchema>,
     grid: &Arc<EvalGrid>,
-    metric: MetricName,
+    metric: SeriesLabels,
     at: usize,
 ) -> Series {
     let fields = SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(Vec::<

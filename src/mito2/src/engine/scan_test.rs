@@ -6245,7 +6245,7 @@ impl store_api::region_engine::RawSeriesStream for ChainedRawSeriesStream {
 fn decode_declared_labels(
     description: &datatypes::series::frame::LabelDecodeSpec,
     chunks: &[datatypes::series::raw::RawSeriesChunk],
-) -> Vec<datatypes::series::MetricName> {
+) -> Vec<datatypes::series::SeriesLabels> {
     use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
 
     let mut decoder =

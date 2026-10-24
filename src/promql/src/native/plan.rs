@@ -33,7 +33,7 @@ use std::sync::Arc;
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::map::MathOp;
@@ -289,7 +289,7 @@ pub enum BoundVectorOp {
     Sort(SortOrder),
     /// `absent`: `1` under `labels` at every point where the input holds no sample. The labels are
     /// what the compiler derives from the argument's matchers.
-    Absent { labels: MetricName },
+    Absent { labels: SeriesLabels },
     /// `histogram_quantile` or `histogram_fraction`: each classic histogram is read from the bucket
     /// series that share its labels, so this too reads the whole vector at a point.
     Histogram(HistogramFunction),

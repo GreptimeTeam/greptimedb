@@ -31,7 +31,7 @@ use datatypes::series::frame::{
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, MetricName};
+use datatypes::series::{Label, SeriesLabels};
 use futures::{Stream, StreamExt};
 
 use crate::codec::PrimaryKeyEncoding;
@@ -192,8 +192,8 @@ fn declared_decode_spec(source: &RawLabelSource) -> Option<LabelDecodeSpec> {
     Some(description)
 }
 
-fn metric(host: &str) -> MetricName {
-    MetricName::try_new(
+fn metric(host: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![Label {
             name: Arc::from("host"),
@@ -242,7 +242,7 @@ fn schema() -> Arc<SeriesSchema> {
 
 fn chunk(
     key: &[u8],
-    metric: Option<MetricName>,
+    metric: Option<SeriesLabels>,
     timestamp: i64,
     value: f64,
     last: bool,
@@ -380,7 +380,7 @@ async fn prepared_source_label_binding_is_available_before_readers_and_matches_c
         assert_eq!(first.primary_key, Buffer::from(vec![0x10, 0x01]));
         assert_eq!(second.primary_key, Buffer::from(vec![0x10, 0x02]));
         assert_eq!(
-            first.metric.as_ref().and_then(MetricName::name),
+            first.metric.as_ref().and_then(SeriesLabels::name),
             if explicit { Some("cpu") } else { None }
         );
         assert_eq!(
