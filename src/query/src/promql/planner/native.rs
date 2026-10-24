@@ -14,11 +14,11 @@
 
 //! The native fused-series route of the PromQL planner.
 //!
-//! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
-//! compiler and, when the compiler accepts it, replaces everything the existing path would plan
-//! below the root with one [`FusedSeries`] node over the selector's own table scan. Declining is
-//! the normal answer: every shape the compiler does not accept, and every query this route cannot
-//! bind to a scan faithfully, keeps the plan the existing planner builds.
+//! [`PromPlanner::try_plan_native_fused`] offers a small experimental subset to the native
+//! compiler: a vector selector (optionally parenthesized), or nested unary `rate`, `increase`,
+//! `sum_over_time`, and `abs` calls over a selector. It replaces that expression with one
+//! [`FusedSeries`] node over the selector's table scan. Other expression shapes keep the existing
+//! planner's route.
 //!
 //! What the node needs from here is three things the existing planner already resolves: the raw
 //! series schema the tree's input was compiled against (the selector's selected field columns), the
@@ -40,7 +40,6 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
-use promql::native::plan::reads_across_series;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
@@ -92,20 +91,14 @@ const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 impl PromPlanner {
     /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
     ///
-    /// The route is offered a whole expression because the compiler folds a range function and the
-    /// math functions over it into one tree: offering a sub-expression instead would compile a tree
-    /// that computes something the reader did not write. Everything else about the node comes from
-    /// the planner's resolved selector context: the table name, the time index column, the tag
-    /// columns and (after the `__field__` matcher) the field columns, which are exactly the raw
-    /// series schema the tree's input has to be compiled against.
+    /// The route is offered the whole expression so its tree computes the requested expression
+    /// over the planner's resolved selector context: table name, time index, tag columns, and
+    /// field columns (after any `__field__` matcher). These are the raw series schema the input
+    /// tree is compiled against.
     ///
-    /// `None` is not a failure. It says this query cannot take the route *unchanged*, and the
-    /// caller plans it with the existing planner as if this method did not exist. The two ways that
-    /// happens are a shape the compiler refuses (`DataFusionError::NotImplemented`, which names
-    /// what it found) and a query this route cannot bind faithfully — more than one selector, a
-    /// label matcher the bare scan below the node would not apply, alternative (`or`) matchers, an
-    /// `__field__` matcher that narrows the field set, a missing table, a field that is not
-    /// `Float64`, a `rate`/`increase` over a delta-temporality table, or an unusable grid.
+    /// `None` is not a failure: unsupported shapes and queries this route cannot bind faithfully
+    /// continue through the existing planner. Admission is limited to selectors and unary calls
+    /// named above, plus the scan, schema, matcher, and grid constraints checked below.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -121,9 +114,8 @@ impl PromPlanner {
             return Ok(None);
         }
 
-        // A tree reads exactly one raw input, and the scan below the node is that one selector's,
-        // so a shape that names no selector or more than one is not offered at all.
-        let Some(selector) = single_selector(prom_expr) else {
+        // Admit only a direct selector or the selected unary calls applied to one selector.
+        let Some(selector) = admitted_selector(prom_expr) else {
             return Ok(None);
         };
 
@@ -312,15 +304,6 @@ impl PromPlanner {
             Err(DataFusionError::NotImplemented(_)) => return Ok(None),
             Err(error) => return Err(error).context(DataFusionPlanningSnafu),
         };
-        // A vector operation (`sort`, `absent`, `topk`, `histogram_quantile`, ...) reads the whole
-        // vector at each grid point rather than one series at a time, so it cannot be evaluated by
-        // one executor per scan partition. Declining here is the only place that still works: once
-        // the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
-        // declining to push it down would leave a node the physical layer must build anyway.
-        if reads_across_series(tree.root()) {
-            return Ok(None);
-        }
-
         let binding = FusedSeriesBinding {
             series_schema,
             // The tree's own output is evaluated on the statement's grid, and the binding names
@@ -470,32 +453,21 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone()))
 }
 
-fn single_selector(expr: &PromExpr) -> Option<&VectorSelector> {
-    let mut selectors = Vec::new();
-    collect_selectors(expr, &mut selectors);
-    match selectors.as_slice() {
-        [only] => Some(only),
-        _ => None,
-    }
-}
-
-fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) {
+fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     match expr {
-        PromExpr::VectorSelector(selector) => out.push(selector),
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
-        PromExpr::Paren(ParenExpr { expr }) => collect_selectors(expr, out),
-        PromExpr::Call(call) => {
-            // A label rewrite adds a label the node's output schema cannot declare: that schema is
-            // built from the table's own tags, so folding `label_replace`/`label_join` in would
-            // silently drop the destination label the existing plan projects.
-            if matches!(call.func.name, "label_replace" | "label_join") {
-                return;
-            }
-            for arg in &call.args.args {
-                collect_selectors(arg, out);
-            }
+        PromExpr::VectorSelector(selector) => Some(selector),
+        // Range selectors are admitted only as arguments within one of these supported calls.
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => Some(vs),
+        PromExpr::Paren(ParenExpr { expr }) => admitted_selector(expr),
+        PromExpr::Call(call)
+            if matches!(
+                call.func.name,
+                "rate" | "increase" | "sum_over_time" | "abs"
+            ) && call.args.args.len() == 1 =>
+        {
+            admitted_selector(&call.args.args[0])
         }
-        _ => {}
+        _ => None,
     }
 }
 

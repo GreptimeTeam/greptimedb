@@ -2081,6 +2081,125 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings() {
+    common_telemetry::init_default_ut_logging();
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_rate_storage_encodings")
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+
+    for (table, ddl, flush_table, encoding, sparse) in [
+        (
+            "native_rate_dense",
+            "CREATE TABLE native_rate_dense (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) ENGINE=mito WITH ('primary_key_encoding' = 'dense')",
+            "native_rate_dense",
+            PrimaryKeyEncoding::Dense,
+            false,
+        ),
+        (
+            "native_rate_sparse",
+            "CREATE TABLE native_rate_sparse_phy (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); CREATE TABLE native_rate_sparse (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) ENGINE=metric WITH ('on_physical_table' = 'native_rate_sparse_phy')",
+            "native_rate_sparse_phy",
+            PrimaryKeyEncoding::Sparse,
+            true,
+        ),
+    ] {
+        execute_all(&instance, ddl, QueryContext::arc()).await;
+        for (start, end) in [(0, 60), (120, 300)] {
+            let values = (b'a'..=b'p')
+                .flat_map(|host| {
+                    (start..=end).step_by(60).map(move |seconds| {
+                        format!(
+                            "('{}', {}, {})",
+                            host as char,
+                            seconds * 1000,
+                            seconds as f64 * (host - b'a' + 1) as f64
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            execute_all(
+                &instance,
+                &format!("INSERT INTO {table} (host, ts, val) VALUES {values}"),
+                QueryContext::arc(),
+            )
+            .await;
+            if start == 0 {
+                execute_all(
+                    &instance,
+                    &format!("ADMIN FLUSH_TABLE('{flush_table}')"),
+                    QueryContext::arc(),
+                )
+                .await;
+            }
+        }
+
+        let expected = (b'a'..=b'p')
+            .map(|host| {
+                (
+                    300_000,
+                    (host as char).to_string(),
+                    (host - b'a' + 1) as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        for expression in [
+            format!("rate({table}[5m])"),
+            format!("abs(rate({table}[5m]))"),
+        ] {
+            let sql = format!("TQL EVAL (300, 300, '1m') {expression}");
+            let legacy_rows =
+                native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+            assert_eq!(
+                legacy_rows, expected,
+                "native-off `{expression}` on {table}"
+            );
+
+            observer.clear();
+            let native_rows =
+                native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+            assert_eq!(native_rows, expected, "native-on `{expression}` on {table}");
+            assert_eq!(native_rows, legacy_rows, "`{expression}` on {table}");
+            let plan = observer.take();
+            assert_eq!(plan.name(), "FusedSeriesExec");
+            assert_eq!(
+                plan.children()[0].output_partitioning().partition_count(),
+                plan.output_partitioning().partition_count(),
+                "fused child and output partitions agree for {table}"
+            );
+            assert!(
+                plan.output_partitioning().partition_count() > 1,
+                "fused execution must retain partitioning for {table}"
+            );
+            if sparse {
+                assert_four_native_partitions(&plan);
+            }
+            let child = plan.children()[0];
+            let child = child
+                .downcast_ref::<CooperativeExec>()
+                .map_or(child, |cooperative| cooperative.input());
+            let series_scan = child
+                .downcast_ref::<SeriesScanExec>()
+                .expect("fused node reads a prepared series scan");
+            let RawLabelSource::PrimaryKey {
+                physical_metadata, ..
+            } = series_scan.label_source()
+            else {
+                panic!("fused scan must materialize labels from the primary key");
+            };
+            assert_eq!(physical_metadata.primary_key_encoding, encoding);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn native_promql_explain_and_analyze_execute_fused_plan() {
     common_telemetry::init_default_ut_logging();
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(

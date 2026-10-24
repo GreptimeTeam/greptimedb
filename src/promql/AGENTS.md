@@ -25,19 +25,21 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   `EmptyMetric` and `UnionDistinctOn`. `PromExtensionPlanner`
   (`src/promql/src/extension_plan/planner.rs`) maps the logical nodes to their
   execution plans.
-- **Fused native-series route:** the query planner offers a PromQL statement to
-  `native_compile::compile` only when the engine's
-  `in_process_region_transport` and `QueryOptions::experimental_native_promql`
-  options are enabled and the per-request `query.experimental_native_promql`
-  extension is true. Accepted plans use process-local `FusedSeries`; declined
-  or unsupported shapes fall back to the existing planner. The supported subset
-  requires one selector, a direct scan with a bound metric name, and no residual
-  label matchers or `__field__` matcher that narrows the scan, plus an eligible
-  raw-series table/field set and supported expression/grid. Metric scans retain
-  the static `__table_id` predicate. Hybrid CTEs keep the existing plan. The
-  operator also disables native planning for a programmatic TQL view so its
-  persisted Substrait plan remains serializable; `CREATE VIEW ... AS TQL EVAL`
-  syntax is a separate change.
+- **Experimental fused native-series POC (default off):** the query planner offers
+  a PromQL statement only when the engine's `in_process_region_transport` and
+  `QueryOptions::experimental_native_promql` options are enabled and the per-request
+  `query.experimental_native_promql` extension is true. Admission is limited to a
+  bare vector selector (parentheses allowed) and unary `rate`, `increase`,
+  `sum_over_time`, and `abs` calls over a selector; range selectors occur only
+  inside those calls. It is a standalone route: unsupported expressions and all
+  other cases use the existing planner. Accepted plans use process-local
+  `FusedSeries`, with ordinary `RecordBatch` output collected through DataFusion.
+  Scan N→Fused N retains region/partition parallelism, but this POC does not merge
+  one logical series across regions or scan partitions, guarantee canonical final
+  labels across them, or use global label-set occupancy; `NativeExecutor` retains
+  its partition-local `Emitted` state. Repartitioning redistributes rows but does not perform
+  semantic series merging. A future gather/repartition plus merge/finalize is
+  outside this POC. Metric scans retain the static `__table_id` predicate.
 - **Admission and SQL output:** the guards live in
   `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
   (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the
@@ -58,9 +60,10 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` is
   the exception: it is not serialized to a datanode. Its distributed placement
   is restricted to a direct table scan, a bound metric name and trees that read
-  one series at a time, and it is only correct because native admission refuses a
-  table whose partition columns are not all tag columns: that is what keeps a
-  series inside one region. Keep that admission and this placement together.
+  one series at a time. Native admission requires partition columns to be tags,
+  but region/partition-local execution does not merge a logical series across
+  regions or scan partitions; do not treat that placement guard as a global
+  series-merge or final-label guarantee.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.

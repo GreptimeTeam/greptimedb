@@ -2377,13 +2377,27 @@ async fn native_fused_whole_vector_operation_falls_back() {
 
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
-    let plan = build_native_fused_plan("sum(rate(some_metric[5m]))", true).await;
-
-    let display = plan.display_indent().to_string();
-    assert!(!display.contains("FusedSeries"), "{display}");
-    // Falling back is not an approximation of the existing plan: it is the existing plan.
-    let without_flag = build_native_fused_plan("sum(rate(some_metric[5m]))", false).await;
-    assert_eq!(display, without_flag.display_indent().to_string());
+    for query in [
+        "sum(rate(some_metric[5m]))",
+        "some_metric + some_metric",
+        "rate(some_metric[5m])[1h:]",
+        "histogram_count(some_metric)",
+        "ceil(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(
+            !display.contains("FusedSeries"),
+            "`{query}` must not enter the limited native POC: {display}"
+        );
+        // Falling back is the existing plan, not an approximation of it.
+        let without_flag = build_native_fused_plan(query, false).await;
+        assert_eq!(
+            display,
+            without_flag.display_indent().to_string(),
+            "`{query}` must keep the existing plan"
+        );
+    }
 }
 
 /// A label rewrite stays on the existing plan, which is the one that projects its new label.
