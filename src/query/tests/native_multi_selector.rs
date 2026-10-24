@@ -40,7 +40,7 @@ use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, Se
 use datatypes::series::{Label, MetricName, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
-use promql::native::plan::NativeExpr;
+use promql::native::plan::{BoundInput, NativeExpr};
 use query::promql::native_compile::SelectorRequirement;
 use query::promql::native_compile::{CompiledTree, compile_selectors};
 
@@ -242,6 +242,32 @@ fn results(chunks: &[EvaluatedChunk]) -> BTreeMap<String, Vec<(usize, f64)>> {
 /// The value at every one of the five grid points.
 fn every_point(value: f64) -> Vec<(usize, f64)> {
     (0..5).map(|position| (position, value)).collect()
+}
+
+/// Each compiled input's tree node names the child of the final tree it reads: occurrence `i` reads
+/// child `i`, which is what makes the handful of sources a caller holds a tree it can feed.
+///
+/// The compiler numbers occurrences, so `a + a` binds two children even though both reads see the
+/// same series; a caller that knows they are one scan rebinds them, which is a decision made above
+/// this compiler.
+#[test]
+fn compiled_inputs_are_numbered_by_binding_occurrence() {
+    for (query, expected) in [
+        ("a", vec![0]),
+        ("a + b", vec![0, 1]),
+        ("a + a", vec![0, 1]),
+        ("(a + b) / a", vec![0, 1, 2]),
+    ] {
+        let compiled = compile(query);
+        let mut indices = Vec::new();
+        promql::native::metrics::walk(compiled.tree.root(), &mut |node, _| {
+            if let NativeExpr::Input(BoundInput { source_index, .. }) = &node.expr {
+                indices.push(*source_index);
+            }
+        });
+        assert_eq!(indices, expected, "query: {query}");
+        assert_eq!(compiled.inputs.len(), expected.len(), "query: {query}");
+    }
 }
 
 /// `a + b` over two genuinely different inputs: different metric names, different matcher sets and

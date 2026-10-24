@@ -1050,7 +1050,7 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
         [
             "NativeTree",
             "  root Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-            "    input Input raw samples",
+            "    input Input source=0 raw samples",
         ]
         .join("\n")
     );
@@ -1069,7 +1069,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Aggregate sum by [job] complete",
                 "    input Binary * ignoring [] one-to-one",
                 "      left Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-                "        input Input raw samples",
+                "        input Input source=0 raw samples",
                 "      right Scalar 100",
             ],
         ),
@@ -1080,7 +1080,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Binary * ignoring [] one-to-one",
                 "    left Scalar -1",
                 "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples",
+                "      input Input source=0 raw samples",
             ],
         ),
         (
@@ -1090,7 +1090,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Binary < ignoring [] one-to-one",
                 "    left Scalar 0",
                 "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples",
+                "      input Input source=0 raw samples",
             ],
         ),
     ];
@@ -4507,6 +4507,7 @@ fn selector_binding_returns_requirement_and_input_path() {
         panic!("inner expression is not a window");
     };
     let NativeExpr::Input(BoundInput {
+        source_index,
         output: NativeType::Samples(bound_schema),
         ordering,
     }) = &window_input.expr
@@ -4518,6 +4519,8 @@ fn selector_binding_returns_requirement_and_input_path() {
     };
     assert!(Arc::ptr_eq(bound_schema, &schema));
     assert_eq!(*ordering, SeriesOrdering::KeyThenTime);
+    // The only selector of the statement read the first child of the final tree.
+    assert_eq!(*source_index, 0);
 }
 
 /// Scan bounds follow the grid the selector is actually evaluated on, open a window's lower edge, and
@@ -4776,11 +4779,12 @@ fn vector_binary_inputs_follow_structural_paths() {
     let mut tree_inputs = Vec::new();
     walk(compiled.tree.root(), &mut |node, path| {
         if let NativeExpr::Input(BoundInput {
+            source_index,
             output: NativeType::Samples(schema),
             ordering,
         }) = &node.expr
         {
-            tree_inputs.push((path.clone(), Arc::clone(schema), *ordering));
+            tree_inputs.push((path.clone(), Arc::clone(schema), *ordering, *source_index));
         }
     });
     assert_eq!(tree_inputs.len(), expected.len());
@@ -4791,10 +4795,13 @@ fn vector_binary_inputs_follow_structural_paths() {
         assert_eq!(bound.requirement.metric.as_deref(), Some(*metric));
         assert!(Arc::ptr_eq(&bound.schema, &schemas[*schema_index]));
         assert_eq!(bound.ordering, SeriesOrdering::KeyThenTime);
-        let (tree_path, tree_schema, tree_ordering) = &tree_inputs[index];
+        let (tree_path, tree_schema, tree_ordering, source_index) = &tree_inputs[index];
         assert_eq!(tree_path.as_str(), *expected_path);
         assert!(Arc::ptr_eq(tree_schema, &bound.schema));
         assert_eq!(*tree_ordering, bound.ordering);
+        // The selectors are numbered in the order they were bound, which is the order this test
+        // lists them in: `x + y`, then `z`.
+        assert_eq!(*source_index, *schema_index);
     }
 }
 
@@ -4850,20 +4857,28 @@ fn selector_bindings_follow_structural_input_paths() {
         let mut tree_inputs = Vec::new();
         walk(compiled.tree.root(), &mut |node, path| {
             if let NativeExpr::Input(BoundInput {
+                source_index,
                 output: NativeType::Samples(bound_schema),
                 ordering,
             }) = &node.expr
             {
-                tree_inputs.push((path.clone(), Arc::clone(bound_schema), *ordering));
+                tree_inputs.push((
+                    path.clone(),
+                    Arc::clone(bound_schema),
+                    *ordering,
+                    *source_index,
+                ));
             }
         });
         assert_eq!(tree_inputs.len(), compiled.inputs.len(), "query: {query}");
-        for ((path, tree_schema, tree_ordering), bound) in
+        for ((path, tree_schema, tree_ordering, source_index), bound) in
             tree_inputs.iter().zip(compiled.inputs.iter())
         {
             assert_eq!(path, &bound.path, "query: {query}");
             assert!(Arc::ptr_eq(tree_schema, &bound.schema), "query: {query}");
             assert_eq!(*tree_ordering, bound.ordering, "query: {query}");
+            // One selector: the statement's only occurrence reads the first child.
+            assert_eq!(*source_index, 0, "query: {query}");
         }
     }
 }
@@ -4925,4 +4940,36 @@ fn recorded_inputs_are_exactly_the_trees_input_nodes() {
     let error = validate_inputs(compiled.tree.root(), &[recorded.clone(), recorded]).unwrap_err();
     assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
     assert!(error.to_string().contains("not its input nodes"), "{error}");
+}
+
+/// The compiler numbers each input node by the occurrence it was bound for, from zero.
+///
+/// The number is what the executor reads a chunk from, so it describes occurrences rather than
+/// scans: `x + x` names one selector twice and binds two children, which is why a caller that
+/// proves both occurrences read one scan rebinds their nodes rather than trusting the numbering.
+#[test]
+fn input_nodes_are_numbered_by_binding_order_from_zero() {
+    for (query, expected) in [
+        ("x", vec![0]),
+        ("rate(x[5m])", vec![0]),
+        ("abs(x) * 2", vec![0]),
+        ("x + y", vec![0, 1]),
+        ("x + x", vec![0, 1]),
+        ("(x + y) / z", vec![0, 1, 2]),
+        ("x + y * z", vec![0, 1, 2]),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let mut indices = Vec::new();
+        walk(compiled.tree.root(), &mut |node, _| {
+            if let NativeExpr::Input(BoundInput { source_index, .. }) = &node.expr {
+                indices.push(*source_index);
+            }
+        });
+        assert_eq!(indices, expected, "query: {query}");
+    }
 }

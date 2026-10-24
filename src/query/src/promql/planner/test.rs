@@ -38,7 +38,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
+use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
@@ -1121,6 +1121,76 @@ async fn build_test_table_provider_with_options(
     )
 }
 
+/// A table whose primary key is exactly `tags`, each column nullable or not as asked.
+///
+/// The default fixture keeps every tag non-nullable, which is the ordinary Mito shape. A nullable
+/// tag column is what a label shared between several logical metrics looks like, and it is the shape
+/// where a NULL and an empty string are two raw series keys but one Prometheus label.
+async fn build_test_identity_table_provider(
+    table_name: &str,
+    tags: &[(&str, bool)],
+) -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let mut columns = tags
+        .iter()
+        .map(|(tag, nullable)| {
+            ColumnSchema::new(
+                (*tag).to_string(),
+                ConcreteDataType::string_datatype(),
+                *nullable,
+            )
+        })
+        .collect::<Vec<_>>();
+    columns.push(
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+    );
+    columns.push(ColumnSchema::new(
+        "field_0".to_string(),
+        ConcreteDataType::float64_datatype(),
+        true,
+    ));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(Arc::new(Schema::new(columns)))
+        // The engine decides whether the table can serve raw series at all, so a fixture that
+        // leaves it unset declines the native route before any identity rule is reached.
+        .engine(MITO_ENGINE.to_string())
+        .primary_key_indices((0..tags.len()).collect())
+        .value_indices(vec![tags.len() + 1])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .name(table_name)
+        .meta(table_meta)
+        .build()
+        .unwrap();
+
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&table_info),
+            })
+            .is_ok()
+    );
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 async fn build_test_native_histogram_table_provider(table_name: &str) -> DfTableSourceProvider {
     build_test_native_histogram_table_provider_with_marker(table_name, false).await
 }
@@ -1838,7 +1908,7 @@ fn find_metric_physical_scan(plan: &LogicalPlan) -> Option<datafusion::logical_e
         LogicalPlan::Extension(Extension { node }) => node
             .as_any()
             .downcast_ref::<FusedSeries>()
-            .and_then(|fused| match fused.inputs().first() {
+            .and_then(|fused| match fused.children().first() {
                 Some(LogicalPlan::TableScan(scan)) => Some(scan.clone()),
                 _ => None,
             }),
@@ -1857,6 +1927,333 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     }
 
     plan.inputs().into_iter().find_map(find_fused_series)
+}
+
+/// Two occurrences of one selector over one scan plan as one child both occurrences read.
+#[tokio::test]
+async fn native_fused_binary_collapses_two_occurrences_onto_one_scan() {
+    let plan = build_native_fused_plan("some_metric + some_metric", true).await;
+    let fused = find_fused_series(&plan).expect("binary query uses native route");
+    assert_eq!(1, fused.children().len());
+    assert!(
+        matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+        "the child should be the selector's own scan: {:?}",
+        fused.children()[0]
+    );
+    // Both occurrences name the one child, because the tree reads two inputs and both of them read
+    // these rows.
+    let inputs = tree_inputs(fused);
+    assert_eq!(
+        inputs,
+        vec![
+            ("root.left.input".to_string(), 0),
+            ("root.right.input".to_string(), 0)
+        ],
+        "the occurrences were not rebound to the one child"
+    );
+    // The columns a series is reported under are the node's: one binding names them for both
+    // occurrences, rather than each occurrence carrying its own copy.
+    let binding = fused.binding();
+    assert_eq!(binding.metric_name.as_deref(), Some("some_metric"));
+    assert_eq!(binding.time_index, "timestamp");
+    assert_eq!(binding.tags, vec!["tag_0".to_string()]);
+}
+
+/// Two occurrences that read one table over different bounds read different rows, so they are two
+/// actual sources and keep the existing plan.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_different_bounds() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        // One side reads a window ten seconds earlier than the other.
+        "some_metric{host!=\"\"} + some_metric{host!=\"\"} offset 10s",
+        // One side folds the same window around a fixed anchor, the other around every grid point.
+        "rate(some_metric{host!=\"\"}[5m]) + rate(some_metric{host!=\"\"}[5m] @ 300)",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// The raw input nodes of `fused`'s tree, as their structural path and the child each reads.
+fn tree_inputs(fused: &FusedSeries) -> Vec<(String, usize)> {
+    let mut inputs = Vec::new();
+    promql::native::metrics::walk(fused.tree().root(), &mut |node, path| {
+        if let NativeExpr::Input(bound) = &node.expr {
+            inputs.push((path.as_str().to_string(), bound.source_index));
+        }
+    });
+    inputs
+}
+
+/// Two occurrences whose matchers differ read different rows, so they keep the existing plan.
+#[tokio::test]
+async fn native_fused_binary_matchers_are_per_scan() {
+    let query = "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}";
+    let plan = build_native_fused_plan(query, true).await;
+    let legacy = build_native_fused_plan(query, false).await;
+    assert_eq!(
+        plan.display_indent_schema().to_string(),
+        legacy.display_indent_schema().to_string(),
+        "two occurrences over different scans must keep the existing plan"
+    );
+    // The legacy plan still applies each selector's own matcher to its own scan.
+    let display = legacy.display_indent().to_string();
+    assert!(display.contains("Utf8(\"a\")"), "{display}");
+    assert!(display.contains("Utf8(\"b\")"), "{display}");
+}
+
+#[tokio::test]
+async fn native_fused_binary_flag_off_has_no_fused_node() {
+    let plan = build_native_fused_plan("some_metric + some_metric", false).await;
+    assert!(find_fused_series(&plan).is_none());
+}
+
+/// Plans `query` over a table whose primary key is exactly `tags`.
+///
+/// The tag list is the whole identity: the route admits two occurrences of one selector only when
+/// the scan's raw series keys name one logical series each, so a fixture states that key directly.
+async fn build_identity_fused_plan(
+    tags: &[(&str, bool)],
+    query: &str,
+    native_fused: bool,
+) -> LogicalPlan {
+    let table_provider = build_test_identity_table_provider("some_metric", tags).await;
+    build_native_fused_plan_with_provider(query, native_fused, table_provider).await
+}
+
+/// The input nodes an admitted two-occurrence statement binds, as their paths.
+///
+/// Both occurrences read the one child the statement was collapsed onto, so both are numbered after
+/// it: a plan that left the two occurrences on two children would hand each side of the match half
+/// the partitions, which is the shape this route declines.
+fn admitted_two_occurrence_paths(plan: &LogicalPlan) -> Vec<String> {
+    let fused = find_fused_series(plan).expect("the statement should plan to one native node");
+    assert_eq!(
+        1,
+        fused.children().len(),
+        "two occurrences over one scan are one child"
+    );
+    assert!(
+        matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+        "the child should be the selector's own scan: {:?}",
+        fused.children()[0]
+    );
+    let inputs = tree_inputs(fused);
+    assert_eq!(2, inputs.len(), "{inputs:?}");
+    assert_ne!(inputs[0].0, inputs[1].0, "{inputs:?}");
+    assert_eq!((0, 0), (inputs[0].1, inputs[1].1), "{inputs:?}");
+    inputs.into_iter().map(|(path, _)| path).collect()
+}
+
+/// Asserts `query` plans exactly as it does with the native route off.
+async fn assert_two_occurrences_fall_back(tags: &[(&str, bool)], query: &str) {
+    let native = build_identity_fused_plan(tags, query, true).await;
+    let legacy = build_identity_fused_plan(tags, query, false).await;
+
+    let display = native.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{query}: {display}");
+    assert_eq!(
+        native.display_indent_schema().to_string(),
+        legacy.display_indent_schema().to_string(),
+        "{query}: a two-occurrence profile this route cannot read must keep the existing plan"
+    );
+}
+
+/// Two occurrences of one selector over one primary key, with matchers that keep the key whole.
+#[tokio::test]
+async fn native_fused_two_occurrences_admit_one_source_pointwise() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "some_metric{host!=\"\"} + some_metric{host!=\"\"}",
+        "abs(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
+        "rate(some_metric{host!=\"\"}[5m]) / rate(some_metric{host!=\"\"}[5m])",
+        "some_metric{host!=\"\"} * 2 + some_metric{host!=\"\"} * 2",
+    ] {
+        let plan = build_identity_fused_plan(&tags, query, true).await;
+        let paths = admitted_two_occurrence_paths(&plan);
+        assert!(paths[0].starts_with("root.left"), "{query}: {paths:?}");
+        assert!(paths[1].starts_with("root.right"), "{query}: {paths:?}");
+    }
+}
+
+/// A match key that keeps every identity tag pairs one series of one side with itself.
+#[tokio::test]
+async fn native_fused_two_occurrences_admit_full_key_matching() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "some_metric + on(host, zone) some_metric",
+        "some_metric + ignoring(__name__) some_metric",
+    ] {
+        let plan = build_identity_fused_plan(&tags, query, true).await;
+        assert_eq!(2, admitted_two_occurrence_paths(&plan).len(), "{query}");
+    }
+}
+
+/// A match key that drops an identity tag pairs two series Prometheus keeps apart.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_partial_key_matching() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "some_metric + on(host) some_metric",
+        "some_metric + ignoring(zone) some_metric",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// `group_left` and `group_right` pair a group against one series.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_group_cardinality() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "some_metric + on(host, zone) group_left some_metric",
+        "some_metric + on(host, zone) group_right some_metric",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// Two scans, or one scan read over two ranges, are two series sets rather than one.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_different_scan_or_bounds() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "some_metric{host=\"a\"} + some_metric{host=\"b\"}",
+        "rate(some_metric[5m]) + rate(some_metric[10m])",
+        "rate(some_metric[5m]) + rate(some_metric[5m] offset 1m)",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// A shape that reads a whole series as a group, or nests one, is not one series point-wise.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_nested_and_broadcast_profiles() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        // The match itself is nested under a map, so the root is not the operation being matched.
+        "abs(some_metric + some_metric)",
+        // A constant broadcast above the match: the root is not a vector-vector operation.
+        "(some_metric + some_metric) * 2",
+        // Three occurrences, which one input carrying two paths cannot express.
+        "some_metric + some_metric + some_metric",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// A nullable identity tag reads one label set as two raw keys, which stays on the existing plan.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_nullable_key_without_proof() {
+    let tags = [("host", true)];
+    for query in [
+        // NULL and `""` are two raw keys and one Prometheus label, so a partition holding one half
+        // cannot answer for the other.
+        "some_metric + some_metric",
+        // The cross-partition counterexample: `(m>0)` and `(m<0)` can each hold one of the halves.
+        "(some_metric > 0) + (some_metric < 0)",
+    ] {
+        assert_two_occurrences_fall_back(&tags, query).await;
+    }
+}
+
+/// A matcher that rejects the empty value leaves no row whose key could read either way.
+#[tokio::test]
+async fn native_fused_two_occurrences_admit_nullable_key_when_matcher_rejects_empty() {
+    let plan = build_identity_fused_plan(
+        &[("host", true)],
+        "some_metric{host!=\"\"} + some_metric{host!=\"\"}",
+        true,
+    )
+    .await;
+    assert_eq!(2, admitted_two_occurrence_paths(&plan).len());
+}
+
+/// A key column named like pipeline metadata is dropped by the nodes above it.
+///
+/// The route reports a series under its primary key, and a window, a map and a binary operation drop
+/// `__name__`, `__type__` and `__unit__` wherever they read them, so a key holding one of them names
+/// no series on its own. Each case is compared against the same statement with the route off.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_metadata_key() {
+    for tags in [
+        [("__name__", false), ("host", false)],
+        [("__type__", false), ("host", false)],
+        [("__unit__", false), ("host", false)],
+    ] {
+        assert_two_occurrences_fall_back(&tags, "some_metric + some_metric").await;
+    }
+}
+
+/// A statement that names its selector once reads one scan, so it binds one child and one input,
+/// however many positional operands its tree has.
+#[tokio::test]
+async fn native_fused_one_occurrence_records_one_path() {
+    for query in [
+        "some_metric",
+        "some_metric * 2",
+        "-some_metric",
+        "2 - some_metric",
+        "abs(some_metric)",
+        "abs(some_metric * 2)",
+        "some_metric > bool 0",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent()));
+        assert_eq!(1, fused.children().len(), "{query}");
+        assert!(
+            matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+            "{query}: {:?}",
+            fused.children()[0]
+        );
+        let inputs = tree_inputs(fused);
+        assert_eq!(1, inputs.len(), "{query}: {inputs:?}");
+        assert_eq!(0, inputs[0].1, "{query}: {inputs:?}");
+    }
+}
+
+/// A whole-vector operation or a group fold reads across series wherever it sits, so a statement
+/// that holds one keeps the existing plan — under a binary root, under a map, and under a constant
+/// broadcast over either.
+#[tokio::test]
+async fn native_fused_binary_holding_a_whole_vector_operation_falls_back() {
+    let tags = [("host", false), ("zone", false)];
+    for query in [
+        "sort(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
+        "abs(sort(some_metric{host!=\"\"})) + some_metric{host!=\"\"}",
+        "sort(some_metric{host!=\"\"}) * 2",
+        "sum(some_metric{host!=\"\"}) + some_metric{host!=\"\"}",
+        "abs(sum(some_metric{host!=\"\"})) * 2",
+    ] {
+        let native = build_identity_fused_plan(&tags, query, true).await;
+        let legacy = build_identity_fused_plan(&tags, query, false).await;
+        let display = native.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        assert_eq!(
+            native.display_indent_schema().to_string(),
+            legacy.display_indent_schema().to_string(),
+            "{query}: a tree that reads across series must keep the existing plan"
+        );
+    }
+}
+
+/// Two different metrics are two different scans, however alike their schemas are.
+#[tokio::test]
+async fn native_fused_two_occurrences_decline_different_table() {
+    let query = "some_metric + other_metric";
+    let table_provider = build_test_table_provider(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+        ],
+        1,
+        1,
+    )
+    .await;
+    let plan = build_native_fused_plan_with_provider(query, true, table_provider).await;
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{query}: {display}");
 }
 
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
@@ -2268,6 +2665,9 @@ async fn native_fused_or_matchers_fall_back() {
     for query in [
         r#"some_metric{tag_0="a" or tag_0="b"}"#,
         r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
+        // Both occurrences of a pair name alternatives, which the per-selector guard refuses before
+        // the pair's own identity check.
+        r#"increase(some_metric{tag_0="a" or tag_0="b"}[5m]) / increase(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2339,6 +2739,37 @@ async fn native_fused_delta_temporality_rates_fall_back() {
     }
 }
 
+/// A `rate`/`increase` pair over a delta-temporality table keeps the existing plan for both sides.
+///
+/// The marker is one identity tag here, so the pair's own identity check passes and only the
+/// per-selector temporality guard can decline it. A table without the marker admits both pair
+/// shapes over the two-occurrence path, which is what makes the decline the marker's doing rather
+/// than the identity check's.
+#[tokio::test]
+async fn native_fused_delta_temporality_two_occurrences_fall_back() {
+    let tags = [("host", false), (OTLP_AGGREGATION_TEMPORALITY_LABEL, false)];
+    for query in [
+        "rate(some_metric[5m]) / rate(some_metric[5m])",
+        "increase(some_metric[5m]) - increase(some_metric[5m])",
+    ] {
+        let marked = build_identity_fused_plan(&tags, query, true).await;
+        let marked_without_flag = build_identity_fused_plan(&tags, query, false).await;
+        assert!(
+            find_fused_series(&marked).is_none(),
+            "`{query}` needs the per-series delta math: {}",
+            marked.display_indent()
+        );
+        assert_eq!(
+            marked.display_indent_schema().to_string(),
+            marked_without_flag.display_indent_schema().to_string(),
+            "`{query}` must keep the existing plan, not the cumulative form for both sides"
+        );
+
+        let unmarked = build_identity_fused_plan(&[("host", false)], query, true).await;
+        assert_eq!(2, admitted_two_occurrence_paths(&unmarked).len());
+    }
+}
+
 /// The marker alone does not decline a query: only `rate`/`increase` are refused.
 #[tokio::test]
 async fn native_fused_delta_temporality_non_counter_math_still_folds() {
@@ -2377,12 +2808,13 @@ async fn native_fused_whole_vector_operation_falls_back() {
 
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
-    let plan = build_native_fused_plan("sum(rate(some_metric[5m]))", true).await;
-
+    // A set operator combines vectors' series rather than their values, so the compiler names and
+    // declines it.
+    let query = "some_metric and on(tag_0) some_metric";
+    let plan = build_native_fused_plan(query, true).await;
     let display = plan.display_indent().to_string();
     assert!(!display.contains("FusedSeries"), "{display}");
-    // Falling back is not an approximation of the existing plan: it is the existing plan.
-    let without_flag = build_native_fused_plan("sum(rate(some_metric[5m]))", false).await;
+    let without_flag = build_native_fused_plan(query, false).await;
     assert_eq!(display, without_flag.display_indent().to_string());
 }
 
@@ -2418,6 +2850,50 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan, not an approximation of it"
         );
+    }
+}
+
+#[tokio::test]
+async fn native_fused_preparation_decline_preserves_legacy_plan() {
+    let query = "absent(vector(1)) + on(tag_0) some_metric{tag_0=\"x\",__field__=\"field_0\"}";
+    let native = build_native_fused_plan(query, true).await;
+    let legacy = build_native_fused_plan(query, false).await;
+
+    assert!(!native.display_indent().to_string().contains("FusedSeries"));
+    assert_eq!(
+        native.display_indent_schema().to_string(),
+        legacy.display_indent_schema().to_string(),
+        "a native preparation decline must leave legacy planning context unchanged"
+    );
+}
+
+#[tokio::test]
+async fn native_fused_aggregate_falls_back_to_legacy_plan() {
+    for query in [
+        "sum(rate(some_metric[5m]))",
+        "avg by(tag_0)(some_metric)",
+        "some_metric + sum(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        assert!(display.contains("Aggregate:"), "{query}: {display}");
+        let legacy = build_native_fused_plan(query, false).await;
+        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
+    }
+}
+
+#[tokio::test]
+async fn native_fused_subquery_falls_back_to_legacy_plan() {
+    for query in [
+        "rate(some_metric[5m:1m])",
+        "rate(rate(some_metric[5m:1m])[10m:1m])",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        let legacy = build_native_fused_plan(query, false).await;
+        assert_eq!(display, legacy.display_indent().to_string(), "{query}");
     }
 }
 
@@ -2467,6 +2943,46 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
     );
+}
+
+#[tokio::test]
+async fn native_fused_at_anchor_offset_identity_uses_raw_anchor() {
+    // The fixture's statement spans 0..100_000_000ms. For explicit 300s, the
+    // offset shifts the window end exactly once; start/end use those same raw anchors.
+    for (query, lower, upper) in [
+        (
+            "rate(some_metric[5m] @ 300 offset 10s)",
+            "timestamp >= TimestampMillisecond(-9999, None)",
+            "timestamp <= TimestampMillisecond(290000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ 300 offset -10s)",
+            "timestamp >= TimestampMillisecond(10001, None)",
+            "timestamp <= TimestampMillisecond(310000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ start() offset 10s)",
+            "timestamp >= TimestampMillisecond(-309999, None)",
+            "timestamp <= TimestampMillisecond(-10000, None)",
+        ),
+        (
+            "rate(some_metric[5m] @ end() offset -10s)",
+            "timestamp >= TimestampMillisecond(99710001, None)",
+            "timestamp <= TimestampMillisecond(100010000, None)",
+        ),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let display = plan.display_indent().to_string();
+        assert!(display.contains("FusedSeries"), "{query}: {display}");
+        assert!(
+            display.contains(lower),
+            "{query}: expected {lower}: {display}"
+        );
+        assert!(
+            display.contains(upper),
+            "{query}: expected {upper}: {display}"
+        );
+    }
 }
 
 #[tokio::test]

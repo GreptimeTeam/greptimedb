@@ -975,7 +975,11 @@ impl TreeNodeRewriter for EnforceDistRequirementRewriter {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: Self::Node) -> DfResult<Transformed<Self::Node>> {
-        // check that node doesn't have multiple children, i.e. join/subquery
+        // The level bookkeeping below describes one chain of nodes: a level names a node, and a
+        // column requirement is scoped by the level it was recorded at. A node with several inputs
+        // is a branch whose children would all share one level, so the walk refuses it rather than
+        // assigning them levels that mean nothing. Every node this rewriter expands is on one such
+        // chain, and the fused PromQL node is one input over one scan like any other node here.
         if node.inputs().len() > 1 {
             return Err(datafusion_common::DataFusionError::Internal(
                 "EnforceDistRequirementRewriter: node with multiple inputs is not supported"

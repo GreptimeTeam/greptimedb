@@ -82,7 +82,7 @@ impl ExtensionPlanner for PromExtensionPlanner {
 /// column of any region.
 const METRIC_NAME: &str = "__name__";
 
-/// Builds the physical node of a [`FusedSeries`] over the raw series leaf its input can provide.
+/// Builds the physical node of a [`FusedSeries`] over the raw series leaf its one child can provide.
 ///
 /// The node reads a raw series frame, so what it needs below it is the region scan itself: the
 /// scan's own raw-series entrypoint is what packs a series' chunks contiguously and declares their
@@ -96,72 +96,91 @@ const METRIC_NAME: &str = "__name__";
 /// reported as an error that names the reason instead of silently producing no plan.
 /// The fused leaf needs a prepared scan: range assignment runs after physical planning and cannot
 /// see a `SeriesScanExec`. Preparation keeps the scan's parallel layout, and the series-producer
-/// contract guarantees that one series stays in one scan partition.
+/// contract guarantees that one series stays in one scan partition. The fields the scan is asked
+/// for are the tree's own, and a node with no child (a constant scalar) or with several (which
+/// would need a label-pairing exchange) is refused here rather than planned into a node that
+/// cannot run it.
 fn plan_fused_series(
     fused: &FusedSeries,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
-    let Some(input) = physical_inputs.first() else {
-        return Ok(None);
-    };
-    let Some(scan) = input.downcast_ref::<RegionScanExec>() else {
-        return Ok(None);
-    };
-
-    let binding = fused.binding();
-    let Some(metric_name) = binding.metric_name.as_deref() else {
-        return Err(DataFusionError::Plan(
-            "the FusedSeries node binds no metric name, so the region scan below it cannot be \
-             asked for the series of one metric"
-                .to_string(),
-        ));
-    };
-    // `__name__` is the metric name rather than a column of the region, so it is not one of the
-    // logical tags the scan is asked to decode; the frame names each series' own metric.
-    let logical_tags = binding
-        .tags
-        .iter()
-        .filter(|tag| tag.as_str() != METRIC_NAME)
-        .cloned()
-        .collect::<Vec<_>>();
-    let field_names = binding
-        .series_schema
-        .fields
-        .iter()
-        .map(|field| field.name.to_string())
-        .collect::<Vec<_>>();
-
-    let scan = if scan.is_partition_set() {
-        Arc::new(scan.clone())
-    } else {
-        let partitions = table::table::scan::assign_partition_ranges(
-            scan.get_partition_ranges(),
-            target_partitions.max(1),
-        );
-        Arc::new(
-            scan.with_new_partitions(partitions, target_partitions.max(1))
-                .map_err(|error| DataFusionError::External(error.into_inner()))?,
-        )
-    };
-    // The scan resolves the label source and the ordering it will declare itself, against its own
-    // metadata snapshot, and hands both back through the leaf it builds. Naming them here instead
-    // would be a second copy of a binding only the scanner can make: the physical metadata and
-    // column ids a `RawLabelSource::PrimaryKey` carries are not reachable from a region scan's
-    // public surface, so the layer that resolves them is the scanner.
-    let Some(series_scan) =
-        scan.try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
-    else {
+    // The children and the physical inputs are paired by position below, so an input list of another
+    // length is refused before anything is read off it. DataFusion plans every child of an extension
+    // node before it calls here, so its own route always matches this count; a direct call of
+    // `plan_extension` need not.
+    let children = fused.children();
+    if physical_inputs.len() != children.len() {
         return Err(DataFusionError::Plan(format!(
-            "the region scan under FusedSeries could not serve a raw series frame for metric \
-             {metric_name:?}: the scanner refused the raw series path for this scan, so this node \
-             has no input to read"
+            "FusedSeries binds {} inputs, but {} physical inputs were given",
+            children.len(),
+            physical_inputs.len()
         )));
-    };
-    let label_source = series_scan.label_source().clone();
-    let ordering = series_scan.raw_series_ordering();
-
-    fused
-        .to_execution_plan(series_scan, label_source, ordering)
-        .map(Some)
+    }
+    // One plan below is one actual source, which is what the physical node reads. A constant scalar
+    // has no plan to read and several sources would have to be paired by label, which needs an
+    // exchange this layer does not build: both are refused by name rather than planned into a node
+    // that cannot run them.
+    if children.is_empty() {
+        return Err(DataFusionError::Plan(
+            "the FusedSeries node reads no source: a constant scalar is not planned by this layer \
+             yet"
+            .to_string(),
+        ));
+    }
+    if children.len() > 1 {
+        return Err(DataFusionError::Plan(format!(
+            "the FusedSeries node reads {} sources, and planning several of them as one tree is not \
+             supported",
+            children.len()
+        )));
+    }
+    // Which columns the scan below must produce are the fields the tree's own input reads, not a
+    // description kept beside the tree.
+    let source_fields = super::fused_series::tree_source_fields(fused.tree())?;
+    let binding = fused.binding();
+    let mut prepared = Vec::with_capacity(children.len());
+    for (index, input) in physical_inputs.iter().enumerate() {
+        let Some(scan) = input.downcast_ref::<RegionScanExec>() else {
+            return Ok(None);
+        };
+        let Some(metric_name) = binding.metric_name.as_deref() else {
+            return Err(DataFusionError::Plan(
+                "the FusedSeries node binds no metric name".to_string(),
+            ));
+        };
+        let tags = binding
+            .tags
+            .iter()
+            .filter(|tag| tag.as_str() != METRIC_NAME)
+            .cloned()
+            .collect::<Vec<_>>();
+        let Some(fields) = source_fields.get(index) else {
+            return Err(DataFusionError::Plan(format!(
+                "the FusedSeries tree reads no input at source {index}"
+            )));
+        };
+        let scan = if scan.is_partition_set() {
+            Arc::new(scan.clone())
+        } else {
+            let n = target_partitions.max(1);
+            let partitions =
+                table::table::scan::assign_partition_ranges(scan.get_partition_ranges(), n);
+            Arc::new(
+                scan.with_new_partitions(partitions, n)
+                    .map_err(|e| DataFusionError::External(e.into_inner()))?,
+            )
+        };
+        let Some(series_scan) = scan.try_to_named_series_scan(metric_name, &tags, fields)? else {
+            return Err(DataFusionError::Plan(format!(
+                "the region scan under FusedSeries could not serve raw series for {metric_name:?}"
+            )));
+        };
+        prepared.push((
+            series_scan.clone() as Arc<dyn ExecutionPlan>,
+            series_scan.label_source().clone(),
+            series_scan.raw_series_ordering(),
+        ));
+    }
+    fused.to_execution_plan(prepared).map(Some)
 }

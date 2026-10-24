@@ -345,6 +345,15 @@ impl PromPlanner {
         if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
             return planner.strip_tsid_column(plan);
         }
+        // `TQL EXPLAIN` wraps the query it explains in an extension node, and a reader asks for that
+        // explanation to see the plan the query actually runs. Offering the wrapper itself would
+        // decline every time - it is not a shape a tree has a node for - and the answer would show
+        // the existing path's plan even where the native route is the one that runs. The two
+        // `EXPLAIN` forms are therefore offered their body, which is wrapped the same way the
+        // existing path wraps it.
+        if let Some(plan) = planner.try_plan_native_fused_explain(&stmt.expr).await? {
+            return planner.strip_tsid_column(plan);
+        }
 
         let plan = planner
             .prom_root_expr_to_plan(&stmt.expr, query_engine_state)

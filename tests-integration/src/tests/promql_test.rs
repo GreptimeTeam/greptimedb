@@ -2076,6 +2076,184 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
+/// Regression for the two occurrences of one selector that read one scan (#9896).
+///
+/// `m{host!=""} - (m{host!=""} * 2)` names one selector twice; the native route binds both tree
+/// inputs to the one physical child it prepares, which needs an ordinary Mito table keyed by the
+/// whole label set (`host` NOT NULL, empty match rejected). Series scans read 8,192-row batches
+/// and hand whole series to successive partitions, so the fixture must exceed one batch: 512
+/// hosts x 64 points is 32,768 rows, i.e. at least four batches reaching all four partitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_occurrences_route_one_scan_per_partition() {
+    // 512 hosts * 64 points = 32,768 rows, generated in 512-row insert batches: at least four
+    // 8,192-row read batches, so the ordinary scan spreads the series over all four partitions.
+    const HOSTS: usize = 512;
+    const POINTS_PER_HOST: i64 = 64;
+    const INSERT_BATCH_ROWS: usize = 512;
+
+    fn value(host: usize, point: i64) -> f64 {
+        host as f64 * 1_000.0 + point as f64
+    }
+
+    fn host_name(host: usize) -> String {
+        // Three digits keep the names in numeric order for every host below 1000: the row
+        // comparison sorts by label text, and the expected rows are generated in numeric order.
+        format!("h{host:03}")
+    }
+
+    fn insert_request(table: &str, schema: &[ColumnSchema], rows: Vec<Row>) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                }),
+            }],
+        }
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_two_occurrences_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_pair_route";
+
+    execute_all(
+        &instance,
+        &format!(
+            r#"CREATE TABLE {table} (
+                host STRING NOT NULL,
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE,
+                PRIMARY KEY(host)
+            )"#
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
+    for host in 0..HOSTS {
+        for point in 0..POINTS_PER_HOST {
+            batch.push(Row {
+                values: vec![
+                    ValueData::StringValue(host_name(host)).into(),
+                    ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                    ValueData::F64Value(value(host, point)).into(),
+                ],
+            });
+            if batch.len() == INSERT_BATCH_ROWS {
+                let rows = std::mem::replace(&mut batch, Vec::with_capacity(INSERT_BATCH_ROWS));
+                instance
+                    .handle_row_inserts(
+                        insert_request(table, &schema, rows),
+                        QueryContext::arc(),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    if !batch.is_empty() {
+        instance
+            .handle_row_inserts(
+                insert_request(table, &schema, batch),
+                QueryContext::arc(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = (0..POINTS_PER_HOST)
+        .flat_map(|point| {
+            (0..HOSTS).map(move |host| (point * 1_000, host_name(host), -value(host, point)))
+        })
+        .collect::<Vec<_>>();
+
+    let last = POINTS_PER_HOST - 1;
+    let selector = format!(r#"{table}{{host!=""}}"#);
+    let sql = format!("TQL EVAL (0, {last}, '1s') {selector} - ({selector} * 2)");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(
+        plan.children().len(),
+        1,
+        "the two occurrences must read one physical child"
+    );
+    assert_four_native_partitions(&plan);
+    let display = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert_eq!(
+        display.matches("source=0").count(),
+        2,
+        "both tree inputs must route to the one child:\n{display}"
+    );
+    assert!(
+        !display.contains("source=1"),
+        "no tree input may route to a child that does not exist:\n{display}"
+    );
+    assert_eq!(native_rows, expected);
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+
+    // A different matcher reads different rows, and a group match pairs series instead of reading
+    // one point-wise: both keep the ordinary plan, so the observer must capture nothing. Their
+    // values still have to be complete and equal to the existing planner's.
+    let fallback_expected = expected[..HOSTS].to_vec();
+    for sql in [
+        format!(r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - ({table}{{host=~"h.+"}} * 2)"#),
+        format!(
+            r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
+        ),
+    ] {
+        observer.clear();
+        let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "a fallback shape must not plan a fused node: {sql}"
+        );
+        assert_eq!(rows, fallback_expected, "{sql}");
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy_rows, "{sql}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_explain_and_analyze_execute_fused_plan() {
     common_telemetry::init_default_ut_logging();

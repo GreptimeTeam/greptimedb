@@ -386,6 +386,7 @@ mod tests {
         let output = NativeType::Samples(schema());
         NativeNode {
             expr: NativeExpr::Input(BoundInput {
+                source_index: 0,
                 output: output.clone(),
                 ordering: datatypes::series::SeriesOrdering::KeyThenTime,
             }),

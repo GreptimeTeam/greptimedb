@@ -1582,11 +1582,10 @@ mod test {
         )
         .unwrap();
         let binding = FusedSeriesBinding {
-            series_schema,
             grid: statement_grid(&stmt).unwrap(),
-            metric_name: Some("some_metric".into()),
             time_index: "ts".to_string(),
             tags: Vec::new(),
+            metric_name: Some(Arc::from("some_metric")),
         };
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
@@ -1612,7 +1611,7 @@ mod test {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    input,
+                    vec![input],
                     output_schema,
                 )
                 .unwrap(),
