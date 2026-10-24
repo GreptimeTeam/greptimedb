@@ -1204,7 +1204,7 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     .expect("the runtime executes a rate tree");
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut stream = exec
-        .execute(0, task_context(&pool))
+        .execute(0, task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>))
         .expect("the node executes");
     // The source hands one unclosed chunk over and parks, so the window holds it while the plan's
     // metrics are read: the reads below happen while an execution is alive.
@@ -1276,7 +1276,7 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
     // untouched -- and no part of the tree it built outlives it.
     let registered = after.iter().count();
     let second_stream = exec
-        .execute(0, task_context(&pool))
+        .execute(0, task_context(Arc::clone(&pool) as Arc<dyn MemoryPool>))
         .expect("the plan runs a second time");
     drop(second_stream);
     let twice = exec
