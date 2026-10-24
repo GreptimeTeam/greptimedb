@@ -805,6 +805,7 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
                 path: hint.path,
                 data_type: data_type as i32,
                 datatype_extension,
+                inverted_index: hint.inverted_index,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1851,7 +1852,7 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
 
     #[test]
     fn test_to_alter_set_json_settings_expr() {
-        let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2 (service STRING);";
+        let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2 (service STRING INVERTED INDEX, message STRING);";
         let stmt =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap()
@@ -1870,8 +1871,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert_eq!("payload", modify.column_name);
         let settings = modify.settings.as_ref().unwrap();
         assert_eq!(Some(100), settings.max_auto_expanded_paths);
-        assert_eq!(1, settings.type_hints.len());
+        assert_eq!(2, settings.type_hints.len());
         assert_eq!(["service"], &settings.type_hints[0].path[..]);
+        assert!(settings.type_hints[0].inverted_index);
+        assert!(!settings.type_hints[1].inverted_index);
 
         let sql = "ALTER TABLE monitor MODIFY COLUMN payload JSON2;";
         let stmt =

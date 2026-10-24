@@ -361,6 +361,18 @@ impl PgScramSha256Verifier {
         &self.salt
     }
 
+    /// `SHA256(ClientKey)`, used to verify the client proof in SCRAM.
+    pub fn stored_key(&self) -> &[u8] {
+        &self.stored_key
+    }
+
+    /// `HMAC(SaltedPassword, "Server Key")`, used to compute the SCRAM
+    /// server signature. This is secret material and must not be exposed to
+    /// clients.
+    pub fn server_key(&self) -> &[u8] {
+        &self.server_key
+    }
+
     pub fn verify_plain_password(&self, password: &[u8]) -> Result<bool> {
         let salted_password =
             pg_scram_sha256_salted_password(password, &self.salt, self.iterations)?;

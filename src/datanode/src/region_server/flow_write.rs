@@ -129,6 +129,7 @@ fn response(reply: Reply) -> ServerResult<api::v1::region::RegionResponse> {
         affected_rows: 0,
         extensions,
         metadata: Vec::new(),
+        failures: Vec::new(),
     })
 }
 

@@ -46,6 +46,7 @@ use crate::error::{
     Error, InvalidSenderSnafu, JoinSnafu, PartitionOutOfRangeSnafu, Result, ScanMultiTimesSnafu,
     ScanSeriesSnafu, TooManyFilesToReadSnafu,
 };
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::ScannerMetrics;
 use crate::read::pruner::{PartitionPruner, Pruner, PrunerOptions};
 use crate::read::scan_region::{ScanInput, StreamContext};
@@ -53,7 +54,7 @@ use crate::read::scan_util::{
     PartitionMetrics, PartitionMetricsList, SeriesDistributorMetrics, compute_average_batch_size,
     compute_parallel_channel_size,
 };
-use crate::read::seq_scan::SeqScan;
+use crate::read::seq_scan::{FlatReadMode, SeqScan};
 use crate::read::series_candidate::{SeriesCandidateScanner, is_sparse_metric_metadata};
 use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, SeriesReader};
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
@@ -480,9 +481,6 @@ impl SeriesScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_limit() {
-            return Ok(());
-        }
         // Sum the total number of files across all partitions
         let total_files: usize = self
             .properties
@@ -494,6 +492,15 @@ impl SeriesScan {
                 range_meta.indices.len()
             })
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_files > max_concurrent_files {
@@ -719,6 +726,7 @@ impl SeriesDistributor {
 
         // Create PartitionPruner covering all partitions
         let all_partition_ranges: Vec<_> = self.partitions.iter().flatten().cloned().collect();
+        let needs_merge = all_partition_ranges.len() > 1;
         let partition_pruner = Arc::new(PartitionPruner::new(
             self.pruner.clone(),
             &all_partition_ranges,
@@ -751,7 +759,11 @@ impl SeriesDistributor {
                     SeqScan::build_flat_partition_range_read(
                         &stream_ctx,
                         &part_range,
-                        false,
+                        if needs_merge {
+                            FlatReadMode::CrossRangeMerge
+                        } else {
+                            FlatReadMode::Sequential
+                        },
                         &part_metrics,
                         partition_pruner,
                         file_scan_semaphore,

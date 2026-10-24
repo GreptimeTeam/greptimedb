@@ -421,6 +421,7 @@ impl StatementExecutor {
                 .await
             }
             Statement::TruncateTable(stmt) => {
+                let ddl_options = ddl::parse_ddl_options(stmt.options())?;
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
@@ -429,7 +430,7 @@ impl StatementExecutor {
                 let time_ranges = self
                     .convert_truncate_time_ranges(&table_name, stmt.time_ranges(), &query_ctx)
                     .await?;
-                self.truncate_table(table_name, time_ranges, query_ctx)
+                self.truncate_table_with_options(table_name, time_ranges, ddl_options, query_ctx)
                     .await
             }
             Statement::CreateDatabase(stmt) => {

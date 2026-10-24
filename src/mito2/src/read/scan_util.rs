@@ -1203,7 +1203,7 @@ const SPLIT_ROW_THRESHOLD: u64 = DEFAULT_ROW_GROUP_SIZE as u64;
 const NUM_SERIES_THRESHOLD: u64 = 10240;
 /// Minimum batch size after splitting. The batch size is less than 60 because a series may only have
 /// 60 samples per hour.
-const BATCH_SIZE_THRESHOLD: u64 = 50;
+pub(crate) const BATCH_SIZE_THRESHOLD: u64 = 50;
 /// Minimum estimated rows per series for compaction to split batches. Shorter series
 /// would make compaction write one small batch per series.
 pub(crate) const MIN_COMPACTION_SPLIT_ROWS: usize = DEFAULT_READ_BATCH_SIZE / 2;
