@@ -357,7 +357,9 @@ pub struct NativeNode {
 /// Three kinds do: an `Aggregate` folds every series of its group, a `Binary` pairs two vectors'
 /// series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
 /// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
-/// an input, a scalar, a selection, a window, a map - answers one series from one series' rows.
+/// an input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
+/// side, whose broadcast reaches each series the other side answers - answers one series from one
+/// series' rows.
 ///
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
@@ -368,9 +370,17 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. } => reads_across_series(input),
-        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } | NativeExpr::Vector { .. } => {
-            true
-        }
+        NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
+            // Two constants answer the same value for every series there is, so the operation reads
+            // none of them; one constant is broadcast over the other side's series unchanged, so what
+            // the operation reads is what that side reads.
+            (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => false,
+            (NativeExpr::Scalar(_), _) => reads_across_series(right),
+            (_, NativeExpr::Scalar(_)) => reads_across_series(left),
+            // Two vectors are matched by label, which pairs series of the whole vector.
+            (_, _) => true,
+        },
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => true,
     }
 }
 

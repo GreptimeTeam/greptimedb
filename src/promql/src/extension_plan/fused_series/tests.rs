@@ -81,6 +81,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::PromExtensionPlanner;
+use crate::extension_plan::aggregate_exchange::state_schema;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{NodeMetric, NodePath};
 use crate::native::plan::{
@@ -119,6 +120,8 @@ const TIME: &str = "time";
 const VALUE: &str = "value";
 const OTHER: &str = "other";
 const HOST: &str = "host";
+/// A second label, so two partitions can hold distinct prefix series that fold into one group.
+const JOB: &str = "job";
 const ZONE: &str = "zone";
 const NAME: &str = "__name__";
 /// A metadata label, which the window drops along with the metric name.
@@ -4038,5 +4041,483 @@ fn a_chunk_reaching_back_still_merges() {
         1,
         absorb_rebuilds() - before,
         "a chunk starting before the last stored run was appended rather than merged"
+    );
+}
+
+/// One chunk of the series keyed `key`, carrying `labels` and closing when `last`.
+///
+/// The key and the labels are separate so a test can hold two raw series under one label set: the
+/// collision check reads the labels, and two different keys are what makes such a pair two series.
+fn labelled_chunk(
+    key: &str,
+    labels: &[(&str, &str)],
+    rows: &[(i64, f64)],
+    last: bool,
+) -> RawSeriesChunk {
+    chunk_of(
+        &raw_schema(),
+        key,
+        metric(labels, Some(METRIC)),
+        &times_of(rows),
+        vec![values_of(rows)],
+        last,
+    )
+}
+
+/// The `by (grouped_by)` aggregate of `kind` that the scope side of a split aggregate exports.
+fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
+    let labels: Vec<Arc<str>> = grouped_by.iter().map(|label| Arc::from(*label)).collect();
+    BoundAggregate {
+        kind,
+        group: Grouping::By(labels.into()),
+        stage: AggregateStage::Complete,
+    }
+}
+
+/// The binding of the prefix tree, declaring `tags` as the node's labels.
+fn partial_binding_of(tree: &NativeTree, tags: &[&str]) -> FusedSeriesBinding {
+    binding_of(tree, tags.iter().map(|tag| (*tag).to_string()).collect())
+}
+
+/// The logical node that runs the prefix and exports `kind`'s state, grouped by `host`.
+///
+/// The prefix's one raw input is bound to source `0`, which is the only child the node carries: a
+/// state export is per partition of that one scan, not a second source.
+fn partial_node(kind: AggregateKind) -> FusedSeries {
+    let tree = rate_tree();
+    let binding = partial_binding_of(&tree, &[HOST]);
+    FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        partial_op(kind, &[HOST]),
+    )
+    .expect("the binding matches the prefix tree")
+}
+
+/// The physical node that runs `tree` and exports `op`'s per-partition state over `input`.
+///
+/// `tags` are the labels the node declares, which the exported state layout is built from.
+fn partial_plan(
+    tree: NativeTree,
+    input: Arc<dyn ExecutionPlan>,
+    op: BoundAggregate,
+    tags: &[&str],
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    let binding = partial_binding_of(&tree, tags);
+    FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        op,
+    )?
+    .to_execution_plan(vec![(
+        input,
+        RawLabelSource::Explicit,
+        SeriesOrdering::Contiguous,
+    )])
+}
+
+/// The one state batch a partition exports, with the schema `state`.
+async fn state_of(
+    exec: &Arc<dyn ExecutionPlan>,
+    partition: usize,
+    state: &SchemaRef,
+) -> RecordBatch {
+    let context = SessionContext::default().task_ctx();
+    let batches = exec
+        .execute(partition, Arc::clone(&context))
+        .expect("the partition exists")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the partition's fold ends");
+    assert_eq!(
+        1,
+        batches.len(),
+        "one partition exports one state batch: {:?}",
+        batches
+            .iter()
+            .map(RecordBatch::num_rows)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(state.as_ref(), batches[0].schema().as_ref());
+    batches.into_iter().next().unwrap()
+}
+
+/// The `tag_0` values of one state batch, which are the group's first declared label.
+fn group_label(state: &SchemaRef, batch: &RecordBatch) -> Vec<Option<String>> {
+    batch
+        .column_by_name(state.field(1).name())
+        .expect("the state carries the group label")
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("a group label is text")
+        .iter()
+        .map(|value| value.map(ToOwned::to_owned))
+        .collect()
+}
+
+/// A partial fold exports one state batch per partition, and two partitions may fold one group.
+///
+/// The two partitions hold series whose *prefix* labels differ (`host="web-0"` and `host="web-1"`)
+/// while the aggregate groups by `job` alone, so both fold into the one group `job="shared"`. That
+/// group repeats in the exported state, which is legal because the merge above the exchange collects
+/// both partitions' states; a ledger over the exported rows would refuse the second one. The prefix
+/// labels are distinct on purpose: two partitions holding the same prefix labels would be a
+/// collision, which the test below covers. The first partition's series also arrives in two chunks,
+/// so the fold has to keep what it folded between them.
+#[tokio::test]
+async fn a_partial_fold_exports_state_from_every_partition() {
+    let rows = series_samples(1.0);
+    let first = [(HOST, "web-0"), (JOB, "shared")];
+    let second = [(HOST, "web-1"), (JOB, "shared")];
+    let partitions = vec![
+        frames(&[
+            labelled_chunk("web-0", &first, &rows[..4], false),
+            labelled_chunk("web-0", &first, &rows[4..], true),
+        ]),
+        vec![frame(&labelled_chunk("web-1", &second, &rows, true))],
+    ];
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Count, &[JOB]),
+        &[JOB],
+    )
+    .expect("a rate tree with a partial count is executable");
+
+    assert_eq!(
+        2,
+        exec.properties().output_partitioning().partition_count(),
+        "the node's partition count is its input's"
+    );
+    let state = state_schema(&[JOB.to_string()]);
+    assert_eq!(state, exec.schema(), "the node declares the state layout");
+
+    for partition in 0..2 {
+        let batch = state_of(&exec, partition, &state).await;
+        assert_eq!(
+            GRID_LEN as usize,
+            batch.num_rows(),
+            "the group has one row per grid point, whichever chunks its series arrived in"
+        );
+        assert_eq!(
+            vec![Some("shared".to_string()); GRID_LEN as usize],
+            group_label(&state, &batch),
+            "the exported rows name the group they were folded into"
+        );
+    }
+}
+
+/// Two partitions whose prefix series share one label set and grid points are refused.
+///
+/// The aggregate would fold both into its group, and the merge above would take the two sets of
+/// contributions for the whole group: a series that reached two partitions was never one series.
+/// The two chunks are two raw series - distinct keys - that carry the *same* complete labels, which
+/// is what a split series looks like once the scan has lost track of its identity.
+#[tokio::test]
+async fn a_repeated_prefix_label_set_across_partitions_is_refused_in_state_mode() {
+    let rows = series_samples(1.0);
+    let labels = [(HOST, "web")];
+    let left = labelled_chunk("web-0", &labels, &rows, true);
+    let right = labelled_chunk("web-1", &labels, &rows, true);
+    assert_eq!(
+        left.metric, right.metric,
+        "the two chunks carry one label set"
+    );
+    assert_ne!(
+        left.primary_key, right.primary_key,
+        "the two chunks are two raw series"
+    );
+    let partitions = vec![vec![frame(&left)], vec![frame(&right)]];
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial sum is executable");
+
+    // The ledger is the plan's, so the first partition has to finish claiming before the second
+    // reaches the same label set.
+    state_of(&exec, 0, &state_schema(&[HOST.to_string()])).await;
+    let context = SessionContext::default().task_ctx();
+    let error = exec
+        .execute(1, Arc::clone(&context))
+        .expect("the partition exists")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("both partitions claim the same label set on the same points");
+    assert!(
+        error
+            .to_string()
+            .contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {error}"
+    );
+}
+
+/// An empty tag value and an absent tag are one label set, in state mode too.
+#[tokio::test]
+async fn an_empty_tag_and_an_absent_one_collide_across_partitions_in_state_mode() {
+    let rows = series_samples(1.0);
+    let empty = [(HOST, "web"), (JOB, "")];
+    let absent = [(HOST, "web")];
+    let partitions = vec![
+        vec![frame(&labelled_chunk("web-0", &empty, &rows, true))],
+        vec![frame(&labelled_chunk("web-1", &absent, &rows, true))],
+    ];
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial sum is executable");
+
+    state_of(&exec, 0, &state_schema(&[HOST.to_string()])).await;
+    let context = SessionContext::default().task_ctx();
+    let error = exec
+        .execute(1, Arc::clone(&context))
+        .expect("the partition exists")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect_err("an empty value is no label, so both partitions claim one label set");
+    assert!(
+        error
+            .to_string()
+            .contains("vector cannot contain metrics with the same labelset"),
+        "refused for another reason: {error}"
+    );
+}
+
+/// Prefix series of one label set on disjoint grid points are legal in state mode.
+///
+/// Only a shared point is a collision: two fragments that fill different points of one label set are
+/// both kept in the ordinary mode, and the exported state is where they legitimately meet.
+///
+/// A window is left-open, `(T - 5m, T]`, so a fragment answers at a grid point only when two of its
+/// own samples fall inside that window. The two fragments are spaced for exactly that: the early one
+/// answers at 300s alone, the late one at 540s alone, and neither answers where the other does.
+#[tokio::test]
+async fn disjoint_prefix_points_across_partitions_export_state() {
+    let labels = [(HOST, "web")];
+    // Sample `0` would fall outside the left-open window of grid point 300s, so both of these do.
+    let early = [(SAMPLE_STEP, 60.0), (2 * SAMPLE_STEP, 120.0)];
+    let late = [(470_000, 470.0), (540_000, 540.0)];
+    let partitions = vec![
+        vec![frame(&labelled_chunk("web-0", &labels, &early, true))],
+        vec![frame(&labelled_chunk("web-1", &labels, &late, true))],
+    ];
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec_partitioned(partitions),
+        partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial sum is executable");
+
+    let state = state_schema(&[HOST.to_string()]);
+    for partition in 0..2 {
+        let batch = state_of(&exec, partition, &state).await;
+        assert!(
+            group_label(&state, &batch)
+                .iter()
+                .flatten()
+                .all(|value| value == "web"),
+            "each partition's state names the group it folded"
+        );
+    }
+}
+
+/// Exported state stays charged until the stream that queued it ends, not until the plan does.
+///
+/// The fold is done by the time the state is queued, so the bytes it exported outlive it: the plan
+/// that owns the reservation may already be dropped while the stream still holds batches a consumer
+/// has not read. What keeps them paid for is the stream's own share of the plan's reservation, so the
+/// pool only returns to zero when the stream itself is dropped - and a batch that has left the stream
+/// is no longer charged, because a record batch cannot be charged after the plan and stream that
+/// declared it are gone.
+#[tokio::test]
+async fn an_exported_state_batch_stays_charged_until_its_stream_ends() {
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let exec = partial_plan(
+        rate_tree(),
+        memory_exec(vec![frame(&series_chunk(
+            "web-0",
+            &series_samples(1.0),
+            true,
+        ))]),
+        partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial sum is executable");
+    let mut stream = exec
+        .execute(0, Arc::clone(&context))
+        .expect("the partition exists");
+    // The plan is not needed to read what it already queued.
+    drop(exec);
+
+    let batches = (&mut stream)
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the partition's fold ends");
+    assert_eq!(1, batches.len(), "the state of one partition is one batch");
+    assert!(
+        pool.reserved() > 0,
+        "the exported batch is charged while its stream lives"
+    );
+
+    drop(stream);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the stream's end returns everything the plan still held"
+    );
+    assert_eq!(1, batches.len(), "the batches read are still the test's");
+}
+
+/// A partial node keeps its mode when an optimizer rebuilds it, and another aggregate is another
+/// node.
+#[test]
+fn a_partial_mode_survives_rebuilding_and_is_compared() {
+    let node = partial_node(AggregateKind::Sum);
+    assert!(node.partial_fold().is_some(), "the fixture exports state");
+    let rebuilt = node
+        .with_exprs_and_inputs(Vec::new(), vec![input_plan(frame_schema())])
+        .expect("the rebuilt node is legal");
+    assert!(
+        matches!(rebuilt.partial_fold(), Some(op) if op.kind == AggregateKind::Sum),
+        "rebuilding the node dropped the aggregate it exports"
+    );
+    assert_eq!(node, rebuilt);
+
+    let counted = partial_node(AggregateKind::Count);
+    assert_ne!(node, counted, "another aggregate is another computation");
+    assert_ne!(Some(std::cmp::Ordering::Equal), node.partial_cmp(&counted));
+}
+
+/// A prefix tree that itself reads across series is refused: every partition would fold a part.
+#[test]
+fn a_prefix_that_reads_across_series_is_refused() {
+    let tree = aggregate_tree();
+    let binding = binding(&tree);
+    let error = FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        partial_op(AggregateKind::Sum, &[HOST]),
+    )
+    .expect_err("a prefix that folds a group per partition is not a per-series prefix");
+    assert!(error.to_string().contains("reads across"), "{error}");
+}
+
+/// `constant <op> vector`, bound the way the compiler binds a scalar broadcast: the constant on the
+/// left, and the vector side's samples as the operation's output.
+fn broadcast_left(constant: f64, vector: NativeNode, op: BinaryOp) -> NativeNode {
+    let grid = vector
+        .output
+        .grid()
+        .expect("a broadcast reads one evaluated vector")
+        .clone();
+    let output = vector.output.clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(NativeNode {
+                expr: NativeExpr::Scalar(BoundScalar { value: constant }),
+                output: NativeType::Scalar(grid),
+            }),
+            right: Box::new(vector),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    }
+}
+
+/// A constant broadcast is per-series work, so a partition folds it like any other prefix.
+///
+/// `max(10 - rate(x[5m]))` over the rates `1` and `2` of the two series below folds `9` and `8` of one
+/// group and exports `9`. Reading the constant on the other side exports `-8`, and folding the rate
+/// and subtracting the constant above the merge exports `10 - 2 = 8`, so the answer says where the
+/// operation ran and which operand its constant was.
+#[tokio::test]
+async fn a_constant_broadcast_prefix_exports_the_values_the_constant_computes() {
+    let tree = NativeTree::try_new(broadcast_left(
+        10.0,
+        rate_tree().root().clone(),
+        BinaryOp::Sub,
+    ))
+    .expect("a broadcast over the rate tree is legal");
+    let exec = partial_plan(
+        tree,
+        memory_exec(two_series_frames()),
+        partial_op(AggregateKind::Max, &[]),
+        &[],
+    )
+    .expect("a per-series broadcast is a prefix one partition evaluates on its own");
+
+    let state = state_schema(&[]);
+    let batch = state_of(&exec, 0, &state).await;
+    let values = batch
+        .column_by_name("value")
+        .expect("the state carries the accumulator")
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("an accumulator is Float64");
+    let values: Vec<Option<f64>> = values.iter().collect();
+    assert_eq!(
+        vec![Some(9.0); GRID_LEN as usize],
+        values,
+        "every grid point holds `10 - 1`, the larger of the two series' values"
+    );
+}
+
+/// An input that fails after rows exports no state, and a partition the input lacks is refused.
+#[tokio::test]
+async fn a_failed_input_exports_no_partial_state() {
+    let schema = frame_schema();
+    let batches = one_series_frames();
+    let source = staged(schema.clone(), move || {
+        Box::pin(StagedStream::new(schema.clone(), batches.clone()).error("the source failed"))
+    });
+    let exec = partial_plan(
+        rate_tree(),
+        source,
+        partial_op(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+    )
+    .expect("a rate tree with a partial sum is executable");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the node's partition count is its input's"
+    );
+    let mut stream = exec
+        .execute(0, SessionContext::default().task_ctx())
+        .expect("the node executes");
+    match stream.next().await {
+        Some(Err(error)) => assert!(
+            error.to_string().contains("the source failed"),
+            "reported another error: {error}"
+        ),
+        other => panic!("a failed input exported state: {other:?}"),
+    }
+
+    let error = match exec.execute(1, SessionContext::default().task_ctx()) {
+        Ok(_) => panic!("a partition the input does not have is answered"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("partition"),
+        "refused for another reason: {error}"
     );
 }

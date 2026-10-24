@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{FusedSeries, SeriesDivide};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, SeriesDivide};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -114,8 +114,9 @@ pub struct DistPlannerAnalyzer {
     ///
     /// A region input normally has to be encoded to Substrait before it can leave the frontend, and
     /// [`PlanRewriter::should_expand`] cuts the plan at the first node that does not encode. In
-    /// process, a root `FusedSeries` plan travels as a `LogicalPlan` instead and skips that gate;
-    /// other plans retain the ordinary encoding checks.
+    /// process, a native fused plan (a `FusedSeries` node, or the `AggregateFinalize` merge over one)
+    /// travels as a `LogicalPlan` instead and skips that gate; other plans retain the ordinary
+    /// encoding checks.
     ///
     /// Whoever builds the query engine sets this, once, from the transport it wired. It is neither a
     /// query-time decision nor a property of a region.
@@ -448,7 +449,8 @@ struct PlanRewriter {
     /// Used for the ordinary standalone fast path when the root plan is encodable. It is not
     /// needed when the root itself is the in-process `FusedSeries` exception.
     whole_plan_encodable: bool,
-    /// In-process transport skips the encodability gate only when the rewritten root itself is FusedSeries.
+    /// In-process transport skips the encodability gate only when the rewritten root is the native
+    /// route's whole plan: a `FusedSeries` node, or the `AggregateFinalize` merge of one's state.
     skip_encodability_gate: bool,
     /// Current level in the tree
     level: usize,
@@ -509,16 +511,53 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
 }
 
+/// Whether `plan` is the native route's whole plan: a `FusedSeries` node over its scan, or the
+/// `AggregateFinalize` merge of exactly such a node's partition-local state.
+///
+/// The merge is the one shape that puts a node above the fused producer: it runs on the frontend over
+/// the state every partition exports, and the producer below it still reads its own scan. Every other
+/// plan keeps the ordinary encoding checks.
+///
+/// The producer is checked by what it exports, not only by its node kind: a `FusedSeries` that
+/// answers with computed values is not a merge input, and merging those values as if they were
+/// partitions' contributions would report one partition's answer as the whole group's. The check is
+/// not implied by the constructor either — `with_exprs_and_inputs` hands a node whatever input an
+/// optimizer rebuilt, so a merge can hold a replacement producer its own constructor never saw.
+fn is_in_process_plan(plan: &LogicalPlan) -> bool {
+    if is_fused_series_plan(plan) {
+        return true;
+    }
+    let LogicalPlan::Extension(extension) = plan else {
+        return false;
+    };
+    if !extension.node.as_any().is::<AggregateFinalize>() {
+        return false;
+    }
+    // The merge's own child, as this rewrite walks it: the producer over its scan.
+    let inputs = extension.node.inputs();
+    let [LogicalPlan::Extension(partial)] = inputs.as_slice() else {
+        return false;
+    };
+    let Some(fused) = partial.node.as_any().downcast_ref::<FusedSeries>() else {
+        return false;
+    };
+    fused.partial_fold().is_some()
+        && matches!(
+            partial.node.inputs().as_slice(),
+            [LogicalPlan::TableScan(_)]
+        )
+}
+
 impl PlanRewriter {
     /// `plan` must be the root of the tree that is about to be rewritten, otherwise
     /// [`PlanRewriter::should_expand`] may skip a check it has to perform.
     fn new(plan: &LogicalPlan, in_process_region_transport: bool) -> Self {
+        // An `Explain` wrapper describes the plan below it, which is the route's root here.
         let native_root = match plan {
             LogicalPlan::Analyze(analyze) => analyze.input.as_ref(),
             _ => plan,
         };
-        let skip_encodability_gate =
-            in_process_region_transport && is_fused_series_plan(native_root);
+        let skip_encodability_gate = in_process_region_transport && is_in_process_plan(native_root);
         Self {
             // Preserve the ordinary whole-plan fast path unless this is the in-process root
             // exception: no node in that tree needs an encoding check.

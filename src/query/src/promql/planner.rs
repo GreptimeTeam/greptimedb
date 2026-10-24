@@ -342,7 +342,10 @@ impl PromPlanner {
         // a range function and the math functions over it into one tree: offered any later, the
         // expression has already been split into the nodes those functions would have shared. A
         // shape it does not accept is planned by the existing path exactly as if it were not here.
-        if let Some(plan) = planner.try_plan_native_fused(&stmt.expr).await? {
+        if let Some(plan) = planner
+            .try_plan_native_fused(&stmt.expr, query_engine_state)
+            .await?
+        {
             return planner.strip_tsid_column(plan);
         }
         // `TQL EXPLAIN` wraps the query it explains in an extension node, and a reader asks for that
@@ -351,7 +354,10 @@ impl PromPlanner {
         // the existing path's plan even where the native route is the one that runs. The two
         // `EXPLAIN` forms are therefore offered their body, which is wrapped the same way the
         // existing path wraps it.
-        if let Some(plan) = planner.try_plan_native_fused_explain(&stmt.expr).await? {
+        if let Some(plan) = planner
+            .try_plan_native_fused_explain(&stmt.expr, query_engine_state)
+            .await?
+        {
             return planner.strip_tsid_column(plan);
         }
 
@@ -2435,7 +2441,10 @@ impl PromPlanner {
             ANALYZE_NODE_NAME
             | ANALYZE_VERBOSE_NODE_NAME
             | EXPLAIN_NODE_NAME
-            | EXPLAIN_VERBOSE_NODE_NAME => self.try_plan_native_fused(&children[0]).await?,
+            | EXPLAIN_VERBOSE_NODE_NAME => {
+                self.try_plan_native_fused(&children[0], query_engine_state)
+                    .await?
+            }
             _ => None,
         };
         let plan = match native_plan {
