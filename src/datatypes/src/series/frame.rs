@@ -76,7 +76,7 @@ use crate::series::raw::{RawSeriesChunk, RawTimestamps};
 use crate::series::samples::{
     DenseSamplesRef, FieldSpec, HistogramSamples, Samples, SeriesFields, SeriesSchema,
 };
-use crate::series::{Label, MetricName, invalid_series};
+use crate::series::{Label, SeriesLabels, invalid_series};
 
 const LAYOUT: &str = "greptime.series.layout";
 const CONTENT: &str = "greptime.series.content";
@@ -735,7 +735,7 @@ pub fn pack_raw_series_chunk(
 /// encoded-size measure.
 struct RawFrameRow {
     primary_key: Buffer,
-    metric: Option<MetricName>,
+    metric: Option<SeriesLabels>,
     is_last: bool,
     times: ScalarBuffer<i64>,
     samples: Vec<Samples>,
@@ -1000,7 +1000,7 @@ fn encode_rows(
     if mode == RawLabelMode::Explicit {
         columns.push(Arc::new(
             rows.iter()
-                .map(|row| row.metric.as_ref().and_then(MetricName::name))
+                .map(|row| row.metric.as_ref().and_then(SeriesLabels::name))
                 .collect::<StringArray>(),
         ));
         let DataType::List(label_item) = schema.field(5).data_type() else {
@@ -1252,7 +1252,7 @@ fn decode_raw_series_frame(
                         value: Arc::from(lv.value(i)),
                     })
                     .collect();
-                Some(MetricName::try_new(
+                Some(SeriesLabels::try_new(
                     (!ns.is_null(row)).then(|| Arc::from(ns.value(row))),
                     tags,
                 )?)

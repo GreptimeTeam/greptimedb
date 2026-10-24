@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use datafusion::arrow::array::UInt32Array;
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::HistogramBatchBuilder;
 use datatypes::series::samples::{
     RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
@@ -45,7 +45,7 @@ pub fn aggregate_histograms(
     op: HistogramAggregate,
     schema: &Arc<SeriesSchema>,
     group: &[Series],
-    metric: MetricName,
+    metric: SeriesLabels,
 ) -> Result<Option<Series>> {
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution("histogram aggregation requires an evaluation grid".into())

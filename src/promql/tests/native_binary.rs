@@ -28,7 +28,7 @@ use datatypes::series::samples::{
     FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{Label, MetricName, SeriesOrdering};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
@@ -52,8 +52,8 @@ fn evaluated_schema(grid: &Arc<EvalGrid>) -> Arc<SeriesSchema> {
 }
 
 /// `name{host="h1",job="x"}`, the label set all three inputs of the tree share.
-fn metric(name: &str) -> MetricName {
-    MetricName::try_new(
+fn metric(name: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(name.into()),
         vec![
             Label {

@@ -32,7 +32,7 @@ use datatypes::arrow::datatypes::{DataType, Schema, SchemaRef};
 use datatypes::arrow::ipc::{reader::StreamReader, writer::StreamWriter};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode, raw_series_frame_schema};
 use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
@@ -59,11 +59,11 @@ fn schema() -> Arc<SeriesSchema> {
         eval_grid: None,
     })
 }
-fn metric() -> MetricName {
-    MetricName::try_new(Some(Arc::from("cpu")), vec![]).unwrap()
+fn metric() -> SeriesLabels {
+    SeriesLabels::try_new(Some(Arc::from("cpu")), vec![]).unwrap()
 }
-fn labeled_metric(host: &str) -> MetricName {
-    MetricName::try_new(
+fn labeled_metric(host: &str) -> SeriesLabels {
+    SeriesLabels::try_new(
         Some(Arc::from("cpu")),
         vec![Label {
             name: Arc::from("host"),
@@ -76,7 +76,7 @@ fn chunk_with(
     key: &[u8],
     times: &[i64],
     values: Vec<Option<f64>>,
-    metric: Option<MetricName>,
+    metric: Option<SeriesLabels>,
     last: bool,
 ) -> RawSeriesChunk {
     RawSeriesChunk::try_new(

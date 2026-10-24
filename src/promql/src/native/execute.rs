@@ -33,7 +33,7 @@ use datatypes::series::samples::{
     DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
-use datatypes::series::{MetricName, SeriesOrdering};
+use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::aggregate;
 use crate::grid_series::{
@@ -297,7 +297,7 @@ impl InputId {
 /// belongs to it and still moves forward.
 struct OpenSeries {
     /// The identity of the open series, as the chunk that opened it named it.
-    metric: MetricName,
+    metric: SeriesLabels,
     /// The last absolute position the open series decided, when it decided any.
     last_position: Option<usize>,
 }
@@ -555,7 +555,7 @@ fn label_bytes(labels: &LabelSet) -> usize {
 ///
 /// This is the convention [`label_bytes`] keeps: the payload of the shared strings and one row per
 /// label.
-fn metric_bytes(metric: &MetricName) -> usize {
+fn metric_bytes(metric: &SeriesLabels) -> usize {
     metric.name().map_or(0, |name| name.len())
         + std::mem::size_of_val(metric.tags())
         + metric
@@ -1029,7 +1029,7 @@ struct RetainedInput {
     /// set may be closed more than once -- a node that rewrites labels can make two series one --
     /// so a chunk that starts a series again is not an error, only one that starts it before the
     /// series already open ended, or names another series while it is open.
-    open: Option<(MetricName, usize)>,
+    open: Option<(SeriesLabels, usize)>,
     /// The chunks this operand handed over, in arrival order.
     series: Vec<Series>,
     /// The chunk count at which each logical series closed, exclusive, in arrival order.
@@ -1816,7 +1816,7 @@ impl BroadcastRuntime {
     ///
     /// It is what a series closes under when the operation emptied every position: the labels say
     /// which series closed, and they are the labels the operation produces, not the ones it read.
-    fn output_metric(&self, metric: &MetricName) -> Result<MetricName> {
+    fn output_metric(&self, metric: &SeriesLabels) -> Result<SeriesLabels> {
         if self.drops_labels() {
             drop_metric_name(metric)
         } else {
@@ -1979,7 +1979,7 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
 /// A series whose selection picked no source row still closes exactly once, on a chunk that holds
 /// nothing: the labels say which series closed, and the address says it closed before its first
 /// point, as the empty chunk a window hands out for such a series does.
-fn no_row_chunk(schema: &SeriesSchema, metric: MetricName) -> Result<EvaluatedChunk> {
+fn no_row_chunk(schema: &SeriesSchema, metric: SeriesLabels) -> Result<EvaluatedChunk> {
     let grid = schema.eval_grid.clone().ok_or_else(|| {
         DataFusionError::Execution(
             "an instant selection produces an evaluated chunk, which is addressed on a grid"
@@ -4031,7 +4031,7 @@ fn map_chunk(
 /// series closed, and the axis is empty because no position holds a value. `metric` is the identity
 /// the operation produces — a map drops the name, a filtering comparison keeps it — so the caller
 /// says which, rather than this function deciding for it.
-fn no_row_series(schema: &SeriesSchema, series: &Series, metric: MetricName) -> Result<Series> {
+fn no_row_series(schema: &SeriesSchema, series: &Series, metric: SeriesLabels) -> Result<Series> {
     let grid = series.time.grid().ok_or_else(|| {
         DataFusionError::Execution("a mapped chunk must be addressed on a grid".to_string())
     })?;

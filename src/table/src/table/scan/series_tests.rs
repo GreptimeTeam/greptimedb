@@ -401,7 +401,9 @@ fn chunk(schema: &SeriesSchema) -> RawSeriesChunk {
     RawSeriesChunk::try_new(
         schema,
         Buffer::from(b"complete-key".as_slice()),
-        Some(datatypes::series::MetricName::try_new(Some(Arc::from("cpu_usage")), vec![]).unwrap()),
+        Some(
+            datatypes::series::SeriesLabels::try_new(Some(Arc::from("cpu_usage")), vec![]).unwrap(),
+        ),
         RawTimestamps::try_new(vec![10, 20].into()).unwrap(),
         SeriesFields::one(Samples::from_float(Float64Array::from(vec![
             Some(1.5),

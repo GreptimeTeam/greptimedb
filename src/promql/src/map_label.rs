@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::{Arc, LazyLock};
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{Series, SeriesSchema};
 use regex::Regex;
 
@@ -146,7 +146,7 @@ impl LabelRewrite {
     /// listed any number of times, and every `$` reference of a `label_replace` template can expand
     /// to the whole source value. The bound counts each source once per listing and each `$` as
     /// one whole source value.
-    pub fn written_bytes(&self, metric: &MetricName) -> usize {
+    pub fn written_bytes(&self, metric: &SeriesLabels) -> usize {
         let value = |name: &str| metric.get(name).map_or(0, str::len);
         match &self.0 {
             Change::Replace {
@@ -173,7 +173,7 @@ impl LabelRewrite {
     }
 
     /// Changes `metric` the way the function changes one series.
-    pub fn apply(&self, metric: &mut MetricName) -> Result<()> {
+    pub fn apply(&self, metric: &mut SeriesLabels) -> Result<()> {
         let mut value = String::new();
         match &self.0 {
             Change::Replace {
@@ -278,7 +278,7 @@ fn expand(regex: &Regex, captures: &regex::Captures<'_>, template: &str, out: &m
 }
 
 /// An empty value removes the label, as Prometheus label sets have no empty values.
-fn set_label(metric: &mut MetricName, name: &str, value: &str) -> Result<()> {
+fn set_label(metric: &mut SeriesLabels, name: &str, value: &str) -> Result<()> {
     if value.is_empty() {
         metric.remove(name);
         return Ok(());

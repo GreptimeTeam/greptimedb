@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::MetricName;
+use datatypes::series::SeriesLabels;
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::samples::{DenseSamplesRef, RowCursor, SampleRef, Series, SeriesSchema};
 use datatypes::series::time::{TimeAxis, union_positions};
@@ -102,7 +102,7 @@ pub fn evaluate_histograms(
     // run, as `merge_same_labelset` keeps it.
     let mut index: HashMap<LabelSet, usize> = HashMap::new();
     let mut groups: Vec<Group<'_>> = Vec::new();
-    let mut group_of = |metric: MetricName| {
+    let mut group_of = |metric: SeriesLabels| {
         *index.entry(label_set(&metric)).or_insert_with(|| {
             groups.push(Group::new(metric));
             groups.len() - 1
@@ -232,13 +232,13 @@ pub fn evaluate_histograms(
 /// The series of one label set (`le` aside): classic buckets, and the series of exactly that
 /// label set when it holds native histograms.
 struct Group<'a> {
-    metric: MetricName,
+    metric: SeriesLabels,
     classic: Vec<(f64, &'a Series)>,
     native: Option<&'a Series>,
 }
 
 impl Group<'_> {
-    fn new(metric: MetricName) -> Self {
+    fn new(metric: SeriesLabels) -> Self {
         Self {
             metric,
             classic: Vec::new(),
