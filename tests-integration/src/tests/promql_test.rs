@@ -1885,7 +1885,7 @@ async fn native_marker_rows(output: Output) -> Vec<(i64, String, String, f64)> {
         _ => unreachable!("TQL EVAL returns record batches"),
     };
     let mut rows = Vec::new();
-    for batch in &batches {
+    for batch in batches.iter() {
         let timestamps = batch
             .column_by_name("ts")
             .unwrap()
@@ -2133,8 +2133,8 @@ async fn native_promql_view_fallback_preserves_native_hint() {
     execute_all(&instance, "CREATE TABLE native_view_source (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_view_source VALUES (0, 'a', 2)", QueryContext::arc()).await;
     let ctx = native_query_context(true, 4);
     let expected_extensions = ctx.extensions();
-    // The AST the parser would build for `CREATE VIEW native_view AS TQL EVAL (0, 0, '1s', '5m')
-    // native_view_source`; the statement's spelling is covered by the separate view case.
+    // Build the TQL view programmatically; the SQL syntax and SHOW CREATE round trip belong to the
+    // independent view-persistence PR.
     let create_view = SqlStatement::CreateView(CreateView {
         name: ObjectName(vec![ObjectNamePart::Identifier(Ident::new("native_view"))]),
         columns: vec![],
