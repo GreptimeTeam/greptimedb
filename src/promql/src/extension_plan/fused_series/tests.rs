@@ -47,7 +47,8 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
@@ -55,7 +56,7 @@ use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
 use datafusion::physical_plan::execution_plan::{
     Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
 };
-use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
+use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
@@ -373,6 +374,15 @@ fn memory_exec_partitioned_with(
 /// A physical input producing each of `partitions`' batches in a partition of its own.
 fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
     memory_exec_partitioned_with(frame_schema(), partitions)
+}
+
+/// A task context whose memory pool is `pool`, so the execution's reservations can be observed.
+fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
+        .build()
+        .expect("the runtime environment builds");
+    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
 }
 
 /// A physical input whose one partition's stream `make` builds.
