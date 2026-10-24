@@ -201,32 +201,21 @@ impl TwcsPicker {
                 handles.push(common_runtime::spawn_blocking_compact(move || {
                     let mut picks = Vec::new();
                     if let Some(files) = time_windows.get(&window) {
-                        // Each strategy is discovered independently. A successful L0
-                        // pick must not hide this window's historical/L1 work.
-                        let classes: &[Option<PickClass>] = if picker.pick_history.is_some() {
-                            &[
-                                Some(PickClass::L0Merge),
-                                Some(PickClass::FileReduction),
-                                Some(PickClass::OverlapResolution),
-                            ]
-                        } else {
-                            &[None]
-                        };
-                        for &class in classes {
-                            if let Some(pick) = picker.pick_window(
-                                files,
-                                &WindowPickContext {
-                                    region_id,
-                                    active_window,
-                                    time_window_size,
-                                    region_sequence,
-                                    mapper: &primary_key_mapper,
-                                },
-                                class,
-                            ) {
-                                picks.push((window, pick));
-                            }
-                        }
+                        picks.extend(
+                            picker
+                                .pick_window(
+                                    files,
+                                    &WindowPickContext {
+                                        region_id,
+                                        active_window,
+                                        time_window_size,
+                                        region_sequence,
+                                        mapper: &primary_key_mapper,
+                                    },
+                                )
+                                .into_iter()
+                                .map(|pick| (window, pick)),
+                        );
                     }
                     picks
                 }));
@@ -324,13 +313,9 @@ impl TwcsPicker {
         Ok(output)
     }
 
-    /// Picks the compaction inputs of one window, or `None` if it needs none.
-    fn pick_window(
-        &self,
-        window: &Window,
-        context: &WindowPickContext<'_>,
-        class: Option<PickClass>,
-    ) -> Option<WindowPick> {
+    /// Prepares one window once. Fair discovery exposes independent alternatives;
+    /// stateless/manual discovery retains the first eligible strategy.
+    fn pick_window(&self, window: &Window, context: &WindowPickContext<'_>) -> Vec<WindowPick> {
         let WindowPickContext {
             region_id,
             active_window,
@@ -362,33 +347,38 @@ impl TwcsPicker {
         let (l0_files, l1_files): (Vec<_>, Vec<_>) =
             files.into_iter().partition(|file| file.level() == 0);
         if !self.all_windows_inactive && active_window == Some(window.time_window) {
-            self.pick_active_window(l0_files, l1_files, mapper, class)
+            self.pick_active_window(l0_files, l1_files, mapper)
         } else if window.files.len() < self.inactive_window_trigger_file_num
             && l1_files.len() < self.inactive_window_l1_merge_trigger
         {
-            None
+            Vec::new()
         } else {
             let settling = !self.all_windows_inactive
                 && is_settling_window(window.time_window, active_window, time_window_size);
             let num_l1_files = l1_files.len();
-            self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet, class)
-                .or_else(|| {
-                    if class.is_some_and(|class| class != PickClass::FileReduction)
-                        || self.merge_mode == MergeMode::LastNonNull
-                        || num_l1_files < self.inactive_window_l1_merge_trigger
-                    {
-                        return None;
-                    }
-                    // Include even append-mode files excluded from normal picks:
-                    // a small-file merge must not add conflicts with large peers.
-                    let pick = units::pick_small_l1(&window.files, mapper, self.pick_limits())?;
-                    Some(WindowPick {
-                        class: PickClass::FileReduction,
-                        branch: "inactive:pick_small_l1",
-                        inputs: pick.inputs,
-                        found_runs: pick.units,
-                    })
-                })
+            let mut picks = self.pick_inactive_window(l0_files, l1_files, mapper, settling, quiet);
+            let needs_reduction = if self.pick_history.is_some() {
+                !picks
+                    .iter()
+                    .any(|pick| pick.class == PickClass::FileReduction)
+            } else {
+                picks.is_empty()
+            };
+            if needs_reduction
+                && self.merge_mode != MergeMode::LastNonNull
+                && num_l1_files >= self.inactive_window_l1_merge_trigger
+                // Include even append-mode files excluded from normal picks:
+                // a small-file merge must not add conflicts with large peers.
+                && let Some(pick) = units::pick_small_l1(&window.files, mapper, self.pick_limits())
+            {
+                picks.push(WindowPick {
+                    class: PickClass::FileReduction,
+                    branch: "inactive:pick_small_l1",
+                    inputs: pick.inputs,
+                    found_runs: pick.units,
+                });
+            }
+            picks
         }
     }
 
@@ -399,6 +389,9 @@ impl TwcsPicker {
     /// 2. Otherwise, merge L1 files once they reach the L1 safety trigger. L1
     ///    files are merged separately from L0 files to avoid chained rewrites.
     ///
+    /// Fair discovery considers both strategies; stateless/manual discovery
+    /// stops at the first eligible one.
+    ///
     /// Overlaps are left for the window to resolve once it becomes inactive:
     /// resolving them while data keeps arriving rewrites the window repeatedly,
     /// and leaves a dominant run that blocks the inactive-window merge.
@@ -407,11 +400,9 @@ impl TwcsPicker {
         l0_files: Vec<FileHandle>,
         l1_files: Vec<FileHandle>,
         mapper: &PrimaryKeyRangeMapper,
-        class: Option<PickClass>,
-    ) -> Option<WindowPick> {
-        if class.is_none_or(|class| class == PickClass::L0Merge)
-            && l0_files.len() >= self.trigger_file_num
-        {
+    ) -> Vec<WindowPick> {
+        let mut picks = Vec::new();
+        if l0_files.len() >= self.trigger_file_num {
             let (inputs, found_runs) = pick_candidate_files(
                 l0_files,
                 self.max_output_file_size,
@@ -419,26 +410,29 @@ impl TwcsPicker {
                 mapper,
             );
             if !inputs.is_empty() {
-                return Some(WindowPick {
+                picks.push(WindowPick {
                     class: PickClass::L0Merge,
                     branch: "active:pick_count_first",
                     inputs,
                     found_runs,
                 });
+                if self.pick_history.is_none() {
+                    return picks;
+                }
             }
         }
-        if class.is_some_and(|class| class != PickClass::FileReduction)
-            || l1_files.len() < self.active_window_l1_merge_trigger
+        // Fair discovery must expose L1 even when L0 has an eligible merge.
+        if l1_files.len() >= self.active_window_l1_merge_trigger
+            && let Some(pick) = units::pick_active_l1(&l1_files, mapper, self.pick_limits())
         {
-            return None;
+            picks.push(WindowPick {
+                class: PickClass::FileReduction,
+                branch: "active:pick_l1_file_reduction",
+                inputs: pick.inputs,
+                found_runs: pick.units,
+            });
         }
-        let pick = units::pick_active_l1(&l1_files, mapper, self.pick_limits())?;
-        Some(WindowPick {
-            class: PickClass::FileReduction,
-            branch: "active:pick_l1_file_reduction",
-            inputs: pick.inputs,
-            found_runs: pick.units,
-        })
+        picks
     }
 
     /// An inactive window should converge at a bounded rewrite cost:
@@ -447,6 +441,9 @@ impl TwcsPicker {
     /// 2. Otherwise, merge a closed group of files that resolves overlaps or
     ///    removes files, see [`units::pick_closed_merge`]. Pure file reduction
     ///    waits for the L1 trigger; overlap resolution does not.
+    ///
+    /// Fair discovery keeps the L0 candidate and both closed-merge classes as
+    /// alternatives; stateless/manual discovery retains the fallback order.
     ///
     /// A `settling` window is the one right before the active window. Late data
     /// still lands there, and any rewrite of its overlapping files would be
@@ -471,11 +468,10 @@ impl TwcsPicker {
         mapper: &PrimaryKeyRangeMapper,
         settling: bool,
         quiet: bool,
-        class: Option<PickClass>,
-    ) -> Option<WindowPick> {
+    ) -> Vec<WindowPick> {
         let num_l1_files = l1_files.len();
-        if class.is_none_or(|class| class == PickClass::L0Merge)
-            && !l0_files.is_empty()
+        let mut picks = Vec::new();
+        if !l0_files.is_empty()
             && let Some((inputs, found_runs, branch)) = pick_inactive_l0(
                 l0_files.clone(),
                 (!settling).then_some(l1_files.as_slice()),
@@ -483,46 +479,47 @@ impl TwcsPicker {
                 mapper,
             )
         {
-            return Some(WindowPick {
+            picks.push(WindowPick {
                 class: PickClass::L0Merge,
                 branch,
                 inputs,
                 found_runs,
             });
+            if self.pick_history.is_none() {
+                return picks;
+            }
         }
 
-        if class == Some(PickClass::L0Merge) {
-            return None;
-        }
-        let mut files = l1_files;
-        if class.is_none() {
-            // Retain the legacy mixed closed merge for stateless/manual callers.
-            files.extend(l0_files);
-        }
-        let pick = units::pick_closed_merge_for_class(
-            &files,
-            mapper,
-            ClosedMergeOptions {
-                limits: self.closed_merge_limits(),
-                allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
-                allow_conflicts: !settling,
-                allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
-            },
-            class.map(|class| class == PickClass::FileReduction),
-        )?;
-        let (class, branch) = if pick.dense_fallback {
-            (PickClass::FileReduction, "inactive:dense_file_reduction")
-        } else if pick.reduces_files {
-            (PickClass::FileReduction, "inactive:pick_l1_file_reduction")
-        } else {
-            (PickClass::OverlapResolution, "inactive:pick_l1_overlap")
+        let options = ClosedMergeOptions {
+            limits: self.closed_merge_limits(),
+            allow_file_reduction: num_l1_files >= self.inactive_window_l1_merge_trigger,
+            allow_conflicts: !settling,
+            allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
         };
-        Some(WindowPick {
-            class,
-            branch,
-            inputs: pick.inputs,
-            found_runs: pick.units,
-        })
+        let candidates = if self.pick_history.is_some() {
+            units::pick_closed_merge_by_class(&l1_files, mapper, options)
+        } else {
+            // Retain the legacy mixed closed merge for stateless/manual callers.
+            let mut files = l1_files;
+            files.extend(l0_files);
+            [units::pick_closed_merge(&files, mapper, options), None]
+        };
+        for pick in candidates.into_iter().flatten() {
+            let (class, branch) = if pick.dense_fallback {
+                (PickClass::FileReduction, "inactive:dense_file_reduction")
+            } else if pick.reduces_files {
+                (PickClass::FileReduction, "inactive:pick_l1_file_reduction")
+            } else {
+                (PickClass::OverlapResolution, "inactive:pick_l1_overlap")
+            };
+            picks.push(WindowPick {
+                class,
+                branch,
+                inputs: pick.inputs,
+                found_runs: pick.units,
+            });
+        }
+        picks
     }
 
     fn pick_limits(&self) -> PickLimits {
@@ -3326,6 +3323,57 @@ mod tests {
             expected,
             output[0].inputs.iter().map(FileHandle::file_id).collect()
         );
+    }
+
+    #[rstest::rstest]
+    #[case::active(0, MergeMode::LastRow, "active:pick_l1_file_reduction")]
+    #[case::inactive(10, MergeMode::LastRow, "inactive:pick_l1_file_reduction")]
+    #[case::settling_fallback(1, MergeMode::LastRow, "inactive:pick_small_l1")]
+    #[case::settling_last_non_null(1, MergeMode::LastNonNull, "")]
+    fn test_window_discovery_keeps_l1_alongside_l0(
+        #[case] active_window: i64,
+        #[case] merge_mode: MergeMode,
+        #[case] l1_branch: &str,
+    ) {
+        let files = priority_test_files(0, 0, 40, false)
+            .into_iter()
+            .chain(priority_test_files(0, 1, 20, true))
+            .collect::<Vec<_>>();
+        let windows = assign_to_windows(files.iter(), 1);
+        let mapper = primary_key_mapper_for_test();
+        let context = WindowPickContext {
+            region_id: RegionId::from_u64(1),
+            active_window: Some(active_window),
+            time_window_size: Some(1),
+            region_sequence: 100,
+            mapper: &mapper,
+        };
+        let mut picker = priority_test_picker(4);
+        picker.merge_mode = merge_mode;
+        let legacy = picker.pick_window(&windows[&0], &context);
+        assert_eq!(1, legacy.len());
+        assert_eq!(PickClass::L0Merge, legacy[0].class);
+
+        picker.pick_history = Some(Arc::new(Mutex::new(PickHistory::default())));
+        let picks = picker.pick_window(&windows[&0], &context);
+        assert_eq!(if l1_branch.is_empty() { 1 } else { 2 }, picks.len());
+        assert_eq!(PickClass::L0Merge, picks[0].class);
+        if !l1_branch.is_empty() {
+            assert_eq!(PickClass::FileReduction, picks[1].class);
+            assert_eq!(l1_branch, picks[1].branch);
+            assert_eq!(
+                files
+                    .iter()
+                    .filter(|file| file.level() == 1)
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>(),
+                picks[1]
+                    .inputs
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>()
+            );
+        }
     }
 
     #[tokio::test]
