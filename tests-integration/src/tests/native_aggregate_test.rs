@@ -343,9 +343,10 @@ struct AggregateCase {
     expected: Vec<ResultRow>,
     /// Whether every one of the four scan partitions must report a folded value.
     per_partition: bool,
-    /// The number of values all four partitions' producers must report together, when the answer
-    /// fixes that figure: one value per series that folded, which is what the counter fixture's
-    /// queries make checkable. [`None`] leaves only "some value" to the assertion.
+    /// The number of values the partitions' producers must report together, when the answer fixes
+    /// that figure: one value per series that folded, which is what the counter fixture's queries
+    /// make checkable. With `per_partition` those are all four partitions' values and their spread
+    /// is bounded too. `None` leaves only "some value" to the assertion.
     root_values: Option<usize>,
     /// The `partial state:` line the producer must show, when the fixture fixes which aggregate the
     /// split cut out. The producer then exports that aggregate's *state*, not an answer, so a
@@ -371,22 +372,6 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
         per_partition,
         root_values: None,
         partial_state: None,
-    }
-}
-
-/// A case whose producer must additionally export the state of the aggregate the split cut out.
-///
-/// Used for aggregates over the gauge table too, so the state assertion does not depend on the
-/// counter table's nonzero values: what the producer exports is checked wherever the fixture fixes
-/// the innermost aggregate of the tree.
-fn state_case(
-    promql: String,
-    expected: &[(&[(&str, &str)], f64)],
-    partial_state: &'static str,
-) -> AggregateCase {
-    AggregateCase {
-        partial_state: Some(partial_state),
-        ..case(promql, expected, true)
     }
 }
 
@@ -933,13 +918,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     }
     if let Some(root_values) = case.root_values {
         // One value per series that folded, so the partitions' counts add up to the number of series
-        // the scan selected - every counter series, or only the ones a matcher kept. Over `k`
-        // nonempty partitions that leaves the values split as evenly as `k` positive counts allow,
-        // and no partition holding more than `root_values - (k - 1)`: a group of three series
-        // (`count by (job)` below reports three for `job = a`) therefore cannot sit in one
-        // partition, so the group's states have to be merged across at least two of them. `k` is
-        // counted rather than assumed: a matcher can leave a partition with nothing to fold, and
-        // then the values it dropped are the ones another partition does not have to hold.
+        // the scan selected - every counter series, or only the ones a matcher kept.
         let counts = per_partition
             .iter()
             .map(|values| values.unwrap_or(0))
@@ -950,20 +929,24 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
             "`{query}`: the partitions must fold one value per selected series, {root_values} in \
              all, got {counts:?}"
         );
-        let nonempty = counts.iter().filter(|count| **count > 0).count();
-        assert!(
-            nonempty > 1,
-            "`{query}`: the bound below says how the folded series are spread over the scan \
-             partitions, so more than one partition has to fold a value, got {counts:?}"
-        );
-        let largest = counts.iter().copied().max().unwrap_or(0);
-        assert_eq!(
-            root_values - (nonempty - 1),
-            largest,
-            "`{query}`: {root_values} values over {nonempty} nonempty partitions leave no \
-             partition holding more than {}, got {counts:?}",
-            root_values - (nonempty - 1)
-        );
+        // A case whose four partitions are all asserted nonempty above splits those values as
+        // evenly as four positive counts allow, so no partition holds more than
+        // `root_values - (SCAN_PARTITIONS - 1)`: a group of three series (`count by (job)` below
+        // reports three for `job = a`) therefore cannot sit in one partition, and the group's
+        // states have to be merged across at least two of them. A case a matcher narrows pins only
+        // the total: which partitions keep a selected series depends on how the scan ranges were
+        // spread, and the answer itself - not a bound on the split - is what shows the unselected
+        // series were dropped.
+        if case.per_partition {
+            let largest = counts.iter().copied().max().unwrap_or(0);
+            assert_eq!(
+                root_values - (SCAN_PARTITIONS - 1),
+                largest,
+                "`{query}`: {root_values} values over {SCAN_PARTITIONS} nonempty partitions leave \
+                 no partition holding more than {}, got {counts:?}",
+                root_values - (SCAN_PARTITIONS - 1)
+            );
+        }
     }
 }
 
@@ -1005,11 +988,14 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // `avg by (job)` the split cut out: what a partition exports is that aggregate's state, not
         // the group's mean. The counter table's cases below are the ones whose answers can tell a
         // merged state from a finished one.
-        state_case(
-            format!("avg by (job) ({GAUGE_TABLE})"),
-            &by_job(6.0, 6.0),
-            "partial state: avg by (job) Complete",
-        ),
+        AggregateCase {
+            partial_state: Some("partial state: avg by (job) Complete"),
+            ..case(
+                format!("avg by (job) ({GAUGE_TABLE})"),
+                &by_job(6.0, 6.0),
+                true,
+            )
+        },
         case(
             format!("count by (job) ({GAUGE_TABLE})"),
             &by_job(3.0, 2.0),
@@ -1099,10 +1085,10 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // `region = us-west-2` files and the series left in the memtable range is `us-east-1`, so
         // this selects four of the five scan ranges: `job = a` keeps its 1, 3 and 5 - nine - while
         // `job = b` keeps only `h4`'s 2, where the case above answers 6. The pruned range still
-        // runs, and its partition may end up holding the rows the matcher dropped and nothing else,
-        // so `per_partition` is left off: what is pinned is that exactly the four selected series
-        // fold - `COUNTER_SERIES.len() - 1` values over however many partitions stayed nonempty -
-        // and that the bound the earlier cases set on the largest share still holds.
+        // runs and may leave its partition with nothing to fold, so `per_partition` is left off and
+        // only the total is pinned: one value for each of the four selected series. The answer's
+        // labels and values say which series survived, and every case here still requires the
+        // producer to read the four-partition scan.
         AggregateCase {
             root_values: Some(COUNTER_SERIES.len() - 1),
             partial_state: Some("partial state: sum by (job) Complete"),
