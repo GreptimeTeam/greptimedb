@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use self::read_bench::run_read_bench;
-use self::storage::{enforce_storage_thresholds, run_storage_inspection};
+use self::storage::{enforce_storage_thresholds, exact_files_failed, run_storage_inspection};
 use crate::query_regression_runner::model::DestinationConfig;
 use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::{
@@ -103,14 +103,30 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
                 destination.as_deref(),
                 storage,
             )?;
+            // Checked before the read-bench: a directory that still holds
+            // obsolete compaction inputs must not be benchmarked or reported as
+            // an accepted comparison.
+            let layout_failed = exact_files_failed(storage, &inspection);
+            if layout_failed {
+                println!(
+                    "query_regression_runner: {name}: inspected file count does not match exact_files; skipping read_bench"
+                );
+            }
             let bench_dir = bench_root.join(name).join("read_bench");
-            let read_bench = run_read_bench(
-                &args.candidate_bin,
-                &data_home,
-                &bench_dir,
-                remote.read_bench.as_ref(),
-                &inspection,
-            )?;
+            let read_bench = if layout_failed {
+                json!({
+                    "status": "skipped",
+                    "reason": "inspected file set violates the exact layout checks",
+                })
+            } else {
+                run_read_bench(
+                    &args.candidate_bin,
+                    &data_home,
+                    &bench_dir,
+                    remote.read_bench.as_ref(),
+                    &inspection,
+                )?
+            };
             let inspection_failed = inspection["status"] == "failed";
             let bench_failed = read_bench["status"] == "failed";
             let target = target
@@ -118,7 +134,7 @@ pub(super) async fn run_finalize_remote(args: FinalizeRemoteArgs) -> Result<()> 
                 .ok_or("report target must be an object")?;
             target.insert("storage_inspection".to_string(), inspection.clone());
             target.insert("read_bench".to_string(), read_bench);
-            if inspection_failed || bench_failed {
+            if inspection_failed || bench_failed || layout_failed {
                 target.insert("status".to_string(), json!("failed"));
             }
             inspections.push(inspection);
@@ -174,6 +190,7 @@ fn is_storage_threshold_entry(threshold: &Value) -> bool {
             name,
             "min_files"
                 | "min_files_with_column"
+                | "exact_files"
                 | "max_total_file_size_bytes"
                 | "max_column_compressed_size_bytes"
                 | "max_column_uncompressed_size_bytes"
