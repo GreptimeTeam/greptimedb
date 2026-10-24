@@ -44,6 +44,19 @@
 //! partial states that only a merge over *all* of them turns into `sum`, `avg`, `count` and
 //! `stddev` - while the gauge queries keep covering the shapes with round answers.
 //!
+//! The counter table carries one tag the gauge table does not, `region`: the four flushed series -
+//! the four files - are in one region and the series left in the memtable range is in another, so
+//! one query can name a matcher (`{region="us-west-2"}`) that only four of the five scan ranges
+//! satisfy. No other counter query reads that tag: an aggregate drops the labels it does not group
+//! by, so their answers are the ones the untagged fixture gives.
+//!
+//! A query the native route declines is checked the other way round. [`check_fallback_case`] runs
+//! shapes the compiler has no node for - `time()`, `scalar(v)`, a fold over two sources and a
+//! subquery - with the native request on and with it off, and requires that no native node ran in
+//! either plan and that both runs report rows derived from the fixture by hand. A hint that quietly
+//! took the route for one of them would show a fused producer or a frontend merge in the plans that
+//! executed, which is what is observed.
+//!
 //! A binary operation whose sibling is a literal scalar is carried by the split on either side of
 //! the fold: below the aggregate it is computed in the per-series prefix (`sum(8 * rate(...))`,
 //! `max(10 - rate(...))`), and above it the merge's suffix rebuilds it over the merged value with
@@ -51,7 +64,8 @@
 //! `-sum(rate(...))`). Deliberately not covered yet: the aggregate split carries a literal scalar
 //! as its only binary sibling, so a computed scalar (`scalar(...)`, `time()`) or a whole-vector
 //! combination such as `sort`, `absent` or `and`/`or`/`unless` beside the aggregate keeps the
-//! existing plan.
+//! existing plan. [`check_fallback_case`] pins that the computed scalars do, and that a fold over a
+//! second source and a subquery keep it too.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -149,6 +163,16 @@ const COUNTER_SERIES: [(&str, &str, f64); 5] = [
     ("b", "h4", 300.0),
     ("b", "h5", 600.0),
 ];
+
+/// The `region` tag of the four counter series that were flushed, one series per file.
+///
+/// Only [`COUNTER_TABLE`] carries the tag, and only the matcher case reads it: the four flushed
+/// series are in this region, so `{region="us-west-2"}` selects the four files and drops the series
+/// the memtable range holds. Every other counter query aggregates the tag away.
+const COUNTER_WEST_REGION: &str = "us-west-2";
+/// The `region` tag of the counter series that stays in the memtable range: `job = b`,
+/// `instance = h5`, whose rate is 4.
+const COUNTER_EAST_REGION: &str = "us-east-1";
 
 /// Observes the physical plan each query engine is about to execute, and keeps it.
 ///
@@ -350,6 +374,22 @@ fn case(promql: String, expected: &[(&[(&str, &str)], f64)], per_partition: bool
     }
 }
 
+/// A case whose producer must additionally export the state of the aggregate the split cut out.
+///
+/// Used for aggregates over the gauge table too, so the state assertion does not depend on the
+/// counter table's nonzero values: what the producer exports is checked wherever the fixture fixes
+/// the innermost aggregate of the tree.
+fn state_case(
+    promql: String,
+    expected: &[(&[(&str, &str)], f64)],
+    partial_state: &'static str,
+) -> AggregateCase {
+    AggregateCase {
+        partial_state: Some(partial_state),
+        ..case(promql, expected, true)
+    }
+}
+
 /// A case over [`COUNTER_TABLE`], which additionally pins the values the four partitions fold and
 /// the state the producer exports.
 ///
@@ -428,6 +468,20 @@ fn create_table_sql(table: &str) -> String {
     )
 }
 
+/// The DDL of [`COUNTER_TABLE`]: [`create_table_sql`]'s columns plus the `region` tag.
+///
+/// The tag is part of the primary key, so it is a label the raw-series scan reports and a matcher
+/// can select, and it costs the other counter queries nothing: an aggregate that does not group by
+/// it drops it. Only the counter table carries it, because only one counter query reads it; the
+/// gauge table keeps the shape [`create_table_sql`] builds for every fixture table.
+fn counter_table_sql() -> String {
+    format!(
+        "CREATE TABLE {COUNTER_TABLE} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, \
+         region STRING, v DOUBLE, PRIMARY KEY (job, instance, region)) WITH \
+         ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')"
+    )
+}
+
 /// Fills the fixture tables.
 ///
 /// The gauge table gets one flush per series but the last, so four files and one memtable range
@@ -435,10 +489,12 @@ fn create_table_sql(table: &str) -> String {
 /// series'. The counter table is filled the same way, with the same keys and the same flush after
 /// each of the first four series, so the scan sees the same five series in the same four files and
 /// one memtable range - but its samples are the two of [`COUNTER_SERIES`], [`COUNTER_STEP_SECS`]
-/// apart and 140s and 200s before [`EVAL_SECS`]. The range table gets one series whose samples are
-/// 390s apart: both are inside a 10m range at [`EVAL_SECS`] and the older one is outside the default
-/// 5m lookback, so a query that reads its own range counts two samples where one that used the
-/// lookback would count one.
+/// apart and 140s and 200s before [`EVAL_SECS`], and its rows carry the `region` tag of the file
+/// they were flushed into ([`COUNTER_WEST_REGION`]) or, for the series left in the memtable range,
+/// [`COUNTER_EAST_REGION`]. The range table gets one series whose samples are 390s apart: both are
+/// inside a 10m range at [`EVAL_SECS`] and the older one is outside the default 5m lookback, so a
+/// query that reads its own range counts two samples where one that used the lookback would count
+/// one.
 async fn setup_fixture(instance: &Arc<Instance>) {
     execute_sql(instance, &create_table_sql(GAUGE_TABLE)).await;
     for (index, (job, host, v)) in GAUGE_SERIES.iter().enumerate() {
@@ -457,19 +513,26 @@ async fn setup_fixture(instance: &Arc<Instance>) {
         }
     }
 
-    execute_sql(instance, &create_table_sql(COUNTER_TABLE)).await;
+    execute_sql(instance, &counter_table_sql()).await;
     let (counter_first, counter_second) = (
         COUNTER_FIRST_SECS * 1000,
         (COUNTER_FIRST_SECS + COUNTER_STEP_SECS) * 1000,
     );
     for (index, (job, host, increase)) in COUNTER_SERIES.iter().enumerate() {
         let second_value = COUNTER_FIRST_VALUE + increase;
+        // The four flushed series are the ones the matcher case selects; the series that stays in
+        // the memtable range is the only one in the other region.
+        let region = if index + 1 < COUNTER_SERIES.len() {
+            COUNTER_WEST_REGION
+        } else {
+            COUNTER_EAST_REGION
+        };
         execute_sql(
             instance,
             &format!(
-                "INSERT INTO {COUNTER_TABLE} (ts, job, instance, v) VALUES \
-                 ({counter_first}, '{job}', '{host}', {COUNTER_FIRST_VALUE:?}), \
-                 ({counter_second}, '{job}', '{host}', {second_value:?})"
+                "INSERT INTO {COUNTER_TABLE} (ts, job, instance, region, v) VALUES \
+                 ({counter_first}, '{job}', '{host}', '{region}', {COUNTER_FIRST_VALUE:?}), \
+                 ({counter_second}, '{job}', '{host}', '{region}', {second_value:?})"
             ),
         )
         .await;
@@ -726,11 +789,79 @@ fn assert_finalize_reads_region_state(
         1, boundary_partitions,
         "{context}: one region is read, so the boundary exposes one output partition:\n{plan}"
     );
+    // What the producer exports is named here, column by column, before the merge's input schema is
+    // compared with it: two schemas that agree on finished values would agree with each other just
+    // as well, and a merge over answers is not the bridge this case is about. The state layout is
+    // the metric name, one column per tag, the point and field a value belongs to, the four
+    // accumulators and the incremental-mean flag; the tag count is read off the schema, so the
+    // assertion holds for both fixtures without repeating either tag list.
+    const STATE_ACCUMULATORS: [&str; 5] =
+        ["value", "mean", "compensation", "count", "incremental_mean"];
+    const STATE_POSITION: [&str; 2] = ["point", "field"];
+    let state_columns = producer
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    let fixed_columns = 1 + STATE_POSITION.len() + STATE_ACCUMULATORS.len();
+    assert!(
+        state_columns.len() >= fixed_columns,
+        "{context}: the producer must export aggregate state, but its {} columns are \
+         {state_columns:?}:\n{plan}",
+        state_columns.len()
+    );
+    let tags = state_columns.len() - fixed_columns;
+    let mut expected_columns = Vec::with_capacity(state_columns.len());
+    expected_columns.push("metric_name".to_string());
+    expected_columns.extend((0..tags).map(|at| format!("tag_{at}")));
+    expected_columns.extend(STATE_POSITION.map(str::to_string));
+    expected_columns.extend(STATE_ACCUMULATORS.map(str::to_string));
+    assert_eq!(
+        expected_columns, state_columns,
+        "{context}: the producer must export the aggregate state layout, not one value per \
+         group:\n{plan}"
+    );
     assert_eq!(
         producer.schema(),
         merge_input.schema(),
         "{context}: the merge must read the state schema the region producer exports:\n{plan}"
     );
+}
+
+/// Checks one query the native route declines: it must stay declined on both routes, and both must
+/// answer what the fixture derives by hand.
+///
+/// The native request is on for one run and off for the other, so the hint being asked for and the
+/// hint being absent are both exercised: neither plan may hold a fused producer or a frontend merge,
+/// and the rows - labels, evaluation time, values and their multiplicity - are the same hand-derived
+/// ones for both. The observer is asked to have seen a plan at all, because a run that handed nothing
+/// over would otherwise satisfy "no native node" without observing anything.
+async fn check_fallback_case(
+    instance: &Arc<Instance>,
+    observer: &NativePlanObserver,
+    case: &AggregateCase,
+) {
+    let promql = case.promql.as_str();
+    let query = tql_eval(promql);
+    for native in [false, true] {
+        let route = if native { "native" } else { "legacy" };
+        let mark = observer.mark();
+        let (result, capture) = run_query(instance, promql, native, observer).await;
+        assert!(
+            observer.mark() > mark,
+            "`{query}`: the {route} run handed no plan to the observer, so nothing about the plan \
+             that ran was observed"
+        );
+        assert!(
+            capture.fused.is_empty() && capture.finalize.is_empty(),
+            "`{query}`: the {route} run must keep the existing plan, but the plans that ran held {} \
+             fused producers and {} frontend merges",
+            capture.fused.len(),
+            capture.finalize.len()
+        );
+        assert_rows(&result.rows, &case.expected, &format!("{route} `{query}`"));
+    }
 }
 
 /// Checks one case on both routes: the legacy run first, then the native one.
@@ -801,33 +932,37 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
         );
     }
     if let Some(root_values) = case.root_values {
-        // One value per series that folded, so the four partitions' counts add up to the fixture's
-        // series count. With every partition nonempty that leaves `root_values` split as evenly as
-        // four positive counts allow, and no partition holding more than that: a group of three
-        // series (`count by (job)` below reports three for `job = a`) therefore cannot sit in one
-        // partition, so the group's states have to be merged across at least two of them.
+        // One value per series that folded, so the partitions' counts add up to the number of series
+        // the scan selected - every counter series, or only the ones a matcher kept. Over `k`
+        // nonempty partitions that leaves the values split as evenly as `k` positive counts allow,
+        // and no partition holding more than `root_values - (k - 1)`: a group of three series
+        // (`count by (job)` below reports three for `job = a`) therefore cannot sit in one
+        // partition, so the group's states have to be merged across at least two of them. `k` is
+        // counted rather than assumed: a matcher can leave a partition with nothing to fold, and
+        // then the values it dropped are the ones another partition does not have to hold.
         let counts = per_partition
             .iter()
             .map(|values| values.unwrap_or(0))
             .collect::<Vec<_>>();
-        assert!(
-            counts.iter().all(|count| *count > 0),
-            "`{query}`: all {SCAN_PARTITIONS} scan partitions must fold a counter series, got \
-             {counts:?}"
-        );
         assert_eq!(
             root_values,
             counts.iter().sum::<usize>(),
-            "`{query}`: the partitions must fold one value per counter series, {root_values} in \
+            "`{query}`: the partitions must fold one value per selected series, {root_values} in \
              all, got {counts:?}"
+        );
+        let nonempty = counts.iter().filter(|count| **count > 0).count();
+        assert!(
+            nonempty > 1,
+            "`{query}`: the bound below says how the folded series are spread over the scan \
+             partitions, so more than one partition has to fold a value, got {counts:?}"
         );
         let largest = counts.iter().copied().max().unwrap_or(0);
         assert_eq!(
-            root_values - (SCAN_PARTITIONS - 1),
+            root_values - (nonempty - 1),
             largest,
-            "`{query}`: {root_values} values over {SCAN_PARTITIONS} nonempty partitions leave no \
+            "`{query}`: {root_values} values over {nonempty} nonempty partitions leave no \
              partition holding more than {}, got {counts:?}",
-            root_values - (SCAN_PARTITIONS - 1)
+            root_values - (nonempty - 1)
         );
     }
 }
@@ -866,10 +1001,14 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             &by_job(18.0, 12.0),
             true,
         ),
-        case(
+        // The gauge's groups average to 6 and 6, and the producer's plan line has to name the
+        // `avg by (job)` the split cut out: what a partition exports is that aggregate's state, not
+        // the group's mean. The counter table's cases below are the ones whose answers can tell a
+        // merged state from a finished one.
+        state_case(
             format!("avg by (job) ({GAUGE_TABLE})"),
             &by_job(6.0, 6.0),
-            true,
+            "partial state: avg by (job) Complete",
         ),
         case(
             format!("count by (job) ({GAUGE_TABLE})"),
@@ -921,13 +1060,22 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         // folds them together, so the answers are only reachable when every partition's state
         // arrives: `count` reports 3 and 2, and `avg`/`stddev` fold states that do not decompose
         // into per-partition values. `job = a`'s three series cannot all be in one of the four
-        // partitions - the per-partition value counts asserted for every counter case here rule
-        // that out - so its mean and its standard deviation are merged across at least two
-        // partitions. A standard deviation finished per partition and then averaged would report
-        // 0.5 or 1.0 for the 2+1 splits the counts leave possible, never sqrt(8/3).
+        // partitions - the per-partition counts asserted for the counter cases that read every
+        // series rule that out - so its mean and its standard deviation are merged across at least
+        // two partitions. A standard deviation finished per partition and then averaged would
+        // report 0.5 or 1.0 for the 2+1 splits the counts leave possible, never sqrt(8/3).
         counter_case(
             format!("sum(rate({COUNTER_TABLE}[5m]))"),
             &[(&[], 15.0)],
+            "partial state: sum by () Complete",
+        ),
+        // The same sum with a literal scalar above the fold: the merge's suffix doubles the merged
+        // 15 to 30, where a suffix run over one partition's share - at most 10 of the 15 - would
+        // answer at most 20, and a suffix that divided instead would answer 7.5. The cut is still
+        // the ungrouped `sum`, which the producer's plan line names.
+        counter_case(
+            format!("sum(rate({COUNTER_TABLE}[5m])) * 2"),
+            &[(&[], 30.0)],
             "partial state: sum by () Complete",
         ),
         counter_case(
@@ -944,6 +1092,25 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             ..case(
                 format!("sum(rate({COUNTER_TABLE}{{job=\"a\"}}[5m]))"),
                 &[(&[], 9.0)],
+                false,
+            )
+        },
+        // A matcher on the tag only the counter table carries. The four flushed series are the four
+        // `region = us-west-2` files and the series left in the memtable range is `us-east-1`, so
+        // this selects four of the five scan ranges: `job = a` keeps its 1, 3 and 5 - nine - while
+        // `job = b` keeps only `h4`'s 2, where the case above answers 6. The pruned range still
+        // runs, and its partition may end up holding the rows the matcher dropped and nothing else,
+        // so `per_partition` is left off: what is pinned is that exactly the four selected series
+        // fold - `COUNTER_SERIES.len() - 1` values over however many partitions stayed nonempty -
+        // and that the bound the earlier cases set on the largest share still holds.
+        AggregateCase {
+            root_values: Some(COUNTER_SERIES.len() - 1),
+            partial_state: Some("partial state: sum by (job) Complete"),
+            ..case(
+                format!(
+                    "sum by (job) (rate({COUNTER_TABLE}{{region=\"{COUNTER_WEST_REGION}\"}}[5m]))"
+                ),
+                &by_job(9.0, 2.0),
                 false,
             )
         },
@@ -1031,5 +1198,41 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     ];
     for case in &cases {
         check_case(&instance, &observer, case).await;
+    }
+
+    // The shapes the native compiler declines, each declined for its own reason, and each checked on
+    // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
+    // must answer what the fixture derives by hand.
+    //
+    // `time()` is the evaluation instant and nothing else, so the single row is at `EVAL_MILLIS` and
+    // carries `EVAL_SECS`. `scalar` reports the one value present at a point only when exactly one
+    // series is present at it, so the five counter series make it NaN; a route that folded one
+    // partition at a time would report the number of whichever partition held a single series, so
+    // the NaN also says the whole vector was read at once. The division folds two *different* tables
+    // - 15 over 30 - and a subquery evaluates its own body on a grid of its own: both read across
+    // series and neither can be answered by a producer per partition, so both keep the existing
+    // plan. The subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each
+    // of which the same extrapolated rate answers 15 - both samples stay further from the window's
+    // ends than the 66s threshold - so the maximum is 15 as well.
+    let fallback_cases = [
+        case("time()".to_string(), &[(&[], EVAL_SECS as f64)], false),
+        case(
+            format!("scalar({COUNTER_TABLE})"),
+            &[(&[], f64::NAN)],
+            false,
+        ),
+        case(
+            format!("sum(rate({COUNTER_TABLE}[5m])) / sum({GAUGE_TABLE})"),
+            &[(&[], 15.0 / 30.0)],
+            false,
+        ),
+        case(
+            format!("max_over_time((sum(rate({COUNTER_TABLE}[5m])))[2s:1s])"),
+            &[(&[], 15.0)],
+            false,
+        ),
+    ];
+    for case in &fallback_cases {
+        check_fallback_case(&instance, &observer, case).await;
     }
 }
