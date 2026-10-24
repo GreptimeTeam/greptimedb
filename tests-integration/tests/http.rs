@@ -47,6 +47,7 @@ use common_frontend::slow_query_event::{
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::metrics::MetricValue;
 use datatypes::arrow::array::{
     Array as _, Float64Array, StringArray, StringViewArray, TimestampMillisecondArray,
 };
@@ -70,6 +71,7 @@ use pipeline::{
 use prost::Message;
 use query::options::QueryOptions;
 use query::parser::PromQuery;
+use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
 use rstest_reuse::apply;
 use serde_json::{Value, json};
 use servers::http::handler::HealthResponse;
@@ -1582,7 +1584,21 @@ fn assert_native_plan(
         1,
         "{context}: a vector must read exactly one scan: {scans:?}"
     );
-    let scan = &fused["children"][0];
+    let mut scan = &fused["children"][0];
+    // An observed optional transparent wrapper that preserves the scan's partition layout; any
+    // other node between the fused node and its scan is rejected.
+    if scan["name"] == "CooperativeExec" {
+        let children = scan["children"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{context}: the cooperative wrapper has no child: {scan}"));
+        assert_eq!(
+            children.len(),
+            1,
+            "{context}: the cooperative wrapper reads {} children: {scan}",
+            children.len()
+        );
+        scan = &children[0];
+    }
     assert_eq!(
         scan["name"], "SeriesScanExec",
         "{context}: the fused node's child is not the scan it reads: {fused}"
@@ -1605,6 +1621,8 @@ fn assert_native_plan(
     );
     // Every partition the scan exposes did its own work: a gather of the raw input would leave the
     // partitions without the input figure, and a partition that never ran would leave both at zero.
+    // These are input figures: the JSON drops `metric.partition()`, so it cannot say which partition
+    // produced which values.
     let metrics = fused["metrics"]
         .as_object()
         .unwrap_or_else(|| panic!("{context}: the fused node reports no metrics: {fused}"));
@@ -1627,6 +1645,68 @@ fn assert_native_plan(
         );
     }
     fused
+}
+
+/// Checks that the fused node that actually ran answered the whole result, one partition at a time.
+///
+/// The JSON drops `metric.partition()`, so which partition produced which values is only on the
+/// captured node.
+fn assert_native_partition_output(
+    fused: &Arc<dyn ExecutionPlan>,
+    scan_partitions: Option<usize>,
+    expected_rows: usize,
+    context: &str,
+) {
+    // A constant answers on the one partition it has.
+    let partitions = scan_partitions.unwrap_or(1);
+    let output_partitions = fused.output_partitioning().partition_count();
+    assert_eq!(
+        output_partitions, partitions,
+        "{context}: the fused node runs {output_partitions} partitions, not {partitions}"
+    );
+    if scan_partitions.is_some() {
+        let children = fused.children();
+        assert_eq!(
+            children.len(),
+            1,
+            "{context}: the fused node reads {} children, not one",
+            children.len()
+        );
+        let child_partitions = children[0].output_partitioning().partition_count();
+        assert_eq!(
+            child_partitions, partitions,
+            "{context}: the fused node's one child runs {child_partitions} partitions, not \
+             {partitions}"
+        );
+    }
+    let metrics = fused
+        .metrics()
+        .unwrap_or_else(|| panic!("{context}: the executed fused node reports no metrics"));
+    let mut values_by_partition = vec![0_usize; partitions];
+    for metric in metrics.iter() {
+        if metric.value().name() != "native.root.output_values" {
+            continue;
+        }
+        let MetricValue::Count { count, .. } = metric.value() else {
+            continue;
+        };
+        let partition = metric.partition().unwrap_or_else(|| {
+            panic!("{context}: the fused node reports output values for no partition")
+        });
+        let values = values_by_partition.get_mut(partition).unwrap_or_else(|| {
+            panic!("{context}: partition {partition} of the fused node is not one of {partitions}")
+        });
+        *values += count.value();
+    }
+    assert!(
+        values_by_partition.iter().all(|values| *values > 0),
+        "{context}: every native execution partition must report values: {values_by_partition:?}"
+    );
+    assert_eq!(
+        values_by_partition.iter().sum::<usize>(),
+        expected_rows,
+        "{context}: the partitions reported a different number of values than the result holds"
+    );
 }
 
 /// The columns of a result as (name, type, nullable).
@@ -2022,11 +2102,59 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
     instance.guard.remove_all().await;
 }
 
+/// Keeps the native fused node the request executed, for the figures only the node records.
+///
+/// Uses the existing [`PhysicalPlanWrapper`] hook; `clear` before a query and `take` after its body
+/// is drained keep each query reading only the node it ran.
+#[derive(Default)]
+struct NativeFusedObserver(Mutex<Vec<Arc<dyn ExecutionPlan>>>);
+
+impl NativeFusedObserver {
+    /// Drops what an earlier request captured.
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    /// The one fused node the request just executed.
+    fn take(&self, context: &str) -> Arc<dyn ExecutionPlan> {
+        let mut captured = std::mem::take(&mut *self.0.lock().unwrap());
+        assert_eq!(
+            captured.len(),
+            1,
+            "`{context}`: the request executed {} fused nodes: {captured:?}",
+            captured.len()
+        );
+        captured.remove(0)
+    }
+}
+
+impl PhysicalPlanWrapper for NativeFusedObserver {
+    fn wrap(
+        &self,
+        origin: Arc<dyn ExecutionPlan>,
+        _ctx: QueryContextRef,
+    ) -> Arc<dyn ExecutionPlan> {
+        let mut stack = vec![origin.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                self.0.lock().unwrap().push(node);
+            } else {
+                stack.extend(node.children().into_iter().cloned());
+            }
+        }
+        origin
+    }
+}
+
 /// Verifies the native route's plan and complete result against the legacy one.
 ///
 /// The fixture is four pk-disjoint insert batches, each persisted by its own flush, so the scan has
 /// four series batches to distribute over the four partitions the query asks for.
 pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
+    let observer = Arc::new(NativeFusedObserver::default());
+    let plugins = Plugins::default();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
     let mut instance =
         tests_integration::standalone::GreptimeDbStandaloneBuilder::new("promql_native_route_plan")
             .with_default_store_type(store_type)
@@ -2035,6 +2163,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
                 parallelism: 4,
                 ..Default::default()
             })
+            .with_plugin(plugins)
             .build()
             .await;
     let frontend = instance.fe_instance();
@@ -2065,8 +2194,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             "Affected Rows: 4",
         )
         .await;
-        // A counter that starts at zero and gains three per sample: every increment is non-zero, and
-        // evaluating it at its last sample needs no extrapolation on either side.
+        // One 0 -> 3 increment between the two samples.
         let values = [first, second]
             .into_iter()
             .map(|host| format!("('h{host}', 0.0, 0), ('h{host}', 3.0, 1000)"))
@@ -2142,6 +2270,8 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             Some(4),
         ),
     ] {
+        // Only the node this query ran is read: the previous request's capture is dropped first.
+        observer.clear();
         let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
         assert_rows_eq(&rows, &expected, query);
         assert_native_result_schema(&schema, &expected, query);
@@ -2150,6 +2280,13 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             fused["metrics"]["native.root.output_values"].as_u64(),
             Some(expected.len() as u64),
             "`{query}`: the tree reported a different number of values than the result holds"
+        );
+        // The body is drained, so every partition has finished.
+        assert_native_partition_output(
+            &observer.take(query),
+            scan_partitions,
+            expected.len(),
+            query,
         );
 
         // Without the per-query hint the same statement runs the legacy pipeline, which must answer
@@ -2162,9 +2299,9 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         );
         assert_rows_eq(&legacy_rows, &expected, query);
         assert_legacy_result_schema(&legacy_schema, &expected, query);
-        // Constant time/value columns are compared field for field across the two routes. Computed
-        // legacy vector columns may have expression names, so only the constant is compared here.
-        if query == "1 + 2" {
+        // Both constant cases preserve the legacy time/value schema; computed vector columns are
+        // compared by role.
+        if scan_partitions.is_none() {
             assert_eq!(
                 result_columns(&legacy_schema),
                 result_columns(&schema),
