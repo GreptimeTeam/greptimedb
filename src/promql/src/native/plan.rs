@@ -140,7 +140,7 @@ pub struct BoundInput {
     pub ordering: SeriesOrdering,
 }
 
-/// A constant scalar bound for broadcast.
+/// A constant scalar bound for broadcast or a statement root.
 ///
 /// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
 /// keeps a binary operation from label-matching it is its type, not its constness. This binding

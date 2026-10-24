@@ -82,7 +82,8 @@ impl ExtensionPlanner for PromExtensionPlanner {
 /// column of any region.
 const METRIC_NAME: &str = "__name__";
 
-/// Builds the physical node of a [`FusedSeries`] over the raw series leaf its one child can provide.
+/// Builds the physical node of a [`FusedSeries`] over its children: the raw series leaf of its one
+/// child, or no child at all for a constant scalar, which reads no frame.
 ///
 /// The node reads a raw series frame, so what it needs below it is the region scan itself: the
 /// scan's own raw-series entrypoint is what packs a series' chunks contiguously and declares their
@@ -97,9 +98,9 @@ const METRIC_NAME: &str = "__name__";
 /// The fused leaf needs a prepared scan: range assignment runs after physical planning and cannot
 /// see a `SeriesScanExec`. Preparation keeps the scan's parallel layout, and the series-producer
 /// contract guarantees that one series stays in one scan partition. The fields the scan is asked
-/// for are the tree's own, and a node with no child (a constant scalar) or with several (which
-/// would need a label-pairing exchange) is refused here rather than planned into a node that
-/// cannot run it.
+/// for are the tree's own, and a node with no child (a constant scalar, which reads no frame) is
+/// planned over the empty input list while one with several (which would need a label-pairing
+/// exchange) is refused here rather than planned into a node that cannot run it.
 fn plan_fused_series(
     fused: &FusedSeries,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
@@ -118,15 +119,12 @@ fn plan_fused_series(
         )));
     }
     // One plan below is one actual source, which is what the physical node reads. A constant scalar
-    // has no plan to read and several sources would have to be paired by label, which needs an
-    // exchange this layer does not build: both are refused by name rather than planned into a node
-    // that cannot run them.
+    // has no plan to read: its rows come from the tree alone, so it is planned over the empty input
+    // list. Several sources would have to be paired by label, which needs an exchange this layer
+    // does not build, so they are refused by name rather than planned into a node that cannot run
+    // them.
     if children.is_empty() {
-        return Err(DataFusionError::Plan(
-            "the FusedSeries node reads no source: a constant scalar is not planned by this layer \
-             yet"
-            .to_string(),
-        ));
+        return fused.to_execution_plan(Vec::new()).map(Some);
     }
     if children.len() > 1 {
         return Err(DataFusionError::Plan(format!(

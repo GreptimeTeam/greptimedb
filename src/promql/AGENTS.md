@@ -42,8 +42,10 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   admitted, so an aggregate or a whole-vector operation (`sort`, `absent`, ...)
   anywhere in the tree falls back, as does an ineligible raw-series table/field
   set, a `__field__` matcher that narrows the scan, or an unsupported
-  expression/grid. Metric scans retain the static `__table_id` predicate. Hybrid
-  CTEs keep the existing plan. The operator also disables native planning for a
+  expression/grid. A constant statement is compiled by `compile_statement` with
+  no Input or scan child and reports one scalar value per evaluation point.
+  Metric scans retain the static `__table_id` predicate. Hybrid CTEs keep the
+  existing plan. The operator also disables native planning for a
   programmatic TQL view so its persisted Substrait plan remains serializable;
   `CREATE VIEW ... AS TQL EVAL` syntax is a separate change.
 - **Admission and SQL output:** the guards live in
@@ -92,13 +94,12 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   its doc is written for a caller that does not exist.
 - **A native window requires non-interleaved input.** Only `Contiguous` and
   `KeyThenTime` are accepted; `Interleaved` is refused when compiled.
-- **A fused tree is logical over N sources, physical over one.** `FusedSeries`
-  accepts one child per source index, but `FusedSeriesExec` runs exactly one
-  child, at that child's own partition count, and queues its chunks with
-  `NativeExecutor::push_raw_source(0, ..)`. A second source (needs a
-  label-pairing exchange) and a constant scalar (needs a scalar-to-batch
-  conversion) are refused when the physical node is built, never answered with
-  an empty result.
+- **A fused tree executes zero or one source.** A constant Scalar has no Input
+  or child and produces one output partition without a scanner. A raw tree runs
+  its one child at that child's own partition count and queues chunks with
+  `NativeExecutor::push_raw_source(0, ..)`. Two or more sources are expressible
+  logically but must fall back before native admission; physical rejection is
+  only a defense.
 - **A series closes exactly once**, on the chunk that says so — per input series,
   not per label set. A node that rewrites labels can hand two input series over
   under one label set, and each closes on its own chunk, so a label set may be

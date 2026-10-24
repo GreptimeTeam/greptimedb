@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use datafusion::common::DFSchema;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
@@ -22,6 +23,7 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
+use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -1239,4 +1241,41 @@ fn a_vector_operation_cannot_consume_raw_samples() {
     };
     let error = node.validate().unwrap_err();
     assert!(error.to_string().contains("an evaluated vector"), "{error}");
+}
+
+/// A node that reports samples while holding no input node is refused where the node is built.
+///
+/// The tree is constructed directly here — a child module of `native::plan` may — because the node
+/// is one the public constructors decline: a scalar root is the only zero-input shape a fused node
+/// accepts, and samples without a source would be an empty vector reported as an answer. Every
+/// public constructor therefore stays a checked one.
+#[test]
+fn a_samples_root_without_an_input_is_refused() {
+    let statement_grid = grid(0, 60_000, 4);
+    let tree = NativeTree {
+        root: NativeNode {
+            expr: NativeExpr::Scalar(BoundScalar { value: 1.0 }),
+            output: evaluated(Arc::new([]), Arc::clone(&statement_grid)),
+        },
+    };
+    let binding = FusedSeriesBinding {
+        grid: statement_grid,
+        time_index: "time".to_string(),
+        tags: vec![],
+        metric_name: None,
+    };
+
+    let error = FusedSeries::try_new(
+        Arc::from("1"),
+        tree,
+        binding,
+        Vec::new(),
+        Arc::new(DFSchema::empty()),
+    )
+    .expect_err("a samples root reads no source while reporting samples");
+
+    assert!(
+        error.to_string().contains("constant scalar"),
+        "the refusal must name the shape a zero-child tree has to be: {error}"
+    );
 }

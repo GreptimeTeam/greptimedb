@@ -107,8 +107,8 @@
 //!
 //! Vector matching is bound with each selector's own input, including the labels and cardinality
 //! written on a vector–vector operation. A scalar has no input of its own: it is bound next to the
-//! vector that gives it something to broadcast over, while a statement whose value is only a scalar
-//! has nothing to read and is refused.
+//! vector that gives it something to broadcast over, while a statement whose value is only a
+//! constant is bound by [`compile_statement`] as that constant on the statement's grid.
 //!
 //! An aggregate is bound as [`AggregateStage::Complete`], which is a claim about the whole execution
 //! rather than about the node: it says that every contribution to every group is in this execution's
@@ -328,6 +328,20 @@ pub fn compile(
     Ok(compiled.tree)
 }
 
+/// Compiles a constant statement to a scalar on the statement's grid, reading no input.
+///
+/// A value that depends on data or on the evaluation time is refused, which the same fold
+/// [`compile_expr`] uses for a constant operand decides ([`constant_value`]).
+pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
+    let value = constant_value(&stmt.expr)
+        .ok_or_else(|| not_implemented(&format!("the expression `{}`", stmt.expr)))?;
+    let grid = statement_grid(stmt)?;
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(grid),
+    })
+}
+
 /// Compiles `stmt` into a tree and the inputs it reads, binding each selector through `bindings`.
 ///
 /// `bindings` answers what a scan of one selector produces, given everything that selector asks for:
@@ -365,6 +379,7 @@ pub fn compile_selectors(
     // constant next to a vector that gives it something to broadcast over rather than on its own.
     // The check is on the statement's type rather than on the compiled node, so it does not depend on
     // which kinds of expression happen to compile to a scalar today.
+    // A statement whose whole value is such a constant is bound by [`compile_statement`] instead.
     if stmt.expr.value_type() != ValueType::Vector {
         return Err(not_implemented(&format!(
             "the expression `{}`, which is a {} where a tree reports evaluated samples",
@@ -1922,7 +1937,8 @@ fn refuses_modifier(modifier: Option<&BinModifier>) -> bool {
 /// semantics for `%`, `^` and `atan2` live, the last two through `go_math`, so defining them again
 /// here would be a second answer for the two to disagree over. An operator with no
 /// [`ArithmeticOp`] — a comparison, `and`, `or`, `unless` — is not arithmetic and does not fold.
-fn constant_value(expr: &PromExpr) -> Option<f64> {
+/// Visible to the planner, which asks whether a statement's value is a constant before binding it.
+pub(crate) fn constant_value(expr: &PromExpr) -> Option<f64> {
     match expr {
         PromExpr::NumberLiteral(NumberLiteral { val }) => Some(*val),
         PromExpr::Paren(paren) => constant_value(&paren.expr),

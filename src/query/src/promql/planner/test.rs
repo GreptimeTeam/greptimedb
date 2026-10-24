@@ -43,7 +43,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
 use promql::extension_plan::{FusedSeries, HistogramFold};
-use promql::native::plan::NativeExpr;
+use promql::native::plan::{NativeExpr, NativeType};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
@@ -2210,6 +2210,122 @@ async fn native_fused_one_occurrence_records_one_path() {
         let inputs = tree_inputs(fused);
         assert_eq!(1, inputs.len(), "{query}: {inputs:?}");
         assert_eq!(0, inputs[0].1, "{query}: {inputs:?}");
+    }
+}
+
+/// A constant beside one selector binds no source of its own, so the statement is still one raw scan:
+/// one child, every input reading child zero, and nothing above the node that gathers or exchanges
+/// series.
+#[tokio::test]
+async fn native_fused_one_occurrence_with_a_constant_reads_one_child() {
+    for query in [
+        "some_metric * 100",
+        "100 / some_metric",
+        "-some_metric",
+        "rate(some_metric[5m]) * 100",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent()));
+        assert_eq!(1, fused.children().len(), "{query}");
+        assert!(
+            matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+            "{query}: {:?}",
+            fused.children()[0]
+        );
+        let inputs = tree_inputs(fused);
+        assert_eq!(1, inputs.len(), "{query}: {inputs:?}");
+        assert_eq!(0, inputs[0].1, "{query}: {inputs:?}");
+        let display = plan.display_indent().to_string();
+        assert!(display.contains("FusedSeries:"), "{query}: {display}");
+        assert!(!display.contains("Exchange"), "{query}: {display}");
+    }
+}
+
+/// A statement whose whole value is a constant reads no scan, so it plans as one node with no child,
+/// and the tree is that constant on the statement's own grid. The columns it reports are the ones the
+/// existing path reports a bare literal with: the time index, then the value.
+#[tokio::test]
+async fn native_fused_constant_statement_plans_without_a_child() {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
+        let plan = build_native_fused_plan(query, true).await;
+        let legacy = build_native_fused_plan(query, false).await;
+        let fused = find_fused_series(&plan)
+            .unwrap_or_else(|| panic!("{query}: {}", plan.display_indent()));
+        // No scan is read, so there is no child at all — not even one that produces nothing.
+        assert!(
+            fused.children().is_empty(),
+            "{query}: {:?}",
+            fused.children()
+        );
+        assert!(
+            tree_inputs(fused).is_empty(),
+            "{query}: the tree binds an input"
+        );
+        assert_eq!(query, fused.promql(), "{query}");
+        let NativeExpr::Scalar(scalar) = &fused.tree().root().expr else {
+            panic!(
+                "{query}: the root is not a constant: {:?}",
+                fused.tree().root().expr
+            );
+        };
+        assert_eq!(value, scalar.value, "{query}");
+        // The constant is reported on the statement's grid, over 100000 seconds in 5-second steps.
+        let NativeType::Scalar(grid) = &fused.tree().root().output else {
+            panic!(
+                "{query}: the tree does not report a scalar: {:?}",
+                fused.tree().root().output
+            );
+        };
+        let spec = grid.spec();
+        assert_eq!(
+            (0, 5_000, 20_001),
+            (spec.start_ms, spec.step_ms, spec.len),
+            "{query}: the constant is not on the statement's grid"
+        );
+        assert_eq!(spec, fused.binding().grid.spec(), "{query}");
+        let shape = |plan: &LogicalPlan| {
+            plan.schema()
+                .fields()
+                .iter()
+                .map(|field| (**field).clone())
+                .collect::<Vec<Field>>()
+        };
+        assert_eq!(
+            shape(&legacy),
+            shape(&plan),
+            "{query}: the constant does not report the columns the existing plan reports"
+        );
+        assert!(
+            !plan.display_indent().to_string().contains("TableScan"),
+            "{query}: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+/// A shape with no selector is not necessarily a shape with no data: the walk stops at what this
+/// route cannot execute, and a value that depends on the data or on the evaluation time is not a
+/// constant. Each of these keeps the whole existing plan.
+#[tokio::test]
+async fn native_fused_non_constant_without_a_selector_keeps_the_existing_plan() {
+    for query in [
+        "time()",
+        "time() + 1",
+        "1 + time()",
+        "vector(1)",
+        // An aggregate subtree is not executed by this route, so the whole statement falls back.
+        "sum(some_metric) * 2",
+    ] {
+        let native = build_native_fused_plan(query, true).await;
+        let legacy = build_native_fused_plan(query, false).await;
+        let display = native.display_indent().to_string();
+        assert!(!display.contains("FusedSeries"), "{query}: {display}");
+        assert_eq!(
+            native.display_indent_schema().to_string(),
+            legacy.display_indent_schema().to_string(),
+            "{query}: a value this route cannot bind must keep the existing plan"
+        );
     }
 }
 
