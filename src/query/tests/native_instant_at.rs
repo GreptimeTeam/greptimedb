@@ -21,7 +21,7 @@ use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
-use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+use datatypes::series::{Label, MetricName, SeriesOrdering};
 use promql::native::execute::{NativeExecutionState, NativeExecutor};
 use promql_parser::parser::EvalStmt;
 use query::promql::native_compile::compile;
@@ -50,12 +50,7 @@ fn schema(fields: usize) -> Arc<SeriesSchema> {
         eval_grid: None,
     })
 }
-fn raw(
-    times: &[i64],
-    values: &[Option<f64>],
-    fields: usize,
-    metric: SeriesLabels,
-) -> RawSeriesChunk {
+fn raw(times: &[i64], values: &[Option<f64>], fields: usize, metric: MetricName) -> RawSeriesChunk {
     let vals = Samples::from_float(Float64Array::from(values.to_vec()));
     let all = (0..fields)
         .map(|i| {
@@ -76,8 +71,8 @@ fn raw(
     )
     .unwrap()
 }
-fn metric(name: &str) -> SeriesLabels {
-    SeriesLabels::try_new(
+fn metric(name: &str) -> MetricName {
+    MetricName::try_new(
         Some(name.into()),
         vec![Label {
             name: "job".into(),
@@ -220,7 +215,7 @@ fn timestamp_refuses_two_series_that_collapse_to_one_label_set() {
     let times = [-1500i64, 500];
     let values = [Some(7.0), Some(1.0)];
     for (key, metadata) in [("first", "gauge"), ("second", "counter")] {
-        let metric = SeriesLabels::try_new(
+        let metric = MetricName::try_new(
             Some("a".into()),
             vec![
                 Label {
