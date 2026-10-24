@@ -1,0 +1,16 @@
+[package]
+name = "common-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+moka = { workspace = true, features = ["future"] }
+prometheus.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
