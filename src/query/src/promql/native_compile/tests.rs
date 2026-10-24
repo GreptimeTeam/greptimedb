@@ -1729,6 +1729,58 @@ fn a_two_vector_operation_binds_one_input_per_selector() {
     );
 }
 
+/// Two ordinary float vectors of unequal field counts pair their fields by position and report the
+/// shorter side's, each named after the left operand's field at that position: the contract the
+/// legacy planner keeps in `align_binary_field_columns`, whose positional `zip` stops at the
+/// shorter column list and whose output field is the left one. Both orders are here, because the
+/// name comes from the side that holds the field rather than from the position it sits at.
+#[test]
+fn a_binary_operation_pairs_unequal_float_fields_by_position() {
+    // `(query, left fields, right fields, the fields the operation reports)`.
+    let cases: [(&str, &[&str], &[&str], &str); 2] = [
+        ("x + y", &["a", "b"], &["c"], "a"),
+        ("x + y", &["c"], &["a", "b"], "c"),
+    ];
+    // What a table of ordinary float fields binds per selector: the fields in table order and no
+    // evaluation grid of its own.
+    let schema = |names: &[&str]| -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: names
+                .iter()
+                .map(|name| FieldSpec {
+                    name: (*name).into(),
+                })
+                .collect(),
+            eval_grid: None,
+        })
+    };
+    for (query, left_fields, right_fields, expected) in cases {
+        let left = schema(left_fields);
+        let right = schema(right_fields);
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|requirement| match requirement.metric.as_deref() {
+                Some("x") => Ok(Arc::clone(&left)),
+                Some("y") => Ok(Arc::clone(&right)),
+                other => panic!("`{query}` selected {other:?}, which is not one of its operands"),
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+
+        // Each scan keeps the layout it was bound to: pairing the fields is the operation's edit,
+        // not the scan's.
+        assert_eq!(compiled.inputs.len(), 2, "`{query}`");
+        assert!(Arc::ptr_eq(&compiled.inputs[0].schema, &left), "`{query}`");
+        assert!(Arc::ptr_eq(&compiled.inputs[1].schema, &right), "`{query}`");
+        // The output is the shorter side's count of fields, so unequal counts are answered rather
+        // than refused or widened to the longer side.
+        let output = evaluated(compiled.tree.root());
+        let names: Vec<&str> = output.fields.iter().map(|field| &*field.name).collect();
+        assert_eq!(names, [expected], "the fields `{query}` reports");
+    }
+}
+
 /// A set operator has no node at all, so it is refused as the set operator it is rather than as an
 /// arithmetic operation the compiler could not bind: `and`, `or` and `unless` combine two vectors'
 /// series, which is not what a binary value node does.
