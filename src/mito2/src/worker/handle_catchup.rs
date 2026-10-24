@@ -132,6 +132,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
+        // Preserve allocated sequences without publishing the old memtables.
+        reopened_region
+            .version_control
+            .update_last_sequence(region.version_control.current().last_sequence);
         self.register_region(reopened_region.clone());
         if let Some(state) = &self.series_index_task_state {
             state.wake();

@@ -759,6 +759,39 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .await
         .unwrap();
 
+    let region = engine.get_region(region_id).unwrap();
+    let file = {
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        manager
+            .staging_manifest()
+            .unwrap()
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    for expected in [11, 12] {
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![file.clone()],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let current = region.version_control.current();
+        assert_eq!(current.last_sequence, expected);
+        assert_eq!(current.committed_sequence, 10);
+    }
+
     // Verify we're in staging mode and staging manifests exist
     let data_home = env.data_home();
     let region_dir = format!("{}/data/test/1024_0000000000", data_home.display());
@@ -770,13 +803,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
     assert_eq!(
         staging_files_before.len(),
-        // Two files for flush operation
-        // One file for entering staging mode
-        3,
-        "Staging manifest directory should contain 3 files before exit, got: {:?}",
+        // Two flushes, two edits and entering staging mode.
+        5,
+        "Staging manifest directory should contain 5 files before exit, got: {:?}",
         staging_files_before
     );
-    let region = engine.get_region(region_id).unwrap();
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let staging_manifest = manager.staging_manifest().unwrap();
@@ -852,6 +883,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     // Verify we're back in normal mode
     let workers = &engine.inner.workers;
     let region = workers.get_region(region_id).unwrap();
+    let current = region.version_control.current();
+    assert_eq!(
+        (current.last_sequence, current.committed_sequence),
+        (12, 12)
+    );
     assert!(
         !region.is_staging(),
         "Region should no longer be in staging mode"
