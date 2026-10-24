@@ -74,6 +74,146 @@ async fn create_gc_worker(
     .unwrap()
 }
 
+#[rstest::rstest]
+#[tokio::test]
+async fn test_gc_keeps_sst_across_index_versions(
+    #[values(false, true)] full_file_listing: bool,
+    #[values(false, true)] old_reader_last: bool,
+) {
+    use crate::sst::file::{FileMeta, IndexType};
+    use crate::sst::version::SstVersion;
+    use common_time::Timestamp;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            gc: GcConfig {
+                enable: true,
+                lingering_time: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+    let meta = FileMeta {
+        region_id,
+        file_id: store_api::storage::FileId::random(),
+        available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+        ..Default::default()
+    };
+    let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+    version.add_files(region.file_purger.clone(), [meta.clone()].into_iter());
+    let old = version.levels()[0].files[&meta.file_id].clone();
+    let updated = FileMeta {
+        index_version: 2,
+        ..meta.clone()
+    };
+    version.add_files(region.file_purger.clone(), [updated].into_iter());
+    let new = version.levels()[0].files[&meta.file_id].clone();
+    version.mark_all_deleted();
+    drop(version);
+
+    let store = region.access_layer.object_store();
+    let mut entries = Vec::new();
+    for suffix in ["parquet", "puffin", "2.puffin"] {
+        entries.push(write_and_list_entry(store, &format!("{}.{}", meta.file_id, suffix)).await);
+    }
+    let removed = BTreeMap::from([(
+        Timestamp::new_millisecond(0),
+        HashSet::from([
+            RemovedFile::File(meta.file_id, Some(2)),
+            RemovedFile::Index(meta.file_id, 0),
+            RemovedFile::Index(meta.file_id, 2),
+        ]),
+    )]);
+    let worker = create_gc_worker(
+        &engine,
+        BTreeMap::from([(region_id, Some(region.clone()))]),
+        &FileRefsManifest::default(),
+        full_file_listing,
+    )
+    .await;
+    let (first, last) = if old_reader_last {
+        (new, old)
+    } else {
+        (old, new)
+    };
+    let released_version = first.index_id().version;
+    let live_version = last.index_id().version;
+    let mut handles = [Some(first), Some(last)];
+    for released in 0..=2 {
+        if released > 0 {
+            drop(handles[released - 1].take());
+        }
+        let refs = engine
+            .get_snapshot_of_file_refs([region_id], HashMap::new())
+            .await
+            .unwrap();
+        let refs = refs.file_refs.get(&region_id).cloned().unwrap_or_default();
+        let expected_versions = match released {
+            0 => vec![0, 2],
+            1 => vec![live_version],
+            _ => vec![],
+        };
+        assert_eq!(
+            refs,
+            expected_versions
+                .into_iter()
+                .map(|v| FileRef::new(region_id, meta.file_id, Some(v)))
+                .collect()
+        );
+        let tmp_refs = refs
+            .into_iter()
+            .map(|f| (f.file_id, f.index_version))
+            .collect();
+        let deleted: HashSet<_> = worker
+            .list_to_be_deleted_files(
+                region_id,
+                false,
+                &HashMap::new(),
+                &tmp_refs,
+                removed.clone(),
+                entries.clone(),
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        let expected = match released {
+            0 => HashSet::new(),
+            1 => HashSet::from([RemovedFile::Index(meta.file_id, released_version)]),
+            _ => HashSet::from([
+                RemovedFile::File(meta.file_id, if full_file_listing { None } else { Some(2) }),
+                RemovedFile::Index(meta.file_id, 0),
+                RemovedFile::Index(meta.file_id, 2),
+            ]),
+        };
+        assert_eq!(deleted, expected);
+    }
+    // A manifest reference also protects Parquet regardless of its index version.
+    let deleted = worker
+        .list_to_be_deleted_files(
+            region_id,
+            false,
+            &HashMap::from([(meta.file_id, Some(3))]),
+            &HashSet::new(),
+            removed,
+            entries,
+        )
+        .await
+        .unwrap();
+    assert!(deleted.iter().all(|f| matches!(f, RemovedFile::Index(..))));
+}
+
 #[tokio::test]
 async fn test_gc_worker_ignores_dropping_marker_file() {
     init_default_ut_logging();

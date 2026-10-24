@@ -147,11 +147,17 @@ impl FileReferenceManager {
 
         for r in &query_regions_for_mem {
             let manifest = r.manifest_ctx.manifest().await;
-            // remove in manifest files for smaller size, since gc worker read from manifest later.
+            // Only omit references covered by the exact index version in the manifest.
+            // Older index readers still need their temporary references.
             ref_files.entry(r.region_id()).and_modify(|refs| {
                 *refs = std::mem::take(refs)
                     .into_iter()
-                    .filter(|f| !manifest.files.contains_key(&f.file_id))
+                    .filter(|f| {
+                        !manifest
+                            .files
+                            .get(&f.file_id)
+                            .is_some_and(|meta| meta.index_version() == f.index_version)
+                    })
                     .collect();
             });
             manifest_version.insert(r.region_id(), manifest.manifest_version);
