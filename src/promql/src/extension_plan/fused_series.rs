@@ -76,9 +76,9 @@ use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::{LabelSet, label_set};
+use crate::native::execute::InputId;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
-use crate::native::metrics::{self, NodePath};
-use crate::native::plan::{NativeExpr, NativeTree};
+use crate::native::plan::{NativeExpr, NativeNode, NativeTree};
 use crate::native::runs::{Run, absorb};
 use crate::source::materialize_raw_labels;
 
@@ -404,9 +404,9 @@ impl PartialOrd for FusedSeries {
 /// can only agree or disagree with it, and the frame this node reads has to be decoded against the
 /// same schema, so both halves read it here instead of each carrying a copy.
 struct TreeInput {
-    /// The position the tree's raw chunks enter at: a position is how the runtime addresses a node,
-    /// so nothing on the node has to carry an identity that the tree itself does not.
-    path: NodePath,
+    /// Which of the tree's inputs the raw chunks enter at. A tree this node feeds has one leaf, so
+    /// this is the first input; it is kept here so the exec does not have to count inputs again.
+    input_id: InputId,
     /// The raw series schema the tree's input node was compiled against.
     schema: Arc<SeriesSchema>,
 }
@@ -414,31 +414,17 @@ struct TreeInput {
 /// Reads what the tree's input node was compiled against, rejecting a tree this node cannot feed.
 ///
 /// A node feeds one raw input, and its output is addressed on a grid; a tree that does not have
-/// that shape is one this layer cannot hand chunks to or read positions from.
+/// that shape is one this layer cannot hand chunks to. Because exactly one input is accepted, that
+/// input is the tree's only leaf and is therefore the first one: the id it is queued at is
+/// [`InputId::new(0)`], so nothing here has to count leaves beyond checking that it is alone.
 fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
-    let mut sources = 0;
-    let mut input_path = None;
-    let mut schema = None;
-    metrics::walk(tree.root(), &mut |node, path| {
-        let NativeExpr::Input(input) = &node.expr else {
-            return;
-        };
-        sources += 1;
-        input_path.get_or_insert_with(|| path.clone());
-        // Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was
-        // compiled against an already-evaluated schema would read the wrong thing.
-        schema = input
-            .output
-            .samples()
-            .filter(|schema| schema.eval_grid.is_none())
-            .map(Arc::clone);
-    });
+    let (sources, schema) = input_leaves(tree.root());
     if sources != 1 {
         return Err(DataFusionError::Plan(format!(
             "FusedSeries runs a tree with {sources} inputs, and it needs exactly one"
         )));
     }
-    let (Some(path), Some(schema)) = (input_path, schema) else {
+    let Some(schema) = schema else {
         return Err(DataFusionError::Plan(
             "FusedSeries runs a tree whose input is not raw series".to_string(),
         ));
@@ -453,7 +439,40 @@ fn tree_input(tree: &NativeTree) -> DataFusionResult<TreeInput> {
             "FusedSeries runs a tree whose output is not evaluated on a grid".to_string(),
         ));
     }
-    Ok(TreeInput { path, schema })
+    Ok(TreeInput {
+        input_id: InputId::new(0),
+        schema,
+    })
+}
+
+/// Counts the [`NativeExpr::Input`] leaves under `node`, and reads the raw schema a leaf declares.
+///
+/// Raw, not evaluated: this node feeds the tree from a scan, so a tree whose input was compiled
+/// against an already-evaluated schema would read the wrong thing. A tree this node accepts has one
+/// leaf, so the schema carried out of here is that leaf's; every other leaf is only counted, which
+/// is what refuses a tree with more than one.
+fn input_leaves(node: &NativeNode) -> (usize, Option<Arc<SeriesSchema>>) {
+    match &node.expr {
+        NativeExpr::Input(input) => (
+            1,
+            input
+                .output
+                .samples()
+                .filter(|schema| schema.eval_grid.is_none())
+                .map(Arc::clone),
+        ),
+        NativeExpr::Scalar(_) => (0, None),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => input_leaves(input),
+        NativeExpr::Binary { left, right, .. } => {
+            let (sources, schema) = input_leaves(left);
+            let (right_sources, right_schema) = input_leaves(right);
+            (sources + right_sources, right_schema.or(schema))
+        }
+    }
 }
 
 /// Refuses a tree whose logical series can be split across the partitions this node runs.
@@ -495,48 +514,54 @@ fn reject_a_split_logical_series(
     if partition_count == 1 {
         return Ok(());
     }
-    // The walk is outermost first, so it meets nodes in the reverse of the order data flows: a
-    // consumer met before a rewriter is one that the rewriter feeds.
-    let mut consumer: Option<String> = None;
-    let mut rejection: Option<(String, String)> = None;
-    metrics::walk(tree.root(), &mut |node, path| {
-        if rejection.is_some() {
-            return;
-        }
-        // A node can leave two raw series on one canonical label set. A map always can: it drops
-        // `__name__` and every empty-valued tag. An instant selection preserves its input labels,
-        // rather than dropping them, but can still leave two raw series on one canonical label set:
-        // `{zone=""}` and the absent `zone` are one label set and two raw keys. A window can
-        // whenever it did not merge its input, which a bare tree says nothing about: a check on the
-        // function alone accepts `last_over_time`, whose output keeps the name and can still hold
-        // both raw series. Every map, instant selection, and window is therefore taken to be a
-        // possible rewriter, and the refusal below is what narrows that to the shape that costs
-        // correctness - a window with a rewriter below it, a window being the only consumer here.
-        let rewrites = matches!(
-            node.expr,
-            NativeExpr::Map { .. } | NativeExpr::Instant { .. } | NativeExpr::Window { .. }
-        );
-        if rewrites && let Some(above) = &consumer {
-            rejection = Some((path.as_str().to_string(), above.clone()));
-            return;
-        }
-        let consumes = matches!(node.expr, NativeExpr::Window { .. });
-        if consumes && consumer.is_none() {
-            consumer = Some(path.as_str().to_string());
-        }
-    });
-    let Some((rewriter, above)) = rejection else {
+    let Some(rewriter) = split_series_rewriter(tree.root(), false) else {
         return Ok(());
     };
     Err(DataFusionError::Plan(format!(
         "FusedSeries runs a tree where `{rewriter}` can leave two raw series on one canonical label \
-         set and `{above}` above it reads a whole series, over {partition_count} partitions: an \
+         set and the `Window` above it reads a whole series, over {partition_count} partitions: an \
          empty tag value and an absent tag are the same label set, the runtime merges such \
-         fragments once per execution, and this node runs one execution per partition, so `{above}` \
-         would read one half and answer an empty result. Reading this tree needs an exchange between \
-         `{rewriter}` and `{above}` that merges a logical series across partitions, which is not \
-         implemented"
+         fragments once per execution, and this node runs one execution per partition, so the \
+         `Window` would read one half and answer an empty result. Reading this tree needs an \
+         exchange between `{rewriter}` and the `Window` above it that merges a logical series \
+         across partitions, which is not implemented"
     )))
+}
+
+/// Finds the rewriter below a consuming window in the subtree at `node`, naming its kind.
+///
+/// The search is outermost first, so it meets nodes in the reverse of the order data flows: a
+/// window met before a rewriter is one that the rewriter feeds. `consumer_above` says whether such
+/// a window was already met, which is what makes a rewriter below this node the shape that costs
+/// correctness.
+///
+/// A node can leave two raw series on one canonical label set. A map always can: it drops
+/// `__name__` and every empty-valued tag. An instant selection preserves its input labels, rather
+/// than dropping them, but can still leave two raw series on one canonical label set: `{zone=""}`
+/// and the absent `zone` are one label set and two raw keys. A window can whenever it did not merge
+/// its input, which a bare tree says nothing about: a check on the function alone accepts
+/// `last_over_time`, whose output keeps the name and can still hold both raw series. Every map,
+/// instant selection, and window is therefore taken to be a possible rewriter, and the caller's
+/// refusal narrows that to a window with a rewriter below it, a window being the only consumer.
+///
+/// A window both rewrites and consumes, so below a window it is the rewriter and otherwise
+/// everything below it is under a consumer. An aggregate and a vector operation are neither: they
+/// pass both facts on unchanged. A binary operation reads its operands independently, so a window
+/// in one operand does not consume the other operand's rewrite.
+fn split_series_rewriter(node: &NativeNode, consumer_above: bool) -> Option<&'static str> {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => None,
+        NativeExpr::Window { .. } if consumer_above => Some("Window"),
+        NativeExpr::Window { input, .. } => split_series_rewriter(input, true),
+        NativeExpr::Map { .. } if consumer_above => Some("Map"),
+        NativeExpr::Instant { .. } if consumer_above => Some("Instant"),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => split_series_rewriter(input, consumer_above),
+        NativeExpr::Binary { left, right, .. } => split_series_rewriter(left, consumer_above)
+            .or_else(|| split_series_rewriter(right, consumer_above)),
+    }
 }
 
 /// Checks that `tree` reads the schema `binding` declares, on the grid it declares.
@@ -749,8 +774,8 @@ pub struct FusedSeriesExec {
     label_source: RawLabelSource,
     /// The ordering the input frames guarantee.
     ordering: SeriesOrdering,
-    /// The position of the tree's input node, where every raw chunk a partition reads enters.
-    input_path: NodePath,
+    /// Which of the tree's inputs every raw chunk a partition reads enters at.
+    input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
@@ -767,8 +792,12 @@ pub struct FusedSeriesExec {
     ///
     /// Plan-level rather than per-partition: see [`LabelSets`].
     labels: SharedLabelSets,
-    /// Per-node metrics, registered by each execution of the tree.
-    metric: ExecutionPlanMetricsSet,
+    /// The metric handles every execution of this plan registered, reported by [`Self::metrics`].
+    ///
+    /// An execution registers its tree's node handles here before it starts, so what this keeps is
+    /// those counters and gauges and not the runtime topology they were registered from. The set
+    /// synchronizes its own registration and reads.
+    metrics: ExecutionPlanMetricsSet,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -799,12 +828,7 @@ impl FusedSeriesExec {
         // Building a state is what proves the runtime executes this tree: a node kind it does not
         // run yet is refused here, so a plan that is built is a plan that starts. The throwaway
         // state is dropped at once, returning its (unbounded) reservations.
-        let _ = NativeExecutionState::try_new(
-            &tree,
-            Arc::new(UnboundedMemoryPool::default()),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-        )?;
+        let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let classification =
             classify_output(&output_schema, &tree_input.schema, &tags, &time_column)?;
         // Read here rather than below, because whether the split below can happen decides whether
@@ -867,14 +891,14 @@ impl FusedSeriesExec {
             series_schema: tree_input.schema,
             label_source,
             ordering,
-            input_path: tree_input.path,
+            input_id: tree_input.input_id,
             classification: classification.into(),
             time_column,
             tags: tags.into(),
             input,
             output_schema,
             labels,
-            metric: ExecutionPlanMetricsSet::new(),
+            metrics: ExecutionPlanMetricsSet::new(),
             properties,
         })
     }
@@ -987,15 +1011,16 @@ impl ExecutionPlan for FusedSeriesExec {
         let state = NativeExecutionState::try_new(
             &self.tree,
             Arc::clone(&context.runtime_env().memory_pool),
-            &self.metric,
-            partition,
         )?;
+        // Registered once, before the first chunk is pulled: what this plan reports afterwards is
+        // the handles the nodes update as they run, and the execution itself stays with the stream.
+        state.register_metrics(&self.metrics, partition);
         // What the label sets hold is charged to the reservation attached above, so nothing is
         // reserved per stream: the entries outlive every stream and are released with the plan.
         Ok(Box::pin(FusedSeriesStream {
             input: Some(input),
             executor: Some(NativeExecutor::new(state)),
-            input_path: self.input_path.clone(),
+            input_id: self.input_id,
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
@@ -1006,7 +1031,7 @@ impl ExecutionPlan for FusedSeriesExec {
     }
 
     fn metrics(&self) -> Option<MetricsSet> {
-        Some(self.metric.clone_inner())
+        Some(self.metrics.clone_inner())
     }
 }
 
@@ -1368,7 +1393,7 @@ pub struct FusedSeriesStream {
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// The position of the tree's input node, which is where every chunk read enters.
-    input_path: NodePath,
+    input_id: InputId,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The tag column names, indexed by `OutputColumn::Tag`.
@@ -1395,7 +1420,7 @@ impl FusedSeriesStream {
         };
         // The chunk enters at the tree's input node by position: a position is how the runtime
         // addresses a node, and a tree that gains a second input names them the same way.
-        executor.push_raw_at(&self.input_path, chunk)?;
+        executor.push_raw(self.input_id, chunk)?;
         let mut settled = Vec::new();
         while let Some(chunk) = executor.next_chunk()? {
             settled.push(chunk);
