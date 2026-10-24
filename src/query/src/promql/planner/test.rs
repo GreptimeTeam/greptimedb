@@ -2665,6 +2665,9 @@ async fn native_fused_or_matchers_fall_back() {
     for query in [
         r#"some_metric{tag_0="a" or tag_0="b"}"#,
         r#"rate(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
+        // Both occurrences of a pair name alternatives, which the per-selector guard refuses before
+        // the pair's own identity check.
+        r#"increase(some_metric{tag_0="a" or tag_0="b"}[5m]) / increase(some_metric{tag_0="a" or tag_0="b"}[5m])"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2733,6 +2736,37 @@ async fn native_fused_delta_temporality_rates_fall_back() {
             "`{query}` over a table without the marker must still fold: {}",
             unmarked.display_indent()
         );
+    }
+}
+
+/// A `rate`/`increase` pair over a delta-temporality table keeps the existing plan for both sides.
+///
+/// The marker is one identity tag here, so the pair's own identity check passes and only the
+/// per-selector temporality guard can decline it. A table without the marker admits both pair
+/// shapes over the two-occurrence path, which is what makes the decline the marker's doing rather
+/// than the identity check's.
+#[tokio::test]
+async fn native_fused_delta_temporality_two_occurrences_fall_back() {
+    let tags = [("host", false), (OTLP_AGGREGATION_TEMPORALITY_LABEL, false)];
+    for query in [
+        "rate(some_metric[5m]) / rate(some_metric[5m])",
+        "increase(some_metric[5m]) - increase(some_metric[5m])",
+    ] {
+        let marked = build_identity_fused_plan(&tags, query, true).await;
+        let marked_without_flag = build_identity_fused_plan(&tags, query, false).await;
+        assert!(
+            find_fused_series(&marked).is_none(),
+            "`{query}` needs the per-series delta math: {}",
+            marked.display_indent()
+        );
+        assert_eq!(
+            marked.display_indent_schema().to_string(),
+            marked_without_flag.display_indent_schema().to_string(),
+            "`{query}` must keep the existing plan, not the cumulative form for both sides"
+        );
+
+        let unmarked = build_identity_fused_plan(&[("host", false)], query, true).await;
+        assert_eq!(2, admitted_two_occurrence_paths(&unmarked).len());
     }
 }
 

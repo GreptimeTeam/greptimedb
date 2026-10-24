@@ -134,9 +134,9 @@ impl PromPlanner {
     /// caller plans it with the existing planner as if this method did not exist. The two ways that
     /// happens are a shape the compiler refuses (`DataFusionError::NotImplemented`, which names
     /// what it found) and a query this route cannot bind faithfully — unsupported aggregates or
-    /// subqueries, a label matcher the bare scan below the node would not apply, alternative (`or`)
-    /// matchers, an `__field__` matcher that narrows the field set, a missing table, a field that is
-    /// not `Float64`, a `rate`/`increase` over a delta-temporality table, or an unusable grid.
+    /// subqueries, alternative (`or`) matchers, an `__field__` matcher that narrows the field set, a
+    /// missing table, a field that is not `Float64`, a `rate`/`increase` over a delta-temporality
+    /// table, or an unusable grid.
     ///
     /// A statement with two occurrences of one selector is admitted only when both read one scan
     /// point-wise. That is the only shape this node can run over every partition of one child
@@ -331,8 +331,7 @@ impl PromPlanner {
                 // partition holds it. A single occurrence needs no such proof: it reads its own scan
                 // once, and the checks above are the ones it has always had.
                 if selectors.len() == 2
-                    && (!selector.matchers.or_matchers.is_empty()
-                        || !identity_keys_are_injective(&matchers, table_meta, &tags))
+                    && !identity_keys_are_injective(&matchers, table_meta, &tags)
                 {
                     return Ok(None);
                 }
@@ -1046,14 +1045,8 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone()))
 }
 
-/// Whether `expr` calls `rate`/`increase`, the functions the existing planner rewrites per series
-/// for a delta-temporality table.
-///
-/// The walk is stated over the whole statement: one such call anywhere keeps the existing plan, so
-/// a shape it skipped would admit a tree whose answer differs from the plan that was there before
-/// this route. It descends through every shape an expression can nest a call in: call arguments,
-/// parentheses, both binary operands, a unary operand, an aggregate's input and a subquery's
-/// expression.
+/// Whether `expr` calls `rate`/`increase`, anywhere an admitted statement can nest one: call
+/// arguments, parentheses, both binary operands and a unary operand.
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
@@ -1065,8 +1058,6 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
             calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
         }
         PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
-        PromExpr::Aggregate(aggregate) => calls_rate_or_increase(&aggregate.expr),
-        PromExpr::Subquery(subquery) => calls_rate_or_increase(&subquery.expr),
         _ => false,
     }
 }
