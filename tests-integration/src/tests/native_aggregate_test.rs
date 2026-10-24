@@ -462,7 +462,7 @@ fn create_table_sql(table: &str) -> String {
 fn counter_table_sql() -> String {
     format!(
         "CREATE TABLE {COUNTER_TABLE} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, \
-         region STRING, v DOUBLE, PRIMARY KEY (job, instance, region)) WITH \
+         \"region\" STRING, v DOUBLE, PRIMARY KEY (job, instance, \"region\")) WITH \
          ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')"
     )
 }
@@ -515,7 +515,7 @@ async fn setup_fixture(instance: &Arc<Instance>) {
         execute_sql(
             instance,
             &format!(
-                "INSERT INTO {COUNTER_TABLE} (ts, job, instance, region, v) VALUES \
+                "INSERT INTO {COUNTER_TABLE} (ts, job, instance, \"region\", v) VALUES \
                  ({counter_first}, '{job}', '{host}', '{region}', {COUNTER_FIRST_VALUE:?}), \
                  ({counter_second}, '{job}', '{host}', '{region}', {second_value:?})"
             ),
