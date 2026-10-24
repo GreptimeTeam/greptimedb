@@ -50,6 +50,8 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sqlparser::ast::{AccessExpr, Value, visit_expressions_mut};
 
+use crate::datafusion::QUERY_FALLBACK_HINT;
+use crate::dist_plan::DistPlannerOptions;
 use crate::error::{
     CteColumnSchemaMismatchSnafu, PlanSqlSnafu, QueryPlanSnafu, Result, SqlSnafu,
     UnimplementedSnafu,
@@ -316,8 +318,27 @@ impl DfLogicalPlanner {
     }
 
     #[tracing::instrument(skip_all)]
-    async fn plan_pql(&self, stmt: &EvalStmt, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
+    async fn plan_pql(
+        &self,
+        stmt: &EvalStmt,
+        query_ctx: QueryContextRef,
+        native_route_allowed: bool,
+    ) -> Result<LogicalPlan> {
         let mut scheduled_state = self.derive_session_state_with_scheduled_time(&query_ctx)?;
+        // Whether the distributed planner may fall back to the fallback plan rewriter. The
+        // execution engine resolves the same three sources the same way: the engine option, which
+        // it copies into the session state it plans with, and then, per query, the session
+        // variable or the `query_fallback` hint. Each source only ever turns the fallback on, so
+        // the value they end up with is the disjunction of them.
+        let allow_query_fallback = scheduled_state
+            .config_options()
+            .extensions
+            .get::<DistPlannerOptions>()
+            .is_some_and(|options| options.allow_query_fallback)
+            || query_ctx.configuration_parameter().allow_query_fallback()
+            || query_ctx
+                .extension(QUERY_FALLBACK_HINT)
+                .is_some_and(|fallback| fallback.to_lowercase().parse::<bool>().unwrap_or(false));
         let promql_annotations = query_ctx.remote_query_id().map(promql_annotation_collector);
         if let Some(collector) = &promql_annotations {
             scheduled_state
@@ -345,6 +366,16 @@ impl DfLogicalPlanner {
             stmt,
             &self.engine_state,
             promql_annotations,
+            // A query allowed to fall back keeps the existing plan. The native node's physical
+            // planner needs the bare region scan as its input; the fallback rewriter instead wraps
+            // every table scan in `MergeScan`, so the node above it would have no physical plan and
+            // the query would fail after the fallback was already taken. Declining here keeps the
+            // whole query on the legacy path.
+            native_route_allowed
+                && !allow_query_fallback
+                && self.engine_state.experimental_native_promql()
+                && self.engine_state.in_process_region_transport()
+                && crate::promql::planner::native::native_promql_requested(&query_ctx),
         )
         .await
         .map_err(BoxedError::new)
@@ -461,8 +492,16 @@ impl DfLogicalPlanner {
                     alias: eval.alias.clone(),
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
-
-                self.plan(&stmt, query_ctx).await
+                // A hybrid CTE registers this plan as a table the outer SQL query reads, so the
+                // `FusedSeries` node would sit under a SQL root. The in-process encodability
+                // exception is scoped to a plan whose root is the node, so here the node would be
+                // cut off and left in the frontend, where the physical planner cannot build it -
+                // a query that used to answer would fail instead. The route is therefore not
+                // offered for an embedded statement.
+                let QueryStatement::Promql(eval, _alias) = &stmt else {
+                    unreachable!("a TQL eval parses to a PromQL statement");
+                };
+                self.plan_pql(eval, query_ctx, false).await
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -699,7 +738,8 @@ impl LogicalPlanner for DfLogicalPlanner {
     async fn plan(&self, stmt: &QueryStatement, query_ctx: QueryContextRef) -> Result<LogicalPlan> {
         match stmt {
             QueryStatement::Sql(stmt) => self.plan_sql(stmt, query_ctx).await,
-            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx).await,
+            // The statement's own plan is what a region receives, so the native route is offered.
+            QueryStatement::Promql(stmt, _alias) => self.plan_pql(stmt, query_ctx, true).await,
         }
     }
 
@@ -760,7 +800,9 @@ mod tests {
     use table::test_util::EmptyTable;
 
     use super::*;
+    use crate::datafusion::QUERY_FALLBACK_HINT;
     use crate::parser::{PromQuery, QueryLanguageParser};
+    use crate::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
     use crate::{QueryEngineFactory, QueryEngineRef};
 
     async fn create_test_engine() -> QueryEngineRef {
@@ -819,6 +861,14 @@ mod tests {
     }
 
     fn create_promql_test_engine() -> QueryEngineRef {
+        create_promql_test_engine_with(crate::options::QueryOptions::default(), false)
+    }
+
+    /// The PromQL fixture, additionally stating the engine options and how its regions are reached.
+    fn create_promql_test_engine_with(
+        query_options: crate::options::QueryOptions,
+        in_process_region_transport: bool,
+    ) -> QueryEngineRef {
         let catalog_manager = MemoryCatalogManager::with_default_setup();
         let physical_table_name = "phy";
         let physical_table_id = 999u32;
@@ -909,15 +959,19 @@ mod tests {
             })
             .unwrap();
 
-        QueryEngineFactory::new(
+        QueryEngineFactory::try_new_with_plugins_and_region_transport(
             catalog_manager,
             None,
             None,
             None,
             None,
+            None,
             false,
-            crate::options::QueryOptions::default(),
+            in_process_region_transport,
+            Default::default(),
+            query_options,
         )
+        .unwrap()
         .query_engine()
     }
 
@@ -948,6 +1002,87 @@ mod tests {
         .unwrap();
 
         engine.planner().plan(&stmt, query_ctx).await.unwrap()
+    }
+
+    /// Plans `rate(some_metric[5m])` on the fixture above with the fallback sources the caller
+    /// states — the engine option, the session variable and the `query_fallback` hint — while the
+    /// native route is enabled and requested, so only the fallback guard decides.
+    async fn plan_native_promql_with_fallback(
+        engine_fallback: bool,
+        session_fallback: bool,
+        hint: Option<&str>,
+    ) -> String {
+        let engine = create_promql_test_engine_with(
+            crate::options::QueryOptions {
+                allow_query_fallback: engine_fallback,
+                experimental_native_promql: true,
+                ..Default::default()
+            },
+            // The native route plans a region input the region server in this process accepts.
+            true,
+        );
+        // The native route request and the fallback hint both reach the planner as query context
+        // extensions, the way a client sends them.
+        let mut builder = QueryContextBuilder::default()
+            .set_extension(NATIVE_PROMQL_EXTENSION_KEY.to_string(), "true".to_string());
+        if let Some(hint) = hint {
+            builder = builder.set_extension(QUERY_FALLBACK_HINT.to_string(), hint.to_string());
+        }
+        let query_ctx = builder.build();
+        query_ctx
+            .configuration_parameter()
+            .set_allow_query_fallback(session_fallback);
+        let query_ctx = Arc::new(query_ctx);
+        let stmt = QueryLanguageParser::parse_promql(
+            &PromQuery {
+                query: "rate(some_metric[5m])".to_string(),
+                start: "0".to_string(),
+                end: "10".to_string(),
+                step: "5s".to_string(),
+                lookback: "300s".to_string(),
+                alias: None,
+            },
+            &query_ctx,
+        )
+        .unwrap();
+
+        engine
+            .planner()
+            .plan(&stmt, query_ctx)
+            .await
+            .unwrap()
+            .display_indent()
+            .to_string()
+    }
+
+    /// The native route is admitted only when the query cannot fall back, and every source the
+    /// execution engine resolves the fallback from decides that at plan time too.
+    #[tokio::test]
+    async fn test_plan_pql_declines_native_route_when_query_may_fall_back() {
+        // (engine option, session variable, hint, native route admitted)
+        for (engine, session, hint, native) in [
+            // Nothing asks for the fallback, so the route is planned as before.
+            (false, false, None, true),
+            // A hint that does not parse as `true` leaves the fallback off, as it does at execution.
+            (false, false, Some("false"), true),
+            (false, false, Some("yes"), true),
+            // Either per-query source turns the fallback on, so the route is declined.
+            (false, true, None, false),
+            (false, false, Some("true"), false),
+            (false, false, Some("TRUE"), false),
+            // Each source only turns the fallback on: neither a `false` hint nor a `false` session
+            // variable clears the engine option, and a `false` hint does not clear the variable.
+            (true, false, None, false),
+            (true, false, Some("false"), false),
+            (true, true, Some("false"), false),
+        ] {
+            let plan = plan_native_promql_with_fallback(engine, session, hint).await;
+            assert_eq!(
+                plan.contains("FusedSeries"),
+                native,
+                "engine={engine}, session={session}, hint={hint:?}: {plan}"
+            );
+        }
     }
 
     /// Plans `sql` and runs the DataFusion analyzer, which is where

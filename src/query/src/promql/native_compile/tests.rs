@@ -17,7 +17,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use datafusion::error::DataFusionError;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
-use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::SeriesOrdering;
@@ -26,7 +25,7 @@ use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, Se
 use datatypes::series::{Label, SeriesLabels};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
-use promql::native::execute::{NativeExecutionState, NativeExecutor};
+use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
     MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -2419,12 +2418,12 @@ fn execute_compiled(query: &str, chunks: Vec<RawSeriesChunk>) -> Vec<EvaluatedCh
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0)
+        NativeExecutionState::try_new(&tree, pool)
             .unwrap_or_else(|error| panic!("`{query}` was not executable: {error}")),
     );
     for chunk in chunks {
         execution
-            .push_raw(chunk)
+            .push_raw(InputId::new(0), chunk)
             .unwrap_or_else(|error| panic!("`{query}` refused its input: {error}"));
     }
     let mut out = Vec::new();
@@ -3850,12 +3849,11 @@ fn aggregate_results(output: &[EvaluatedChunk]) -> Vec<AggSeries> {
 /// decided at each absolute grid position.
 fn run_aggregate_tree(tree: &NativeTree, chunks: Vec<RawSeriesChunk>) -> Vec<AggSeries> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-    let state =
-        NativeExecutionState::try_new(tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let state = NativeExecutionState::try_new(tree, pool).unwrap();
     let mut execution = NativeExecutor::new(state);
     for chunk in chunks {
         execution
-            .push_raw(chunk)
+            .push_raw(InputId::new(0), chunk)
             .unwrap_or_else(|error| panic!("a source chunk was refused: {error}"));
     }
     let output = execution
@@ -3952,11 +3950,10 @@ fn a_compiled_sum_aggregates_series_chunks_after_input_ends() {
             ),
         ];
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-        let state =
-            NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+        let state = NativeExecutionState::try_new(&tree, pool).unwrap();
         let mut execution = NativeExecutor::new(state);
         for chunk in chunks {
-            execution.push_raw(chunk).unwrap();
+            execution.push_raw(InputId::new(0), chunk).unwrap();
             assert!(
                 execution.next_chunk().unwrap().is_none(),
                 "`{query}` produced output before the whole input ended"
@@ -4236,11 +4233,10 @@ fn a_compiled_sum_over_a_rate_aggregates_series_chunks_after_input_ends() {
         ),
     ];
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
-    let state =
-        NativeExecutionState::try_new(&tree, pool, &ExecutionPlanMetricsSet::new(), 0).unwrap();
+    let state = NativeExecutionState::try_new(&tree, pool).unwrap();
     let mut execution = NativeExecutor::new(state);
     for chunk in chunks {
-        execution.push_raw(chunk).unwrap();
+        execution.push_raw(InputId::new(0), chunk).unwrap();
         assert!(
             execution.next_chunk().unwrap().is_none(),
             "the rate aggregate produced output before the whole input ended"

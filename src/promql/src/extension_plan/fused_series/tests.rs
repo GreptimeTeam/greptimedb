@@ -47,13 +47,14 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
-use datafusion::execution::runtime_env::RuntimeEnvBuilder;
+use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
-use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::execution_plan::{
+    Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
+};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricValue, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
@@ -68,17 +69,13 @@ use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
-use super::{
-    FusedSeries, FusedSeriesBinding, LabelSets, OutputColumn, POLL_BUDGET, label_set,
-    occupied_runs, series_to_record_batch,
-};
+use super::{FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET, series_to_record_batch};
 use crate::evaluated::EvaluatedChunk;
-use crate::native::execute::{NativeExecutionState, NativeExecutor};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundWindow, Grouping, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
-use crate::native::runs::absorb_rebuilds;
 use crate::range_eval::{RangeFunction, RangeWindow};
 
 /// The query every tree here is compiled from.
@@ -111,8 +108,6 @@ const OTHER: &str = "other";
 const HOST: &str = "host";
 const ZONE: &str = "zone";
 const NAME: &str = "__name__";
-/// A metadata label, which the window drops along with the metric name.
-const TYPE: &str = "__type__";
 const METRIC: &str = "http_requests_total";
 
 fn grid() -> Arc<EvalGrid> {
@@ -129,7 +124,7 @@ fn raw_schema() -> Arc<SeriesSchema> {
     })
 }
 
-/// A raw schema of two float fields, so one series can fill one of them and another the other.
+/// A raw schema of two float fields, used to verify a frame with different fields is rejected.
 fn two_field_schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: Arc::from([
@@ -182,102 +177,6 @@ fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
 }
 
-/// An instant selection feeding a range window.
-fn instant_window_tree() -> NativeTree {
-    let instant = instant_tree().root().clone();
-    let grid = instant
-        .output
-        .samples()
-        .expect("an instant selection produces samples")
-        .eval_grid
-        .clone()
-        .expect("an instant selection's output is evaluated on a grid");
-    let evaluated = instant.output.clone();
-    NativeTree::try_new(NativeNode {
-        expr: NativeExpr::Window {
-            input: Box::new(instant),
-            op: BoundWindow {
-                function: RangeFunction::Rate,
-                window: RangeWindow {
-                    range_ms: RANGE_MS,
-                    offset_ms: 0,
-                    anchor_ms: None,
-                    modifier: None,
-                },
-                input_grid: Some(Arc::clone(&grid)),
-                output_grid: grid,
-            },
-        },
-        output: evaluated,
-    })
-    .expect("the bound tree is legal")
-}
-
-/// Two windows stacked, `rate(last_over_time(x[1s])[2s])`, which no compiler produces.
-///
-/// A range function has to apply directly to a selector, and a selector is raw samples, so a tree
-/// with a window above a window is only reachable by writing it down by hand - which is a tree
-/// [`FusedSeriesExec`](super::FusedSeriesExec) accepts, and therefore one it has to answer correctly.
-///
-/// The inner window is the interesting one: `last_over_time` keeps `__name__`, so the pair it can
-/// split is not two series whose names it dropped but `{host="h", zone=""}` and `{host="h"}`, one
-/// canonical label set and two raw keys. Its fragments are not merged unless the node above it
-/// merges them, and that merge happens once per execution: with one execution per partition each
-/// partition sees one fragment, so the outer window reads one half of the pair.
-fn nested_window_tree() -> NativeTree {
-    let grid = grid();
-    // The inner window's output, which is also the outer window's output: a window reports one value
-    // per input field on its own grid.
-    let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: raw_schema().fields.clone(),
-        eval_grid: Some(Arc::clone(&grid)),
-    }));
-    let raw = NativeType::Samples(raw_schema());
-    NativeTree::try_new(NativeNode {
-        expr: NativeExpr::Window {
-            input: Box::new(NativeNode {
-                expr: NativeExpr::Window {
-                    input: Box::new(NativeNode {
-                        expr: NativeExpr::Input(BoundInput {
-                            output: raw.clone(),
-                            ordering: SeriesOrdering::KeyThenTime,
-                        }),
-                        output: raw,
-                    }),
-                    op: BoundWindow {
-                        function: RangeFunction::LastOverTime,
-                        window: RangeWindow {
-                            range_ms: 1_000,
-                            offset_ms: 0,
-                            anchor_ms: None,
-                            modifier: None,
-                        },
-                        // The inner window's input is raw samples, so it has no grid of its own.
-                        input_grid: None,
-                        output_grid: Arc::clone(&grid),
-                    },
-                },
-                output: evaluated.clone(),
-            }),
-            op: BoundWindow {
-                function: RangeFunction::Rate,
-                window: RangeWindow {
-                    range_ms: 2_000,
-                    offset_ms: 0,
-                    anchor_ms: None,
-                    modifier: None,
-                },
-                // The outer window reads the inner one's evaluated output, on that output's grid,
-                // and reports one value per field there like the inner one does.
-                input_grid: Some(Arc::clone(&grid)),
-                output_grid: Arc::clone(&grid),
-            },
-        },
-        output: evaluated,
-    })
-    .expect("the bound tree is legal")
-}
-
 /// The same tree asking for `quantile`, whose state the runtime does not keep yet.
 fn quantile_aggregate_tree() -> NativeTree {
     let complete = aggregate_tree();
@@ -325,37 +224,6 @@ fn aggregate_tree() -> NativeTree {
             fields: raw_schema().fields.clone(),
             eval_grid: Some(grid),
         })),
-    })
-    .expect("the bound tree is legal")
-}
-
-/// The tree an instant selection compiles to: the last raw sample at or before each grid point.
-///
-/// Unlike a window or a map, a selection rewrites no label: the series it answers carries the labels
-/// its input did.
-fn instant_tree() -> NativeTree {
-    let grid = grid();
-    let evaluated = NativeType::Samples(Arc::new(SeriesSchema {
-        fields: raw_schema().fields.clone(),
-        eval_grid: Some(Arc::clone(&grid)),
-    }));
-    let raw = NativeType::Samples(raw_schema());
-    NativeTree::try_new(NativeNode {
-        expr: NativeExpr::Instant {
-            input: Box::new(NativeNode {
-                expr: NativeExpr::Input(BoundInput {
-                    output: raw.clone(),
-                    ordering: SeriesOrdering::KeyThenTime,
-                }),
-                output: raw,
-            }),
-            op: BoundInstant {
-                lookback_ms: RANGE_MS,
-                offset_ms: 0,
-                output_grid: grid,
-            },
-        },
-        output: evaluated,
     })
     .expect("the bound tree is legal")
 }
@@ -411,6 +279,66 @@ fn output_schema() -> SchemaRef {
     ]))
 }
 
+/// The output of [`zone_node`]: the field, `host`, `zone`, the dropped name and the grid times.
+fn zone_output_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(ZONE, DataType::Utf8, true),
+        Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]))
+}
+
+/// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
+fn zone_node() -> FusedSeries {
+    let tree = rate_tree();
+    let binding = binding_of(
+        &tree,
+        raw_schema(),
+        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
+    );
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        input_plan(frame_schema()),
+        zone_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the binding matches the tree")
+}
+
+/// The two chunks of the collision: one series once with an empty `zone` and once with no `zone`.
+///
+/// They are one identity to Prometheus — an empty label value is no label — but two different raw
+/// series: the scan encodes the empty value and the absent one differently, so they reach the
+/// runtime as two series that close on the same label set.
+fn zone_chunks() -> Vec<RawSeriesChunk> {
+    let rows = series_samples(1.0);
+    vec![
+        chunk_of(
+            &raw_schema(),
+            "zone-empty",
+            metric(&[(HOST, "web-1"), (ZONE, "")], Some(METRIC)),
+            &times_of(&rows),
+            vec![values_of(&rows)],
+            true,
+        ),
+        chunk_of(
+            &raw_schema(),
+            "zone-absent",
+            metric(&[(HOST, "web-1")], Some(METRIC)),
+            &times_of(&rows),
+            vec![values_of(&rows)],
+            true,
+        ),
+    ]
+}
+
 fn input_plan(schema: SchemaRef) -> LogicalPlan {
     LogicalPlan::EmptyRelation(EmptyRelation {
         produce_one_row: false,
@@ -445,15 +373,6 @@ fn memory_exec_partitioned_with(
 /// A physical input producing each of `partitions`' batches in a partition of its own.
 fn memory_exec_partitioned(partitions: Vec<Vec<RecordBatch>>) -> Arc<dyn ExecutionPlan> {
     memory_exec_partitioned_with(frame_schema(), partitions)
-}
-
-/// A task context whose memory pool is `pool`, so what the node charges can be read afterwards.
-fn task_context(pool: &Arc<GreedyMemoryPool>) -> Arc<TaskContext> {
-    let runtime = RuntimeEnvBuilder::new()
-        .with_memory_pool(Arc::clone(pool) as Arc<dyn MemoryPool>)
-        .build()
-        .expect("the runtime environment builds");
-    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
 }
 
 /// A physical input whose one partition's stream `make` builds.
@@ -664,11 +583,6 @@ fn values_of(rows: &[(i64, f64)]) -> Vec<Option<f64>> {
     rows.iter().map(|(_, value)| Some(*value)).collect()
 }
 
-/// One missing sample per timestamp of `rows`, which is a field the series holds no value in.
-fn no_values(rows: &[(i64, f64)]) -> Vec<Option<f64>> {
-    rows.iter().map(|_| None).collect()
-}
-
 /// One chunk of `metric`, keyed `key`, holding `times` and one sample per field of `schema`.
 fn chunk_of(
     schema: &SeriesSchema,
@@ -829,90 +743,9 @@ fn rows(batches: &[RecordBatch]) -> Vec<Row> {
     rows
 }
 
-/// The output of [`zone_node`]: the field, `host`, `zone`, the dropped name and the grid times.
-fn zone_output_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(ZONE, DataType::Utf8, true),
-        Field::new(NAME, DataType::Utf8, true),
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-    ]))
-}
-
-/// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
-fn zone_node() -> FusedSeries {
-    let tree = rate_tree();
-    let binding = binding_of(
-        &tree,
-        raw_schema(),
-        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-    );
-    FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        input_plan(frame_schema()),
-        zone_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the binding matches the tree")
-}
-
-/// The instant-selection node over frames that carry `zone` as well as `host`.
-///
-/// Its output labels are the input's, so an empty-valued label reaches this node's own state as the
-/// frame wrote it.
-fn instant_node() -> FusedSeries {
-    let tree = instant_tree();
-    let binding = binding_of(
-        &tree,
-        raw_schema(),
-        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-    );
-    FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        input_plan(frame_schema()),
-        zone_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the binding matches the tree")
-}
-
-/// The two chunks of the collision: one series once with an empty `zone` and once with no `zone`.
-///
-/// They are one identity to Prometheus — an empty label value is no label — but two different raw
-/// series: the scan encodes the empty value and the absent one differently, so they reach the
-/// runtime as two series that close on the same label set.
-fn zone_chunks() -> Vec<RawSeriesChunk> {
-    let rows = series_samples(1.0);
-    vec![
-        chunk_of(
-            &raw_schema(),
-            "zone-empty",
-            metric(&[(HOST, "web-1"), (ZONE, "")], Some(METRIC)),
-            &times_of(&rows),
-            vec![values_of(&rows)],
-            true,
-        ),
-        chunk_of(
-            &raw_schema(),
-            "zone-absent",
-            metric(&[(HOST, "web-1")], Some(METRIC)),
-            &times_of(&rows),
-            vec![values_of(&rows)],
-            true,
-        ),
-    ]
-}
-
 /// The canonical label set these tests collide on, as the runtime renders it in its refusal.
 const DUPLICATE_LABEL_SET: &str =
-    "the node at root produces two series under the label set [(\"host\", \"web-1\")]";
+    "the node produces two series under the label set [(\"host\", \"web-1\")]";
 
 /// Two raw series that are already one Prometheus identity are refused by the runtime that would
 /// have to answer both.
@@ -984,7 +817,7 @@ async fn a_runtime_error_after_rows_releases_the_input() {
     );
 }
 
-/// Two series with *different* names collapse once `rate` drops the name.
+/// A collision produced inside one native execution is still refused by its local runtime state.
 ///
 /// This is the collision the canonical label set exists for, at the layer that sees it:
 /// `http_requests_total{host="web-1"}` and `http_errors_total{host="web-1"}` reach the window as two
@@ -995,24 +828,22 @@ async fn a_runtime_error_after_rows_releases_the_input() {
 fn two_differently_named_series_collide_once_rate_drops_the_name() {
     let tree = rate_tree();
     let mut execution = NativeExecutor::new(
-        NativeExecutionState::try_new(
-            &tree,
-            Arc::new(UnboundedMemoryPool::default()),
-            &ExecutionPlanMetricsSet::new(),
-            0,
-        )
-        .expect("the runtime executes a rate tree"),
+        NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))
+            .expect("the runtime executes a rate tree"),
     );
     let samples = series_samples(1.0);
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            METRIC,
-            metric(&[(HOST, "web-1")], Some(METRIC)),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                METRIC,
+                metric(&[(HOST, "web-1")], Some(METRIC)),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the first series is a legal raw chunk");
     assert!(
         execution
@@ -1022,14 +853,17 @@ fn two_differently_named_series_collide_once_rate_drops_the_name() {
         "the first series is answered"
     );
     execution
-        .push_raw(chunk_of(
-            &raw_schema(),
-            "http_errors_total",
-            metric(&[(HOST, "web-1")], Some("http_errors_total")),
-            &times_of(&samples),
-            vec![values_of(&samples)],
-            true,
-        ))
+        .push_raw(
+            InputId::new(0),
+            chunk_of(
+                &raw_schema(),
+                "http_errors_total",
+                metric(&[(HOST, "web-1")], Some("http_errors_total")),
+                &times_of(&samples),
+                vec![values_of(&samples)],
+                true,
+            ),
+        )
         .expect("the second series is a legal raw chunk");
     let error = execution
         .next_chunk()
@@ -1489,85 +1323,6 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     );
 }
 
-/// Two windows stacked are refused over more than one partition, because the inner one's fragments
-/// need not have been merged.
-///
-/// The counterexample is legal PromQL once nesting is expressible: the inner `last_over_time` runs
-/// over two raw series that are one canonical label set, `{host="h", zone=""}` holding `(1s, 1)` and
-/// `{host="h"}` holding `(2s, 2)`, and the outer `rate` needs both in one window. In a single
-/// partition the outer window merges the two fragments and answers `(2s, 1)`; in two partitions each
-/// executor is handed one fragment and has one sample to rate, so the outer window answers nothing.
-/// That is an empty result rather than an error, which is why no check further down can see it.
-///
-/// `last_over_time` keeps `__name__`, so a check that looked only for a dropped metric name accepts
-/// this tree. What makes it unsafe is that a window's output can hold two series under one label set
-/// whenever it did not merge its input, which a bare tree cannot say.
-///
-/// One partition stays accepted: there is nothing to split there, which is what makes the refusal
-/// about the split rather than about the shape of the tree.
-#[test]
-fn a_nested_window_over_two_partitions_is_refused() {
-    let error = plan(
-        nested_window_tree(),
-        memory_exec_partitioned(vec![vec![], vec![]]),
-    )
-    .expect_err("each of two partitions would merge only the fragment it was given");
-    let message = error.to_string();
-    assert!(
-        message.contains("`root.input`"),
-        "the refusal must name the inner window: {message}"
-    );
-    assert!(
-        message.contains("`root`"),
-        "the refusal must name the window above it: {message}"
-    );
-    assert!(
-        message.contains("2 partitions"),
-        "the refusal must name the partition count: {message}"
-    );
-
-    // The same tree over one partition is accepted, because one execution sees every fragment and
-    // merges them into one series before the window above it evaluates.
-    plan(nested_window_tree(), memory_exec(Vec::new()))
-        .expect("a single partition cannot split a logical series");
-}
-
-/// An instant selection can leave distinct raw labels on one canonical label set for a window.
-#[test]
-fn an_instant_then_window_over_two_partitions_is_refused() {
-    let error = plan(
-        instant_window_tree(),
-        memory_exec_partitioned(vec![vec![], vec![]]),
-    )
-    .expect_err("each partition could hand the window only one fragment");
-    let message = error.to_string();
-    assert!(
-        message.contains("`root.input`"),
-        "the refusal must name the instant selection: {message}"
-    );
-    assert!(
-        message.contains("`root`"),
-        "the refusal must name the consuming window: {message}"
-    );
-    assert!(
-        message.contains("2 partitions"),
-        "the refusal must name the partition count: {message}"
-    );
-}
-
-/// A single partition cannot split a logical series, even when an instant feeds a window.
-#[test]
-fn an_instant_then_window_over_one_partition_is_accepted() {
-    plan(instant_window_tree(), memory_exec(Vec::new())).expect("one partition sees all fragments");
-}
-
-/// A window directly over raw input remains valid across partitions without a preceding rewriter.
-#[test]
-fn a_window_over_raw_input_on_two_partitions_is_accepted() {
-    plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
-        .expect("ordinary input-to-window trees do not split a logical series");
-}
-
 /// One poll reads at most [`POLL_BUDGET`] chunks of input, and stopping there loses nothing.
 ///
 /// `rate(x[5m])` decides nothing until a sample reaches the grid's first point, so a series can
@@ -1753,165 +1508,7 @@ fn error_chain(error: &DataFusionError) -> String {
     message
 }
 
-/// Two partitions, one series each, and both series leave the window on the same label set.
-///
-/// `rate` drops `__name__`, so `http_requests_total{host="web-1"}` reads as `{host="web-1"}` in
-/// the output. The key column keeps each of the two whole inside its own partition, so a check that
-/// lived inside one execution would see one series each and report nothing: only state shared by
-/// the partitions sees that the output vector holds the label set twice.
-#[tokio::test]
-async fn a_duplicate_label_set_across_partitions_is_refused() {
-    let series = frame(&series_chunk("web-1", &series_samples(1.0), true));
-    let exec = plan(
-        rate_tree(),
-        memory_exec_partitioned(vec![vec![series.clone()], vec![series]]),
-    )
-    .expect("the runtime executes a rate tree");
-    assert_eq!(
-        2,
-        exec.properties().output_partitioning().partition_count(),
-        "this test needs one series in each of two partitions"
-    );
-
-    let error = collect(exec, SessionContext::default().task_ctx())
-        .await
-        .expect_err("the second partition lands on the label set the first one claimed");
-    let message = error_chain(&error);
-    assert!(
-        message.contains("vector cannot contain metrics with the same labelset"),
-        "refused for another reason: {message}"
-    );
-    assert!(
-        message.contains("host=\"web-1\""),
-        "the label set must be readable: {message}"
-    );
-}
-
-/// The same label set on points that do not overlap is legal, and every point survives.
-///
-/// A rate needs two samples in its window, so the first series only has a value at the first grid
-/// point and the second only at the last: the two share a final label set but no evaluation
-/// timestamp. Prometheus merges such series into one; this node emits both batches and leaves the
-/// merge to matrix assembly, so the check has to allow what it would otherwise refuse.
-#[tokio::test]
-async fn a_duplicate_label_set_on_disjoint_grid_points_is_emitted() {
-    let first = vec![frame(&series_chunk(
-        "web-1",
-        &[(60_000, 60.0), (GRID_START, GRID_START as f64 / 1_000.0)],
-        true,
-    ))];
-    let last = GRID_START + (GRID_LEN as i64 - 1) * GRID_STEP;
-    let second = vec![frame(&series_chunk(
-        "web-1",
-        &[
-            (GRID_START, GRID_START as f64 / 1_000.0),
-            (last, last as f64 / 1_000.0),
-        ],
-        true,
-    ))];
-    let exec = plan(rate_tree(), memory_exec_partitioned(vec![first, second]))
-        .expect("the runtime executes a rate tree");
-
-    let batches = collect(exec, SessionContext::default().task_ctx())
-        .await
-        .expect("disjoint grid points are legal");
-    assert_eq!(2, batches.len(), "each partition emits its own series");
-    let mut rows = rows(&batches);
-    rows.sort_by_key(|row| row.0);
-    assert_eq!(
-        vec![GRID_START, last],
-        rows.iter().map(|row| row.0).collect::<Vec<_>>(),
-        "both series must survive with the one point each holds"
-    );
-    for ((_, value, host, _), rate) in rows.iter().zip([1.0, 1.0]) {
-        assert_eq!(Some("web-1"), host.as_deref());
-        let value = value.expect("the point each series holds has a value");
-        assert!((rate - value).abs() < 1e-9, "{value} is not {rate}");
-    }
-}
-
-/// What a label set holds stays charged after the stream that first claimed it ends, and what a
-/// later partition adds to it is charged as well.
-///
-/// The map belongs to the plan: it outlives every partition and is released with the plan. Charging
-/// each stream for what it inserted returned the bytes of a label set when *that* stream ended,
-/// while the entry the next partition is checked against stayed in the map, so everything the map
-/// held after the first partition was invisible to the pool. What is charged here is therefore read
-/// between the partitions: it has to survive the first stream, and the runs the second partition
-/// merges into the entry have to cost what they hold.
-#[tokio::test]
-async fn a_label_set_stays_charged_after_its_first_stream_ends() {
-    // The first series holds a value only at the first grid point and the second only at the last,
-    // so the two share a final label set without sharing an evaluation timestamp: the second
-    // partition is legal and has to be answered, and it has to find the first one's entry there.
-    let first = vec![frame(&series_chunk(
-        "web-0",
-        &[(60_000, 60.0), (GRID_START, GRID_START as f64 / 1_000.0)],
-        true,
-    ))];
-    let last = GRID_START + (GRID_LEN as i64 - 1) * GRID_STEP;
-    let second = vec![frame(&series_chunk(
-        "web-0",
-        &[
-            (GRID_START, GRID_START as f64 / 1_000.0),
-            (last, last as f64 / 1_000.0),
-        ],
-        true,
-    ))];
-    let exec = plan(rate_tree(), memory_exec_partitioned(vec![first, second]))
-        .expect("the runtime executes a rate tree");
-    assert_eq!(
-        2,
-        exec.properties().output_partitioning().partition_count(),
-        "this test needs one series in each of two partitions"
-    );
-    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
-    let context = task_context(&pool);
-
-    // The first partition claims the label set, answers it and ends.
-    let mut stream = exec
-        .execute(0, Arc::clone(&context))
-        .expect("the node executes");
-    let mut answered = Vec::new();
-    while let Some(batch) = stream.next().await {
-        answered.push(batch.expect("the first partition runs"));
-    }
-    assert_eq!(1, answered.len(), "one series over one grid point");
-    drop(stream);
-    let charged = pool.reserved();
-    assert!(
-        charged > 0,
-        "the first partition's label set is still in the plan's map, but nothing is charged for it"
-    );
-
-    // The second partition lands on that same label set on points the first one does not hold: it
-    // is answered, and the run it merges into the entry is what its charge grows by.
-    let mut stream = exec
-        .execute(1, Arc::clone(&context))
-        .expect("the node executes");
-    let mut answered = Vec::new();
-    while let Some(batch) = stream.next().await {
-        answered.push(batch.expect("the second partition runs"));
-    }
-    assert_eq!(1, answered.len(), "disjoint points are legal");
-    drop(stream);
-    assert!(
-        pool.reserved() > charged,
-        "the second partition's run grew the entry, but nothing was charged for it: {} is not \
-         above {charged}",
-        pool.reserved()
-    );
-
-    // The entries live as long as the plan, so dropping it is what gives their bytes back.
-    drop(exec);
-    assert_eq!(
-        0,
-        pool.reserved(),
-        "the plan's drop releases what its label sets held"
-    );
-}
-
-/// Each partition runs its own series and answers it, with no label set claimed twice.
+/// Each partition runs its own series and answers it independently.
 #[tokio::test]
 async fn every_partition_evaluates_its_own_series() {
     let partitions = [1.0, 2.0, 3.0]
@@ -1998,7 +1595,7 @@ fn the_optimizer_inserts_no_exchange_between_the_input_and_this_node() {
          reorders a series' chunks: the node would close a series it has not finished"
     );
     // No exchange is not the same as no change: a rule that raised the count some other way would
-    // still split a series. The count is the input's, which is what the node reports and what it
+    // The count is the input's, which is what the node reports and what it
     // runs one evaluator per.
     assert_eq!(
         2,
@@ -2118,654 +1715,6 @@ async fn a_partition_past_the_inputs_count_is_refused() {
     );
 }
 
-/// The `rate(x[5m])` tree over two fields, with both fields and the tags in the output.
-fn two_field_node() -> FusedSeries {
-    let tree = rate_tree_of(two_field_schema());
-    let binding = binding_of(
-        &tree,
-        two_field_schema(),
-        vec![HOST.to_string(), NAME.to_string()],
-    );
-    FusedSeries::try_new(
-        Arc::from(PROMQL),
-        tree,
-        binding,
-        input_plan(frame_schema_of(&two_field_schema())),
-        two_field_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .expect("the binding matches the tree")
-}
-
-/// The output of [`two_field_node`]: both fields, the tags and the grid times.
-fn two_field_output_schema() -> SchemaRef {
-    Arc::new(Schema::new(vec![
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(OTHER, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(NAME, DataType::Utf8, true),
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-    ]))
-}
-
-/// One chunk of `{__name__=METRIC, host=<host>, __type__=<kind>}` whose `field` holds `rows` and
-/// whose other field is missing everywhere.
-fn one_field_chunk(field: usize, host: &str, kind: &str, last: bool) -> RawSeriesChunk {
-    let rows = series_samples(1.0);
-    let (value, other) = if field == 0 {
-        (values_of(&rows), no_values(&rows))
-    } else {
-        (no_values(&rows), values_of(&rows))
-    };
-    chunk_of(
-        &two_field_schema(),
-        &format!("{host}-{kind}"),
-        metric(&[(HOST, host), (TYPE, kind)], Some(METRIC)),
-        &times_of(&rows),
-        vec![value, other],
-        last,
-    )
-}
-
-/// Two series that close on one label set may still fill it, one field each.
-///
-/// `rate` drops `__name__` and `__type__`, so the two series below leave the window as
-/// `{host="web-1"}` and read as one label set. They hold values in *different* fields, which is the
-/// pair [`crate::grid_series::merge_same_labelset`] merges: one value of one field at each position,
-/// never two. Occupancy is therefore per field, and refusing this pair would refuse a series
-/// Prometheus answers.
-#[tokio::test]
-async fn a_duplicate_label_set_of_complementary_fields_is_emitted() {
-    let exec = plan_of(
-        two_field_node(),
-        memory_exec_partitioned_with(
-            frame_schema_of(&two_field_schema()),
-            vec![
-                frames_of(
-                    &two_field_schema(),
-                    &[one_field_chunk(0, "web-1", "counter", true)],
-                ),
-                frames_of(
-                    &two_field_schema(),
-                    &[one_field_chunk(1, "web-1", "gauge", true)],
-                ),
-            ],
-        ),
-    )
-    .expect("the runtime executes a rate tree");
-    assert_eq!(
-        2,
-        exec.properties().output_partitioning().partition_count(),
-        "this test needs one series in each of two partitions"
-    );
-
-    let batches = collect(exec, SessionContext::default().task_ctx())
-        .await
-        .expect("complementary fields are legal");
-    assert_eq!(2, batches.len(), "each partition emits its own series");
-    // Each batch answers one field of the shared label set and leaves the other missing: the two
-    // together are the merged series, with no value of one field holding a position twice.
-    let answered = batches
-        .iter()
-        .map(|batch| {
-            let host = batch
-                .column_by_name(HOST)
-                .and_then(|host| host.as_any().downcast_ref::<StringArray>())
-                .expect("every batch has its tag column");
-            assert!(
-                (0..host.len()).all(|row| host.value(row) == "web-1"),
-                "both batches answer the one label set"
-            );
-            let present = [VALUE, OTHER]
-                .into_iter()
-                .filter(|field| {
-                    let column = batch
-                        .column_by_name(field)
-                        .unwrap_or_else(|| panic!("every batch has a {field} column"))
-                        .as_any()
-                        .downcast_ref::<Float64Array>()
-                        .expect("the field column is Float64");
-                    column.null_count() < column.len()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                1,
-                present.len(),
-                "each series fills exactly one field: {present:?}"
-            );
-            present[0]
-        })
-        .collect::<Vec<_>>();
-    let mut answered = answered;
-    answered.sort_unstable();
-    assert_eq!(vec![OTHER, VALUE], answered, "the two fields are filled");
-}
-
-/// Two series that close on one label set may not hold the same field at the same position.
-///
-/// This is the pair no merge resolves: at one grid position one field of the label set would carry
-/// two values. It is refused even though the two series name different `__type__` labels, because
-/// the window drops that label and what reaches the output is one label set twice.
-#[tokio::test]
-async fn a_duplicate_label_set_of_one_field_is_refused() {
-    let exec = plan_of(
-        two_field_node(),
-        memory_exec_partitioned_with(
-            frame_schema_of(&two_field_schema()),
-            vec![
-                frames_of(
-                    &two_field_schema(),
-                    &[one_field_chunk(0, "web-1", "counter", true)],
-                ),
-                frames_of(
-                    &two_field_schema(),
-                    &[one_field_chunk(0, "web-1", "gauge", true)],
-                ),
-            ],
-        ),
-    )
-    .expect("the runtime executes a rate tree");
-
-    let error = collect(exec, SessionContext::default().task_ctx())
-        .await
-        .expect_err("both series hold a value of one field at one position");
-    let message = error_chain(&error);
-    assert!(
-        message.contains("vector cannot contain metrics with the same labelset"),
-        "refused for another reason: {message}"
-    );
-    assert!(
-        message.contains("host=\"web-1\""),
-        "the label set must be readable: {message}"
-    );
-}
-
-/// Two partitions whose label sets differ only in an empty value hold one label set.
-///
-/// `{host="web-1", zone=""}` and `{host="web-1"}` are one series to Prometheus: an empty label value
-/// is no label. An instant selection rewrites nothing, so both label sets reach this node's own
-/// state as their frames wrote them, and a state that compared the tags as they arrived would file
-/// them apart. Neither partition sees the other's series, so nothing else in the plan can refuse
-/// the pair: this node's state is what compares them, and what it has to compare is the label set
-/// Prometheus compares.
-#[tokio::test]
-async fn partitions_whose_label_sets_differ_only_in_an_empty_value_are_refused() {
-    let [empty, absent] = <[_; 2]>::try_from(zone_chunks()).expect("the fixture has two chunks");
-    let exec = plan_of(
-        instant_node(),
-        memory_exec_partitioned(vec![frames(&[empty]), frames(&[absent])]),
-    )
-    .expect("the runtime executes an instant selection");
-    assert_eq!(
-        2,
-        exec.properties().output_partitioning().partition_count(),
-        "this test needs one series in each of two partitions"
-    );
-
-    let error = collect(exec, SessionContext::default().task_ctx())
-        .await
-        .expect_err("both partitions hold one value of one field at the same position");
-    let message = error_chain(&error);
-    assert!(
-        message.contains("vector cannot contain metrics with the same labelset"),
-        "refused for another reason: {message}"
-    );
-    assert!(
-        message.contains("host=\"web-1\""),
-        "the label set must be readable: {message}"
-    );
-}
-
-/// A chunk holding no value records nothing, so a query that answers nothing holds nothing.
-///
-/// A selection over a series that staleness or the range left empty still closes that series, and
-/// hands over a closing chunk with no rows - [`crate::native::execute::no_row_chunk`] is where it is
-/// built. Every chunk reaches [`LabelSets::claim`], so an implementation that wrote an entry per
-/// chunk would record one per empty series and charge the plan's reservation for it, for a query
-/// whose answer is empty: enough of them would exhaust a finite pool without a single row produced.
-///
-/// The entries are checked rather than the charge, because a charge of zero is what a mistake here
-/// would still show if the label bytes happened to be free: what must not grow is the table.
-#[test]
-fn a_chunk_holding_no_value_is_claimed_without_recording_it() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 0)])
-        .expect("an empty run over the grid");
-    let empty_series = |index: usize| Series {
-        metric: metric(&[(HOST, &format!("web-{index}"))], Some(METRIC)),
-        time: axis.clone(),
-        // Five positions were never filled, so no field occupies one.
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![f64::NAN; 0]))),
-    };
-
-    for index in 0..64 {
-        labels
-            .claim(&empty_series(index))
-            .expect("an empty chunk cannot collide with anything");
-    }
-
-    assert_eq!(
-        0,
-        labels.seen.len(),
-        "64 empty series were recorded, and the table outlives the query: {:?}",
-        labels.seen.keys().collect::<Vec<_>>()
-    );
-    assert_eq!(
-        0,
-        pool.reserved(),
-        "nothing is held, so nothing may be charged"
-    );
-}
-
-/// An empty chunk does not stop a later chunk of the same label set from being recorded.
-///
-/// Skipping the empty chunk is only safe while it also records nothing a later one needs: a series
-/// that answers nothing holds no position, so a second series under one label set has to be free to
-/// claim the positions it really holds.
-#[test]
-fn a_later_chunk_still_claims_the_label_set_an_empty_one_skipped() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let empty_axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 0)])
-        .expect("an empty run over the grid");
-    let full_axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 5)])
-        .expect("one run over the whole grid");
-
-    labels
-        .claim(&Series {
-            metric: metric(&[(HOST, "h")], Some(METRIC)),
-            time: empty_axis,
-            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![f64::NAN; 0]))),
-        })
-        .expect("an empty chunk cannot collide with anything");
-    labels
-        .claim(&Series {
-            metric: metric(&[(HOST, "h")], Some(METRIC)),
-            time: full_axis,
-            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; 5]))),
-        })
-        .expect("the first chunk to hold a value claims the positions it holds");
-
-    assert_eq!(1, labels.seen.len(), "the positions are recorded once");
-    assert!(pool.reserved() > 0, "the recorded positions are charged");
-}
-
-/// The claim compares the label set Prometheus compares, so an empty value is no label.
-///
-/// Driven directly at the layer that keeps the state: a window and a map both drop an empty-valued
-/// label before a chunk reaches this node, so no tree this crate can build produces the pair below.
-/// The state has to key on the same normalization they apply all the same, or the equality it
-/// enforces would be one Prometheus does not have.
-#[test]
-fn a_claim_compares_label_sets_without_empty_values() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let axis = TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 5)])
-        .expect("one run over the whole grid");
-    let series_of = |metric: SeriesLabels| Series {
-        metric,
-        time: axis.clone(),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; 5]))),
-    };
-
-    labels
-        .claim(&series_of(metric(&[(HOST, "h"), (ZONE, "")], Some(METRIC))))
-        .expect("the first label set is claimed");
-    let error = labels
-        .claim(&series_of(metric(&[(HOST, "h")], Some(METRIC))))
-        .expect_err("an empty label value is no label");
-    assert!(
-        error
-            .to_string()
-            .contains("vector cannot contain metrics with the same labelset"),
-        "refused for another reason: {error}"
-    );
-    assert_eq!(
-        vec![(Arc::from(HOST), Arc::from("h"))],
-        label_set(&metric(&[(HOST, "h"), (ZONE, "")], None)),
-        "the empty value is not part of the label set"
-    );
-}
-
-/// A series whose chunks move forward, a hole apart, appends to its stored runs rather than
-/// re-merging them.
-///
-/// One grid point per chunk with a hole after it (`0, 2, 4, ...`) is a legal stream and the shape a
-/// short `count_over_time` over sub-sampled, chunked input produces: the chunks of one label set
-/// hold their values at disjoint positions, so they merge into one series and no position ever
-/// carries two values. What it used to cost was quadratic - `claim` walked the whole stored history
-/// to look for a collision and then rebuilt all of it with a merge, for each chunk - and all of it
-/// ran under the label-set lock every partition shares, so a sparse series of `K` chunks made the
-/// other partitions wait for `K(K+1)/2` run moves.
-///
-/// The counter is the runtime's own, so this test measures the append path the native table takes
-/// as well: one fix, not two that can drift apart again.
-#[test]
-fn a_forward_chunk_does_not_rebuild_the_stored_runs() {
-    // How many one-position chunks the series arrives in: enough that the quadratic cost it used to
-    // pay would be unmistakable, since that cost was the square of this figure.
-    const CHUNKS: usize = 64;
-
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    // Two positions per chunk, so a hole follows every point the series holds.
-    let grid = Arc::new(
-        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 2 * CHUNKS as u64).unwrap())
-            .unwrap(),
-    );
-    let chunk = |position: usize| Series {
-        metric: metric(&[(HOST, "h")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(position, 1)])
-            .expect("one position of the grid"),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
-    };
-
-    let before = absorb_rebuilds();
-    for index in 0..CHUNKS {
-        labels
-            .claim(&chunk(2 * index))
-            .expect("the chunks of one label set hold values at disjoint positions");
-    }
-
-    assert_eq!(
-        0,
-        absorb_rebuilds() - before,
-        "the {CHUNKS} forward chunks rebuilt the stored runs instead of appending to them"
-    );
-    assert_eq!(
-        1,
-        labels.seen.len(),
-        "every chunk belongs to one label set, so the history is one entry"
-    );
-}
-
-/// A backward disjoint claim after a spare-capacity run merge updates the exact memory charge.
-#[test]
-fn a_backward_disjoint_claim_after_spare_capacity_is_charged_correctly() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
-    let chunk = |start, len| Series {
-        metric: metric(&[(HOST, "h")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, len)])
-            .unwrap(),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; len]))),
-    };
-    labels.claim(&chunk(10, 2)).unwrap();
-    let runs = labels
-        .seen
-        .values_mut()
-        .next()
-        .unwrap()
-        .first_mut()
-        .unwrap();
-    let old_capacity = runs.capacity();
-    runs.reserve(16);
-    let new_capacity = runs.capacity();
-    labels
-        .reservation
-        .as_mut()
-        .unwrap()
-        .try_grow((new_capacity - old_capacity) * std::mem::size_of::<crate::native::runs::Run>())
-        .unwrap();
-    let before = pool.reserved();
-
-    labels
-        .claim(&chunk(0, 1))
-        .expect("the position is disjoint and earlier than stored history");
-    let runs = labels.seen.values().next().unwrap().first().unwrap();
-    assert_eq!(
-        vec![(0, 1), (10, 12)],
-        runs.iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        before - (new_capacity - runs.capacity()) * std::mem::size_of::<crate::native::runs::Run>(),
-        pool.reserved(),
-        "the accounting follows the replacement vector's actual capacity"
-    );
-}
-
-/// A backward claim that joins two spare-capacity runs charges a replacement vector's shrinkage.
-#[test]
-fn a_backward_claim_merging_spare_capacity_runs_accounts_for_shrinkage() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 3).unwrap()).unwrap());
-    let chunk = |values: Vec<Option<f64>>| Series {
-        metric: metric(&[(HOST, "shrink")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 3)])
-            .expect("the chunk covers the small grid"),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(values))),
-    };
-
-    labels
-        .claim(&chunk(vec![Some(1.0), None, Some(1.0)]))
-        .expect("the first claim stores runs at positions 0 and 2");
-    let runs = labels.seen.values().next().unwrap().first().unwrap();
-    assert_eq!(
-        vec![(0, 1), (2, 3)],
-        runs.iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>()
-    );
-    let before_capacity = runs.capacity();
-    let before_reserved = pool.reserved();
-
-    labels
-        .claim(&chunk(vec![None, Some(1.0), None]))
-        .expect("the disjoint middle position joins both existing runs");
-
-    let runs = labels.seen.values().next().unwrap().first().unwrap();
-    let after_capacity = runs.capacity();
-    assert_eq!(
-        vec![(0, 3)],
-        runs.iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>()
-    );
-    assert!(
-        before_capacity > after_capacity,
-        "the regression requires replacement-vector shrinkage (before={before_capacity}, after={after_capacity})"
-    );
-    let run_size = std::mem::size_of::<crate::native::runs::Run>();
-    assert_eq!(
-        before_reserved - (before_capacity - after_capacity) * run_size,
-        pool.reserved(),
-        "the reservation tracks the replacement vector's actual capacity decrease"
-    );
-}
-
-/// A newly retained field is charged for the cloned run vector's capacity, not incoming slack.
-#[test]
-fn a_new_field_claim_is_charged_for_its_retained_capacity() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 4).unwrap()).unwrap());
-    let first = Series {
-        metric: metric(&[(HOST, "new-field")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 1)]).unwrap(),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
-    };
-    labels.claim(&first).unwrap();
-
-    let incoming = Series {
-        metric: metric(&[(HOST, "new-field")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 4)]).unwrap(),
-        fields: SeriesFields::try_from_vec(vec![
-            Samples::from_float(Float64Array::from(vec![None, None, None, None])),
-            Samples::from_float(Float64Array::from(vec![Some(1.0), None, Some(2.0), None])),
-        ])
-        .unwrap(),
-    };
-    let incoming_runs = occupied_runs(&incoming).unwrap();
-    assert_eq!(2, incoming_runs[1].len());
-    assert!(
-        incoming_runs[1].capacity() > incoming_runs[1].len(),
-        "the incoming run vector has spare capacity"
-    );
-    let before = pool.reserved();
-    labels.claim(&incoming).unwrap();
-
-    let retained = &labels.seen.values().next().unwrap()[1];
-    assert_eq!(2, retained.len());
-    assert_eq!(
-        retained.capacity() * std::mem::size_of::<crate::native::runs::Run>(),
-        pool.reserved() - before,
-        "the reservation charges the retained cloned vector capacity"
-    );
-    assert!(
-        retained.capacity() < incoming_runs[1].capacity(),
-        "the incoming spare capacity was not retained or charged"
-    );
-}
-
-/// Chunked fields are traversed sequentially while occupancy is converted into grid runs.
-#[test]
-fn chunked_samples_occupancy_preserves_sparse_rows() {
-    let values = Samples::try_from_chunks(vec![
-        Samples::from_float(Float64Array::from(vec![Some(1.0), None])),
-        Samples::from_float(Float64Array::from(vec![None, Some(2.0)])),
-    ])
-    .unwrap();
-    let series = Series {
-        metric: metric(&[(HOST, "chunked")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid()), vec![GridSpan::new(0, 4)]).unwrap(),
-        fields: SeriesFields::one(values),
-    };
-    let runs = occupied_runs(&series).expect("chunked occupancy is read through a forward cursor");
-    assert_eq!(
-        vec![(0, 1), (3, 4)],
-        runs[0]
-            .iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>()
-    );
-}
-
-/// Appending a run that touches stored history reuses its last slot instead of rebuilding it.
-#[test]
-fn a_touching_append_with_full_capacity_does_not_rebuild_history() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
-    let chunk = |start| Series {
-        metric: metric(&[(HOST, "touch")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, 1)]).unwrap(),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
-    };
-    labels.claim(&chunk(0)).unwrap();
-    let stored = labels
-        .seen
-        .values_mut()
-        .next()
-        .unwrap()
-        .first_mut()
-        .unwrap();
-    stored.shrink_to_fit();
-    let cap = stored.capacity();
-    let allocation = stored.as_ptr();
-    assert_eq!(
-        stored.len(),
-        cap,
-        "the test requires a full-capacity run list"
-    );
-    let before = absorb_rebuilds();
-    labels
-        .claim(&chunk(1))
-        .expect("the touching position extends the same run");
-    let stored = labels.seen.values().next().unwrap().first().unwrap();
-    assert_eq!(
-        vec![(0, 2)],
-        stored
-            .iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(
-        cap,
-        stored.capacity(),
-        "extending a run did not allocate or copy its history"
-    );
-    assert_eq!(
-        allocation,
-        stored.as_ptr(),
-        "extending a run retained the stored vector allocation"
-    );
-    assert_eq!(
-        before,
-        absorb_rebuilds(),
-        "touching append uses the append path"
-    );
-}
-
-/// A failed claim does not mutate the shared entry, while its reservation owner remains alive.
-#[test]
-fn a_refused_growth_keeps_shared_label_entry_unchanged() {
-    use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
-    let limit = 4096;
-    let pool = Arc::new(GreedyMemoryPool::new(limit));
-    let erased: Arc<dyn MemoryPool> = pool.clone();
-    let mut labels = LabelSets::default();
-    labels.attach(&erased);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
-    let chunk = |host: &str, start| Series {
-        metric: metric(&[(HOST, host)], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, 1)]).unwrap(),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
-    };
-    labels
-        .claim(&chunk("shared", 0))
-        .expect("initial label fits");
-    let key = label_set(&chunk("shared", 0).metric);
-    let before_runs = labels.seen[&key][0]
-        .iter()
-        .map(|run| (run.start, run.end))
-        .collect::<Vec<_>>();
-    let before_reserved = pool.reserved();
-    let blocker: MemoryReservation = MemoryConsumer::new("test blocker").register(&erased);
-    blocker
-        .try_grow(limit - before_reserved)
-        .expect("the blocker occupies remaining capacity");
-    let error = labels
-        .claim(&chunk("shared", 2))
-        .expect_err("growth exceeds the pool");
-    assert!(!error.to_string().is_empty(), "pool refusal is reported");
-    assert_eq!(
-        before_runs,
-        labels.seen[&key][0]
-            .iter()
-            .map(|run| (run.start, run.end))
-            .collect::<Vec<_>>(),
-        "the persistent entry is unchanged"
-    );
-    assert_eq!(limit, pool.reserved(), "both reservations remain live");
-    drop(blocker);
-    assert_eq!(
-        before_reserved,
-        pool.reserved(),
-        "the plan-owned entry remains charged"
-    );
-}
-
 /// Binding ordering includes field names, while schema ordering refuses unequal DF schemas.
 #[test]
 fn unequal_binding_and_output_schema_are_not_ordered_equal() {
@@ -2807,80 +1756,183 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
     );
 }
 
-/// A chunk reaching back before the last stored run still merges into the history.
-///
-/// The forward path only takes a chunk that starts at or after the end of the last stored run; a
-/// chunk that starts before it can interleave with what is stored, so it has to go through the full
-/// merge, and the result still has to be sorted, disjoint and with the runs that touch joined -
-/// which is what the look-up in [`LabelSets::claim`] relies on.
-///
-/// A chunk reaching back over a stored run is the other case, and it stays refused: `[0, 11)` shares
-/// position 10 with the stored `[10, 12)`, so it is a collision and the stored history is left
-/// as it was.
-#[test]
-fn a_chunk_reaching_back_still_merges() {
-    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
-    let mut labels = LabelSets::default();
-    labels.attach(&pool);
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, 16).unwrap()).unwrap());
-    // One chunk holding `len` positions from `start`, every one of them with a value.
-    let chunk = |start: usize, len: usize| Series {
-        metric: metric(&[(HOST, "h")], Some(METRIC)),
-        time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(start, len)])
-            .expect("one run over the grid"),
-        fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0; len]))),
-    };
-    // The runs stored under the one label set, which one field of the output holds.
-    let stored = |labels: &LabelSets| -> Vec<(usize, usize)> {
-        labels
-            .seen
-            .values()
-            .next()
-            .expect("the chunk was recorded under one label set")
-            .first()
-            .expect("the series has one field")
+/// Rebuilding keeps execution metrics independent from those of the original plan.
+#[tokio::test]
+async fn a_rebuilt_node_reports_only_its_own_execution() {
+    let exec = plan(rate_tree(), memory_exec(one_series_frames()))
+        .expect("the runtime executes a rate tree");
+    let batches = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .expect("the node runs");
+    let first_rows = rows(&batches);
+    assert_eq!(
+        grid_timestamps(),
+        first_rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the series is answered at every grid position"
+    );
+    let original = exec
+        .metrics()
+        .expect("the node reports its runtime's metrics");
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    // Rebuilt over a fresh input of the same frames, the way an optimizer replaces a child.
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec(one_series_frames())],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("the node rebuilds over another input");
+    // No execution of the rebuilt node has run, so it registered no handles to report.
+    let before = rebuilt
+        .metrics()
+        .expect("a plan that has not run reports an empty set rather than none");
+    assert_eq!(
+        0,
+        before.iter().count(),
+        "the rebuilt node inherited an execution's metrics"
+    );
+    // Rebuilding does not reset the node it was built from.
+    assert_eq!(1, count(&original, "native.root.completed_series"));
+
+    let rebuilt_batches = collect(Arc::clone(&rebuilt), SessionContext::default().task_ctx())
+        .await
+        .expect("the rebuilt node runs");
+    assert_eq!(first_rows, rows(&rebuilt_batches));
+
+    let after = rebuilt
+        .metrics()
+        .expect("the rebuilt node reports the execution it ran");
+    assert_eq!(1, count(&after, "native.root.completed_series"));
+    assert_eq!(1, count(&after, "native.root.input.completed_series"));
+    // One execution's set, not two: a copy of the original's roots would answer 2 here.
+    assert_eq!(original.iter().count(), after.iter().count());
+    let retained = exec
+        .metrics()
+        .expect("the original keeps the handles its execution registered");
+    assert_eq!(original.iter().count(), retained.iter().count());
+    assert_eq!(1, count(&retained, "native.root.completed_series"));
+    assert_eq!(1, count(&retained, "native.root.input.completed_series"));
+}
+
+/// Reading metrics retains handles, not runtime ownership or duplicate registrations.
+#[tokio::test]
+async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
+    let schema = frame_schema();
+    let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let exec = plan(
+        rate_tree(),
+        staged(schema.clone(), move || {
+            Box::pin(StagedStream::new(schema.clone(), vec![partial.clone()]).pending_after(1))
+        }),
+    )
+    .expect("the runtime executes a rate tree");
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+    // The source hands one unclosed chunk over and parks, so the window holds it while the plan's
+    // metrics are read: the reads below happen while an execution is alive.
+    assert!(futures::poll!(stream.next()).is_pending());
+
+    let first = exec
+        .metrics()
+        .expect("the metrics are registered before the run");
+    let names = |metrics: &MetricsSet| -> Vec<String> {
+        metrics
             .iter()
-            .map(|run| (run.start, run.end))
+            .map(|metric| metric.value().name().to_string())
             .collect()
     };
-
-    labels
-        .claim(&chunk(10, 2))
-        .expect("the first chunk claims the positions it holds");
+    let second = exec.metrics().expect("metrics can be read repeatedly");
     assert_eq!(
-        vec![(10, 12)],
-        stored(&labels),
-        "the run `[10, 12)` is stored"
+        names(&first),
+        names(&second),
+        "reading the metrics again registered another copy of them"
     );
+    assert_eq!(
+        first.iter().count(),
+        second.iter().count(),
+        "the second read changed how many metrics the plan reports"
+    );
+    // A read hands back the very entries the execution records into, not a fresh registration.
+    for (early, late) in first.iter().zip(second.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the second read registered {} again",
+            late.value().name()
+        );
+    }
 
-    let error = labels
-        .claim(&chunk(0, 11))
-        .expect_err("`[0, 11)` holds a value at position 10, where `[10, 12)` holds one");
+    drop(stream);
+    // What the execution recorded is still readable once it is gone, and nothing it held is charged
+    // any more.
+    let after = exec
+        .metrics()
+        .expect("the handles outlive the execution they were registered for");
+    assert_eq!(
+        names(&first),
+        names(&after),
+        "dropping the execution changed the metrics the plan reports"
+    );
+    let current = after
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    let peak = after
+        .sum_by_name("native.p0.root.peak_reserved_bytes")
+        .expect("the peak-bytes gauge is registered");
     assert!(
-        error
-            .to_string()
-            .contains("vector cannot contain metrics with the same labelset"),
-        "refused for another reason: {error}"
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "the dropped execution holds nothing: {current:?}"
     );
-    assert_eq!(
-        vec![(10, 12)],
-        stored(&labels),
-        "a refused claim left the stored history as it was"
-    );
-
-    let before = absorb_rebuilds();
-    labels
-        .claim(&chunk(0, 10))
-        .expect("`[0, 10)` reaches back before the last stored run without sharing a position");
-    assert_eq!(
-        vec![(0, 12)],
-        stored(&labels),
-        "the run reaching back did not merge into the stored one and join it"
+    assert!(
+        matches!(&peak, MetricValue::Gauge { gauge, .. } if gauge.value() > 0),
+        "the peak is what the execution did, not what it holds: {peak:?}"
     );
     assert_eq!(
         1,
-        absorb_rebuilds() - before,
-        "a chunk starting before the last stored run was appended rather than merged"
+        count(&after, "native.root.input.input_batches"),
+        "the counter of the batches the leaf read did not survive the execution"
     );
+    assert_eq!(0, pool.reserved(), "the dropped execution holds no bytes");
+
+    // A second execution of the same plan registers its own tree's handles. It is dropped without
+    // being polled, so what it adds is its own counters at zero -- the first execution's figures are
+    // untouched -- and no part of the tree it built outlives it.
+    let registered = after.iter().count();
+    let second_stream = exec
+        .execute(0, task_context(&pool))
+        .expect("the plan runs a second time");
+    drop(second_stream);
+    let twice = exec
+        .metrics()
+        .expect("the metrics of both executions are read");
+    assert_eq!(
+        twice.iter().count(),
+        registered * 2,
+        "the second execution did not register its own node handles"
+    );
+    assert_eq!(
+        count(&twice, "native.root.input.input_batches"),
+        1,
+        "the second execution's leaf counted the batches of the first"
+    );
+    let current = twice
+        .sum_by_name("native.root.current_reserved_bytes")
+        .expect("the current-bytes gauge is registered");
+    assert!(
+        matches!(&current, MetricValue::Gauge { gauge, .. } if gauge.value() == 0),
+        "an execution that did nothing kept bytes: {current:?}"
+    );
+    assert_eq!(0, pool.reserved(), "the dropped executions hold no bytes");
+
+    // Reading both executions' metrics is still a read: the same entries come back.
+    let again = exec.metrics().expect("metrics can be read repeatedly");
+    assert_eq!(twice.iter().count(), again.iter().count());
+    for (early, late) in twice.iter().zip(again.iter()) {
+        assert!(
+            Arc::ptr_eq(early, late),
+            "the read registered {} again",
+            late.value().name()
+        );
+    }
 }

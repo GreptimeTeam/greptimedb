@@ -1116,7 +1116,11 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
 
 /// The grid the statement is evaluated on: `(end - start) / step + 1` points, the last of which
 /// does not pass `end`.
-fn statement_grid(stmt: &EvalStmt) -> Result<Arc<EvalGrid>> {
+///
+/// Visible to the planner because the binding a [`NativeTree`] is planned against has to name the
+/// same grid the tree itself was compiled on, and [`compile`]'s callers therefore read it here
+/// rather than deriving the grid a second time.
+pub(crate) fn statement_grid(stmt: &EvalStmt) -> Result<Arc<EvalGrid>> {
     let start_ms = signed_millis_since_epoch(stmt.start)?;
     let end_ms = signed_millis_since_epoch(stmt.end)?;
     // The step is narrowed before [`GridSpec`] sees it, so an interval to which no millisecond

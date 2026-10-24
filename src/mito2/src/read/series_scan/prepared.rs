@@ -137,20 +137,30 @@ fn same_labels(left: &RawLabelSource, right: &RawLabelSource) -> bool {
 }
 
 /// Validates the pinned assignments and coverage without opening artifacts.
-pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<()> {
-    collect_inputs(context, ranges).map(|_| ())
+///
+/// Returns whether every assigned source can be read from columnar artifacts. `false` is not an
+/// error: the caller scans those sources with the ordinary reader instead.
+pub(crate) fn validate_inputs(context: &StreamContext, ranges: &[PartitionRange]) -> Result<bool> {
+    collect_inputs(context, ranges).map(|inputs| inputs.is_some())
 }
 
+/// Collects the assigned SSTs and their covering columnar series indexes.
+///
+/// `None` means the assignments are structurally valid but not ready for columnar reads: an
+/// assigned memtable, an SST without columnar series coverage, or an SST without columnar
+/// samples. Structural corruption is still an error, and every assignment is validated before
+/// either answer is returned, so a later invalid assignment is never masked by missing artifacts.
 fn collect_inputs(
     context: &StreamContext,
     ranges: &[PartitionRange],
-) -> Result<(Vec<usize>, HashSet<FileId>)> {
+) -> Result<Option<(Vec<usize>, HashSet<FileId>)>> {
     let input = &context.input;
     let metadata = input.region_metadata();
     let index = input
         .series_index
         .as_ref()
         .ok_or_else(|| invalid("missing columnar index context"))?;
+    let mut ready = true;
     let mut files = BTreeMap::<usize, HashSet<i64>>::new();
     for range in ranges {
         let range = context
@@ -159,7 +169,9 @@ fn collect_inputs(
             .ok_or_else(|| invalid("invalid prepared scan range"))?;
         for row_group in &range.row_group_indices {
             if context.is_mem_range_index(*row_group) {
-                return Err(invalid("columnar prepared reads require flushed memtables"));
+                // Artifacts exist for flushed SSTs only.
+                ready = false;
+                continue;
             }
             if !context.is_file_range_index(*row_group) {
                 return Err(invalid(
@@ -203,24 +215,18 @@ fn collect_inputs(
             }
         }
         if !covered {
-            return Err(invalid(format!(
-                "SST {} has no columnar series coverage; run build_series_index()",
-                file.file_id()
-            )));
+            ready = false;
         }
-        index
+        if index
             .version
             .samples
             .get(&file.file_id().file_id())
-            .filter(|handle| handle.entry().artifact.format == ArtifactFormat::ColumnarSamples)
-            .ok_or_else(|| {
-                invalid(format!(
-                    "SST {} has no columnar samples; run build_series_index()",
-                    file.file_id()
-                ))
-            })?;
+            .is_none_or(|handle| handle.entry().artifact.format != ArtifactFormat::ColumnarSamples)
+        {
+            ready = false;
+        }
     }
-    Ok((file_indices, indexes))
+    Ok(ready.then_some((file_indices, indexes)))
 }
 
 struct Candidate {
@@ -254,7 +260,12 @@ impl ColumnarPreparedSource {
             .series_index
             .as_ref()
             .ok_or_else(|| invalid("missing columnar index context"))?;
-        let (files, indexes) = collect_inputs(&context, &ranges)?;
+        let Some((files, indexes)) = collect_inputs(&context, &ranges)? else {
+            // Readiness was checked before preparation, so this is a real capability change.
+            return Err(invalid(
+                "columnar series coverage changed after series preparation",
+            ));
+        };
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
         for file_idx in files {
             let file = &input.files[file_idx];
