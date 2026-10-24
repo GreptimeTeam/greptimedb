@@ -111,6 +111,7 @@ fn source(schema: &Arc<SeriesSchema>) -> NativeNode {
     let output = NativeType::Samples(Arc::clone(schema));
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),

@@ -129,6 +129,11 @@ pub struct AggregateStateSchema {
 /// rejecting an interleaved input; no other consumer reads it yet.
 #[derive(Clone, Debug)]
 pub struct BoundInput {
+    /// The index of the input source, of this execution, whose chunks feed this input.
+    ///
+    /// The index is local to one execution: several inputs may name one source, and then share
+    /// every chunk queued for it.
+    pub source_index: usize,
     /// What the input produces: raw samples from a scan, or state from an exchange boundary.
     pub output: NativeType,
     /// The ordering the input guarantees.

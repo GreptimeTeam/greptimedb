@@ -226,6 +226,13 @@ impl SelectorRequirement {
 }
 
 /// One input a compiled tree reads, and the selector it was bound to.
+///
+/// The record describes the scan side of one occurrence: what the selector asked a scan for and
+/// which layout it was bound to. The tree side is the input node at [`path`](Self::path), whose
+/// `source_index` names the input source its chunks come from — an index local to one execution of
+/// the tree, not an identity any enclosing plan assigns. That index is not mirrored here: an
+/// occurrence's position in this list is the index the compiler gave its node, and a caller that
+/// collapses two occurrences onto one source rewrites the node rather than another record.
 #[derive(Clone, Debug)]
 pub struct CompiledInput {
     /// Where the executor reads this input in the compiled tree.
@@ -331,6 +338,13 @@ pub fn compile(
 /// Each selector's path is recorded as its recursive node is compiled, so its requirement and
 /// schema stay structurally paired with the input the executor names at that position; the finished
 /// tree is then walked once to check that pairing ([`validate_inputs`]).
+///
+/// Each input node also carries a `source_index`, naming which input source of one execution its
+/// chunks come from. The compiler numbers occurrences in binding order from zero, so the i-th
+/// selector compiled reads input source i, and `x + x` binds two indices even when both occurrences
+/// are fed one schema. How those indices map onto a caller's actual sources is the caller's to
+/// say — the fused planner, for one, proves that two occurrences read one scan and rebinds them to
+/// the single child position it prepared.
 pub fn compile_selectors(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
@@ -1166,7 +1180,7 @@ fn window_selection(
 
     // A range function reports one value per input field, so the layout is the input's.
     let (start_ms, end_ms) = grid_endpoints(&output_grid)?;
-    let raw_schema = bind_selector(
+    let (source_index, raw_schema) = bind_selector(
         context,
         SelectorRequirement {
             metric: vs.name.clone(),
@@ -1192,6 +1206,7 @@ fn window_selection(
         expr: NativeExpr::Window {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index,
                     output: raw.clone(),
                     ordering: context.ordering,
                 }),
@@ -1351,7 +1366,7 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
 
     // An instant selection reports one value per input field, so the layout is the input's.
     let (start_ms, end_ms) = grid_endpoints(&output_grid)?;
-    let raw_schema = bind_selector(
+    let (source_index, raw_schema) = bind_selector(
         context,
         SelectorRequirement {
             metric: selector.name.clone(),
@@ -1376,6 +1391,7 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index,
                     output: raw.clone(),
                     ordering: context.ordering,
                 }),
@@ -1396,15 +1412,27 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
 /// The callback decides one thing — what a scan of this selector produces — while the requirement
 /// records what the selector named, how it shifts time and which points it is read at. The input
 /// path is carried through recursive compilation, so the binding is paired with its tree node here.
-fn bind_selector(context: &Context, requirement: SelectorRequirement) -> Result<Arc<SeriesSchema>> {
+///
+/// The returned index is the occurrence's position in binding order, which its input node carries
+/// as [`BoundInput::source_index`]: the input source that node's chunks come from, local to one
+/// execution of the tree. It is read off the record list rather than kept in a counter, so the
+/// record a selector appends and the index its node names cannot drift apart. Two occurrences of one
+/// selector are numbered separately here — a compiler describes occurrences — and a caller that
+/// proves two of them read one source rebinds their nodes to that source.
+fn bind_selector(
+    context: &Context,
+    requirement: SelectorRequirement,
+) -> Result<(usize, Arc<SeriesSchema>)> {
     let schema = (context.bindings)(&requirement)?;
-    context.inputs.borrow_mut().push(CompiledInput {
+    let mut inputs = context.inputs.borrow_mut();
+    let source_index = inputs.len();
+    inputs.push(CompiledInput {
         path: context.path.input(),
         requirement,
         schema: Arc::clone(&schema),
         ordering: context.ordering,
     });
-    Ok(schema)
+    Ok((source_index, schema))
 }
 
 /// The first and last point of `grid`, as milliseconds since the Unix epoch.

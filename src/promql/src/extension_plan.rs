@@ -38,9 +38,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
-pub use fused_series::{
-    FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesInput, FusedSeriesStream,
-};
+pub use fused_series::{FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream};
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
 };

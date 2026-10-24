@@ -384,6 +384,10 @@ struct NodeSpec {
     /// The index of this node's input, which is the node the build pass reaches next: the one
     /// input of a unary node, the left operand of a binary node, and none for an input node.
     input: Option<usize>,
+    /// The index of the input source an input node reads; `None` for every other node.
+    ///
+    /// The index is local to this execution, and several inputs may carry the same one.
+    source_index: Option<usize>,
 }
 
 /// The series whose first chunk this buffer received and whose closing chunk it has not seen.
@@ -2885,6 +2889,7 @@ pub struct NativeExecutionState {
     ///
     /// A tree of unary nodes has one, and a binary node adds one per operand: a tree of nested
     /// binary nodes has as many as it has leaves, and a queued chunk names the one it belongs to.
+    /// Several of them may share a `NodeSpec::source_index`, so one source's chunk feeds them all.
     sources: Vec<usize>,
 }
 
@@ -3129,9 +3134,15 @@ impl NativeExecutionState {
                     true
                 }
             };
+            // The source an input reads; every other node is fed by the one its spec names.
+            let source_index = match &node.expr {
+                NativeExpr::Input(bound) => Some(bound.source_index),
+                _ => None,
+            };
             nodes.push(NodeSpec {
                 tag,
                 input: reads_input.then_some(index + 1),
+                source_index,
             });
             exprs.push(&node.expr);
             paths.push(path.clone());
@@ -3555,6 +3566,20 @@ impl NativeExecutor {
     /// either can say which of the two inputs a chunk belongs to.
     pub fn push_raw_at(&mut self, path: &NodePath, chunk: RawSeriesChunk) -> Result<()> {
         self.push_source(Some(path), NativeChunk::Raw(chunk))
+    }
+
+    /// Queues one raw source chunk at every input bound to source `source_index`.
+    ///
+    /// The index is local to this execution, and several inputs may name one source: each of them
+    /// gets the chunk -- all but the last from a copy. The inputs of one index have to read the
+    /// same raw samples, and an index no input names is refused; either stops the execution.
+    pub fn push_raw_source(&mut self, source_index: usize, chunk: RawSeriesChunk) -> Result<()> {
+        self.check_running()?;
+        let result = self.queue_raw_source(source_index, chunk);
+        if let Err(error) = &result {
+            self.stop(error);
+        }
+        result
     }
 
     /// Queues one evaluated source chunk at the input node at `path`.
@@ -4097,6 +4122,76 @@ impl NativeExecutor {
     /// Queues a source chunk at one input node, checking it against that input's binding.
     fn queue_source(&mut self, path: Option<&NodePath>, chunk: NativeChunk) -> Result<()> {
         let source = self.source_index(path)?;
+        self.queue_source_at(source, chunk)
+    }
+
+    /// Queues one raw source chunk at every input bound to source `source_index`, in traversal
+    /// order: the last of them takes the caller's chunk, the ones before it a copy.
+    fn queue_raw_source(&mut self, source_index: usize, chunk: RawSeriesChunk) -> Result<()> {
+        let last = self
+            .state
+            .sources
+            .iter()
+            .rposition(|&source| self.state.nodes[source].source_index == Some(source_index))
+            .ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "the native execution has no input bound to source {source_index}"
+                ))
+            })?;
+        // One chunk reaches every one of them, so they have to read the same raw samples: an input
+        // of another layout, or one over an evaluated series, cannot take it. The check runs before
+        // the first copy is queued, so a refusal leaves no input holding one.
+        let mut baseline: Option<(usize, Arc<SeriesSchema>)> = None;
+        for &source in &self.state.sources[..=last] {
+            if self.state.nodes[source].source_index != Some(source_index) {
+                continue;
+            }
+            let at = &self.state.paths[source];
+            let schema = self.state.runtimes[source]
+                .source_schema
+                .clone()
+                .ok_or_else(|| {
+                    DataFusionError::Execution(format!(
+                        "the input node at {at} does not produce samples"
+                    ))
+                })?;
+            if schema.eval_grid.is_some() {
+                return Err(DataFusionError::Execution(format!(
+                    "the native source {source_index} hands over raw samples, but the input at {at} \
+                     reads an evaluated series"
+                )));
+            }
+            match &baseline {
+                None => baseline = Some((source, schema)),
+                Some((first, bound)) => {
+                    if !schema
+                        .fields
+                        .iter()
+                        .map(|field| &field.name)
+                        .eq(bound.fields.iter().map(|field| &field.name))
+                    {
+                        return Err(DataFusionError::Execution(format!(
+                            "the native source {source_index} feeds two layouts: the inputs at {} \
+                             and {at} differ in their fields",
+                            self.state.paths[*first]
+                        )));
+                    }
+                }
+            }
+        }
+        for position in 0..last {
+            let source = self.state.sources[position];
+            if self.state.nodes[source].source_index != Some(source_index) {
+                continue;
+            }
+            self.queue_source_at(source, NativeChunk::Raw(chunk.clone()))?;
+        }
+        let source = self.state.sources[last];
+        self.queue_source_at(source, NativeChunk::Raw(chunk))
+    }
+
+    /// Queues a source chunk at the input node at `source`, checking it against its binding.
+    fn queue_source_at(&mut self, source: usize, chunk: NativeChunk) -> Result<()> {
         let at = &self.state.paths[source];
         let Some(binding) = self.state.runtimes[source].source_schema.as_ref() else {
             return Err(DataFusionError::Execution(format!(

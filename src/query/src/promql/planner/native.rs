@@ -20,12 +20,14 @@
 //! the normal answer: every shape the compiler does not accept, and every query this route cannot
 //! bind to a scan faithfully, keeps the plan the existing planner builds.
 //!
-//! What the node needs from here is three things the existing planner already resolves: the raw
-//! series schema the tree's input was compiled against (the selector's selected field columns), the
-//! statement's evaluation grid, and the logical tag names the output carries. The output schema is
-//! built to the shape the existing unary pipeline produces — the time index, then the series
-//! fields, then the tags — so a node planned here can be consumed by the same code that consumes a
-//! `SeriesNormalize` output.
+//! What the node needs from here is what the existing planner already resolves: the selector's own
+//! table scan with its matchers and compiled time bounds pushed down, the statement's evaluation
+//! grid, and the columns a series is reported under — the time index, the tags and the metric name.
+//! The tree's inputs are numbered, and each number is the position of the child whose chunks that
+//! input reads; a statement whose two occurrences were proven to read one scan is planned with that
+//! one child and both inputs rebound to it. The output schema is built to the shape the existing
+//! unary pipeline produces — the time index, then the series fields, then the tags — so a node
+//! planned here can be consumed by the same code that consumes a `SeriesNormalize` output.
 
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -39,7 +41,7 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding, FusedSeriesInput};
+use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
 use promql::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
@@ -102,6 +104,21 @@ const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 /// longer names the series the partition holds.
 const METADATA_KEY_TAGS: [&str; 3] = ["__name__", "__type__", "__unit__"];
 
+/// One prepared occurrence of a selector: the scan that reads it, the raw-series layout it was
+/// prepared against, and the columns its series are reported under.
+///
+/// The last three are the node's rather than one scan's — the binding names a time index, a tag list
+/// and a metric name once — so they are compared across the occurrences and then travel to the
+/// binding together. The first two are what [`same_source`] compares, which is the check that two
+/// occurrences of one selector are one scan.
+type PreparedInput = (
+    LogicalPlan,
+    Arc<SeriesSchema>,
+    Option<Arc<str>>,
+    String,
+    Vec<String>,
+);
+
 impl PromPlanner {
     /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
     ///
@@ -120,11 +137,15 @@ impl PromPlanner {
     /// native histogram field, or an unusable grid.
     ///
     /// A statement with two occurrences of one selector is admitted only when both read one scan
-    /// point-wise. That is the only shape this node can run over every partition of one input
+    /// point-wise. That is the only shape this node can run over every partition of one child
     /// independently: both sides then see the same series in the same partition, so the series a
-    /// partition holds is whole. Everything else — a different scan, different bounds, a match key
-    /// that is not the whole series identity, a shape that reads a whole series as a group —
-    /// keeps the existing plan rather than gathering every partition into one execution.
+    /// partition holds is whole. Such a statement is planned over that one child, with both of its
+    /// tree inputs bound to it; the node's binding names the columns a series is reported under —
+    /// the time index, the tags and the metric name — once for all of them. Everything else — a
+    /// different scan, different bounds, a match key that is not the whole series identity, a shape
+    /// that reads a whole series as a group — keeps the existing plan rather than gathering every
+    /// partition into one execution, because a match over two actual sources cannot be answered one
+    /// region at a time.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -164,7 +185,7 @@ impl PromPlanner {
         };
         let original_context = self.ctx.clone();
         let preparation = async {
-            let mut prepared: Vec<FusedSeriesInput> = Vec::new();
+            let mut prepared: Vec<PreparedInput> = Vec::new();
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 let matchers =
@@ -317,26 +338,34 @@ impl PromPlanner {
                 } else {
                     return Ok(None);
                 }
-                prepared.push(FusedSeriesInput {
-                    series_schema,
-                    metric_name: Some(Arc::from(metric)),
-                    time_index: time,
-                    tags,
-                    input,
-                    // Filled from the compiled tree, which is what names an input.
-                    paths: Vec::new(),
-                });
+                prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
             }
             Ok(Some(prepared))
         }
         .await;
         self.ctx = original_context;
-        let Some(prepared) = preparation? else {
+        let Some(mut prepared) = preparation? else {
             return Ok(None);
         };
+        // The time index, the tag list and the metric name are the node's, not one scan's: the
+        // output schema and the binding name them once, and every occurrence reports its series
+        // under them. Two occurrences that disagree are two different reportings, which one node
+        // cannot be built for. Both occurrences of an admitted pair share the layout, so the first
+        // one's schema also speaks for the node below.
+        let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
+            return Ok(None);
+        };
+        let (series_schema, metric, time, tags) = (
+            Arc::clone(series_schema),
+            metric.clone(),
+            time.clone(),
+            tags.clone(),
+        );
         if prepared
-            .windows(2)
-            .any(|w| w[0].time_index != w[1].time_index || w[0].tags != w[1].tags)
+            .iter()
+            .any(|(_, _, other_metric, other_time, other_tags)| {
+                *other_metric != metric || *other_time != time || *other_tags != tags
+            })
         {
             return Ok(None);
         }
@@ -370,7 +399,7 @@ impl PromPlanner {
             &|req| {
                 let i = bind_index.get();
                 bind_index.set(i + 1);
-                let (Some(prepared_input), Some(identity)) = (prepared.get(i), identities.get(i))
+                let (Some((_, schema, ..)), Some(identity)) = (prepared.get(i), identities.get(i))
                 else {
                     return Err(DataFusionError::Internal(
                         "a selector was bound that the planner did not prepare".into(),
@@ -388,7 +417,7 @@ impl PromPlanner {
                         "the compiler and the planner walk the selectors differently".into(),
                     ));
                 }
-                Ok(Arc::clone(&prepared_input.series_schema))
+                Ok(Arc::clone(schema))
             },
             NATIVE_ORDERING,
         ) {
@@ -404,33 +433,41 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        let mut inputs = Vec::with_capacity(prepared.len());
-        for (index, (compiled_input, mut input)) in compiled.inputs.iter().zip(prepared).enumerate()
+        for (index, (compiled_input, (scan, _, _, _, _))) in
+            compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             // The range this selector reads is the compiler's own: a window and an instant differ
             // in which side of the lookback or range their scan starts on, and an anchor can move
-            // the whole range outside the statement's.
+            // the whole range outside the statement's. The bound belongs to the scan, so it is
+            // pushed down before two occurrences are compared: two selectors over different windows
+            // or offsets read different rows even when nothing else about them differs.
             let (start, end, inclusive) = compiled_input
                 .requirement
                 .raw_scan_bounds()
                 .context(DataFusionPlanningSnafu)?;
-            let time = input.time_index.clone();
-            let mut scan = input.input;
             let filter = scan_time_filter(start, end, inclusive, scan.schema(), &time)?;
-            if let (LogicalPlan::TableScan(table_scan), Some(filter)) = (&mut scan, filter) {
+            if let (LogicalPlan::TableScan(table_scan), Some(filter)) = (&mut *scan, filter) {
                 table_scan.filters.push(filter);
             } else if !matches!(scan, LogicalPlan::TableScan(_)) {
                 return Err(DataFusionError::Internal(format!(
-                    "the input at {index} is not the table scan this route prepared"
+                    "the child at {index} is not the table scan this route prepared"
                 )))
                 .context(DataFusionPlanningSnafu);
             }
-            input.input = scan;
-            // The tree names the input this occurrence compiled to, and the collapse below joins
-            // two of them onto one plan.
-            input.paths = vec![compiled_input.path.clone()];
-            inputs.push(input);
         }
+        // Two occurrences are admitted only when both read one scan plan: the node then runs one
+        // execution per partition of that one child, and both sides of the match see the same series
+        // in the same partition. Two actual scans — a different table, different matchers, different
+        // bounds — stay with the existing planner, which is where a match over more than one source
+        // is answered rather than in a region that holds part of it.
+        if selectors.len() == 2 && !(prepared.len() == 2 && same_source(&prepared[0], &prepared[1]))
+        {
+            return Ok(None);
+        }
+        let mut children = prepared
+            .into_iter()
+            .map(|(scan, _, _, _, _)| scan)
+            .collect::<Vec<_>>();
         // A tree run once per scan partition has to read one series at a time: an aggregate folds a
         // label set's series together and a vector operation (`sort`, `absent`, `topk`,
         // `histogram_quantile`, ...) reads the whole vector at a grid point, so one region's share
@@ -439,35 +476,36 @@ impl PromPlanner {
         // declining to push it down would leave a node the physical layer must build anyway. What
         // does read one series at a time is one occurrence's samples - a selection, a window, a map
         // over either, or a constant broadcast - and, for a statement that names one selector
-        // twice, a one-to-one match whose key holds the whole identity, which the collapse below
-        // then reads as one scan.
-        if reads_across_series(compiled.tree.root())
-            && !(pointwise_operand(compiled.tree.root())
-                || (selectors.len() == 2
-                    && two_occurrences_read_one_source(&compiled.tree, &inputs)))
+        // twice, a one-to-one match whose key holds the whole identity over one scan, which the
+        // collapse below reads as that scan.
+        let root = compiled.tree.root();
+        if reads_across_series(root)
+            && !(pointwise_operand(root)
+                || (selectors.len() == 2 && two_occurrences_pair_one_source(root, &tags)))
         {
             return Ok(None);
         }
         // Two occurrences of one selector read the same series only when the tree between them is
-        // point-wise and both scans are the same scan, which the check above has just admitted.
-        // Then both inputs are one plan, and this node runs one execution per partition of it
-        // instead of one execution over every partition.
-        if selectors.len() == 2 {
-            // The tree still names two input paths, so the second occurrence's destination moves
-            // onto the first plan rather than being dropped with the plan that carried it. `append`
-            // leaves the second list empty, which is what makes removing that plan lose nothing.
-            let prepared_inputs = inputs.len();
-            let [first, second] = &mut inputs[..] else {
-                return Err(DataFusionError::Internal(format!(
-                    "two occurrences prepared {prepared_inputs} input(s) rather than a pair"
-                )))
-                .context(DataFusionPlanningSnafu);
-            };
-            first.paths.append(&mut second.paths);
-            inputs.remove(1);
-        }
-        let root_fields = compiled
-            .tree
+        // point-wise, both scans are the same scan, and the match key holds the whole identity,
+        // which the checks above have just admitted. Both occurrences are then one child, so the
+        // tree is rebuilt with both inputs bound to it. A tree this route admits but cannot rebind
+        // is a compiler defect it declines (`NotImplemented`) rather than rewrites, and the existing
+        // plan answers the query; an error of any other kind is a defect to report.
+        let tree = if selectors.len() == 2 {
+            match collapsed_pair_tree(&compiled.tree) {
+                Ok(tree) => {
+                    // Both occurrences read the one plan, so the two prepared children are that
+                    // same plan and only one of them is kept.
+                    children.truncate(1);
+                    tree
+                }
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(e) => return Err(e).context(DataFusionPlanningSnafu),
+            }
+        } else {
+            compiled.tree
+        };
+        let root_fields = tree
             .root()
             .output
             .samples()
@@ -478,24 +516,24 @@ impl PromPlanner {
             .map(|f| f.name.to_string())
             .collect::<Vec<_>>();
         if root_fields.iter().any(|field| {
-            !inputs.iter().any(|input| {
-                input
-                    .series_schema
-                    .fields
-                    .iter()
-                    .any(|f| f.name.as_ref() == field)
-            })
+            !series_schema
+                .fields
+                .iter()
+                .any(|f| f.name.as_ref() == field)
         }) {
             return Ok(None);
         }
-        let time = inputs[0].time_index.clone();
-        let tags = inputs[0].tags.clone();
         let output_schema = fused_output_schema(&root_fields, &tags, &time)?;
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
-            compiled.tree,
-            FusedSeriesBinding { grid },
-            inputs,
+            tree,
+            FusedSeriesBinding {
+                grid,
+                time_index: time,
+                tags,
+                metric_name: metric,
+            },
+            children,
             output_schema,
         )
         .context(DataFusionPlanningSnafu)?;
@@ -642,7 +680,7 @@ fn literal_or_next(start: i64) -> Option<DfExpr> {
     ))
 }
 
-/// Whether a tree's two occurrences may be read as one source.
+/// Whether a tree is two occurrences of one selector matched point-wise over the whole identity.
 ///
 /// The claim is about one series: it is whole in the partition it was scanned in, so a tree whose
 /// nodes each read one series separately can run one execution per partition. What breaks that is a
@@ -656,35 +694,35 @@ fn literal_or_next(start: i64) -> Option<DfExpr> {
 /// `fill_left`/`fill_right` for a one-to-one match too, and what the admission rests on is the key
 /// and the operands, not the absence of a fill — see [`matching_keys_on_identity`].
 ///
+/// The pair's scans are the caller's claim: this function reads the tree and the tags, and a caller
+/// that admits a pair on two actual scans would still be admitting a match over two sources. Both
+/// the planner that collapses a pair onto one scan and the categorizer that places the node
+/// region-side ask this, so the two cannot disagree about which pairs read one series: a pair
+/// admitted here but refused there becomes a node the physical layer cannot build.
+///
 /// The raw keys themselves are proven to name one logical series each by the caller's preparation,
 /// which checks the table's primary key against the tags this binding reports
 /// (`identity_keys_are_injective`). That is a planning-time check over the scan the planner
 /// prepared, not a property this function re-derives: a tree and binding built by anything other
 /// than this planner carries no such proof, so a manual `FusedSeries` node is only as safe as the
 /// binding its builder passed.
-fn two_occurrences_read_one_source(tree: &NativeTree, inputs: &[FusedSeriesInput]) -> bool {
+pub(crate) fn two_occurrences_pair_one_source(root: &NativeNode, tags: &[String]) -> bool {
     let NativeExpr::Binary {
         left,
         right,
         matching,
-    } = &tree.root().expr
+    } = &root.expr
     else {
         return false;
     };
     // A root with a constant on one side is a broadcast of that constant, not two occurrences
     // matched, and `group_left`/`group_right` pair a group against one series.
-    if matching.cardinality != Cardinality::OneToOne
-        || !pointwise_operand(left)
-        || !pointwise_operand(right)
-    {
-        return false;
-    }
-    let [first, second] = inputs else {
-        return false;
-    };
-    // A key that does not hold the whole identity pairs series Prometheus keeps apart, and a
-    // partition that holds one of them cannot tell that the other is missing.
-    matching_keys_on_identity(&matching.labels, &first.tags) && same_source(first, second)
+    matching.cardinality == Cardinality::OneToOne
+        && pointwise_operand(left)
+        && pointwise_operand(right)
+        // A key that does not hold the whole identity pairs series Prometheus keeps apart, and a
+        // partition that holds one of them cannot tell that the other is missing.
+        && matching_keys_on_identity(&matching.labels, tags)
 }
 
 /// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
@@ -781,31 +819,90 @@ fn identity_keys_are_injective(matchers: &Matchers, meta: &TableMeta, tags: &[St
     })
 }
 
-/// Whether two prepared inputs read the same scan, and so produce the same series.
+/// Whether two prepared occurrences read the same scan, and so produce the same series.
 ///
 /// Everything below the node is compared, not only the table name: two selectors over one table
 /// with different matchers or different bounds read different rows, and a partition that holds one
 /// of them is not the partition that holds the other. DataFusion's own scan comparison covers the
 /// table name, the projection, the schema, the filters and the fetch; the source is compared by
-/// identity, because it is what resolves those rows in the first place. The time index and the tag
-/// list are not compared here: both are checked once for every prepared input, above.
-fn same_source(left: &FusedSeriesInput, right: &FusedSeriesInput) -> bool {
+/// identity, because it is what resolves those rows in the first place. The reporting columns — the
+/// metric name, the time index and the tags — are not compared here: they are checked once for
+/// every prepared occurrence, before this runs.
+fn same_source(left: &PreparedInput, right: &PreparedInput) -> bool {
+    let (left_input, left_schema, ..) = left;
+    let (right_input, right_schema, ..) = right;
     let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
-        (&left.input, &right.input)
+        (left_input, right_input)
     else {
         return false;
     };
     // Both schemas are raw series schemas, so the fields are what the tree's input was compiled
     // against, in the order it reads them.
-    left.metric_name == right.metric_name
-        && left
-            .series_schema
-            .fields
-            .iter()
-            .map(|field| &field.name)
-            .eq(right.series_schema.fields.iter().map(|field| &field.name))
-        && left_scan == right_scan
-        && Arc::ptr_eq(&left_scan.source, &right_scan.source)
+    let same_fields = left_schema
+        .fields
+        .iter()
+        .map(|field| &field.name)
+        .eq(right_schema.fields.iter().map(|field| &field.name));
+    same_fields && left_scan == right_scan && Arc::ptr_eq(&left_scan.source, &right_scan.source)
+}
+
+/// Rebuilds an admitted pair's tree so both of its occurrences read the one child prepared for them.
+///
+/// The compiler numbers occurrences in binding order, so an admitted pair's two input nodes are
+/// numbered `0` and `1`; the planner prepared one plan for them, which is child `0`. Giving every
+/// input node that index is what makes the executor hand each chunk of that child to both of them,
+/// and what makes the node report one child for the whole match.
+///
+/// The tree is rebuilt rather than patched in place because a node's inputs are shared: the rebuilt
+/// tree is validated again by [`NativeTree::try_new`], so a rebind can never produce a tree the
+/// runtime would refuse. A tree whose inputs are not exactly those two occurrences is a compiler
+/// defect this route declines with `NotImplemented` — the caller keeps the existing plan rather than
+/// running a tree whose inputs it cannot name.
+///
+/// It is `pub(crate)` for the categorizer's own tests, which build the node the planner would have
+/// built: the region-side placement has to accept exactly the shape this collapse produces, so a
+/// fixture that bound the pair by hand could agree with the categorizer while disagreeing with the
+/// planner.
+pub(crate) fn collapsed_pair_tree(tree: &NativeTree) -> datafusion::error::Result<NativeTree> {
+    let mut root = tree.root().clone();
+    let mut occurrences = 0;
+    let numbered = rebind_pair_inputs(&mut root, &mut occurrences);
+    if !numbered || occurrences != 2 {
+        return Err(DataFusionError::NotImplemented(format!(
+            "a two-occurrence tree whose {occurrences} input(s) are not the two occurrences \
+             numbered from zero, which this route cannot bind to one child"
+        )));
+    }
+    NativeTree::try_new(root)
+}
+
+/// Rebinds every input below `node` to child `0`, counting them and checking their numbering.
+///
+/// The walk visits inputs in the order the compiler bound them — an operand before the next one, the
+/// left operand before the right — so occurrence `i` of the walk is the input the compiler numbered
+/// `i`. `false` means the tree is not the pair this route admitted: a node carried a number the walk
+/// did not expect, or a shape the admission does not cover. An `Aggregate` or a `Vector` below the
+/// root is one of those shapes — neither is point-wise, so the pair was never admitted — and the
+/// walk refuses it rather than rebinding a tree this route does not run.
+fn rebind_pair_inputs(node: &mut NativeNode, next: &mut usize) -> bool {
+    match &mut node.expr {
+        NativeExpr::Input(bound) => {
+            let numbered = bound.source_index == *next;
+            bound.source_index = 0;
+            *next += 1;
+            numbered
+        }
+        NativeExpr::Scalar(_) => true,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. } => rebind_pair_inputs(input, next),
+        NativeExpr::Binary { left, right, .. } => {
+            let left_numbered = rebind_pair_inputs(left, next);
+            let right_numbered = rebind_pair_inputs(right, next);
+            left_numbered && right_numbered
+        }
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => false,
+    }
 }
 
 /// The columns a [`FusedSeries`] node produces.
@@ -935,10 +1032,14 @@ fn metric_scan_and_table_id(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
 
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use promql::native::plan::{NativeExpr, NativeNode};
     use session::context::QueryContextBuilder;
 
-    use super::{NATIVE_PROMQL_EXTENSION_KEY, native_promql_requested};
+    use super::{NATIVE_PROMQL_EXTENSION_KEY, collapsed_pair_tree, native_promql_requested};
 
     #[test]
     fn native_promql_requested_is_false_when_extension_is_absent() {
@@ -958,6 +1059,85 @@ mod tests {
 
             assert!(native_promql_requested(&query_ctx), "value: {value}");
         }
+    }
+
+    /// The statement `query` is compiled against: one selector over five seconds of grid.
+    fn native_test_statement(query: &str) -> promql_parser::parser::EvalStmt {
+        promql_parser::parser::EvalStmt {
+            expr: promql_parser::parser::parse(query).unwrap(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH + Duration::from_secs(10),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(5),
+        }
+    }
+
+    /// `query` compiled against one raw-series layout, every selector bound to it.
+    ///
+    /// The entry is `compile_selectors` rather than the compatibility `compile`, because the pair
+    /// these tests are about names one selector twice and `compile` refuses a statement whose two
+    /// occurrences it cannot tell apart. Binding both occurrences to one layout is the test's
+    /// choice of scan, not a claim the compiler makes.
+    fn native_test_tree(query: &str) -> promql::native::plan::NativeTree {
+        let schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let stmt = native_test_statement(query);
+        crate::promql::native_compile::compile_selectors(
+            &stmt,
+            &|_| Ok(Arc::clone(&schema)),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap()
+        .tree
+    }
+
+    /// The child each raw input below `root` reads, in the order the compiler bound them.
+    fn native_test_input_sources(root: &NativeNode) -> Vec<usize> {
+        let mut sources = Vec::new();
+        promql::native::metrics::walk(root, &mut |node, _| {
+            if let NativeExpr::Input(bound) = &node.expr {
+                sources.push(bound.source_index);
+            }
+        });
+        sources
+    }
+
+    /// Collapsing a pair binds both occurrences to the one child the planner prepared for them.
+    #[test]
+    fn a_pair_tree_is_rebound_to_its_one_child() {
+        let tree = native_test_tree("x + x");
+        assert_eq!(
+            native_test_input_sources(tree.root()),
+            vec![0, 1],
+            "the compiler numbers occurrences"
+        );
+
+        let collapsed = collapsed_pair_tree(&tree).unwrap();
+        assert_eq!(native_test_input_sources(collapsed.root()), vec![0, 0]);
+        // The rest of the tree is the one that was compiled: only the bindings moved.
+        assert!(matches!(collapsed.root().expr, NativeExpr::Binary { .. }));
+        assert_eq!(
+            tree.to_string().replace("source=1", "source=0"),
+            collapsed.to_string(),
+            "the collapse changed something other than the child each input reads"
+        );
+    }
+
+    /// A tree whose inputs are not the two occurrences is declined, and the refusal is the one the
+    /// route answers with the existing plan — not an internal error to report.
+    #[test]
+    fn a_tree_that_is_not_a_pair_is_declined_by_the_collapse() {
+        let error = collapsed_pair_tree(&native_test_tree("x")).unwrap_err();
+        assert!(
+            matches!(error, datafusion::error::DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("cannot bind to one child"),
+            "{error}"
+        );
     }
 
     #[test]

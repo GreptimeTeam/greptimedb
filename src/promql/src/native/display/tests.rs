@@ -48,6 +48,11 @@ fn evaluated(grid: Arc<EvalGrid>) -> NativeType {
 
 /// An unqualified scan over raw samples, which is what a compiled query starts from.
 fn raw_input() -> NativeNode {
+    raw_input_from(0)
+}
+
+/// The same scan bound to child `source_index` of the final execution tree.
+fn raw_input_from(source_index: usize) -> NativeNode {
     // One allocation shared by the binding and the output: `validate` checks allocation identity.
     // The fields are the ones a window over this input reports, because a window keeps its input's
     // layout and `validate` rejects a node that declares a different count.
@@ -57,6 +62,7 @@ fn raw_input() -> NativeNode {
     }));
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index,
             output: output.clone(),
             ordering: SeriesOrdering::KeyThenTime,
         }),
@@ -117,7 +123,7 @@ fn the_first_line_names_the_tree() {
 
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input raw samples"])
+        shown(&["NativeTree", "  root Input source=0 raw samples"])
     );
     assert_eq!(tree.to_string().lines().next(), Some("NativeTree"));
 }
@@ -141,7 +147,7 @@ fn a_window_over_raw_samples_is_shown_once_per_node() {
         shown(&[
             "NativeTree",
             "  root Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "    input Input raw samples",
+            "    input Input source=0 raw samples",
         ])
     );
 }
@@ -169,7 +175,7 @@ fn a_map_nests_below_the_window_it_maps() {
             "NativeTree",
             "  root Map abs, round 3",
             "    input Window rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input source=0 raw samples",
         ])
     );
 }
@@ -193,7 +199,7 @@ fn a_window_names_its_constant_argument_and_its_anchor() {
         shown(&[
             "NativeTree",
             "  root Window quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
-            "    input Input raw samples",
+            "    input Input source=0 raw samples",
         ])
     );
 }
@@ -208,6 +214,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     }));
     let evaluated_input = NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: contiguous.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
@@ -216,7 +223,10 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(evaluated_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input evaluated samples, contiguous",])
+        shown(&[
+            "NativeTree",
+            "  root Input source=0 evaluated samples, contiguous",
+        ])
     );
 
     let interleaved = NativeType::Samples(Arc::new(SeriesSchema {
@@ -225,6 +235,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     }));
     let raw_input = NativeNode {
         expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
             output: interleaved.clone(),
             ordering: SeriesOrdering::Interleaved,
         }),
@@ -233,7 +244,72 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(raw_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input raw samples, interleaved"])
+        shown(&[
+            "NativeTree",
+            "  root Input source=0 raw samples, interleaved"
+        ])
+    );
+}
+
+/// The child an input reads is part of its line: two trees over different children, or over one
+/// child shared by both inputs, do not render as the same text.
+#[test]
+fn an_input_names_the_child_it_reads() {
+    let out = grid(0, 60_000, 4);
+    let selected = |source_index: usize| NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(raw_input_from(source_index)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(Arc::clone(&out)),
+    };
+    let tree = |left: usize, right: usize| {
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(selected(left)),
+                right: Box::new(selected(right)),
+                matching: BinaryMatching {
+                    op: BinaryOp::Add,
+                    return_bool: false,
+                    labels: MatchingLabels::Ignoring(Vec::new()),
+                    cardinality: Cardinality::OneToOne,
+                    fill: FillValues::default(),
+                },
+            },
+            output: evaluated(Arc::clone(&out)),
+        })
+        .unwrap()
+    };
+
+    let distinct = tree(0, 1).to_string();
+    assert_eq!(
+        distinct,
+        shown(&[
+            "NativeTree",
+            "  root Binary + ignoring [] one-to-one",
+            "    left Instant lookback 300000ms offset 0 on grid 0/60000x4",
+            "      input Input source=0 raw samples",
+            "    right Instant lookback 300000ms offset 0 on grid 0/60000x4",
+            "      input Input source=1 raw samples",
+        ])
+    );
+
+    let shared = tree(0, 0).to_string();
+    assert_eq!(
+        shared
+            .lines()
+            .filter(|line| line.ends_with("Input source=0 raw samples"))
+            .count(),
+        2,
+        "{shared}"
+    );
+    assert_ne!(
+        shared, distinct,
+        "two trees differ in the child each input reads"
     );
 }
 
@@ -266,7 +342,7 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
         shown(&[
             "NativeTree",
             "  root Instant lookback 300000ms offset 60000 on grid 0/60000x4",
-            "    input Input raw samples",
+            "    input Input source=0 raw samples",
         ])
     );
 }
@@ -301,7 +377,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "NativeTree",
             "  root Aggregate sum by [job] complete",
             "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input source=0 raw samples",
         ])
     );
 
@@ -339,7 +415,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "  root Binary + ignoring [] one-to-one",
             "    left Scalar 2",
             "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input source=0 raw samples",
         ])
     );
 
@@ -392,7 +468,7 @@ fn a_without_grouping_does_not_read_as_by() {
             "NativeTree",
             "  root Aggregate sum without [job] complete",
             "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input source=0 raw samples",
         ])
     );
 }

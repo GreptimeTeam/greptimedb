@@ -23,14 +23,13 @@ use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
 };
-use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
-use promql::vector_match::Cardinality;
+use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-use crate::promql::planner::native::{matching_keys_on_identity, pointwise_operand};
+use crate::promql::planner::native::{pointwise_operand, two_occurrences_pair_one_source};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -245,21 +244,21 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                // A region builds this node from the region scans themselves: the conversion takes a
+                // A region builds this node from the region scan itself: the conversion takes a
                 // scan's raw-series entrypoint and cannot look through anything in between, so a
-                // node with an input that is not such a scan has nothing to read where it would be
-                // placed and stays where it was planned. A binding is one actual source, so a node
-                // that lists its raw inputs as several bindings reads several plans and a region has
-                // nothing to build for it either.
-                let [input] = fused.fused_inputs() else {
+                // node over anything but one scan has nothing to read where it would be placed and
+                // stays where it was planned. A match over one selector is still one child: the
+                // planner binds both occurrences of it to the one plan they read.
+                let [child] = fused.children() else {
                     return Commutativity::NonCommutative;
                 };
-                let LogicalPlan::TableScan(_) = &input.input else {
+                let LogicalPlan::TableScan(_) = child else {
                     return Commutativity::NonCommutative;
                 };
                 // The region asks the scan for the series of one named metric, so a node that binds
                 // no name cannot be built there at all.
-                if input.metric_name.is_none() {
+                let binding = fused.binding();
+                if binding.metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
                 // A region evaluates the tree over whatever series its own scan returns, so the tree
@@ -271,11 +270,8 @@ impl Categorizer {
                 // collapsed onto this one plan, a one-to-one match over the whole series identity
                 // with a point-wise operand on each side.
                 let root = fused.tree().root();
-                let per_series = match input.paths.as_slice() {
-                    [_] => pointwise_operand(root),
-                    [_, _] => two_occurrences_pair_one_series(root, &input.tags),
-                    _ => false,
-                };
+                let per_series =
+                    pointwise_operand(root) || two_occurrences_pair_one_source(root, &binding.tags);
                 if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }
@@ -402,27 +398,6 @@ impl Categorizer {
     }
 }
 
-/// Whether `root` pairs the two occurrences one plan feeds point-wise over the whole identity.
-///
-/// The two occurrences are one scan, so both sides hold the same series in the same partition: what
-/// is left to check is that the tree between them is a one-to-one match over the key that names the
-/// whole series ([`matching_keys_on_identity`]) with a point-wise operand on each side, which is the
-/// shape `PromPlanner` collapses onto one input. Anything else keeps the node on the frontend.
-fn two_occurrences_pair_one_series(root: &NativeNode, tags: &[String]) -> bool {
-    let NativeExpr::Binary {
-        left,
-        right,
-        matching,
-    } = &root.expr
-    else {
-        return false;
-    };
-    matching.cardinality == Cardinality::OneToOne
-        && pointwise_operand(left)
-        && pointwise_operand(right)
-        && matching_keys_on_identity(&matching.labels, tags)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
@@ -442,11 +417,10 @@ mod tests {
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{FusedSeries, FusedSeriesBinding, FusedSeriesInput};
+    use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
-    use promql::native::metrics::NodePath;
     use promql::native::plan::{NativeExpr, NativeTree};
     use promql_parser::parser;
     use store_api::storage::RegionId;
@@ -456,6 +430,7 @@ mod tests {
     use crate::dist_plan::DistPlannerAnalyzer;
     use crate::optimizer::test_util::mock_table_provider;
     use crate::promql::native_compile::{compile, compile_selectors, statement_grid};
+    use crate::promql::planner::native::collapsed_pair_tree;
     use crate::query_engine::DefaultSerializer;
 
     #[test]
@@ -528,23 +503,10 @@ mod tests {
         .unwrap();
         let binding = FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
-        };
-        // The tree names the destination its selector compiled to, which this test reads off the
-        // tree rather than assuming.
-        let mut paths = Vec::new();
-        promql::native::metrics::walk(tree.root(), &mut |node, path| {
-            if matches!(node.expr, NativeExpr::Input(_)) {
-                paths.push(path.clone());
-            }
-        });
-        let inputs = vec![FusedSeriesInput {
-            series_schema,
-            metric_name: metric_name.map(Arc::from),
             time_index: "ts".to_string(),
             tags: Vec::new(),
-            input,
-            paths,
-        }];
+            metric_name: metric_name.map(Arc::from),
+        };
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
                 vec![
@@ -572,7 +534,7 @@ mod tests {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    inputs,
+                    vec![input],
                     output_schema,
                 )
                 .unwrap(),
@@ -768,13 +730,7 @@ mod tests {
     }
 
     /// The tree `query` compiles to, with the raw-series schema every input is bound to.
-    fn query_tree(
-        query: &str,
-    ) -> (
-        NativeTree,
-        Arc<SeriesSchema>,
-        promql_parser::parser::EvalStmt,
-    ) {
+    fn query_tree(query: &str) -> (NativeTree, promql_parser::parser::EvalStmt) {
         let stmt = eval_statement(query);
         let series_schema = Arc::new(SeriesSchema {
             fields: Arc::from([FieldSpec { name: "v0".into() }]),
@@ -790,39 +746,38 @@ mod tests {
             .unwrap()
             .tree
         };
-        (tree, series_schema, stmt)
+        (tree, stmt)
     }
 
-    /// The paths of a tree's raw inputs, in walk order.
-    fn tree_input_paths(tree: &NativeTree) -> Vec<NodePath> {
-        let mut paths = Vec::new();
-        promql::native::metrics::walk(tree.root(), &mut |node, path| {
+    /// The number of raw inputs a tree reads, in walk order.
+    fn tree_input_count(tree: &NativeTree) -> usize {
+        let mut inputs = 0;
+        promql::native::metrics::walk(tree.root(), &mut |node, _| {
             if matches!(node.expr, NativeExpr::Input(_)) {
-                paths.push(path.clone());
+                inputs += 1;
             }
         });
-        paths
+        inputs
     }
 
     /// A `FusedSeries` node over `query`, with `one_source` deciding how its raw inputs bind.
     ///
-    /// `one_source` binds every tree input to one plan - the shape a two-occurrence statement
-    /// collapses to - and otherwise binds one plan per input.
+    /// `one_source` binds both occurrences of a two-occurrence statement to one plan - the shape
+    /// the planner collapses to, with both tree inputs numbered after that child - and otherwise
+    /// gives every occurrence its own plan.
     fn occurrence_plan(query: &str, tags: &[&str], one_source: bool) -> LogicalPlan {
-        let (tree, series_schema, stmt) = query_tree(query);
-        let paths = tree_input_paths(&tree);
-        let binding = |paths| FusedSeriesInput {
-            series_schema: Arc::clone(&series_schema),
-            metric_name: Some(Arc::from("some_metric")),
-            time_index: "ts".to_string(),
-            tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
-            input: table_scan_plan(),
-            paths,
-        };
-        let inputs = if one_source {
-            vec![binding(paths)]
-        } else {
-            paths.into_iter().map(|path| binding(vec![path])).collect()
+        let (tree, stmt) = query_tree(query);
+        let input_count = tree_input_count(&tree);
+        let (tree, children) = match (one_source, input_count) {
+            // A statement that names its selector once reads one child already.
+            (_, 1) => (tree, vec![table_scan_plan()]),
+            // Both occurrences read the one plan the planner collapsed them onto.
+            (true, _) => (
+                collapsed_pair_tree(&tree).expect("the fixture is a two-occurrence pair"),
+                vec![table_scan_plan()],
+            ),
+            // Every occurrence reads a plan of its own.
+            (false, _) => (tree, (0..input_count).map(|_| table_scan_plan()).collect()),
         };
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
@@ -851,8 +806,11 @@ mod tests {
                     tree,
                     FusedSeriesBinding {
                         grid: statement_grid(&stmt).unwrap(),
+                        time_index: "ts".to_string(),
+                        tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+                        metric_name: Some(Arc::from("some_metric")),
                     },
-                    inputs,
+                    children,
                     output_schema,
                 )
                 .unwrap(),
@@ -900,8 +858,9 @@ mod tests {
         }
     }
 
-    /// A node that lists its raw inputs as two bindings reads two plans, and a region has nothing
-    /// to build for it.
+    /// A node over two children reads two plans, and a region has nothing to build for it: the
+    /// planner collapses a pair onto one child, so this is the shape that keeps the node where it
+    /// was planned rather than a match one region cannot answer.
     #[test]
     fn fused_series_over_two_actual_scans_is_not_commutative() {
         let plan = occurrence_plan("some_metric + on(host) some_metric", &["host"], false);
@@ -930,16 +889,21 @@ mod tests {
     }
 
     /// A tree that reads a whole vector or folds a group reads across series, whether it is the
-    /// root or sits below the match the planner collapsed.
+    /// root or sits below a map.
+    ///
+    /// Each case below reads one scan, which is the only shape such a tree can have here: a
+    /// two-occurrence statement is collapsed onto one child only when both of its operands are
+    /// point-wise, and the planner refuses the pair otherwise. The categorizer reads the same
+    /// predicate ([`two_occurrences_pair_one_source`]) the planner admits with, so it cannot place
+    /// a pair the planner declined — that case is covered where the query falls back.
     #[test]
     fn fused_series_whose_tree_reads_across_series_is_not_commutative() {
-        for (query, one_source) in [
-            ("sort(some_metric)", true),
-            ("sum(some_metric)", true),
-            ("sort(some_metric) + on(host) sort(some_metric)", true),
-            ("sum(some_metric) + on(host) sum(some_metric)", true),
+        for query in [
+            "sort(some_metric)",
+            "sum(some_metric)",
+            "abs(sort(some_metric)) * 2",
         ] {
-            let plan = occurrence_plan(query, &["host"], one_source);
+            let plan = occurrence_plan(query, &["host"], true);
             assert!(
                 matches!(commutativity_of(&plan), Commutativity::NonCommutative),
                 "{query}"

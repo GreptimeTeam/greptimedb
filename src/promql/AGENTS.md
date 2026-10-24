@@ -31,16 +31,18 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   options are enabled and the per-request `query.experimental_native_promql`
   extension is true. Accepted plans use process-local `FusedSeries`; declined
   or unsupported shapes fall back to the existing planner. `compile_selectors`
-  binds each selector to its own scan, and the route accepts one selector over a
-  direct scan with a bound metric name, or two occurrences of one selector when
-  both read one identical final scan, matched one-to-one over the whole series
-  identity with a point-wise operand on each side. Label matchers are not a
-  reason to decline: each scan applies its own. Only trees that read one series at
-  a time are admitted, so an aggregate or a whole-vector operation (`sort`,
-  `absent`, ...) anywhere in the tree falls back, as does an ineligible
-  raw-series table/field set or an unsupported expression/grid. Metric scans
-  retain the static `__table_id` predicate. Hybrid CTEs and CREATE VIEW TQL
-  creation currently fall back to the existing planner.
+  binds each selector to its own scan and stamps that scan's position on the
+  tree input it creates (`BoundInput::source_index`), so `FusedSeries` holds one
+  logical child per index and the tree itself says which child feeds which input.
+  The route accepts one selector over a direct scan with a bound metric name, or
+  two occurrences of one selector when both read one identical final scan,
+  matched one-to-one over the whole series identity with a point-wise operand on
+  each side. Label matchers are not a reason to decline: each scan applies its
+  own. Only trees that read one series at a time are admitted, so an aggregate
+  or a whole-vector operation (`sort`, `absent`, ...) anywhere in the tree falls
+  back, as does an ineligible raw-series table/field set or an unsupported
+  expression/grid. Metric scans retain the static `__table_id` predicate. Hybrid
+  CTEs and CREATE VIEW TQL creation currently fall back to the existing planner.
 
 ## Change coupling
 
@@ -56,6 +58,16 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.
+- A fused plan's inputs are described once. `BoundInput::source_index` names which
+  source of one `NativeExecutor` invocation produced an input's chunks;
+  `FusedSeries` maps that index to its DataFusion child by position, and the
+  raw-series schema the input was compiled against is the layout its frame is
+  decoded with. Neither the logical node nor `FusedSeriesExec` therefore keeps a
+  per-child schema or destination list, while the binding's grid, time column,
+  tags and metric name and the executor's `(plan, RawLabelSource, SeriesOrdering)`
+  tuple stay as they are. A change to how a source is bound touches `BoundInput`
+  (its `ordering` included, which the executor checks against the producer),
+  `FusedSeries`'s source walk and the executor's `push_raw_source` together.
 
 ## Gotchas
 
@@ -66,6 +78,13 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   its doc is written for a caller that does not exist.
 - **A native window requires non-interleaved input.** Only `Contiguous` and
   `KeyThenTime` are accepted; `Interleaved` is refused when compiled.
+- **A fused tree is logical over N sources, physical over one.** `FusedSeries`
+  accepts one child per source index, but `FusedSeriesExec` runs exactly one
+  child, at that child's own partition count, and queues its chunks with
+  `NativeExecutor::push_raw_source(0, ..)`. A second source (needs a
+  label-pairing exchange) and a constant scalar (needs a scalar-to-batch
+  conversion) are refused when the physical node is built, never answered with
+  an empty result.
 - **A series closes exactly once**, on the chunk that says so — per input series,
   not per label set. A node that rewrites labels can hand two input series over
   under one label set, and each closes on its own chunk, so a label set may be

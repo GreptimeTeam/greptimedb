@@ -25,6 +25,11 @@
 //! says which series a chunk belongs to and whether it closes it instead of relying on where a row
 //! boundary happens to fall.
 //!
+//! One actual source is what the runtime runs: every tree input of the admitted trees is bound to
+//! source `0`, and the one child's chunks are handed to each of them. A tree that names a source
+//! index no child covers, or a plan given more than one child, is refused where the plan is built
+//! rather than run against half of its input.
+//!
 //! Kernel numerics are not the subject: `rate` is checked against a counter that advances one
 //! second per second, so the value it has to produce is exactly 1 (or 2) at every grid point and
 //! any position or finalization mistake shows up as a wrong, missing or duplicated row.
@@ -71,16 +76,16 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
 use super::{
-    FusedSeries, FusedSeriesBinding, FusedSeriesChild, FusedSeriesExec, FusedSeriesInput,
-    LabelSets, OutputColumn, POLL_BUDGET, label_set, occupied_runs, series_to_record_batch,
+    FusedSeries, FusedSeriesBinding, FusedSeriesExec, LabelSets, OutputColumn, POLL_BUDGET,
+    label_set, occupied_runs, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::PromExtensionPlanner;
 use crate::native::execute::{NativeExecutionState, NativeExecutor};
 use crate::native::metrics::{NodeMetric, NodePath};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundWindow, Grouping,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundScalar,
+    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::native::runs::absorb_rebuilds;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -147,6 +152,16 @@ fn two_field_schema() -> Arc<SeriesSchema> {
 
 /// The tree `rate(x[5m])` compiles to over `schema`: raw samples folded by one window onto the grid.
 fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
+    rate_tree_at(schema, 0)
+}
+
+/// [`rate_tree_of`] with its input bound to the child at `source_index`.
+///
+/// The input declares `Contiguous`, which is what every plan these fixtures build presents
+/// ([`plan_of`]): a tree is legal only against frames that satisfy the ordering each of its inputs
+/// declares, so a fixture declares the ordering its own plans really hand over. A test that needs
+/// another declaration rewrites it on a clone with [`declaring_orderings`].
+fn rate_tree_at(schema: Arc<SeriesSchema>, source_index: usize) -> NativeTree {
     let grid = grid();
     // One schema shared by the window's binding and its output, which is what `NativeTree`'s
     // validation compares by identity.
@@ -159,8 +174,9 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
         expr: NativeExpr::Window {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index,
                     output: raw.clone(),
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: raw,
             }),
@@ -186,19 +202,25 @@ fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
 }
 
+/// `left + right` on one grid, both operands reading the one actual source.
 fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) -> NativeTree {
-    binary_tree_op(BinaryOp::Add, left_schema, right_schema)
+    binary_tree_over_sources(BinaryOp::Add, left_schema, right_schema, 0, 0)
 }
 
-/// [`binary_tree`] over `op`, for a test that needs an operator its operands cannot exchange.
+/// A binary tree over `op` whose operands are bound to the given source indexes.
 ///
 /// `left_schema` is the operand at `root.left` and `right_schema` the one at `root.right`, so a
-/// subtracting tree answers `left - right` and a routing that swapped the two would answer the
-/// negative of that.
-fn binary_tree_op(
+/// subtracting tree answers `left - right`. One source read at both operands is what a statement
+/// that names one selector twice plans to; two different indexes are what a statement whose
+/// operands are two scans plans to, which the runtime refuses for now. The tree is the same shape
+/// either way, and the renderer names the index each input reads, so the trees are distinct
+/// computations.
+fn binary_tree_over_sources(
     op: BinaryOp,
     left_schema: Arc<SeriesSchema>,
     right_schema: Arc<SeriesSchema>,
+    left_source: usize,
+    right_source: usize,
 ) -> NativeTree {
     let grid = grid();
     let left_eval = Arc::new(SeriesSchema {
@@ -216,8 +238,9 @@ fn binary_tree_op(
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index: left_source,
                     output: NativeType::Samples(Arc::clone(&raw_left)),
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: NativeType::Samples(raw_left),
             }),
@@ -233,8 +256,9 @@ fn binary_tree_op(
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index: right_source,
                     output: NativeType::Samples(Arc::clone(&raw_right)),
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: NativeType::Samples(raw_right),
             }),
@@ -261,6 +285,133 @@ fn binary_tree_op(
         output: NativeType::Samples(output),
     })
     .unwrap()
+}
+
+/// The constant scalar `value`, evaluated on `grid`.
+///
+/// A scalar is the one thing a tree can produce while reading no source, so this is the tree the
+/// zero-child case is about.
+fn scalar_tree(grid: Arc<EvalGrid>, value: f64) -> NativeTree {
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(grid),
+    })
+    .expect("a constant scalar is a legal tree")
+}
+
+/// An instant selection over the tree input bound to `source_index`.
+fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
+    let raw = NativeType::Samples(raw_schema());
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index,
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(grid),
+            },
+        },
+        output: evaluated_of(&raw_schema(), grid),
+    }
+}
+
+/// `raw_schema`'s fields on `grid`: one value per grid point.
+fn evaluated_of(schema: &SeriesSchema, grid: &Arc<EvalGrid>) -> NativeType {
+    NativeType::Samples(Arc::new(SeriesSchema {
+        fields: schema.fields.clone(),
+        eval_grid: Some(Arc::clone(grid)),
+    }))
+}
+
+/// `tree` with the orderings its input nodes declare replaced, in the order the nodes are reached.
+///
+/// The fixtures here declare `Contiguous`, which is what the plans below them present, so a test
+/// that needs another declaration rewrites it on a clone rather than keeping a second tree builder
+/// beside the first. The rewrite is revalidated by [`NativeTree::try_new`], so one that broke a
+/// contract of the tree is refused here instead of at the node under test.
+fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> NativeTree {
+    fn rewrite(node: &NativeNode, orderings: &[SeriesOrdering], seen: &mut usize) -> NativeNode {
+        let mut expr = node.expr.clone();
+        match &mut expr {
+            NativeExpr::Input(bound) => {
+                bound.ordering = orderings[*seen];
+                *seen += 1;
+            }
+            // A constant reads no source, so it declares no ordering.
+            NativeExpr::Scalar(_) => {}
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => {
+                **input = rewrite(input, orderings, seen);
+            }
+            NativeExpr::Binary { left, right, .. } => {
+                **left = rewrite(left, orderings, seen);
+                **right = rewrite(right, orderings, seen);
+            }
+        }
+        NativeNode {
+            expr,
+            output: node.output.clone(),
+        }
+    }
+    let mut seen = 0;
+    let tree = NativeTree::try_new(rewrite(tree.root(), orderings, &mut seen))
+        .expect("another declared ordering keeps the tree legal");
+    assert_eq!(orderings.len(), seen, "one ordering per input of the tree");
+    tree
+}
+
+/// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
+///
+/// The subtraction and the multiplier together make the answer depend on which operand is which:
+/// this tree answers `-x` at every grid point, and the same operands paired the other way round
+/// answer `+x`. `x - x` would answer zero either way and could not tell the two apart.
+fn subtracted_scaled_tree() -> NativeTree {
+    let grid = grid();
+    let output = evaluated_of(&raw_schema(), &grid);
+    let doubled = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(instant_of(0, &grid)),
+            right: Box::new(NativeNode {
+                expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+                output: NativeType::Scalar(Arc::clone(&grid)),
+            }),
+            matching: BinaryMatching {
+                op: BinaryOp::Mul,
+                return_bool: false,
+                // What a scalar broadcast binds: the modifiers of a vector-vector match have no
+                // meaning here, and the runtime refuses a constant carrying them.
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: output.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(instant_of(0, &grid)),
+            right: Box::new(doubled),
+            matching: BinaryMatching {
+                op: BinaryOp::Sub,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    })
+    .expect("the bound tree is legal")
 }
 
 /// An instant selection feeding a range window.
@@ -319,8 +470,9 @@ fn nested_window_tree() -> NativeTree {
                 expr: NativeExpr::Window {
                     input: Box::new(NativeNode {
                         expr: NativeExpr::Input(BoundInput {
+                            source_index: 0,
                             output: raw.clone(),
-                            ordering: SeriesOrdering::KeyThenTime,
+                            ordering: SeriesOrdering::Contiguous,
                         }),
                         output: raw,
                     }),
@@ -422,8 +574,9 @@ fn instant_tree() -> NativeTree {
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
                 expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
                     output: raw.clone(),
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: raw,
             }),
@@ -438,84 +591,53 @@ fn instant_tree() -> NativeTree {
     .expect("the bound tree is legal")
 }
 
-/// What the tree's input was compiled against, for the input schema and output tags given.
-fn binding_of(
-    tree: &NativeTree,
-    _series_schema: Arc<SeriesSchema>,
-    _tags: Vec<String>,
-) -> FusedSeriesBinding {
-    FusedSeriesBinding {
-        grid: tree
-            .root()
+/// The grid `tree` is evaluated on, which is the grid its binding declares.
+fn tree_grid(tree: &NativeTree) -> Arc<EvalGrid> {
+    Arc::clone(
+        tree.root()
             .output
-            .samples()
-            .unwrap()
-            .eval_grid
-            .clone()
-            .unwrap(),
-    }
-}
-fn one_input(tree: &NativeTree, plan: LogicalPlan) -> Vec<FusedSeriesInput> {
-    one_input_tags(tree, plan, vec![HOST.to_string(), NAME.to_string()])
+            .grid()
+            .expect("these trees produce an evaluated value"),
+    )
 }
 
-/// One binding for the tree's single input, at the destination the tree itself names.
-fn one_input_tags(
-    tree: &NativeTree,
-    plan: LogicalPlan,
-    tags: Vec<String>,
-) -> Vec<FusedSeriesInput> {
-    let mut found = Vec::new();
-    crate::native::metrics::walk(tree.root(), &mut |node, path| {
-        if let NativeExpr::Input(input) = &node.expr {
-            found.push((Arc::clone(input.output.samples().unwrap()), path.clone()));
-        }
-    });
-    assert_eq!(1, found.len(), "these trees read one input");
-    let (series_schema, path) = found.remove(0);
-    vec![FusedSeriesInput {
-        series_schema,
-        metric_name: Some(Arc::from(METRIC)),
+/// The tags the output reports: the series' host and the metric name.
+fn default_tags() -> Vec<String> {
+    vec![HOST.to_string(), NAME.to_string()]
+}
+
+/// The binding of these tests' scans over `tree`, reporting `tags` as the output's tag columns.
+fn binding_of(tree: &NativeTree, tags: Vec<String>) -> FusedSeriesBinding {
+    FusedSeriesBinding {
+        grid: tree_grid(tree),
         time_index: TIME.to_string(),
         tags,
-        input: plan,
-        // The tree's own destination, not `root.input` assumed: a window above the input moves it.
-        paths: vec![path],
-    }]
-}
-
-/// What the tree's input was compiled against, read off the tree itself.
-fn binding(tree: &NativeTree) -> FusedSeriesBinding {
-    binding_of(tree, raw_schema(), vec![HOST.to_string(), NAME.to_string()])
-}
-
-/// The destinations of [`binary_tree`], left operand first.
-fn binary_paths() -> [NodePath; 2] {
-    [
-        NodePath::root().left().input(),
-        NodePath::root().right().input(),
-    ]
-}
-
-/// One binding of the one-field schema of these tests, reading `plan` at `paths`.
-fn binding_at(paths: Vec<NodePath>, plan: LogicalPlan) -> FusedSeriesInput {
-    FusedSeriesInput {
-        series_schema: raw_schema(),
         metric_name: Some(Arc::from(METRIC)),
-        time_index: TIME.to_string(),
-        tags: vec![HOST.to_string(), NAME.to_string()],
-        input: plan,
-        paths,
     }
 }
 
-/// The logical node of `tree` over `inputs`, with the grid the tree was evaluated on.
-fn logical(tree: &NativeTree, inputs: Vec<FusedSeriesInput>) -> DataFusionResult<FusedSeries> {
+/// The binding of the one-field schema of these tests, read off the tree itself.
+fn binding(tree: &NativeTree) -> FusedSeriesBinding {
+    binding_of(tree, default_tags())
+}
+
+/// One logical child: the plan a scan stands in for when the caller is not testing the plans below.
+fn child() -> LogicalPlan {
+    input_plan(frame_schema())
+}
+
+/// `count` logical children, each on the frame schema of these tests.
+fn children(count: usize) -> Vec<LogicalPlan> {
+    vec![child(); count]
+}
+
+/// The logical node of `tree` over `children`, with the grid the tree was evaluated on.
+fn logical(tree: &NativeTree, children: Vec<LogicalPlan>) -> DataFusionResult<FusedSeries> {
     FusedSeries::try_new(
         Arc::from("a + on(host) a"),
         tree.clone(),
         binding(tree),
-        inputs,
+        children,
         output_schema().to_dfschema_ref().unwrap(),
     )
 }
@@ -839,7 +961,7 @@ fn fused(tree: NativeTree) -> FusedSeries {
         Arc::from(PROMQL),
         tree.clone(),
         binding,
-        one_input(&tree, input_plan(frame_schema())),
+        vec![child()],
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -863,17 +985,6 @@ fn plan(
     input: Arc<dyn ExecutionPlan>,
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
     plan_of(fused(tree), input)
-}
-
-/// One physical child of the one-field schema of these tests, reading `batches` at `paths`.
-fn child_at(paths: Vec<NodePath>, batches: Vec<RecordBatch>) -> FusedSeriesChild {
-    (
-        memory_exec(batches),
-        RawLabelSource::Explicit,
-        SeriesOrdering::Contiguous,
-        paths,
-        raw_schema(),
-    )
 }
 
 /// The timestamps of `rows`.
@@ -1069,20 +1180,14 @@ fn zone_output_schema() -> SchemaRef {
 /// `rate(x[5m])` over frames that carry `zone` as well as `host`, with both in the output.
 fn zone_node() -> FusedSeries {
     let tree = rate_tree();
-    let binding = binding_of(
-        &tree,
-        raw_schema(),
-        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-    );
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
-        binding,
-        one_input_tags(
+        binding_of(
             &tree,
-            input_plan(frame_schema()),
             vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
         ),
+        vec![child()],
         zone_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -1094,20 +1199,14 @@ fn zone_node() -> FusedSeries {
 /// frame wrote it.
 fn instant_node() -> FusedSeries {
     let tree = instant_tree();
-    let binding = binding_of(
-        &tree,
-        raw_schema(),
-        vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
-    );
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
-        binding,
-        one_input_tags(
+        binding_of(
             &tree,
-            input_plan(frame_schema()),
             vec![HOST.to_string(), ZONE.to_string(), NAME.to_string()],
         ),
+        vec![child()],
         zone_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -1279,7 +1378,8 @@ fn grid_timestamps() -> Vec<i64> {
 
 /// A waker a test can ask whether it was notified.
 ///
-/// The poll tests use this to drive only when a child or the bounded-work continuation woke them.
+/// The remaining poll test uses it to see that a poll which stopped on its budget wakes the
+/// consumer, which is what makes a stopped poll resumable rather than a lost one.
 #[derive(Default)]
 struct CountingWake(AtomicBool);
 
@@ -1292,10 +1392,6 @@ impl futures::task::ArcWake for CountingWake {
 impl CountingWake {
     fn woken(&self) -> bool {
         self.0.load(Ordering::SeqCst)
-    }
-
-    fn clear(&self) {
-        self.0.store(false, Ordering::SeqCst);
     }
 }
 
@@ -1391,8 +1487,8 @@ fn fmt_as_prints_the_native_tree() {
         "the node line carries the tree it runs: {text}"
     );
     assert!(
-        text.contains("input Input raw samples"),
-        "the node line carries the tree's source: {text}"
+        text.contains("input Input source=0 raw samples"),
+        "the node line carries the tree's source and the child it reads: {text}"
     );
 }
 
@@ -1461,278 +1557,97 @@ async fn a_series_spanning_chunks_keeps_absolute_positions_and_closes_once() {
     assert_eq!(1, count(&metrics, "native.root.completed_series"));
 }
 
-#[tokio::test]
-async fn two_input_binary_exec_routes_each_raw_stream_to_its_tree_path() {
-    let left_schema = raw_schema();
-    let right_schema = raw_schema();
-    let tree = binary_tree(Arc::clone(&left_schema), Arc::clone(&right_schema));
-    let output = Arc::new(Schema::new(vec![
-        Field::new(VALUE, DataType::Float64, true),
-        Field::new(HOST, DataType::Utf8, true),
-        Field::new(NAME, DataType::Utf8, true),
-        Field::new(
-            TIME,
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ),
-    ]));
-    let _node = FusedSeries::try_new(
-        Arc::from("a + on(host) b"),
-        tree.clone(),
-        FusedSeriesBinding { grid: grid() },
-        vec![
-            FusedSeriesInput {
-                series_schema: left_schema.clone(),
-                metric_name: Some(Arc::from("a")),
-                time_index: TIME.into(),
-                tags: vec![HOST.into(), NAME.into()],
-                input: input_plan(frame_schema()),
-                // The two bindings of this direct test name the destinations explicitly: one
-                // source per operand, which is the shape a match over two scans keeps.
-                paths: vec![NodePath::root().left().input()],
-            },
-            FusedSeriesInput {
-                series_schema: right_schema.clone(),
-                metric_name: Some(Arc::from("b")),
-                time_index: TIME.into(),
-                tags: vec![HOST.into(), NAME.into()],
-                input: input_plan(frame_schema()),
-                paths: vec![NodePath::root().right().input()],
-            },
-        ],
-        output.clone().to_dfschema_ref().unwrap(),
-    )
-    .unwrap();
-    let physical = FusedSeriesExec::try_new(
-        Arc::from("a + on(host) b"),
-        vec![
-            (
-                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 10.0)], true)])),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-                vec![NodePath::root().left().input()],
-                left_schema,
-            ),
-            (
-                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 7.0)], true)])),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-                vec![NodePath::root().right().input()],
-                right_schema,
-            ),
-        ],
-        Arc::new(tree),
-        output,
-        TIME.into(),
-        vec![HOST.into(), NAME.into()],
-    )
-    .unwrap();
-    let batches = collect(Arc::new(physical), SessionContext::default().task_ctx())
-        .await
-        .unwrap();
-    let rows = rows(&batches);
-    assert_eq!(1, rows.len());
-    assert_eq!(GRID_START, rows[0].0);
-    assert_eq!(Some(17.0), rows[0].1);
-    assert_eq!(Some("job".to_string()), rows[0].2);
-}
-
-/// A child is routed by the path it names, not by the position it was given in.
+/// One child read at both operands of `x - 2 * x` answers `-x`, so the operands cannot be swapped.
 ///
-/// The tree subtracts, so its two operands cannot be exchanged without the answer changing sign, and
-/// the children are listed in the opposite order to the operands: the source that names the right
-/// operand comes first. A node that paired children with tree inputs by position would put `10` at
-/// the right operand and `7` at the left and answer `-3`; the same tree evaluated with the children
-/// in operand order would answer `3` for that reason alone, and neither is `10 - 7`. The value is
-/// therefore evidence about the routing and not about the arithmetic.
+/// A statement that names one selector twice plans to one scan and two tree inputs, and the tree
+/// hands every chunk of that scan to both of them. What each input reads is its own
+/// `source_index`, so both read the one child and no per-child list of destinations exists to
+/// disagree with the tree. The subtraction and the scalar multiplier together make the answer
+/// order-sensitive: `x - 2 * x` is `-x` at every grid point, while the same samples paired the other
+/// way round answer `+x`. `x - x` would answer zero whichever way it was paired and could not tell.
 #[tokio::test]
-async fn a_binary_exec_routes_its_children_by_path_not_by_position() {
-    let tree = binary_tree_op(BinaryOp::Sub, raw_schema(), raw_schema());
-    let [left_path, right_path] = binary_paths();
-    let physical = FusedSeriesExec::try_new(
-        Arc::from("a - on(host) b"),
-        vec![
-            // The right operand's source first, so only the path can say which is which.
-            (
-                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 7.0)], true)])),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-                vec![right_path],
-                raw_schema(),
-            ),
-            (
-                memory_exec(frames(&[series_chunk("job", &[(GRID_START, 10.0)], true)])),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-                vec![left_path],
-                raw_schema(),
-            ),
-        ],
-        Arc::new(tree),
-        output_schema(),
-        TIME.into(),
-        vec![HOST.into(), NAME.into()],
-    )
-    .expect("the two children cover the tree's two inputs");
-    let batches = collect(Arc::new(physical), SessionContext::default().task_ctx())
-        .await
-        .expect("the sole output partition executes");
-    let rows = rows(&batches);
-    assert_eq!(1, rows.len(), "{rows:?}");
-    let (time, value, host, name) = &rows[0];
-    assert_eq!(&GRID_START, time, "the one grid point both samples sit on");
-    assert_eq!(
-        Some(3.0),
-        *value,
-        "the left operand minus the right one, which a positional pairing answers as -3 or 17"
-    );
-    assert_eq!(
-        Some("job"),
-        host.as_deref(),
-        "the label both operands match on"
-    );
-    // Arithmetic drops the metric name, on whichever operand the left path named.
-    assert_eq!(None, *name, "{name:?}");
-}
+async fn one_child_read_at_both_operands_answers_a_scalar_scaled_subtraction() {
+    let tree = subtracted_scaled_tree();
+    let node = logical(&tree, vec![child()]).expect("one child covers both of the tree's inputs");
+    assert_eq!(1, node.children().len(), "one actual source");
 
-/// Two sources that are each read in several partitions are refused, not gathered.
-///
-/// A match pairs two scans' series by label, and neither scan says where the other put the series it
-/// is looking for: `h1` can be in the left scan's first partition and the right scan's last. Reading
-/// each source once per partition would then hand one execution half of a pair, and reading every
-/// partition of both into one execution would be the gather this node no longer has - it would read
-/// the two sources' partitions out of order behind the tree's back, and it would do so silently.
-/// The shape is refused where it is built, and it names the input that has more than one partition.
-#[tokio::test]
-async fn several_sources_read_in_several_partitions_are_refused() {
-    let left_schema = raw_schema();
-    let right_schema = raw_schema();
-    let tree = binary_tree(Arc::clone(&left_schema), Arc::clone(&right_schema));
-    let node = FusedSeries::try_new(
-        Arc::from("a + on(host) b"),
-        tree.clone(),
-        FusedSeriesBinding { grid: grid() },
-        vec![
-            FusedSeriesInput {
-                series_schema: left_schema.clone(),
-                metric_name: Some(Arc::from("a")),
-                time_index: TIME.into(),
-                tags: vec![HOST.into(), NAME.into()],
-                input: input_plan(frame_schema()),
-                paths: vec![NodePath::root().left().input()],
-            },
-            FusedSeriesInput {
-                series_schema: right_schema.clone(),
-                metric_name: Some(Arc::from("b")),
-                time_index: TIME.into(),
-                tags: vec![HOST.into(), NAME.into()],
-                input: input_plan(frame_schema()),
-                paths: vec![NodePath::root().right().input()],
-            },
-        ],
-        output_schema()
-            .to_dfschema_ref()
-            .expect("the output schema is valid"),
+    let samples = series_samples(1.0);
+    let exec = plan_of(
+        node,
+        memory_exec(frames(&[series_chunk("h1", &samples, true)])),
     )
-    .expect("the two-input binding matches the tree");
-    let rows_of = |scale: f64| frames(&[series_chunk("h1", &series_samples(scale), true)]);
-    let one = |batches: Vec<RecordBatch>| memory_exec_partitioned(vec![batches]);
-    let two = |batches: Vec<RecordBatch>| memory_exec_partitioned(vec![batches.clone(), batches]);
-    // The first source is one partition and the second two: the refusal names the source that
-    // cannot be paired, and neither count is silently reduced to one.
-    let error = node
-        .to_execution_plan(vec![
-            (
-                one(rows_of(1.0)),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            ),
-            (
-                two(rows_of(2.0)),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            ),
-        ])
-        .expect_err("the second source has two partitions, and pairing it needs an exchange");
-    let message = error.to_string();
-    assert!(
-        message.contains("input 1"),
-        "the refusal must name it: {message}"
-    );
-    assert!(
-        message.contains("2 partitions"),
-        "the refusal must name the count: {message}"
-    );
-    assert!(
-        message.contains("2 sources"),
-        "the refusal must name how many sources it would run: {message}"
-    );
-    // Two sources of one partition each are the accepted shape: one execution sees every series of
-    // both, so a match pairs them by label.
-    let physical = node
-        .to_execution_plan(vec![
-            (
-                one(rows_of(1.0)),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            ),
-            (
-                one(rows_of(2.0)),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            ),
-        ])
-        .expect("two single-partition sources are one execution");
-    assert_eq!(
-        1,
-        physical
-            .properties()
-            .output_partitioning()
-            .partition_count()
-    );
-    let batches = collect(physical, SessionContext::default().task_ctx())
+    .expect("the physical node builds");
+    let batches = collect(exec, SessionContext::default().task_ctx())
         .await
-        .expect("the sole output partition executes");
-    let mut rows = rows(&batches);
-    rows.sort_by_key(|row| row.0);
+        .expect("the one partition answers");
+    let rows = rows(&batches);
     let expected = grid_timestamps()
         .into_iter()
         .map(|stamp| {
-            let value = 3.0 * stamp as f64 / 1_000.0;
-            (stamp, Some(value))
+            let sample = samples
+                .iter()
+                .find_map(|(time, value)| (*time == stamp).then_some(*value))
+                .expect("the samples cover every grid point");
+            (stamp, Some(-sample), Some("h1".to_string()))
         })
         .collect::<Vec<_>>();
     assert_eq!(
         expected,
-        rows.iter().map(|row| (row.0, row.1)).collect::<Vec<_>>(),
-        "each grid point holds the sum of the two sources"
+        rows.iter()
+            .map(|row| (row.0, row.1, row.2.clone()))
+            .collect::<Vec<_>>(),
+        "the left operand minus the doubled right one, not the other way round"
+    );
+}
+
+/// A second child is refused, even when each child has one partition.
+///
+/// Pairing two children's series by label needs an exchange that merges them, which this node does
+/// not have: one execution would read both children's partitions out of order behind the tree's
+/// back. The refusal is on the count and not on the partitioning, so two children of one partition
+/// each are refused exactly like two children of several. The tree below is the two-source shape
+/// such a query plans to, and it is refused where the execution plan is built.
+#[test]
+fn a_second_child_is_refused() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = logical(&tree, children(2)).expect("the tree names both of its children");
+    let rows = frames(&[series_chunk("h1", &series_samples(1.0), true)]);
+    let error = node
+        .to_execution_plan(vec![
+            (
+                memory_exec(rows.clone()),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec(rows),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect_err("two children would have to be paired by label");
+    let message = error.to_string();
+    assert!(
+        message.contains("2 sources"),
+        "the refusal must name how many sources it would run: {message}"
     );
     assert!(
-        rows.iter().all(|row| row.2.as_deref() == Some("h1")),
-        "the match is on the host the two series share: {rows:?}"
+        message.contains("exchange"),
+        "the refusal must name what is missing: {message}"
     );
 }
 
 /// One source feeding both operands is read once and answered as `x + x`, not as `x`.
 ///
 /// This is the shape a statement that names one selector twice plans to: one scan and two tree
-/// destinations. The tree sees the same samples at both operands, so every grid point holds the
-/// sample summed with itself. Answering `x` is what a node that queued the chunk at only one
-/// destination - or that resolved a destination by traversal order instead of by path - would
-/// produce, and that is what this test separates from the sum.
+/// inputs. The tree sees the same samples at both operands, so every grid point holds the sample
+/// summed with itself. Answering `x` is what a node that queued the chunk at only one of the two
+/// inputs would produce, and that is what this test separates from the sum.
 #[tokio::test]
 async fn one_source_read_at_both_operands_answers_x_plus_x() {
     let tree = binary_tree(raw_schema(), raw_schema());
-    let node = logical(
-        &tree,
-        vec![binding_at(
-            binary_paths().to_vec(),
-            input_plan(frame_schema()),
-        )],
-    )
-    .expect("one source covers both of the tree's inputs");
-    assert_eq!(1, node.fused_inputs().len(), "one actual source");
-    assert_eq!(2, node.fused_inputs()[0].paths.len(), "two destinations");
+    let node = logical(&tree, vec![child()]).expect("one source covers both of the tree's inputs");
+    assert_eq!(1, node.children().len(), "one actual source");
 
     let samples = series_samples(1.0);
     let exec = plan_of(
@@ -1763,7 +1678,7 @@ async fn one_source_read_at_both_operands_answers_x_plus_x() {
     );
 }
 
-/// A source read at both destinations is executed once per partition, and each partition is its own.
+/// A source read at both inputs is executed once per partition, and each partition is its own.
 ///
 /// Each of the `partitions` series sits in a partition of its own in one scan, so each execution of
 /// the tree owns one series and reads it at both operands. Three things are checked at once: the
@@ -1778,14 +1693,8 @@ async fn one_source_read_at_both_operands_answers_x_plus_x() {
 async fn one_source_read_at_both_operands_is_executed_once_per_partition() {
     for partitions in [2_usize, 4] {
         let tree = binary_tree(raw_schema(), raw_schema());
-        let node = logical(
-            &tree,
-            vec![binding_at(
-                binary_paths().to_vec(),
-                input_plan(frame_schema()),
-            )],
-        )
-        .expect("one source covers both of the tree's inputs");
+        let node =
+            logical(&tree, vec![child()]).expect("one source covers both of the tree's inputs");
         let scales = (1..=partitions).map(|n| n as f64).collect::<Vec<_>>();
         let source_partitions = scales
             .iter()
@@ -1876,96 +1785,468 @@ async fn one_source_read_at_both_operands_is_executed_once_per_partition() {
     }
 }
 
-/// A binding names each of the tree's raw inputs exactly once, and the tree names them all.
-#[test]
-fn a_binding_must_name_one_destination_per_tree_input() {
-    let tree = binary_tree(raw_schema(), raw_schema());
-    let [left, right] = binary_paths();
-    let cases: [(&str, Vec<Vec<NodePath>>, &str); 6] = [
-        (
-            "a binding with no destination",
-            vec![vec![]],
-            "names no tree input path",
-        ),
-        (
-            "a destination the tree does not have",
-            vec![vec![NodePath::root().input()]],
-            "is not an input of its tree",
-        ),
-        (
-            "one destination listed twice by one binding",
-            vec![vec![left.clone(), left.clone(), right.clone()]],
-            "more than once",
-        ),
-        (
-            "one destination listed by two bindings",
-            vec![vec![left.clone()], vec![left.clone()]],
-            "more than once",
-        ),
-        (
-            "a destination no binding names",
-            vec![vec![left.clone()]],
-            "binds no source for the tree input `root.right.input`",
-        ),
-        (
-            "no bindings at all",
-            vec![],
-            "binds no source for the tree input `root.left.input`",
-        ),
-    ];
-    for (case, paths, expected) in cases {
-        let inputs = paths
-            .into_iter()
-            .map(|paths| binding_at(paths, input_plan(frame_schema())))
-            .collect();
-        let error = logical(&tree, inputs).expect_err(case);
-        let message = error.to_string();
-        assert!(message.contains(expected), "{case}: {message}");
-    }
-    // Both destinations, in either order: the list is looked up by path rather than zipped against
-    // the tree's walk, so the order it is written in does not matter.
-    for paths in [
-        vec![left.clone(), right.clone()],
-        vec![right.clone(), left.clone()],
+/// Two stateful windows over one child each receive every chunk of the series.
+///
+/// `rate(x[5m]) - rate(x[5m])` names one selector twice, so both windows are bound to source `0`
+/// and one child's chunks are queued at both of them. A window never hands a chunk on, but it does
+/// not hold a series either: it keeps only the samples its remaining windows still read and hands
+/// out each grid point as the pushed samples complete its window. So the subtraction is not the
+/// delivery proof: `rate - rate` is zero wherever both operands decided a point, and the counter
+/// here advances one second per second, so a sample both windows missed costs neither one its
+/// rate - identical omissions are invisible to a comparison of the two sides or to the values
+/// themselves.
+///
+/// What rules omissions out is what the runtime reports per input: each one counts one
+/// [`NodeMetric::INPUT_BATCHES`] per batch of the child ([`one_series_frames`] sends three) and one
+/// completed series, so a window handed less of the stream than the other is visible even at the
+/// points where its answer would have been right.
+#[tokio::test]
+async fn two_windows_over_one_child_each_read_the_whole_series() {
+    // `rate(x[5m]) - rate(x[5m])` over one source: the two operands are the window's own root,
+    // cloned so both halves share its bindings and its grid by allocation.
+    let rate = rate_tree();
+    let window = rate.root().clone();
+    let output = crate::vector_match::binary_output_schema(
+        window
+            .output
+            .samples()
+            .expect("a window produces evaluated samples"),
+        window
+            .output
+            .samples()
+            .expect("a window produces evaluated samples"),
+    )
+    .expect("both operands are evaluated on the one grid");
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(window.clone()),
+            right: Box::new(window),
+            matching: BinaryMatching {
+                op: BinaryOp::Sub,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("two windows over one source are a legal tree");
+    let node = logical(&tree, vec![child()]).expect("one child feeds both windows");
+    assert_eq!(1, node.children().len(), "one actual source");
+
+    let batches = one_series_frames();
+    let chunks = batches.len();
+    assert!(
+        chunks > 1,
+        "the fixture has to arrive in several chunks: {chunks}"
+    );
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let source = ExecuteRecorder::counting(memory_exec(batches), &calls);
+    let exec = plan_of(node, source).expect("the physical node builds");
+
+    let answered = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .expect("the one partition answers");
+    let rows = rows(&answered);
+    // The whole grid, in order, with the host `rate` kept and the name it dropped: `rate - rate`
+    // is zero at every point both windows decided, which is the shape of the answer.
+    let expected = grid_timestamps()
+        .into_iter()
+        .map(|stamp| (stamp, Some(0.0), Some("web-1".to_string()), None))
+        .collect::<Vec<_>>();
+    assert_eq!(expected, rows, "every grid point holds rate minus rate");
+
+    // The one child was executed once, for the partition this node answers.
+    let called = calls.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    assert_eq!(
+        vec![0],
+        called,
+        "the child is executed once, at partition 0"
+    );
+
+    // Each window completed the one series it read, and the subtraction completed its one result.
+    // A window that never received the closing chunk reports no completed series, so this is the
+    // stateful half of the claim the rows above make.
+    let metrics = exec
+        .metrics()
+        .expect("the node reports its runtime's metrics");
+    for node in [
+        NodePath::root(),
+        NodePath::root().left(),
+        NodePath::root().right(),
     ] {
-        logical(&tree, vec![binding_at(paths, input_plan(frame_schema()))])
-            .expect("one source at both destinations is the admitted shape");
+        assert_eq!(
+            1,
+            count(&metrics, &node.metric_name(NodeMetric::COMPLETED_SERIES)),
+            "{node} did not complete the one series it read"
+        );
+    }
+
+    // Both inputs were fed the whole stream: one batch per batch of the child, which is what the
+    // two windows' answers cannot say on their own.
+    let left = NodePath::root().left().input();
+    let right = NodePath::root().right().input();
+    for input in [&left, &right] {
+        assert_eq!(
+            chunks,
+            count(&metrics, &input.metric_name(NodeMetric::INPUT_BATCHES)),
+            "{input} did not receive every chunk of the series"
+        );
+        assert_eq!(
+            1,
+            count(&metrics, &input.metric_name(NodeMetric::COMPLETED_SERIES)),
+            "{input} did not close the one series it read"
+        );
     }
 }
 
-/// A binding's schema is checked against the schema of every destination it names.
+/// One source read at two inputs must be read through one raw series schema.
 ///
-/// The two operands of this tree were compiled against different schemas, so no one binding can
-/// serve both: decoding one frame against either layout would hand the other operand a column set
-/// it never bound. The refusal names the destination that disagrees.
+/// Both inputs of this tree name source `0`, so one child's frames are decoded for both of them.
+/// The two operands were compiled against different field lists: decoding the one frame either way
+/// would hand the other operand a column it never bound, so the job is refused while it is built.
+/// There is no per-input copy of the schema to mutate here - the schema each input reads is the one
+/// its own node carries - so what is compared is the tree against itself.
 #[test]
-fn a_binding_must_agree_with_the_schema_of_each_destination() {
+fn a_source_shared_by_both_inputs_must_read_one_schema() {
     let tree = binary_tree(raw_schema(), two_field_schema());
-    let error = logical(
-        &tree,
-        vec![binding_at(
-            binary_paths().to_vec(),
-            input_plan(frame_schema()),
-        )],
-    )
-    .expect_err("one binding cannot be the layout of both operands");
+    let error =
+        logical(&tree, vec![child()]).expect_err("one child cannot be decoded through two layouts");
     let message = error.to_string();
     assert!(
-        message.contains("`root.right.input`"),
-        "the refusal must name the destination that disagrees: {message}"
+        message.contains("source 0"),
+        "the refusal must name the source both inputs read: {message}"
     );
     assert!(
-        message.contains("not compiled against"),
-        "refused for another reason: {message}"
+        message.contains("layout"),
+        "the refusal must say why one child cannot serve both: {message}"
     );
 }
 
-/// The execution inputs are one per binding, in both directions.
+/// A tree input that is not raw samples is refused by the logical node.
 ///
-/// A zip would drop the longer side, so a caller that passes one scan too many would have it
+/// The right operand below reads evaluated samples at source `0` - the shape an exchange boundary
+/// hands over - while the left one reads raw samples from the same child, and the tree is otherwise
+/// valid: both sides are on one grid and the binary operation is legal. This node decodes raw series
+/// frames, so every input it runs has to be raw; the tree is refused where the node is created,
+/// before any execution plan exists to run.
+#[test]
+fn a_tree_input_that_is_not_raw_series_is_refused() {
+    let grid = grid();
+    let evaluated = evaluated_of(&raw_schema(), &grid);
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(instant_of(0, &grid)),
+            right: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: evaluated.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: evaluated.clone(),
+            }),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: evaluated,
+    })
+    .expect("an evaluated input is a legal tree: it is what an exchange boundary hands over");
+    let error = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![child()],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect_err("the node decodes raw frames, so an evaluated input cannot be run");
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+    let message = error.to_string();
+    // The operand *is* the input node - nothing sits below it - so the walk reaches it at
+    // `root.right`, not at a `root.right.input` that does not exist in this tree.
+    assert!(
+        message.contains("`root.right`"),
+        "the refusal must name the input node that is not raw: {message}"
+    );
+    assert!(
+        !message.contains("`root.right.input`"),
+        "an input node is its own position, so the refusal cannot name a node below it: {message}"
+    );
+    assert!(
+        message.contains("not raw series"),
+        "the refusal must say what the input has to be: {message}"
+    );
+}
+
+/// The ordering a tree input declares has to be met by the frames its child produces.
+///
+/// This is the whole matrix of the two facts: what an input declares, and what the producer
+/// promises. `Contiguous` frames satisfy an input bound to `Contiguous` and one bound to the
+/// stronger `KeyThenTime` does not - contiguous says only that a series' chunks are adjacent, not
+/// that the series arrive in identity order. `KeyThenTime` frames satisfy both, because they are
+/// the stronger promise. `Interleaved` frames satisfy neither: they may split one series' chunks
+/// with another's, and both admitted inputs are read one series to its last chunk. The refusal
+/// names the source, the ordering the producer promises, the one the input asked for, and the input
+/// itself.
+#[test]
+fn the_declared_ordering_must_be_met_by_the_producer() {
+    let contiguous = SeriesOrdering::Contiguous;
+    let key_then_time = SeriesOrdering::KeyThenTime;
+    let interleaved = SeriesOrdering::Interleaved;
+    // (declared by the tree input, promised by the producer, admitted)
+    let cases = [
+        (contiguous, contiguous, true),
+        (contiguous, key_then_time, true),
+        (key_then_time, key_then_time, true),
+        (key_then_time, contiguous, false),
+        (contiguous, interleaved, false),
+        (key_then_time, interleaved, false),
+    ];
+    for (declared, actual, accepted) in cases {
+        let tree = declaring_orderings(&rate_tree(), &[declared]);
+        let node = logical(&tree, vec![child()]).expect("the binding matches the tree");
+        let built = node.to_execution_plan(vec![(
+            memory_exec(Vec::new()),
+            RawLabelSource::Explicit,
+            actual,
+        )]);
+        match (accepted, built) {
+            (true, Ok(exec)) => assert_eq!(
+                1,
+                exec.properties().output_partitioning().partition_count(),
+                "{actual:?} frames satisfy an input bound to {declared:?}"
+            ),
+            (true, Err(error)) => {
+                panic!("{actual:?} frames were refused for an input bound to {declared:?}: {error}")
+            }
+            (false, Ok(_)) => panic!(
+                "{actual:?} frames were accepted for an input bound to {declared:?}, which asks \
+                 for more than they promise"
+            ),
+            (false, Err(error)) => {
+                assert!(
+                    matches!(error, DataFusionError::Plan(_)),
+                    "{declared:?} against {actual:?}: {error}"
+                );
+                let message = error.to_string();
+                assert!(
+                    message.contains("ordering"),
+                    "the refusal must say what it is about: {message}"
+                );
+                assert!(
+                    message.contains("source 0"),
+                    "the refusal must name the source: {message}"
+                );
+                assert!(
+                    message.contains(&format!("{actual:?}")),
+                    "the refusal must name the ordering the producer promises: {message}"
+                );
+                assert!(
+                    message.contains(&format!("{declared:?}")),
+                    "the refusal must name the ordering the input asked for: {message}"
+                );
+                assert!(
+                    message.contains("`root.input`"),
+                    "the refusal must name the input that asked for it: {message}"
+                );
+            }
+        }
+    }
+}
+
+/// Every input's ordering is checked, not only the first one's.
+///
+/// Both operands of this tree are fed by the one child - `x + x` over one scan - but the left one
+/// was compiled against contiguous frames and the right one against identity-then-time frames. A
+/// check that read only the first input would admit this plan and then run the right operand over
+/// frames it never bound. The refusal names the right input, and the same tree builds over frames
+/// that really are identity-then-time, which is what makes it about the promise and not the shape.
+#[test]
+fn every_inputs_ordering_is_checked_not_only_the_first() {
+    let tree = declaring_orderings(
+        &binary_tree(raw_schema(), raw_schema()),
+        &[SeriesOrdering::Contiguous, SeriesOrdering::KeyThenTime],
+    );
+    let node = logical(&tree, vec![child()]).expect("the binding matches the tree");
+    let error = node
+        .to_execution_plan(vec![(
+            memory_exec(Vec::new()),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .expect_err("the right operand asked for more than the child promises");
+    assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+    let message = error.to_string();
+    assert!(
+        message.contains("source 0"),
+        "the refusal must name the source both inputs read: {message}"
+    );
+    assert!(
+        message.contains("`root.right.input`"),
+        "the refusal must name the input that asked for the stronger ordering, not the first \
+         one: {message}"
+    );
+    assert!(
+        message.contains("Contiguous") && message.contains("KeyThenTime"),
+        "the refusal must name both orderings: {message}"
+    );
+    node.to_execution_plan(vec![(
+        memory_exec(Vec::new()),
+        RawLabelSource::Explicit,
+        SeriesOrdering::KeyThenTime,
+    )])
+    .expect("identity-then-time frames satisfy both inputs");
+}
+
+/// A tree whose inputs name a source index past the sources it reads is refused.
+///
+/// The index is the input's own fact, so a tree that skips an index has no child to read it from:
+/// source `1` with no source `0` would silently read the wrong child, and a source past the list
+/// would read nothing at all. The refusal names the index.
+///
+/// Every index is bounded by the number of input occurrences before any per-index state is sized,
+/// so the four indexes below - a skip of one, a sparse one, and the two extremes - are refused
+/// rather than reserving slots no input can ever fill: were the bound checked after the sizing,
+/// these cases would abort on the allocation instead of answering an error. The sparse index is a
+/// shift of `usize::BITS` rather than a fixed literal, so it is out of any real source list's range
+/// on a 32-bit target as well as a 64-bit one.
+#[test]
+fn a_source_index_without_the_sources_below_it_is_refused() {
+    for index in [1, 1usize << (usize::BITS / 2), usize::MAX / 2, usize::MAX] {
+        let tree = rate_tree_at(raw_schema(), index);
+        let error = match logical(&tree, vec![child()]) {
+            Ok(_) => panic!("source {index} has no source 0 below it, yet the tree was admitted"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains(&format!("source index {index}")),
+            "the refusal must name the index the tree binds: {message}"
+        );
+    }
+    // The same tree with its input bound to the only child it has is legal, which is what makes the
+    // refusal about the index and not about the number of children.
+    logical(&rate_tree_at(raw_schema(), 0), vec![child()]).expect("source 0 is the first child");
+}
+
+/// A child list that is not one child per source is refused, in both directions.
+///
+/// The children are the tree's sources, in source order, so a list that is too short leaves a
+/// source unread and a list that is too long carries a child no input names. Both are refused
+/// rather than zipped, which would drop whichever side is longer.
+#[test]
+fn a_tree_wants_one_child_per_source() {
+    let two_sources = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let error = logical(&two_sources, vec![child()]).expect_err("source 1 has no child");
+    let message = error.to_string();
+    assert!(
+        message.contains("2 sources") && message.contains("1 child"),
+        "the refusal must name both counts: {message}"
+    );
+    let one_source = rate_tree();
+    let error = logical(&one_source, children(2)).expect_err("the second child is unreferenced");
+    let message = error.to_string();
+    assert!(
+        message.contains("1 source") && message.contains("2 child"),
+        "the refusal must name both counts: {message}"
+    );
+}
+
+/// A tree that reads no source is legal only as the statement's constant scalar.
+///
+/// A scalar is declared by the type that produces it, so the one zero-input tree this node accepts
+/// is a bound [`NativeExpr::Scalar`] on the statement's grid: it reads nothing and its rows are the
+/// same value at every grid point. A scalar on another grid is a different value at every grid
+/// point than the one the binding names, so it is refused; a tree that produces samples with no
+/// input at all would be an empty vector reported as an answer, which is not a shape this node
+/// invents. Nothing is read for the scalar yet, so asking for its physical node is refused rather
+/// than answered with an empty result.
+#[test]
+fn a_zero_child_tree_must_be_a_constant_scalar_on_the_statement_grid() {
+    let scalar = scalar_tree(grid(), 7.0);
+    let node = FusedSeries::try_new(
+        Arc::from("7"),
+        scalar.clone(),
+        binding(&scalar),
+        Vec::new(),
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("a constant scalar on the statement's grid reads no source");
+    assert!(node.children().is_empty(), "the scalar binds no child");
+    let error = node
+        .to_execution_plan(Vec::new())
+        .expect_err("a constant scalar's rows are not produced yet");
+    assert!(
+        matches!(
+            error,
+            DataFusionError::Plan(_) | DataFusionError::NotImplemented(_)
+        ),
+        "the refusal is explicit, not an empty answer: {error}"
+    );
+
+    // The same tree evaluated on another grid is not the statement's scalar.
+    let elsewhere = scalar_tree(
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, GRID_STEP, GRID_LEN).unwrap()).unwrap()),
+        7.0,
+    );
+    let error = FusedSeries::try_new(
+        Arc::from("7"),
+        elsewhere.clone(),
+        FusedSeriesBinding {
+            grid: binding(&scalar).grid,
+            ..binding(&elsewhere)
+        },
+        Vec::new(),
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect_err("the scalar is not evaluated on the grid the binding names");
+    assert!(
+        error.to_string().contains("constant scalar"),
+        "the refusal must say the zero-child tree has to be a constant scalar: {error}"
+    );
+}
+
+/// The child a tree input reads is part of what the tree is.
+///
+/// `a - b` over two scans and the same subtraction with the scans bound the other way round are the
+/// same shape while still reading different children at each operand: what tells them apart is the
+/// index that makes it part of the tree's own text, and that text is what the logical node compares
+/// since the tree carries no structural equality of its own.
+#[test]
+fn a_source_index_is_part_of_the_tree() {
+    let left_first = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let right_first = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 1, 0);
+    assert!(
+        left_first.to_string().contains("source=0") && left_first.to_string().contains("source=1"),
+        "the tree's text names the source each input reads: {left_first}"
+    );
+    assert_ne!(
+        left_first.to_string(),
+        right_first.to_string(),
+        "the two bindings of the same subtraction are different trees"
+    );
+
+    let mine = logical(&left_first, children(2)).expect("both sources have a child");
+    let theirs = logical(&right_first, children(2)).expect("the same sources, bound the other way");
+    assert_ne!(mine, theirs, "the swapped tree is another computation");
+    assert_ne!(
+        Some(std::cmp::Ordering::Equal),
+        mine.partial_cmp(&theirs),
+        "a different tree is not ordered equal to this one"
+    );
+}
+
+/// The execution children are one per child, in both directions.
+///
+/// A zip would drop the longer side, so a caller that passes one child too many would have it
 /// silently ignored and a caller that passes one too few would run a tree over half its sources.
 #[test]
-fn the_execution_inputs_must_be_one_per_binding() {
+fn the_execution_children_must_be_one_per_child() {
     let tree = rate_tree();
     let node = fused(tree);
     let bare = || memory_exec(Vec::new());
@@ -1974,31 +2255,31 @@ fn the_execution_inputs_must_be_one_per_binding() {
             (bare(), RawLabelSource::Explicit, SeriesOrdering::Contiguous),
             (bare(), RawLabelSource::Explicit, SeriesOrdering::Contiguous),
         ])
-        .expect_err("two execution inputs for one binding");
+        .expect_err("two execution children for one child");
     assert!(
         error.to_string().contains("2 execution inputs were given"),
         "{error}"
     );
     let error = node
         .to_execution_plan(Vec::new())
-        .expect_err("no execution input for one binding");
+        .expect_err("no execution child for one child");
     assert!(
         error.to_string().contains("0 execution inputs were given"),
         "{error}"
     );
 }
 
-/// The physical inputs of the node must number its bindings, whoever plans it.
+/// The physical inputs of the node must number its children, whoever plans it.
 ///
 /// DataFusion plans every physical child before it asks for the node, so its own route always
-/// matches the count. A direct call of `plan_extension` need not, and the bindings are paired with
+/// matches the count. A direct call of `plan_extension` need not, and the children are paired with
 /// the inputs by position, so a list of another length is a plan error naming both counts instead
-/// of a binding read past its end or an input silently ignored. The inputs here are memory sources,
+/// of a child read past its end or an input silently ignored. The inputs here are memory sources,
 /// which this node cannot read as raw series: that they are refused for their count and not for
 /// their type is what shows the count is asked before a child is looked at, since the scan check
 /// would have answered `Ok(None)` for both counts instead.
 #[tokio::test]
-async fn the_physical_inputs_must_number_the_bindings() {
+async fn the_physical_inputs_must_number_the_children() {
     let node = fused(rate_tree());
     let planner = DefaultPhysicalPlanner::default();
     let session = SessionContext::default();
@@ -2011,14 +2292,8 @@ async fn the_physical_inputs_must_number_the_bindings() {
         let error = PromExtensionPlanner
             .plan_extension(&planner, &node, &[], &inputs, &state, &planning_ctx)
             .await
-            .expect_err("the node binds one input, whatever it was given");
+            .expect_err("the node binds one child, whatever it was given");
         assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
-        assert!(
-            error.to_string().contains(&format!(
-                "binds 1 inputs, but {count} physical inputs were given"
-            )),
-            "{error}"
-        );
     }
     let planned = PromExtensionPlanner
         .plan_extension(
@@ -2037,67 +2312,51 @@ async fn the_physical_inputs_must_number_the_bindings() {
     );
 }
 
-/// The physical children cover the tree's destinations exactly, one child per actual source.
+/// The physical children must number the tree's sources.
+///
+/// The tree's own input nodes say how many children it reads, so a child list of another length is
+/// refused where the physical node is built: a shorter one leaves a source unread, and the tree
+/// would run over part of its input.
 #[test]
-fn the_physical_children_must_cover_every_destination() {
-    let tree = binary_tree(raw_schema(), raw_schema());
-    let [left, right] = binary_paths();
-    let build = |children: Vec<FusedSeriesChild>| {
-        FusedSeriesExec::try_new(
-            Arc::from("a + on(host) a"),
-            children,
-            Arc::new(tree.clone()),
-            output_schema(),
-            TIME.into(),
-            vec![HOST.into(), NAME.into()],
-        )
-    };
-    let error = build(vec![child_at(vec![left.clone()], Vec::new())])
-        .expect_err("the right destination has no child");
+fn the_physical_children_must_number_the_trees_sources() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let error = FusedSeriesExec::try_new(
+        Arc::from("a + on(host) b"),
+        vec![(
+            memory_exec(Vec::new()),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )],
+        Arc::new(tree),
+        output_schema(),
+        TIME.into(),
+        default_tags(),
+    )
+    .expect_err("the tree reads two sources and was given one child");
+    let message = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("binds no source for the tree input `root.right.input`"),
-        "{error}"
-    );
-    let error = build(vec![
-        child_at(vec![left.clone()], Vec::new()),
-        child_at(vec![left.clone()], Vec::new()),
-        child_at(vec![right.clone()], Vec::new()),
-    ])
-    .expect_err("two children read the left destination");
-    assert!(error.to_string().contains("more than once"), "{error}");
-    let mut two_fields = child_at(vec![left.clone(), right.clone()], Vec::new());
-    two_fields.4 = two_field_schema();
-    let error = build(vec![two_fields]).expect_err("the tree's inputs read one field");
-    assert!(
-        error.to_string().contains("not compiled against"),
-        "{error}"
+        message.contains("2 sources") && message.contains("1 child"),
+        "the refusal must name both counts: {message}"
     );
 }
 
-/// Rebuilding a node over new inputs keeps the destinations, and revalidation decides.
+/// Rebuilding a node over new children keeps the arity and the fields they must provide.
 ///
-/// A rewrite above this node replaces the plans below it and nothing else: the destinations are the
-/// node's own fact, so they travel unchanged, while the arity the bindings demand is asked again.
+/// A rewrite above this node replaces the plans below it and nothing else: the binding is the
+/// node's own fact, so it travels unchanged, while the number of children and the fields each of
+/// them must carry are asked again. A replacement child missing a field the tree reads is refused
+/// rather than decoded with a stale layout.
 #[test]
-fn with_exprs_and_inputs_keeps_the_destinations() {
+fn with_exprs_and_inputs_keeps_the_arity_and_the_fields() {
     let tree = binary_tree(raw_schema(), raw_schema());
-    let node = logical(
-        &tree,
-        vec![binding_at(
-            binary_paths().to_vec(),
-            input_plan(frame_schema()),
-        )],
-    )
-    .expect("one source covers both of the tree's inputs");
+    let node = logical(&tree, vec![child()]).expect("one child covers both of the tree's inputs");
     let rebuilt = node
-        .with_exprs_and_inputs(vec![], vec![input_plan(frame_schema())])
-        .expect("one plan still covers both destinations");
+        .with_exprs_and_inputs(vec![], vec![child()])
+        .expect("one child still covers both of the tree's inputs");
     assert_eq!(
-        binary_paths().to_vec(),
-        rebuilt.fused_inputs()[0].paths,
-        "the destinations must survive a rewrite above the node"
+        node.binding(),
+        rebuilt.binding(),
+        "the binding must survive a rewrite above the node"
     );
     assert_eq!(
         node.schema(),
@@ -2106,8 +2365,21 @@ fn with_exprs_and_inputs_keeps_the_destinations() {
     );
     let error = node
         .with_exprs_and_inputs(vec![], Vec::new())
-        .expect_err("the one binding needs one plan");
+        .expect_err("the one child cannot be dropped");
     assert!(error.to_string().contains("expected 1 inputs"), "{error}");
+    // The replacement has to carry the field the tree's input reads.
+    let other = input_plan(Arc::new(Schema::new(vec![Field::new(
+        OTHER,
+        DataType::Float64,
+        true,
+    )])));
+    let error = node
+        .with_exprs_and_inputs(vec![], vec![other])
+        .expect_err("the replacement child has no `value` column");
+    assert!(
+        error.to_string().contains("no column"),
+        "the refusal must name the missing column: {error}"
+    );
 }
 
 /// A tree the runtime does not execute is refused when the execution plan is built.
@@ -2134,12 +2406,14 @@ fn a_tree_bound_to_another_grid_is_rejected() {
     let tree = rate_tree();
     let other_grid =
         Arc::new(EvalGrid::try_new(GridSpec::try_new(0, GRID_STEP, GRID_LEN).unwrap()).unwrap());
-    let binding = FusedSeriesBinding { grid: other_grid };
     let error = FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
-        binding,
-        one_input(&tree, input_plan(frame_schema())),
+        FusedSeriesBinding {
+            grid: other_grid,
+            ..binding(&tree)
+        },
+        vec![child()],
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect_err("the tree is not evaluated on the declared grid");
@@ -2162,12 +2436,14 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
         !Arc::ptr_eq(&equal, &binding(&tree).grid),
         "the two grids are separate allocations"
     );
-    let binding = FusedSeriesBinding { grid: equal };
     let _node = FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
-        binding,
-        one_input(&tree, input_plan(frame_schema())),
+        FusedSeriesBinding {
+            grid: equal,
+            ..binding(&tree)
+        },
+        vec![child()],
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("an equal grid spec is the same grid");
@@ -2450,321 +2726,6 @@ fn an_instant_then_window_over_one_partition_is_accepted() {
 fn a_window_over_raw_input_on_two_partitions_is_accepted() {
     plan(rate_tree(), memory_exec_partitioned(vec![vec![], vec![]]))
         .expect("ordinary input-to-window trees do not split a logical series");
-}
-
-/// A child that notifies between parent polls is not lost behind an all-pending combinator pass.
-///
-/// `SelectAll` polls every child once and cooperatively wakes the parent, then parks until a child
-/// notifies. The wake from that first pass is cleared here so the wake asserted after it is the
-/// child's own, and the parent is only polled while that notification is outstanding.
-#[test]
-fn a_child_woken_between_parent_polls_is_not_lost() {
-    let schema = raw_schema();
-    let woken = Arc::new(CountingWake::default());
-    let child_count = POLL_BUDGET + 1;
-    let poll_counts = (0..child_count)
-        .map(|_| Arc::new(AtomicUsize::new(0)))
-        .collect::<Vec<_>>();
-    let child_waker = Arc::new(std::sync::Mutex::new(None));
-    let child_ready = Arc::new(AtomicBool::new(false));
-    let inputs: Vec<_> = poll_counts
-        .iter()
-        .enumerate()
-        .map(|(index, count)| {
-            let count = Arc::clone(count);
-            let child_waker = Arc::clone(&child_waker);
-            let child_ready = Arc::clone(&child_ready);
-            let batches = Box::pin(
-                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                    frame_schema(),
-                    futures::stream::poll_fn({
-                        let child_waker = Arc::clone(&child_waker);
-                        let child_ready = Arc::clone(&child_ready);
-                        move |cx| {
-                            count.fetch_add(1, Ordering::SeqCst);
-                            if index == 0 {
-                                *child_waker.lock().unwrap() = Some(cx.waker().clone());
-                                if child_ready.load(Ordering::SeqCst) {
-                                    return Poll::Ready(Some(Err(DataFusionError::Execution(
-                                        "woken first child failed".to_string(),
-                                    ))));
-                                }
-                            }
-                            Poll::Pending
-                        }
-                    }),
-                ),
-            );
-            let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
-                .expect("the empty raw-frame stream decodes");
-            let stream = super::materialize_raw_labels(decoded)
-                .expect("the empty raw-frame stream materializes labels");
-            (vec![NodePath::root().input()], Some(stream), false)
-        })
-        .collect();
-    let mut stream = super::FusedSeriesStream {
-        inputs: inputs.into_iter().fold(
-            futures::stream::SelectAll::new(),
-            |mut all, (path, stream, _)| {
-                all.push(Box::pin(
-                    stream
-                        .expect("input stream exists")
-                        .map(move |item| (path.clone(), item)),
-                ) as super::TaggedInputStream);
-                all
-            },
-        ),
-        executor: None,
-        classification: Arc::from([]),
-        tags: Arc::from([]),
-        output_schema: output_schema(),
-        labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
-        ready: VecDeque::new(),
-        input_ended: false,
-        done: false,
-    };
-
-    let waker = futures::task::waker(Arc::clone(&woken));
-    let mut context = Context::from_waker(&waker);
-    assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
-    assert!(child_waker.lock().unwrap().is_some(), "child 0 was polled");
-    assert!(
-        woken.woken(),
-        "the combinator's first all-pending pass wakes once"
-    );
-    // Clear that cooperative yield so the next wake can only be the child's.
-    woken.clear();
-    child_ready.store(true, Ordering::SeqCst);
-    child_waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
-    assert!(woken.woken(), "the child notification reaches the parent");
-    let mut saw_error = false;
-    for _ in 0..4 {
-        assert!(woken.woken(), "drive only on a notification");
-        woken.clear();
-        match Pin::new(&mut stream).poll_next(&mut context) {
-            Poll::Ready(Some(Err(DataFusionError::External(error)))) => {
-                assert!(error.to_string().contains("woken first child failed"));
-                saw_error = true;
-                break;
-            }
-            Poll::Pending => {}
-            other => panic!("unexpected stream result: {other:?}"),
-        }
-    }
-    assert!(saw_error, "the woken child error must be observed");
-    assert_eq!(
-        2,
-        poll_counts[0].load(Ordering::SeqCst),
-        "child 0 was polled by the first pass and again after its wake"
-    );
-    assert_eq!(1, poll_counts[POLL_BUDGET].load(Ordering::SeqCst));
-    assert!(stream.done, "the error ends the stream");
-    assert!(stream.executor.is_none(), "the error releases the executor");
-    assert!(stream.ready.is_empty(), "the error drops queued batches");
-    assert!(stream.inputs.is_empty(), "the error releases every input");
-    let counts: Vec<_> = poll_counts
-        .iter()
-        .map(|count| count.load(Ordering::SeqCst))
-        .collect();
-    assert!(matches!(
-        Pin::new(&mut stream).poll_next(&mut context),
-        Poll::Ready(None)
-    ));
-    assert_eq!(
-        counts,
-        poll_counts
-            .iter()
-            .map(|count| count.load(Ordering::SeqCst))
-            .collect::<Vec<_>>(),
-        "a terminal poll polls no child"
-    );
-}
-
-/// A ready error at child 65 is not starved behind earlier pending children.
-#[test]
-fn late_child_error_is_not_starved() {
-    let schema = raw_schema();
-    let poll_counts = (0..=POLL_BUDGET)
-        .map(|_| Arc::new(AtomicUsize::new(0)))
-        .collect::<Vec<_>>();
-    let inputs: Vec<_> = poll_counts
-        .iter()
-        .enumerate()
-        .map(|(index, count)| {
-            let count = Arc::clone(count);
-            let batches = Box::pin(
-                datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                    frame_schema(),
-                    futures::stream::poll_fn(move |_| {
-                        count.fetch_add(1, Ordering::SeqCst);
-                        if index == POLL_BUDGET {
-                            Poll::Ready(Some(Err(DataFusionError::Execution(
-                                "late child failed".to_string(),
-                            ))))
-                        } else {
-                            Poll::Pending
-                        }
-                    }),
-                ),
-            );
-            let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
-                .expect("the empty raw-frame stream decodes");
-            let stream = super::materialize_raw_labels(decoded)
-                .expect("the empty raw-frame stream materializes labels");
-            (vec![NodePath::root().input()], stream)
-        })
-        .collect();
-    let mut input_streams = futures::stream::SelectAll::new();
-    input_streams.extend(inputs.into_iter().map(|(path, stream)| {
-        Box::pin(stream.map(move |item| (path.clone(), item))) as super::TaggedInputStream
-    }));
-    let mut stream = super::FusedSeriesStream {
-        inputs: input_streams,
-        executor: None,
-        classification: Arc::from([]),
-        tags: Arc::from([]),
-        output_schema: output_schema(),
-        labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
-        ready: VecDeque::new(),
-        input_ended: false,
-        done: false,
-    };
-    let waker = futures::task::noop_waker();
-    let mut context = Context::from_waker(&waker);
-    assert!(matches!(
-        Pin::new(&mut stream).poll_next(&mut context),
-        Poll::Ready(Some(Err(DataFusionError::External(error))))
-            if error.to_string().contains("late child failed")
-    ));
-    assert!(
-        poll_counts
-            .iter()
-            .all(|count| count.load(Ordering::SeqCst) == 1),
-        "the first combinator pass polls every child once, the last one included"
-    );
-    assert!(stream.done);
-    assert!(stream.executor.is_none());
-    assert!(stream.ready.is_empty());
-    assert!(stream.inputs.is_empty());
-    let counts: Vec<_> = poll_counts
-        .iter()
-        .map(|count| count.load(Ordering::SeqCst))
-        .collect();
-    assert!(matches!(
-        Pin::new(&mut stream).poll_next(&mut context),
-        Poll::Ready(None)
-    ));
-    assert_eq!(
-        counts,
-        poll_counts
-            .iter()
-            .map(|count| count.load(Ordering::SeqCst))
-            .collect::<Vec<_>>()
-    );
-}
-
-/// A fully pending input set parks after the combinator's one cooperative yield.
-#[test]
-fn all_pending_children_park_without_self_wake() {
-    for child_count in [POLL_BUDGET, POLL_BUDGET + 1] {
-        let schema = raw_schema();
-        let woken = Arc::new(CountingWake::default());
-        let poll_counts = (0..child_count)
-            .map(|_| Arc::new(AtomicUsize::new(0)))
-            .collect::<Vec<_>>();
-        let inputs: Vec<_> = poll_counts
-            .iter()
-            .map(|count| {
-                let count = Arc::clone(count);
-                let batches = Box::pin(
-                    datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
-                        frame_schema(),
-                        futures::stream::poll_fn(move |_| {
-                            count.fetch_add(1, Ordering::SeqCst);
-                            Poll::Pending
-                        }),
-                    ),
-                );
-                let decoded = super::unpack_raw_series(batches, Some(Arc::clone(&schema)))
-                    .expect("the empty raw-frame stream decodes");
-                let stream = super::materialize_raw_labels(decoded)
-                    .expect("the empty raw-frame stream materializes labels");
-                (vec![NodePath::root().input()], Some(stream), false)
-            })
-            .collect();
-        let mut stream = super::FusedSeriesStream {
-            inputs: inputs.into_iter().fold(
-                futures::stream::SelectAll::new(),
-                |mut all, (path, stream, _)| {
-                    all.push(Box::pin(
-                        stream
-                            .expect("input stream exists")
-                            .map(move |item| (path.clone(), item)),
-                    ) as super::TaggedInputStream);
-                    all
-                },
-            ),
-            executor: None,
-            classification: Arc::from([]),
-            tags: Arc::from([]),
-            output_schema: output_schema(),
-            labels: Arc::new(std::sync::Mutex::new(super::LabelSets::default())),
-            ready: VecDeque::new(),
-            input_ended: false,
-            done: false,
-        };
-        let waker = futures::task::waker(Arc::clone(&woken));
-        let mut context = Context::from_waker(&waker);
-        // The first pass polls every child once, then the combinator wakes once to yield.
-        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
-        assert!(
-            woken.woken(),
-            "the combinator's first all-pending pass wakes once"
-        );
-        assert!(
-            poll_counts
-                .iter()
-                .all(|count| count.load(Ordering::SeqCst) == 1),
-            "every child is polled exactly once in the first pass"
-        );
-        let mut drained = 0;
-        for _ in 0..4 {
-            if !woken.woken() {
-                break;
-            }
-            woken.clear();
-            assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
-            drained += 1;
-        }
-        assert!(drained > 0, "the cooperative yield is drained");
-        assert!(
-            !woken.woken(),
-            "a parked all-pending set must not self-wake"
-        );
-        assert!(
-            poll_counts
-                .iter()
-                .all(|count| count.load(Ordering::SeqCst) == 1),
-            "no child is polled again without a notification"
-        );
-        let counts: Vec<_> = poll_counts
-            .iter()
-            .map(|count| count.load(Ordering::SeqCst))
-            .collect();
-        assert!(Pin::new(&mut stream).poll_next(&mut context).is_pending());
-        assert!(
-            !woken.woken(),
-            "an unnotified poll of a parked set must not self-wake"
-        );
-        assert_eq!(
-            counts,
-            poll_counts
-                .iter()
-                .map(|count| count.load(Ordering::SeqCst))
-                .collect::<Vec<_>>(),
-            "an unnotified poll of a parked set polls no child"
-        );
-    }
 }
 
 /// One poll reads at most [`POLL_BUDGET`] chunks of input, and stopping there loses nothing.
@@ -3320,16 +3281,11 @@ async fn a_partition_past_the_inputs_count_is_refused() {
 /// The `rate(x[5m])` tree over two fields, with both fields and the tags in the output.
 fn two_field_node() -> FusedSeries {
     let tree = rate_tree_of(two_field_schema());
-    let binding = binding_of(
-        &tree,
-        two_field_schema(),
-        vec![HOST.to_string(), NAME.to_string()],
-    );
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree.clone(),
-        binding,
-        one_input(&tree, input_plan(frame_schema_of(&two_field_schema()))),
+        binding(&tree),
+        vec![input_plan(frame_schema_of(&two_field_schema()))],
         two_field_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -3965,24 +3921,21 @@ fn a_refused_growth_keeps_shared_label_entry_unchanged() {
     );
 }
 
-/// Binding ordering includes field names, while schema ordering refuses unequal DF schemas.
+/// A binding is ordered by its grid, its time column, its tags and its metric, while a node is
+/// ordered last by its output schema and refuses unequal DF schemas.
 #[test]
 fn unequal_binding_and_output_schema_are_not_ordered_equal() {
     let tree = rate_tree();
     let left = binding(&tree);
-    let other_schema = Arc::new(SeriesSchema {
-        fields: Arc::from([FieldSpec {
-            name: "different".into(),
-        }]),
-        eval_grid: None,
-    });
-    let right = binding_of(
-        &tree,
-        other_schema,
-        vec![HOST.to_string(), NAME.to_string()],
-    );
+    let right = binding_of(&tree, default_tags());
     assert_eq!(left, right);
     assert_eq!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
+    let named = FusedSeriesBinding {
+        metric_name: Some(Arc::from("another_metric")),
+        ..binding(&tree)
+    };
+    assert_ne!(left, named);
+    assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&named));
 
     let left_node = fused(tree.clone());
     let nullability_changed = Arc::new(Schema::new(vec![
@@ -3999,7 +3952,7 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         Arc::from(PROMQL),
         tree.clone(),
         binding(&rate_tree()),
-        one_input(&tree, input_plan(frame_schema())),
+        vec![child()],
         nullability_changed.to_dfschema_ref().unwrap(),
     )
     .unwrap();
