@@ -98,7 +98,7 @@ use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
-    execute_sql, execute_sql_and_expect, setup_test_http_app, setup_test_http_app_with_frontend,
+    execute_sql_and_expect, setup_test_http_app, setup_test_http_app_with_frontend,
     setup_test_http_app_with_frontend_and_custom_options,
     setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
@@ -1653,7 +1653,7 @@ fn row_tags(rows: &[PromqlRow]) -> Vec<(String, String)> {
 /// series field, then one nullable `Utf8` per tag.
 ///
 /// A constant reports no tags and no series fields: its one value per grid point is `value` on the
-/// `time` grid, which is the schema the legacy path also reports for a bare literal.
+/// `time` grid.
 fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
     let tags = row_tags(expected);
     // The time index and the one field the tree reports, then one `Utf8` column per tag.
@@ -1679,13 +1679,13 @@ fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], conte
     );
 }
 
-/// Checks the schema the legacy route reports by role, since it does not share the native one:
-/// the legacy pipeline projects the tags before the time index and names a computed field after the
-/// expression that computes it (`native_demo.val * Float64(100)`), while the native route reports
-/// the time index first and the field the tree reads.
+/// Checks the schema the legacy route reports by role rather than by position or field name, which
+/// it does not share with the native route: one millisecond time column, one `Float64` value column
+/// whose name contains the field it derives from, and one `Utf8` column per tag, named exactly as
+/// that tag.
 ///
-/// One time column, one `Float64` value column and one `Utf8` column per tag are therefore required
-/// in any order, and the value column has to name the field it derives from.
+/// The value column's name is checked loosely because a computed legacy vector column may be named
+/// after the expression that computes it; only constants are compared field for field.
 fn assert_legacy_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
     let tags = row_tags(expected);
     let time_column = if tags.is_empty() { "time" } else { "ts" };
@@ -2079,8 +2079,10 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         )
         .await;
         // Flushing before the next pair keeps every round a separate persisted batch.
-        execute_sql(frontend, "ADMIN FLUSH_TABLE('native_demo')").await;
-        execute_sql(frontend, "ADMIN FLUSH_TABLE('native_rate')").await;
+        tests_integration::test_util::execute_sql(frontend, "ADMIN FLUSH_TABLE('native_demo')")
+            .await;
+        tests_integration::test_util::execute_sql(frontend, "ADMIN FLUSH_TABLE('native_rate')")
+            .await;
     }
 
     for (query, start, end, expected, scan_partitions) in [
@@ -2127,12 +2129,9 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             fixture_rows(|value| -value),
             Some(4),
         ),
-        // Three increments over the 300s window, evaluated at the last sample of a counter that
-        // starts at zero: the inferred zero point pins the leading edge of the window and the
-        // evaluation point pins the trailing one, so nothing is extrapolated and the rate is
-        // 3 / 300, which the statement scales back to 1 by multiplying by 100. A steady counter
-        // therefore reports one per sample here, and neither a zero rate nor the naive `3 / 300`
-        // without the multiplicative scaling would report it.
+        // The counter rises 0 -> 3 between ts 0 and 1s and is evaluated at 1s: the inferred zero
+        // point and the evaluation instant both sit on a sample, so neither edge is extrapolated and
+        // (3 / 300s) * 100 = 1.
         (
             "rate(native_rate[5m]) * 100",
             "1",
@@ -2163,10 +2162,8 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         );
         assert_rows_eq(&legacy_rows, &expected, query);
         assert_legacy_result_schema(&legacy_schema, &expected, query);
-        // A bare literal is the one shape both routes name identically: the same `time` column and
-        // the same `value` field. A negated literal is not, because the legacy pipeline names the
-        // value column after the projection it builds (`(- value)`), which the role check above
-        // accepts while this comparison would not.
+        // Constant time/value columns are compared field for field across the two routes. Computed
+        // legacy vector columns may have expression names, so only the constant is compared here.
         if query == "1 + 2" {
             assert_eq!(
                 result_columns(&legacy_schema),
