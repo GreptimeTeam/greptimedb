@@ -25,6 +25,7 @@ use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
 use datafusion::physical_plan::ExecutionPlanProperties;
+use datafusion::physical_plan::coop::CooperativeExec;
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -44,6 +45,9 @@ use sql::ast::{Ident, ObjectName, ObjectNamePart};
 use sql::statements::create::CreateView;
 use sql::statements::statement::Statement as SqlStatement;
 use sql::statements::tql::{Tql, TqlEval};
+use store_api::codec::PrimaryKeyEncoding;
+use store_api::region_engine::RawLabelSource;
+use table::table::scan::SeriesScanExec;
 
 use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
@@ -2455,4 +2459,130 @@ async fn native_promql_columnar_config_falls_back_for_integer_field() {
             "`{query}`: the native route must decline a field the columnar samples cannot serve"
         );
     }
+}
+
+/// The positive counterpart of the fallback above: a sparse physical metric table whose series
+/// index is published in the columnar format fuses a `Float64` selector and matches the old plan.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_fused_series_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    const PHYSICAL: &str = "native_columnar_fused_phy";
+    const TABLE: &str = "native_columnar_fused";
+    let mito_config = mito2::config::MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        // Slow the periodic pass, so the manual build below is what publishes the catalog.
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let builder = GreptimeDbStandaloneBuilder::new("native_promql_columnar_fused")
+        .with_mito_config(mito_config);
+    let (standalone, observer) = native_test_instance(builder).await;
+    let instance = standalone.fe_instance().clone();
+    // One flushed SST is enough for a manual build, which skips the periodic four-file trigger.
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
+             ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
+             ('b', 60000, 20), ('b', 120000, 60); \
+             ADMIN FLUSH_TABLE('{PHYSICAL}'); \
+             ADMIN BUILD_SERIES_INDEX('{PHYSICAL}');"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    // Both samples of each series fall in the 2m window: 10 + 30 and 20 + 60.
+    let expected = vec![
+        (120_000, "a".to_string(), 40.0),
+        (120_000, "b".to_string(), 80.0),
+    ];
+    let sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}[2m])");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    // The answer is drained first, so the counters below describe execution, not planning.
+    let plan = observer.take();
+    assert_eq!(native_rows, expected, "the fused route reports the sums");
+    // `EnsureCooperative` wraps a leaf that does not ask for cooperative scheduling, and the fused
+    // node reads the same series scan through it.
+    let child = plan.children()[0];
+    let child = child
+        .downcast_ref::<CooperativeExec>()
+        .map_or(child, |cooperative| cooperative.input());
+    let series_scan = child
+        .downcast_ref::<SeriesScanExec>()
+        .expect("the fused node reads a prepared series scan");
+    let RawLabelSource::PrimaryKey {
+        metric_name,
+        physical_metadata,
+        logical_tags,
+    } = series_scan.label_source()
+    else {
+        panic!("the fused scan must materialize labels from the primary key");
+    };
+    assert_eq!(metric_name.as_ref(), TABLE);
+    assert_eq!(
+        logical_tags
+            .iter()
+            .map(|tag| tag.name.as_ref())
+            .collect::<Vec<_>>(),
+        vec!["host"],
+        "the logical tags are the primary-key columns of the scanned region"
+    );
+    for tag in logical_tags.iter() {
+        let column = physical_metadata.column_by_id(tag.column_id).unwrap();
+        assert_eq!(column.column_schema.name, "host");
+        assert_eq!(column.semantic_type, SemanticType::Tag);
+    }
+    assert_eq!(
+        physical_metadata.primary_key_encoding,
+        PrimaryKeyEncoding::Sparse
+    );
+    let series_schema = series_scan.series_schema();
+    assert_eq!(series_schema.fields.len(), 1);
+    assert_eq!(series_schema.fields[0].name.as_ref(), "val");
+    // Only the columnar writer publishes these formats, so the scanned region's catalog rules out
+    // a configuration-only run.
+    let samples = std::path::Path::new(&standalone.opts.storage.data_home)
+        .join("series_index")
+        .join(physical_metadata.region_id.as_u64().to_string())
+        .join("samples.json");
+    let catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(samples).unwrap()).unwrap();
+    let entries = catalog["entries"].as_array().unwrap();
+    let series = catalog["series"].as_array().unwrap();
+    assert!(!entries.is_empty() && !series.is_empty(), "published");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["artifact"]["format"] == "columnar-samples")
+    );
+    assert!(
+        series
+            .iter()
+            .all(|entry| entry["artifact"]["format"] == "columnar-series")
+    );
+    // One value per series: the node ran, rather than being merely planned.
+    let output_values = plan
+        .metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(output_values, 2, "both series must report one value");
+    // Native off: the same rows must come from the existing plan.
+    observer.clear();
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows, "same rows on both routes");
+    assert!(observer.fused().is_none(), "the legacy route must not fuse");
 }
