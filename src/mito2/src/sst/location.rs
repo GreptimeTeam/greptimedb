@@ -39,7 +39,7 @@ pub fn region_dir_from_table_dir(
     }
 }
 
-/// Generate the directory of the index files of a region.
+/// Generate index dir from region_dir
 pub fn index_dir(region_dir: &str) -> String {
     util::join_dir(region_dir, "index")
 }

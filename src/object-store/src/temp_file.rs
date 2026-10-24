@@ -48,7 +48,7 @@ pub fn writes_temporary_files(store: &ObjectStore) -> bool {
 /// A sweep goes through its directories and files one at a time, and a failure
 /// on either doesn't stop it, so it reports what it reclaimed and what it
 /// couldn't.
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SweepReport {
     /// Temporary files deleted.
     pub deleted: usize,
@@ -128,10 +128,11 @@ async fn sweep_dir(store: &ObjectStore, dir: &str, older_than: Duration) -> Swee
         // Delete one file at a time: the bulk delete stops at the first
         // failure, and one file that can't be deleted must not keep the rest of
         // the directory from being swept.
-        match store.delete(entry.path()).await {
+        let path = entry.path();
+        match store.delete(path).await {
             Ok(()) => report.deleted += 1,
             Err(error) => {
-                warn!(error; "Failed to delete temporary file {}", entry.path());
+                warn!(error; "Failed to delete temporary file {path}");
                 report.failed += 1;
             }
         }
