@@ -348,6 +348,8 @@ fn instant_tree() -> NativeTree {
             op: BoundInstant {
                 lookback_ms: RANGE_MS,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: grid,
             },
         },

@@ -107,7 +107,9 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::evaluate_histograms;
-use crate::instant_eval::select_instants;
+use crate::instant_eval::{
+    select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
+};
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
     map_compare, map_math,
@@ -352,6 +354,8 @@ enum NodeTag {
     Window,
     /// Applies point-wise operations to its input chunks.
     Map,
+    /// Projects evaluated timestamps.
+    Timestamp,
     /// Matches two evaluated vectors and applies one operation to every matched pair of series, or
     /// broadcasts one constant over the chunks of one evaluated vector.
     Binary,
@@ -370,6 +374,7 @@ impl NodeTag {
             Self::Instant => "instant selection",
             Self::Window => "window",
             Self::Map => "map",
+            Self::Timestamp => "timestamp",
             Self::Binary => "binary",
             Self::Aggregate => "aggregate",
             Self::Vector => "vector operation",
@@ -815,6 +820,10 @@ fn misaligned_field(
 }
 
 /// What a map node applies.
+struct TimestampRuntime {
+    schema: Arc<SeriesSchema>,
+}
+
 struct MapRuntime {
     ops: Arc<[MapOp]>,
     /// The schema of what the map produces, which is what its input is checked against.
@@ -965,6 +974,9 @@ impl InstantRuntime {
     /// reads two timestamps rather than the rows.
     fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
         let spec = self.selection.output_grid.spec();
+        if self.selection.at_ms.is_some() {
+            return usize::try_from(spec.len).unwrap_or(usize::MAX);
+        }
         // The selection refuses these itself, before it can decide anything.
         if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
             return 0;
@@ -1070,6 +1082,59 @@ impl InstantRuntime {
         let spec = grid.spec();
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
+        if let Some(at_ms) = self.selection.at_ms {
+            let Some(row_index) = select_instant_at(
+                &time,
+                &fields,
+                at_ms,
+                self.selection.lookback_ms,
+                self.selection.offset_ms,
+            )?
+            else {
+                let metric = if self.selection.timestamp {
+                    drop_metric_name(&metric)?
+                } else {
+                    metric
+                };
+                return no_row_chunk(&self.schema, metric);
+            };
+            let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
+            if self.selection.timestamp {
+                let indices = vec![row_index; grid_len];
+                let timestamps = grid
+                    .timestamps()
+                    .map_err(crate::grid_series::external)?
+                    .to_vec();
+                return match timestamp_of_selection(
+                    &self.schema,
+                    &metric,
+                    &time,
+                    &fields,
+                    &indices,
+                    &timestamps,
+                )? {
+                    Some(series) => EvaluatedChunk::try_new(series, true),
+                    None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
+                };
+            }
+            let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
+            let mut row = Vec::with_capacity(fields.len());
+            for cursor in &mut cursors {
+                row.push(owned(
+                    cursor
+                        .at(row_index as usize)
+                        .ok_or_else(|| missing_row(path, row_index as usize))?,
+                )?);
+            }
+            self.output.begin_series();
+            for position in 0..grid_len {
+                self.output.push_samples(position, &row)?;
+            }
+            return match self.output.finish(metric.clone())? {
+                Some(series) => EvaluatedChunk::try_new(series, true),
+                None => no_row_chunk(&self.schema, metric),
+            };
+        }
         let (indices, timestamps) = select_instants(
             &time,
             &fields,
@@ -1078,6 +1143,19 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
+        if self.selection.timestamp {
+            return match timestamp_of_selection(
+                &self.schema,
+                &metric,
+                &time,
+                &fields,
+                &indices,
+                &timestamps,
+            )? {
+                Some(series) => EvaluatedChunk::try_new(series, true),
+                None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
+            };
+        }
         self.output.begin_series();
         // One cursor per field, so a row is read as the field holds it rather than by walking the
         // chunks of a field from its start once per row.
@@ -2122,6 +2200,7 @@ struct NodeRuntime {
     window: Option<RangeEvaluator>,
     /// What a map node applies.
     map: Option<MapRuntime>,
+    timestamp: Option<TimestampRuntime>,
     /// What a binary node holds when it matches two vectors: both operands, until the input ends.
     ///
     /// `None` for every other node, and for a binary node that broadcasts a constant instead: that
@@ -2713,6 +2792,13 @@ impl NodeRuntime {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
+            if self
+                .instant
+                .as_ref()
+                .is_some_and(|instant| instant.selection.timestamp)
+            {
+                self.track(path, output)?;
+            }
         }
         // What this node still holds is the chunks of the series it is selecting: a whole series is
         // held until it ends, so the reservation is what those chunks hold rather than a figure
@@ -2731,7 +2817,8 @@ impl NodeRuntime {
             .instant
             .as_ref()
             .map_or(0, InstantRuntime::buffered_bytes);
-        self.buffer.resize(buffered)
+        let emitted = self.emitted_bytes();
+        self.buffer.resize(buffered.saturating_add(emitted))
     }
 
     /// Keeps one fragment of this node's collected input, charged for as it arrives.
@@ -2845,6 +2932,7 @@ impl NodeRuntime {
         // for as long as the caller keeps the stopped executor alive. The label sets this node
         // handed out and the fragments it collected go with it.
         self.window = None;
+        self.timestamp = None;
         self.instant = None;
         self.binary = None;
         // The fold is what an aggregate node holds, and dropping it is what gives its states back.
@@ -2936,6 +3024,7 @@ impl NativeExecutionState {
                 NativeExpr::Instant { .. } => NodeTag::Instant,
                 NativeExpr::Window { .. } => NodeTag::Window,
                 NativeExpr::Map { .. } => NodeTag::Map,
+                NativeExpr::Timestamp { .. } => NodeTag::Timestamp,
                 // A binary node is built here and narrowed below: legality is a wider set of operand
                 // types than the kernels take, so which of its two modes it is -- a match between
                 // two vectors, or a constant broadcast over one -- is decided where the operands'
@@ -2958,6 +3047,7 @@ impl NativeExecutionState {
                 instant: None,
                 window: None,
                 map: None,
+                timestamp: None,
                 binary: None,
                 aggregate: None,
                 vector: None,
@@ -2981,10 +3071,19 @@ impl NativeExecutionState {
                         ))
                     })?;
                     runtime.instant = Some(InstantRuntime::try_new(input_schema, op)?);
-                    // A selection keeps the labels of the series it reads, empty-valued ones
-                    // included, so it is not one of the nodes that can turn two series into one
-                    // label set and it keeps no table of what it handed out: the node that drops a
-                    // label is the one that can collide, and it records its own.
+                    // A plain selection keeps its labels. Timestamp mode drops metric metadata,
+                    // so it tracks outputs to detect collisions just like a map node.
+                    if op.timestamp {
+                        runtime.emitted = Some(Emitted::default());
+                    }
+                }
+                NativeExpr::Timestamp { .. } => {
+                    runtime.timestamp = Some(TimestampRuntime {
+                        schema: node.output.samples().cloned().ok_or_else(|| {
+                            DataFusionError::Execution("timestamp output has no schema".into())
+                        })?,
+                    });
+                    runtime.emitted = Some(Emitted::default());
                 }
                 NativeExpr::Map { op, .. } => {
                     let schema = node.output.samples().cloned().ok_or_else(|| {
@@ -3119,7 +3218,8 @@ impl NativeExecutionState {
                 | NativeExpr::Window { input, .. }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Aggregate { input, .. }
-                | NativeExpr::Vector { input, .. } => {
+                | NativeExpr::Vector { input, .. }
+                | NativeExpr::Timestamp { input } => {
                     pending.push((input.as_ref(), path.input()));
                     true
                 }
@@ -3187,7 +3287,7 @@ impl NativeExecutionState {
                         // chunk of another before it is buffered.
                         holds_shared[index] = input_holds_shared;
                     }
-                    NodeTag::Map => holds_shared[index] = true,
+                    NodeTag::Map | NodeTag::Timestamp => holds_shared[index] = true,
                     NodeTag::Aggregate => {
                         // An aggregate hands over one series per group, each under the label set its
                         // group was keyed by and each closed on its own chunk: two groups are two
@@ -3756,9 +3856,11 @@ impl NativeExecutor {
             NodeTag::Scalar => true,
             // These report as they are handed chunks, so a child with nothing left is all it takes
             // for them to have nothing left either.
-            NodeTag::Map | NodeTag::Window | NodeTag::Instant => self.state.nodes[index]
-                .input
-                .is_none_or(|child| self.settled(child)),
+            NodeTag::Map | NodeTag::Timestamp | NodeTag::Window | NodeTag::Instant => {
+                self.state.nodes[index]
+                    .input
+                    .is_none_or(|child| self.settled(child))
+            }
             // An aggregate answers one series per group and only once its input ended, so its own
             // fold has to have run as well: a child that has handed everything up is not enough,
             // because every one of those chunks was folded and none of them answered yet. This is
@@ -3891,6 +3993,17 @@ impl NativeExecutor {
             // value is the constant on the tree, which the consumer reads off its own binding. A
             // pull of it is therefore empty by construction and says nothing has stalled.
             NodeTag::Scalar => Ok(None),
+            NodeTag::Timestamp => {
+                let child = input.ok_or_else(|| missing_input(tag))?;
+                loop {
+                    let Some(chunk) = self.pull(child)? else {
+                        return Ok(None);
+                    };
+                    if let Some(output) = self.timestamp_node(index, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
             NodeTag::Map => {
                 let child = input.ok_or_else(|| missing_input(tag))?;
                 // An operation that empties every position yields no chunk, and the map asks its
@@ -4068,6 +4181,51 @@ impl NativeExecutor {
         let path = &self.state.paths[index];
         let runtime = &mut self.state.runtimes[index];
         Ok(runtime.map(path, chunk)?.map(NativeChunk::Evaluated))
+    }
+
+    fn timestamp_node(
+        &mut self,
+        index: usize,
+        chunk: NativeChunk,
+    ) -> Result<Option<EvaluatedChunk>> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(format!(
+                "timestamp at {} consumes evaluated samples",
+                self.state.paths[index]
+            )));
+        };
+        let path = &self.state.paths[index];
+        let runtime = &mut self.state.runtimes[index];
+        let positions = chunk.series.time.len();
+        let metrics = Arc::clone(&runtime.buffer.metrics);
+        let _timer = metrics.timer();
+        runtime.buffer.grow(evaluated_bytes(&chunk))?;
+        let schema = &runtime
+            .timestamp
+            .as_ref()
+            .ok_or_else(|| closed(path))?
+            .schema;
+        let output = timestamp_of_evaluated(schema, &chunk.series)?;
+        metrics.record_input(1, positions);
+        if chunk.is_last {
+            metrics.record_completed_series(1);
+        }
+        let output = match output {
+            Some(series) => Some(EvaluatedChunk::try_new(series, chunk.is_last)?),
+            None if chunk.is_last => Some(no_row_chunk(
+                schema,
+                drop_metric_name(&chunk.series.metric)?,
+            )?),
+            None => None,
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+            runtime.track(path, output)?;
+        }
+        let emitted = runtime.emitted_bytes();
+        runtime.buffer.resize(emitted)?;
+        Ok(output)
     }
 
     /// Feeds one chunk to the window at `index`.
