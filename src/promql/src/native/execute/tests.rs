@@ -1346,6 +1346,7 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     .unwrap();
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
+    let metrics = metrics_of(&execution);
 
     // One direct pattern per level, on the nodes the constructor made; the borrow ends before the
     // first push.
@@ -1396,7 +1397,6 @@ fn a_binary_over_a_broadcast_registers_every_node_it_runs() {
     let out = run(&mut execution);
     assert_eq!(decided(&out), vec![(0, Some(13.0)), (1, Some(24.0))]);
 
-    let metrics = metrics_of(&execution);
     // Each leaf closed the one series it was handed; the constant closed none.
     assert_eq!(
         count(&metrics, "root.left.right", NodeMetric::COMPLETED_SERIES),
