@@ -72,6 +72,8 @@ mod scan_corrupt;
 #[cfg(test)]
 mod scan_test;
 #[cfg(test)]
+mod sequence_test;
+#[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
 mod skip_wal_test;

@@ -998,6 +998,13 @@ mod tests {
         assert!(region_ctxs[&failing_region].is_failed());
         assert!(!region_ctxs[&ok_region].is_failed());
         assert_eq!(entry_id + 1, region_ctxs[&ok_region].next_entry_id());
+        assert_eq!(
+            region_ctxs[&failing_region]
+                .version_control()
+                .current()
+                .last_sequence,
+            1
+        );
 
         for region_ctx in region_ctxs.values_mut() {
             region_ctx.write_memtables().await;
@@ -1030,6 +1037,7 @@ mod tests {
     async fn check_bulk_write_sequence_not_committed_before_install_worker_level(skip_wal: bool) {
         let region_id = RegionId::new(1, 1);
         let version_control = Arc::new(VersionControlBuilder::new().build());
+        version_control.update_last_sequence(2);
 
         let mut region_ctxs = HashMap::new();
         let mut ctx = RegionWriteCtx::new(
@@ -1064,6 +1072,9 @@ mod tests {
         .await
         .expect("bulk write never reached the install barrier");
 
+        assert_eq!(version_control.current().last_sequence, 5);
+        assert_eq!(version_control.current().last_entry_id, 0);
+
         assert_eq!(
             0,
             version_control.committed_sequence(),
@@ -1073,11 +1084,14 @@ mod tests {
         barrier.release();
         write_handle.await.expect("bulk write should complete");
         assert_eq!(
-            3,
+            5,
             version_control.committed_sequence(),
             "committed sequence must cover the installed bulk rows"
         );
 
+        let current = version_control.current();
+        assert_eq!(current.last_sequence, 5);
+        assert_eq!(current.last_entry_id, u64::from(!skip_wal));
         assert_eq!(3, rx.await.unwrap().unwrap());
     }
 
@@ -1112,6 +1126,7 @@ mod tests {
 
         let mut region_ctxs = HashMap::new();
         let (ctx, rx) = new_region_ctx(region_id, false);
+        let version_control = ctx.version_control().clone();
         region_ctxs.insert(region_id, ctx);
 
         assert!(!write_wal(&wal, &mut region_ctxs).await);
@@ -1119,5 +1134,11 @@ mod tests {
         // All contexts are consumed and waiters are notified with the error.
         assert!(region_ctxs.is_empty());
         assert!(rx.await.unwrap().is_err());
+        let current = version_control.current();
+        assert_eq!(current.last_sequence, 1);
+        assert_eq!(current.committed_sequence, 0);
+        assert_eq!(current.last_entry_id, 0);
+        assert_eq!(current.version.flushed_sequence, 0);
+        assert_eq!(current.version.flushed_entry_id, 0);
     }
 }

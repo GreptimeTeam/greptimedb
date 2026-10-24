@@ -20,10 +20,10 @@ use common_recordbatch::RecordBatches;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use store_api::metadata::ColumnMetadata;
-use store_api::region_engine::{RegionEngine, RegionManifestInfo};
+use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, PathType, RegionAlterRequest, RegionOpenRequest,
-    RegionRequest,
+    RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{RegionId, ScanRequest};
 
@@ -170,6 +170,11 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
         .await
         .unwrap();
     common_telemetry::info!("Scan the region on the follower engine after sync");
+    let follower = follower_engine.get_region(region_id).unwrap();
+    assert_eq!(follower.version_control.current().last_sequence, 3);
+    // Sync does not update committed sequence or entry id.
+    assert_eq!(follower.version_control.committed_sequence(), 0);
+    assert_eq!(follower.version_control.current().last_entry_id, 0);
     // Scan the region on the follower engine
     let expected = "\
 +-------+---------+---------------------+
@@ -180,6 +185,80 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
 | 2     | 2.0     | 1970-01-01T00:00:02 |
 +-------+---------+---------------------+";
     scan_check(&follower_engine, region_id, expected, 0, 1).await;
+
+    // An edit may have a committed sequence above the flushed sequence.
+    let file = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()[0]
+        .files
+        .values()
+        .next()
+        .unwrap()
+        .meta_ref()
+        .clone();
+    engine
+        .edit_region(
+            region_id,
+            crate::manifest::action::RegionEdit {
+                files_to_add: vec![file],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            },
+        )
+        .await
+        .unwrap();
+    let manifest_version = engine
+        .get_region(region_id)
+        .unwrap()
+        .manifest_ctx
+        .manifest_version()
+        .await;
+    follower_engine
+        .sync_region(
+            region_id,
+            RegionManifestInfo::mito(manifest_version, 0, 0).into(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(follower.version_control.current().last_sequence, 4);
+    assert_eq!(follower.version_control.committed_sequence(), 0);
+
+    // Writes after promotion must use a higher sequence.
+    follower_engine
+        .set_region_role(region_id, RegionRole::Leader)
+        .unwrap();
+    let request = CreateRequestBuilder::new().build();
+    // Skip WAL to isolate row sequence allocation.
+    follower_engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows {
+                    schema: rows_schema(&request),
+                    rows: build_rows(0, 1),
+                },
+                skip_wal: true,
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        5,
+        follower_engine
+            .get_region(region_id)
+            .unwrap()
+            .version_control
+            .committed_sequence()
+    );
 }
 
 #[tokio::test]
