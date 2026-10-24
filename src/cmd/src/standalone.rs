@@ -38,7 +38,7 @@ use common_meta::ddl::{DdlContext, NoopRegionFailureDetectorControl};
 use common_meta::ddl_manager::{DdlManager, DdlManagerConfiguratorRef, DdlManagerRef};
 use common_meta::key::flow::FlowMetadataManager;
 use common_meta::key::{TableMetadataManager, TableMetadataManagerRef};
-use common_meta::kv_backend::KvBackendRef;
+use common_meta::kv_backend::{ClosableKvBackendRef, KvBackendRef};
 use common_meta::node_manager::{FlownodeRef, NodeManagerRef};
 use common_meta::procedure_executor::{LocalProcedureExecutor, ProcedureExecutorRef};
 use common_meta::region_keeper::MemoryRegionKeeper;
@@ -224,6 +224,8 @@ pub struct Instance {
     procedure_manager: ProcedureManagerRef,
     leader_services_controller: Box<dyn StandaloneLeaderServicesController>,
     leader_services_context: LeaderServicesContext,
+    /// Closed last on shutdown, see [ClosableKvBackend](common_meta::kv_backend::ClosableKvBackend).
+    metadata_kv_backend: ClosableKvBackendRef,
     // Keep the logging guard to prevent the worker from being dropped.
     _guard: Vec<WorkerGuard>,
 }
@@ -278,7 +280,7 @@ impl App for Instance {
     /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
         let mut first_error = None;
-        let mut record = |result: Result<()>| {
+        let mut record_shutdown_error = |result: Result<()>| {
             if let Err(err) = result {
                 if first_error.is_none() {
                     first_error = Some(err);
@@ -288,14 +290,14 @@ impl App for Instance {
             }
         };
 
-        record(
+        record_shutdown_error(
             self.frontend
                 .shutdown()
                 .await
                 .context(error::ShutdownFrontendSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.leader_services_controller
                 .stop(
                     self.procedure_manager.clone(),
@@ -304,18 +306,26 @@ impl App for Instance {
                 .await,
         );
 
-        record(
+        record_shutdown_error(
             self.datanode
                 .shutdown()
                 .await
                 .context(error::ShutdownDatanodeSnafu),
         );
 
-        record(
+        record_shutdown_error(
             self.flownode
                 .shutdown()
                 .await
                 .context(error::ShutdownFlownodeSnafu),
+        );
+
+        // Close the metadata after attempting to stop all components.
+        record_shutdown_error(
+            self.metadata_kv_backend
+                .close()
+                .await
+                .context(error::CloseMetadataKvBackendSnafu),
         );
 
         info!("Datanode instance stopped.");
@@ -542,10 +552,11 @@ impl StartCommand {
             .context(OtherSnafu)?;
 
         let metadata_dir = metadata_store_dir(data_home);
-        let kv_backend = creator
+        let metadata_kv_backend = creator
             .metadata_kv_backend_creator
             .create(metadata_dir, &opts)
             .await?;
+        let kv_backend: KvBackendRef = metadata_kv_backend.clone();
         let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), opts.procedure);
 
@@ -789,6 +800,7 @@ impl StartCommand {
             procedure_manager,
             leader_services_controller: creator.leader_services_controller,
             leader_services_context,
+            metadata_kv_backend,
             _guard: vec![],
         };
         let result = InstanceCreatorResult {
@@ -847,15 +859,25 @@ impl NodeManagerCreator for DefaultNodeManagerCreator {
 /// configuration types.
 #[async_trait]
 pub trait MetadataKvBackendCreator: Send + Sync {
-    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef>;
+    /// Standalone closes the backend on shutdown, so wrappers must forward
+    /// [close](common_meta::kv_backend::ClosableKvBackend::close) to the backend they wrap.
+    async fn create(
+        &self,
+        metadata_dir: String,
+        opts: &StandaloneOptions,
+    ) -> Result<ClosableKvBackendRef>;
 }
 
 pub struct DefaultMetadataKvBackendCreator;
 
 #[async_trait]
 impl MetadataKvBackendCreator for DefaultMetadataKvBackendCreator {
-    async fn create(&self, metadata_dir: String, opts: &StandaloneOptions) -> Result<KvBackendRef> {
-        standalone::build_metadata_kvbackend(metadata_dir, opts.metadata_store)
+    async fn create(
+        &self,
+        metadata_dir: String,
+        opts: &StandaloneOptions,
+    ) -> Result<ClosableKvBackendRef> {
+        standalone::open_metadata_kvbackend(metadata_dir, opts.metadata_store)
             .context(error::BuildMetadataKvbackendSnafu)
     }
 }
@@ -1161,6 +1183,7 @@ mod tests {
         opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
         let creator = InstanceCreator::default()
             .with_leader_services_controller(Box::new(FailingLeaderServices));
+        let metadata_dir = metadata_store_dir(&opts.storage.data_home);
         let (mut instance, _) = StartCommand::build_with(opts, vec![], creator)
             .await
             .unwrap();
@@ -1181,6 +1204,11 @@ mod tests {
             log_store.append_batch(vec![]).await,
             Err(log_store::error::Error::ObjectStoreWalStopped { .. })
         ));
+        // The metadata backend was closed although earlier steps failed: raft-engine locks its
+        // directory while open, so reopening it only succeeds once it was released.
+        let metadata =
+            standalone::open_metadata_kvbackend(metadata_dir, Default::default()).unwrap();
+        metadata.close().await.unwrap();
     }
 
     #[tokio::test]
