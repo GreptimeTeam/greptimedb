@@ -15,7 +15,7 @@
 use std::fmt::Display;
 
 use serde::Serialize;
-use sqlparser::ast::AnalyzeFormat;
+use sqlparser::ast::{AnalyzeFormat, Value};
 use sqlparser_derive::{Visit, VisitMut};
 
 #[derive(Debug, Clone, PartialEq, Eq, Visit, VisitMut, Serialize)]
@@ -44,9 +44,15 @@ fn format_tql(
     query: &str,
     alias: &Option<String>,
 ) -> std::fmt::Result {
-    write!(f, "({start}, {end}, '{step}'")?;
+    write!(
+        f,
+        "({}, {}, {}",
+        Value::SingleQuotedString(start.to_string()),
+        Value::SingleQuotedString(end.to_string()),
+        Value::SingleQuotedString(step.to_string())
+    )?;
     if let Some(lookback) = lookback {
-        write!(f, ", '{lookback}'")?;
+        write!(f, ", {}", Value::SingleQuotedString(lookback.to_string()))?;
     }
     if let Some(alias) = alias {
         write!(f, ") {query} AS {alias}")

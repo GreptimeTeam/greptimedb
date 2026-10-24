@@ -3333,6 +3333,20 @@ CREATE TABLE spans (
             ("TQL EVAL (0, 15, '5s') metric", None),
             ("TQL EVAL (0, 15, '5s', '5m') metric", Some("5m")),
             ("TQL EVAL (0, 15, '5s', '300') metric", Some("300")),
+            (
+                "TQL EVAL ('2024-05-01T00:00:00Z', '2024-05-01T01:00:00Z', '5m') metric",
+                None,
+            ),
+            (
+                "TQL EVAL ('2024-05-01T00:00:00.5+08:00', '2024-05-01T01:00:00.25-05:00', '5m', '10m') metric",
+                Some("10m"),
+            ),
+            // Parser-only case: an embedded apostrophe in a parameter must be
+            // re-escaped by `Display` so the formatted statement reparses equal.
+            (
+                "TQL EVAL ('2024-05-01T00:00:00Z', '2024-05-01T01:00:00Z', '5m', '5m''ish') metric",
+                Some("5m'ish"),
+            ),
         ] {
             let sql = format!("CREATE VIEW test AS {query}");
             let result = ParserContext::create_with_dialect(
