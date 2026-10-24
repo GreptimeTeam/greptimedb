@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::value::ValueData;
 use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
+use common_base::Plugins;
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
+use datafusion::physical_plan::ExecutionPlanProperties;
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -29,7 +31,10 @@ use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
 use query::datafusion::QUERY_PARALLELISM_HINT;
+use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
+use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
+use query::promql::planner::NATIVE_PROMQL_EXTENSION_KEY;
 use rstest::rstest;
 use rstest_reuse::apply;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -38,6 +43,7 @@ use session::context::QueryContext;
 use super::test_util::{
     both_instances_cases, check_unordered_output_stream, distributed, standalone,
 };
+use crate::standalone::GreptimeDbStandaloneBuilder;
 use crate::tests::test_util::MockInstance;
 
 #[allow(clippy::too_many_arguments)]
@@ -1750,5 +1756,349 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
             "F06: `LAG(...) OVER (ORDER BY ts DESC)` over scalar() must return `ts`-descending \
              rows with the lagged scalar values (parallelism={parallelism})\n{sql}"
         );
+    }
+}
+
+#[derive(Default)]
+struct NativePlanObserver(Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>);
+
+impl NativePlanObserver {
+    fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    fn take(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("native fused plan was captured")
+    }
+}
+
+impl PhysicalPlanWrapper for NativePlanObserver {
+    fn wrap(
+        &self,
+        origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        let mut stack = vec![origin.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                *self.0.lock().unwrap() = Some(node);
+                break;
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        origin
+    }
+}
+
+fn native_query_context(enabled: bool, parallelism: usize) -> Arc<QueryContext> {
+    let mut ctx = QueryContext::with_db_name(None);
+    ctx.set_extension(QUERY_PARALLELISM_HINT, parallelism.to_string());
+    ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, enabled.to_string());
+    Arc::new(ctx)
+}
+
+async fn native_tql_output(instance: &Arc<Instance>, sql: &str, enabled: bool) -> Output {
+    instance
+        .do_query(sql, native_query_context(enabled, 4))
+        .await
+        .remove(0)
+        .unwrap()
+}
+
+async fn native_output_text(output: Output) -> String {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("query returns record batches"),
+    };
+    batches.pretty_print().unwrap()
+}
+
+async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let hosts = cast(
+                batch.column_by_name("host").unwrap().as_ref(),
+                &DataType::Utf8,
+            )
+            .unwrap();
+            let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+            let value_columns = batch
+                .columns()
+                .iter()
+                .filter(|column| column.data_type() == &DataType::Float64)
+                .collect::<Vec<_>>();
+            assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
+            let values = value_columns[0]
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(timestamps.null_count(), 0);
+            assert_eq!(hosts.null_count(), 0);
+            assert_eq!(values.null_count(), 0);
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        timestamps.value(row),
+                        hosts.value(row).to_string(),
+                        values.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    rows
+}
+
+fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.output_partitioning().partition_count(), 4);
+    assert_eq!(
+        plan.children()[0].output_partitioning().partition_count(),
+        4,
+        "fused scan must have four partitions"
+    );
+    let mut values_by_partition = [0_u64; 4];
+    for metric in plan.metrics().expect("fused plan metrics").iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+            && let Some(partition) = metric.partition()
+            && let Some(value) = values_by_partition.get_mut(partition)
+        {
+            *value += count.value() as u64;
+        }
+    }
+    assert!(
+        values_by_partition.iter().all(|value| *value > 0),
+        "every native execution partition must produce values: {values_by_partition:?}"
+    );
+}
+
+async fn native_test_instance(
+    builder: GreptimeDbStandaloneBuilder,
+) -> (
+    crate::standalone::GreptimeDbStandalone,
+    Arc<NativePlanObserver>,
+) {
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let options = QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    };
+    let standalone = builder
+        .with_plugin(plugins)
+        .with_query_options(options)
+        .build()
+        .await;
+    (standalone, observer)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_executes_fused_node_and_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    // The fixture opts in so its single bulk insert is distributed across real TSID scan
+    // partitions; legacy may send its one batch only to partition 0.
+    let mito_config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let builder =
+        GreptimeDbStandaloneBuilder::new("native_promql_fused_e2e").with_mito_config(mito_config);
+    let (standalone, observer) = native_test_instance(builder).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_e2e_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH (\"physical_metric_table\" = \"true\"); CREATE TABLE native_e2e (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH (\"on_physical_table\" = 'native_e2e_phy')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(&instance, "INSERT INTO native_e2e (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4), ('c', 0, 6), ('d', 0, 8), ('e', 0, 10), ('f', 0, 12), ('g', 0, 14), ('h', 0, 16), ('i', 0, 18), ('j', 0, 20), ('k', 0, 22), ('l', 0, 24), ('m', 0, 26), ('n', 0, 28), ('o', 0, 30), ('p', 0, 32)", QueryContext::arc()).await;
+    let query = PromQuery {
+        query: "native_e2e".to_string(),
+        start: "0".to_string(),
+        end: "0".to_string(),
+        step: "1s".to_string(),
+        ..PromQuery::default()
+    };
+    observer.clear();
+    let native = instance
+        .do_promql_query(&query, native_query_context(true, 4))
+        .await
+        .remove(0)
+        .unwrap();
+    let native_rows = native_result_rows(native).await;
+    let plan = observer.take();
+    assert_four_native_partitions(&plan);
+    let expected = (b'a'..=b'p')
+        .zip((1..=16).map(|index| index as f64 * 2.0))
+        .map(|(host, value)| (0, (host as char).to_string(), value))
+        .collect::<Vec<_>>();
+    let legacy_rows = native_result_rows(
+        instance
+            .do_promql_query(&query, native_query_context(false, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(native_rows, expected);
+    assert_eq!(native_rows, legacy_rows);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_explain_and_analyze_execute_fused_plan() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_explain_analyze_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE native_explain (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_explain VALUES (0, 'a', 2)", QueryContext::arc()).await;
+    for (statement, enabled) in [
+        ("TQL EXPLAIN (0, 0, '1s') native_explain", true),
+        ("TQL EXPLAIN VERBOSE (0, 0, '1s') native_explain", true),
+        ("TQL ANALYZE (0, 0, '1s') native_explain", true),
+        ("TQL ANALYZE VERBOSE (0, 0, '1s') native_explain", true),
+        ("TQL EXPLAIN (0, 0, '1s') native_explain", false),
+    ] {
+        observer.clear();
+        let output = native_tql_output(&instance, statement, enabled).await;
+        let text = native_output_text(output).await;
+        if statement.contains("ANALYZE") && enabled {
+            assert!(text.contains("FusedSeriesExec"));
+            assert!(text.contains("output_values"));
+            let plan = observer.take();
+            let output_values = plan
+                .metrics()
+                .expect("fused plan metrics")
+                .iter()
+                .filter_map(|metric| match metric.value() {
+                    datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                        if name.as_ref() == "native.root.output_values" =>
+                    {
+                        Some(count.value())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>();
+            assert_eq!(output_values, 1, "ANALYZE executes the fused series");
+        } else if statement.contains("EXPLAIN") && enabled {
+            assert!(text.contains("FusedSeries: native_explain"));
+            assert!(text.contains("MergeScanExec"));
+        } else if !enabled {
+            assert!(!text.contains("FusedSeries:"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_view_fallback_preserves_native_hint() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_view_fallback_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance, "CREATE TABLE native_view_source (ts TIMESTAMP TIME INDEX, host STRING, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_view_source VALUES (0, 'a', 2)", QueryContext::arc()).await;
+    let ctx = native_query_context(true, 4);
+    let expected_extensions = ctx.extensions();
+    execute_all(
+        &instance,
+        "CREATE VIEW native_view AS TQL EVAL (0, 0, '1s', '5m') native_view_source",
+        ctx.clone(),
+    )
+    .await;
+    let view = instance
+        .do_query("SELECT * FROM native_view", ctx.clone())
+        .await
+        .remove(0)
+        .unwrap();
+    let view_rows = native_result_rows(view).await;
+    assert_eq!(ctx.extensions(), expected_extensions);
+    assert_eq!(view_rows, vec![(0, "a".to_string(), 2.0)]);
+    let create_view = instance
+        .do_query("SHOW CREATE VIEW native_view", ctx.clone())
+        .await
+        .remove(0)
+        .unwrap();
+    let create_view_text = native_output_text(create_view).await;
+    assert!(create_view_text.contains("TQL EVAL"));
+    assert!(create_view_text.contains("5m"));
+    observer.clear();
+    let direct = instance
+        .do_query("TQL EVAL (0, 0, '1s') native_view_source", ctx)
+        .await
+        .remove(0)
+        .unwrap();
+    let direct_rows = native_result_rows(direct).await;
+    assert_eq!(direct_rows, vec![(0, "a".to_string(), 2.0)]);
+    assert_eq!(observer.take().name(), "FusedSeriesExec");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_metric_logical_tables_are_isolated() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_isolation_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_metric_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_metric_a (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_metric_phy');
+        CREATE TABLE native_metric_b (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_metric_phy');
+        INSERT INTO native_metric_a (host, ts, val) VALUES ('only_a', 0, 101), ('only_a', 1000, 102);
+        INSERT INTO native_metric_b (host, ts, val) VALUES ('only_b', 0, 202), ('only_b', 1000, 204);"#,
+        QueryContext::arc(),
+    )
+    .await;
+    for (table, host, value) in [
+        ("native_metric_a", "only_a", 1.0),
+        ("native_metric_b", "only_b", 2.0),
+    ] {
+        let sql = format!("TQL EVAL (1, 1, '1s') rate({table}[2s])");
+        observer.clear();
+        let native = native_tql_output(&instance, &sql, true).await;
+        let native_rows = native_result_rows(native).await;
+        assert_eq!(observer.take().name(), "FusedSeriesExec");
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
+        assert_eq!(native_rows, legacy_rows);
     }
 }

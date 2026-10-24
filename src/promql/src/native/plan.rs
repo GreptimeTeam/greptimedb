@@ -349,6 +349,28 @@ pub struct NativeNode {
     pub output: NativeType,
 }
 
+/// Whether `node` reads the whole input vector at a point rather than one series at a time.
+///
+/// Three kinds do: an `Aggregate` folds every series of its group, a `Binary` pairs two vectors'
+/// series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
+/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
+/// an input, a scalar, a selection, a window, a map - answers one series from one series' rows.
+///
+/// Both a region-side placement and the native route's admission ask this, and they must agree: a
+/// tree admitted here but refused there becomes a node the physical layer cannot build, and one
+/// refused here but admitted there would be pushed to a region that holds part of the metric.
+pub fn reads_across_series(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. } => reads_across_series(input),
+        NativeExpr::Aggregate { .. } | NativeExpr::Binary { .. } | NativeExpr::Vector { .. } => {
+            true
+        }
+    }
+}
+
 /// A bound evaluation tree.
 ///
 /// The tree itself carries no run-time state: every execution builds its own, so one compiled plan
