@@ -496,12 +496,13 @@ impl TwcsPicker {
             allow_conflicts: !settling,
             allow_unbalanced: (quiet || self.all_windows_inactive) && !settling,
         };
+        // Both classes must see L0 peers: they can absorb late files stranded
+        // by the L0 strategies, and must not introduce conflicts with them.
+        let mut files = l1_files;
+        files.extend(l0_files);
         let candidates = if self.pick_history.is_some() {
-            units::pick_closed_merge_by_class(&l1_files, mapper, options)
+            units::pick_closed_merge_by_class(&files, mapper, options)
         } else {
-            // Retain the legacy mixed closed merge for stateless/manual callers.
-            let mut files = l1_files;
-            files.extend(l0_files);
             [units::pick_closed_merge(&files, mapper, options), None]
         };
         for pick in candidates.into_iter().flatten() {
@@ -3325,6 +3326,84 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_fair_inactive_closed_merge_absorbs_stranded_l0() {
+        // R2-C1: one L0 cannot merge alone, and the mixed L0 fallback exceeds
+        // its one-output budget. A closed overlap merge must still see both levels.
+        let files = [
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 499, 0, 1, 100),
+            new_file_handle_with_size_and_sequence(FileId::random(), 250, 749, 1, 1, 100),
+        ];
+        let mut picker = priority_test_picker(1);
+        picker.pick_history = Some(Arc::new(Mutex::new(PickHistory::default())));
+        let output = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(1, output.len());
+        assert_eq!(
+            files
+                .iter()
+                .map(FileHandle::file_id)
+                .collect::<HashSet<_>>(),
+            output[0].inputs.iter().map(FileHandle::file_id).collect()
+        );
+    }
+
+    #[rstest::rstest]
+    #[case::stranded_l0(1)]
+    #[case::eligible_l0_merge(2)]
+    #[tokio::test]
+    async fn test_fair_closed_merge_does_not_add_conflicts_with_l0(#[case] l0_count: usize) {
+        // R2-C1: merging the two L1 files alone encloses previously disjoint L0
+        // peers. Even an aged FileReduction must not displace safe L0 work with
+        // such a merge; without L0 work this snapshot must produce no plan.
+        let mut files = vec![
+            new_file_handle_with_size_and_sequence(FileId::random(), 0, 99, 1, 1, 40),
+            new_file_handle_with_size_and_sequence(FileId::random(), 200, 299, 1, 1, 40),
+        ];
+        files.extend((0..l0_count).map(|_| {
+            new_file_handle_with_size_and_sequence(FileId::random(), 100, 199, 0, 1, 1000)
+        }));
+        let mut history = PickHistory::default();
+        history.observe(
+            [PickKey {
+                window: 0,
+                class: PickClass::FileReduction,
+            }]
+            .into_iter(),
+            Instant::now() - Duration::from_secs(120),
+        );
+        let mut picker = priority_test_picker(1);
+        picker.pick_history = Some(Arc::new(Mutex::new(history)));
+        let output = picker
+            .build_output_with_time_range(
+                RegionId::from_u64(1),
+                assign_to_windows(files.iter(), 1),
+                Some(10),
+                None,
+            )
+            .await
+            .unwrap();
+        if l0_count == 1 {
+            assert!(output.is_empty());
+        } else {
+            assert_eq!(1, output.len());
+            assert_eq!(
+                files[2..]
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect::<HashSet<_>>(),
+                output[0].inputs.iter().map(FileHandle::file_id).collect()
+            );
+        }
+    }
+
     #[rstest::rstest]
     #[case::active(0, MergeMode::LastRow, "active:pick_l1_file_reduction")]
     #[case::inactive(10, MergeMode::LastRow, "inactive:pick_l1_file_reduction")]
@@ -3364,7 +3443,9 @@ mod tests {
             assert_eq!(
                 files
                     .iter()
-                    .filter(|file| file.level() == 1)
+                    // Inactive closed merges include overlapping L0 peers;
+                    // active picks and the small-L1 fallback remain L1-only.
+                    .filter(|file| active_window == 10 || file.level() == 1)
                     .map(FileHandle::file_id)
                     .collect::<HashSet<_>>(),
                 picks[1]
