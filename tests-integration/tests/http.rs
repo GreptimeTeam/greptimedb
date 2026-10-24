@@ -2056,7 +2056,7 @@ pub async fn test_prometheus_native_promql_route(store_type: StorageType) {
         for (query, expected) in &instants {
             let mut request = client.get(&format!(
                 "/v1/prometheus/api/v1/query?query={}&time=1",
-                encode(*query)
+                encode(query)
             ));
             if native {
                 request = request.header(native_hint.0, native_hint.1);
