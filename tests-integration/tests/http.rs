@@ -1724,18 +1724,15 @@ fn result_columns(schema: &SchemaRef) -> Vec<(String, DataType, bool)> {
         .collect()
 }
 
-/// The tag columns of `rows`, which every row of one result shares.
-fn row_tags(rows: &[PromqlRow]) -> Vec<(String, String)> {
-    rows.first().map(|row| row.0.clone()).unwrap_or_default()
-}
-
 /// Checks the schema the native route reports: the time index, then one nullable `Float64` per
 /// series field, then one nullable `Utf8` per tag.
 ///
 /// A constant reports no tags and no series fields: its one value per grid point is `value` on the
 /// `time` grid.
-fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
-    let tags = row_tags(expected);
+///
+/// The tags are stated by the caller rather than read off the result: a vector that matches no
+/// series reports no row to read them from, and still answers with its tag columns.
+fn assert_native_result_schema(schema: &SchemaRef, tags: &[&str], context: &str) {
     // The time index and the one field the tree reports, then one `Utf8` column per tag.
     let mut columns = vec![
         (
@@ -1749,8 +1746,8 @@ fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], conte
             true,
         ),
     ];
-    for (name, _) in &tags {
-        columns.push((name.clone(), DataType::Utf8, true));
+    for name in tags {
+        columns.push(((*name).to_string(), DataType::Utf8, true));
     }
     assert_eq!(
         result_columns(schema),
@@ -1766,8 +1763,10 @@ fn assert_native_result_schema(schema: &SchemaRef, expected: &[PromqlRow], conte
 ///
 /// The value column's name is checked loosely because a computed legacy vector column may be named
 /// after the expression that computes it; only constants are compared field for field.
-fn assert_legacy_result_schema(schema: &SchemaRef, expected: &[PromqlRow], context: &str) {
-    let tags = row_tags(expected);
+///
+/// As on the native route the tags are stated by the caller, so a vector that matches no series is
+/// still expected to answer with its tag columns.
+fn assert_legacy_result_schema(schema: &SchemaRef, tags: &[&str], context: &str) {
     let time_column = if tags.is_empty() { "time" } else { "ts" };
     let columns = result_columns(schema);
     assert_eq!(
@@ -1804,11 +1803,10 @@ fn assert_legacy_result_schema(schema: &SchemaRef, expected: &[PromqlRow], conte
     let tag_names = columns
         .iter()
         .filter(|column| column.1 == DataType::Utf8)
-        .map(|column| &column.0)
+        .map(|column| column.0.as_str())
         .collect::<Vec<_>>();
-    let expected_tag_names = tags.iter().map(|(name, _)| name).collect::<Vec<_>>();
     assert_eq!(
-        tag_names, expected_tag_names,
+        tag_names, tags,
         "{context}: legacy tag columns: {columns:?}"
     );
 }
@@ -1907,14 +1905,13 @@ async fn promql_output(
             panic!("`{query}` returned affected rows: {rows}")
         }
     };
-    let mut schema = None;
+    // The collected batches keep the schema the stream reported, so a result that holds no row still
+    // names the columns its route answers with.
+    let schema = output_data.schema().arrow_schema().clone();
     let mut rows = Vec::new();
     for batch in output_data.iter() {
         let batch = batch.df_record_batch();
         let arrow_schema = batch.schema();
-        if schema.is_none() {
-            schema = Some(arrow_schema.clone());
-        }
         let timestamps = batch
             .columns()
             .iter()
@@ -1970,11 +1967,7 @@ async fn promql_output(
         }
     }
     rows.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-    (
-        plan,
-        schema.expect("a result reports at least one batch"),
-        rows,
-    )
+    (plan, schema, rows)
 }
 
 /// Checks public PromQL results and the executed plan of every request on both routes.
@@ -2272,9 +2265,15 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
     ] {
         // Only the node this query ran is read: the previous request's capture is dropped first.
         observer.clear();
+        // Every fixture series carries one tag; a constant carries none.
+        let tags: &[&str] = if scan_partitions.is_some() {
+            &["host"]
+        } else {
+            &[]
+        };
         let (plan, schema, rows) = promql_output(frontend, query, true, start, end).await;
         assert_rows_eq(&rows, &expected, query);
-        assert_native_result_schema(&schema, &expected, query);
+        assert_native_result_schema(&schema, tags, query);
         let fused = assert_native_plan(&plan, scan_partitions, query);
         assert_eq!(
             fused["metrics"]["native.root.output_values"].as_u64(),
@@ -2298,7 +2297,7 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             "`{query}` without the hint executed the fused route"
         );
         assert_rows_eq(&legacy_rows, &expected, query);
-        assert_legacy_result_schema(&legacy_schema, &expected, query);
+        assert_legacy_result_schema(&legacy_schema, tags, query);
         // Both constant cases preserve the legacy time/value schema; computed vector columns are
         // compared by role.
         if scan_partitions.is_none() {
@@ -2309,6 +2308,70 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
             );
         }
     }
+
+    // A vector that matches no series is a typed empty result, not a constant: both routes still
+    // report the time, value and tag columns, and the native route still plans its one scan. What
+    // such a plan reports per partition is deliberately not read: an empty input may be pruned to a
+    // different partition layout than the four non-empty queries above.
+    let query = "native_demo{host=\"absent\"} * 100";
+    observer.clear();
+    let (plan, schema, rows) = promql_output(frontend, query, true, "0", "2").await;
+    assert!(rows.is_empty(), "`{query}` reported {} rows", rows.len());
+    assert_native_result_schema(&schema, &["host"], query);
+    assert!(
+        executes_fused_series(&plan),
+        "`{query}` did not execute the fused route"
+    );
+    let fused_nodes = plan_nodes_named(&plan, "FusedSeriesExec");
+    assert_eq!(
+        fused_nodes.len(),
+        1,
+        "`{query}`: expected one fused node: {fused_nodes:?}"
+    );
+    let fused = &fused_nodes[0];
+    let tree = fused["param"].as_str().unwrap_or_default();
+    assert_eq!(
+        fused["children"].as_array().map(Vec::len),
+        Some(1),
+        "`{query}`: an empty vector must read exactly one child: {fused}"
+    );
+    let scans = plan_nodes_named(&plan, "SeriesScanExec");
+    assert_eq!(
+        scans.len(),
+        1,
+        "`{query}`: an empty vector must read exactly one scan: {scans:?}"
+    );
+    // The tree binds the one source instead of answering as a constant, whose tree binds no input.
+    assert!(
+        tree.contains("Input"),
+        "`{query}`: the empty vector planned no input: {tree}"
+    );
+    assert_eq!(
+        tree.matches("source=0").count(),
+        1,
+        "`{query}`: the tree does not read the one source: {tree}"
+    );
+    assert!(
+        !tree.contains("source=1"),
+        "`{query}`: the tree reads a second source: {tree}"
+    );
+    // The body is drained, so the one fused node the request ran has finished.
+    observer.take(query);
+
+    // Without the per-query hint the same statement runs the legacy pipeline, which must answer
+    // with the same empty typed result.
+    let (legacy_plan, legacy_schema, legacy_rows) =
+        promql_output(frontend, query, false, "0", "2").await;
+    assert!(
+        !executes_fused_series(&legacy_plan),
+        "`{query}` without the hint executed the fused route"
+    );
+    assert!(
+        legacy_rows.is_empty(),
+        "`{query}` without the hint reported {} rows",
+        legacy_rows.len()
+    );
+    assert_legacy_result_schema(&legacy_schema, &["host"], query);
 
     instance.guard.remove_all().await;
 }
