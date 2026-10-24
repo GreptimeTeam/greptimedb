@@ -2586,3 +2586,176 @@ async fn native_promql_columnar_fused_series_matches_legacy() {
     assert_eq!(native_rows, legacy_rows, "same rows on both routes");
     assert!(observer.fused().is_none(), "the legacy route must not fuse");
 }
+
+/// No published series index: the columnar `Float64` selector must answer from the raw memtable
+/// and from an unindexed SST instead of failing to plan.
+#[rstest]
+#[case::memtable("memtable", false)]
+#[case::unindexed_sst("unindexed_sst", true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_unindexed_float64_matches_legacy(
+    #[case] stage: &str,
+    #[case] flush: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+    const PHYSICAL: &str = "native_columnar_unindexed_phy";
+    const TABLE: &str = "native_columnar_unindexed";
+    let mito_config = mito2::config::MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        // No periodic build, so neither case ever gets an index.
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new(&format!("native_promql_columnar_{stage}"))
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
+             ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('a', 120000, 30), \
+             ('b', 60000, 20), ('b', 120000, 60);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    if flush {
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_TABLE('{PHYSICAL}');"),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    // Both samples of each series fall in the 2m window: 10 + 30 and 20 + 60.
+    let expected = vec![
+        (120_000, "a".to_string(), 40.0),
+        (120_000, "b".to_string(), 80.0),
+    ];
+    let sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}[2m])");
+    // Legacy off first, so a red native query is about the fused route.
+    observer.clear();
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(legacy_rows, expected, "{stage}: existing plan must answer");
+    assert!(observer.fused().is_none(), "{stage}: legacy must not fuse");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    // Drained first, so the counter below describes execution, not planning; `take` requires the
+    // fused node to have run.
+    let plan = observer.take();
+    assert_eq!(native_rows, expected, "{stage}: fused route must answer");
+    let output_values = plan
+        .metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(output_values, 2, "{stage}: two values, one per series");
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{stage}: same rows on both routes"
+    );
+}
+
+/// An index over the first SST only: the newer rows still in the memtable, then flushed into a
+/// second unindexed SST, must answer the same sums.
+#[rstest]
+#[case::partial_memtable("partial_memtable", false)]
+#[case::partial_sst("partial_sst", true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_columnar_partial_index_float64_matches_legacy(
+    #[case] stage: &str,
+    #[case] flush: bool,
+) {
+    common_telemetry::init_default_ut_logging();
+    const PHYSICAL: &str = "native_columnar_partial_phy";
+    const TABLE: &str = "native_columnar_partial";
+    let mito_config = mito2::config::MitoConfig {
+        experimental_enable_series_index: true,
+        experimental_series_index_format: mito2::config::SeriesIndexFormat::Columnar,
+        // Slow the periodic pass, so only the manual build below publishes an index.
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new(&format!("native_promql_columnar_{stage}"))
+            .with_mito_config(mito_config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // The first samples are flushed and indexed before the second ones are inserted, so the index
+    // covers one SST while the later rows start out unflushed.
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) ENGINE=metric \
+             WITH ('physical_metric_table' = 'true', 'primary_key_encoding' = 'sparse'); \
+             CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP(3) TIME INDEX, val DOUBLE, PRIMARY KEY (host)) \
+             ENGINE=metric WITH ('on_physical_table' = '{PHYSICAL}'); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 60000, 10), ('b', 60000, 20); \
+             ADMIN FLUSH_TABLE('{PHYSICAL}'); \
+             ADMIN BUILD_SERIES_INDEX('{PHYSICAL}'); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES ('a', 120000, 30), ('b', 120000, 60);"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    if flush {
+        // The new SST stays unindexed: the build above is not repeated.
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_TABLE('{PHYSICAL}');"),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    // Both samples of each series fall in the 2m window: 10 + 30 and 20 + 60.
+    let expected = vec![
+        (120_000, "a".to_string(), 40.0),
+        (120_000, "b".to_string(), 80.0),
+    ];
+    let sql = format!("TQL EVAL (120, 120, '1m') sum_over_time({TABLE}[2m])");
+    // Legacy off first, so a red native query is about the fused route.
+    observer.clear();
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(legacy_rows, expected, "{stage}: existing plan must answer");
+    assert!(observer.fused().is_none(), "{stage}: legacy must not fuse");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    // Drained first, so the counter below describes execution, not planning; `take` requires the
+    // fused node to have run.
+    let plan = observer.take();
+    assert_eq!(native_rows, expected, "{stage}: fused route must answer");
+    let output_values = plan
+        .metrics()
+        .expect("fused plan metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(output_values, 2, "{stage}: two values, one per series");
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{stage}: same rows on both routes"
+    );
+}
