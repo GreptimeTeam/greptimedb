@@ -14,6 +14,7 @@ permissions:
 
 jobs:
   sweep:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

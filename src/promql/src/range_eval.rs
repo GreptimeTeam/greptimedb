@@ -42,7 +42,9 @@ pub use function::RangeFunction;
 pub(crate) use function::quantile;
 
 /// The samples a range selector reads at evaluation time `T`: source timestamps in
-/// `(E - range_ms, E]`, where `E` is `T - offset_ms`, or `anchor_ms - offset_ms` with `@`.
+/// `(E - range_ms, E]`, where `E` is `T - offset_ms`, or `anchor_ms - offset_ms` with `@`. A
+/// modifier widens that: `anchored` also reads the lookback before `E - range_ms`, `smoothed` the
+/// lookback on both sides, and a scan feeding the window has to read that much more.
 #[derive(Clone, Copy, Debug)]
 pub struct RangeWindow {
     /// Positive window length in milliseconds.
@@ -52,6 +54,46 @@ pub struct RangeWindow {
     /// The resolved `@` timestamp in milliseconds, with `start()` and `end()` already replaced
     /// by the statement's start and end.
     pub anchor_ms: Option<i64>,
+    /// The experimental `anchored` or `smoothed` selector modifier, which also reads samples
+    /// around the window.
+    pub modifier: Option<RangeModifier>,
+}
+
+/// The experimental range selector modifiers of Prometheus, which read samples beyond the
+/// window to pin its boundary values. Not to be confused with an `@` anchor, which fixes the
+/// window's end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RangeModifier {
+    /// `anchored`: the window also reads the last sample at or before its start, up to the
+    /// statement's lookback before it, and takes it as the value at the start.
+    Anchored { lookback_ms: i64 },
+    /// `smoothed`: the window also reads samples up to the lookback before its start and after its
+    /// end, and interpolates the values at both boundaries.
+    Smoothed { lookback_ms: i64 },
+}
+
+impl RangeModifier {
+    /// How far before the window start the window also reads.
+    pub(crate) fn before_ms(self) -> i64 {
+        match self {
+            Self::Anchored { lookback_ms } | Self::Smoothed { lookback_ms } => lookback_ms,
+        }
+    }
+
+    /// How far after the window end the window also reads.
+    pub(crate) fn after_ms(self) -> i64 {
+        match self {
+            Self::Anchored { .. } => 0,
+            Self::Smoothed { lookback_ms } => lookback_ms,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Anchored { .. } => "anchored",
+            Self::Smoothed { .. } => "smoothed",
+        }
+    }
 }
 
 /// The valid samples of one field inside one window, in source order.
@@ -63,7 +105,8 @@ pub(crate) struct FloatWindow<'a> {
     /// that does not correct counters and for every window of a series that never reset.
     pub counter_resets: &'a [CounterReset],
     /// Evaluation timestamp `T`. `timestamps` lie in `(T - range_ms, T]`, except for an
-    /// `@`-anchored `predict_linear`, which evaluates the first point's window at every `T`.
+    /// `@`-anchored `predict_linear`, which evaluates the first point's window at every `T`, and
+    /// for a range modifier, which widens the window by the lookback as [`RangeWindow`] says.
     pub eval_ts: i64,
     pub range_ms: i64,
 }
@@ -522,6 +565,9 @@ impl RangeEvaluator {
                     format!("invalid {name} factor. Expected: 0 < factor < 1, got: {factor}")
                 });
         }
+        if let Some(modifier) = window.modifier {
+            check_modifier(input, modifier, function)?;
+        }
         let fold_offset = fold_offset(grid.spec(), window)?;
         let step_invariant = !matches!(function, RangeFunction::PredictLinear(_));
         if !step_invariant {
@@ -536,20 +582,23 @@ impl RangeEvaluator {
                 }
             }
         }
-        let mut evaluator = Self::with_kernel(
-            input,
-            grid,
-            window,
-            function.kernel(fold_offset),
-            step_invariant,
-            function.indexes_counter_resets(),
-        )?;
+        // A modified window corrects counters over the samples it holds rather than through the
+        // reset index, and has no batch form.
+        let (kernel, index_resets) = match window.modifier {
+            Some(modifier) => (function.modified_kernel(modifier), false),
+            None => (
+                function.kernel(fold_offset),
+                function.indexes_counter_resets(),
+            ),
+        };
+        let mut evaluator =
+            Self::with_kernel(input, grid, window, kernel, step_invariant, index_resets)?;
         evaluator.drops_metric_name = function.drops_metric_name();
         evaluator.window_error = window_error;
         evaluator.function = Some(function);
         // An anchored selector replays one window at every point, so its windows do not advance
         // with the grid and a batch would only repeat the same call.
-        if matches!(evaluator.replay, Replay::PerPoint) {
+        if matches!(evaluator.replay, Replay::PerPoint) && window.modifier.is_none() {
             evaluator.batch = function.batch_kernel();
         }
         Ok(evaluator)
@@ -1016,6 +1065,20 @@ impl RangeEvaluator {
                         self.window.offset_ms
                     ))
                 })?;
+            // Refused here rather than when a point is evaluated: a smoothed point can be decided
+            // before the rest of its window arrives, so whether a later histogram is seen would
+            // depend on how the input is chunked.
+            if let Some(modifier) = self.window.modifier
+                && row
+                    .iter()
+                    .any(|sample| matches!(sample, SampleRef::Histogram(_)))
+                && self.decided_window_reads(shifted)
+            {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "the {} range modifier over native histogram samples",
+                    modifier.name()
+                )));
+            }
             for (field, sample) in self.fields.iter_mut().zip(&row) {
                 match sample {
                     SampleRef::Missing => {}
@@ -1039,6 +1102,34 @@ impl RangeEvaluator {
         Ok(())
     }
 
+    /// Whether a sample at `timestamp` on the evaluation timeline lies in the window of a point
+    /// this evaluator decides: a window ending at `E` reads `(E - range - before, E + after]`, and
+    /// only the first point's window is read when the result is replayed.
+    fn decided_window_reads(&self, timestamp: i64) -> bool {
+        let (before, after) = self.window.modifier.map_or((0, 0), |modifier| {
+            (
+                i128::from(modifier.before_ms()),
+                i128::from(modifier.after_ms()),
+            )
+        });
+        let spec = self.grid.spec();
+        let ends = match self.replay {
+            Replay::PerPoint => i128::from(spec.len),
+            Replay::Once | Replay::EveryPoint => 1,
+        };
+        let (start, step) = (i128::from(spec.start_ms), i128::from(spec.step_ms));
+        // The window ends that read the sample are those in `[timestamp - after, timestamp +
+        // range + before)`; the first grid point at or after the lower bound decides.
+        let lowest = i128::from(timestamp) - after;
+        let highest = i128::from(timestamp) + i128::from(self.window.range_ms) + before;
+        let first = if lowest <= start {
+            0
+        } else {
+            (lowest - start + step - 1) / step
+        };
+        first < ends && start + first * step < highest
+    }
+
     /// Evaluates grid points up to `ready` on the evaluation timeline, or all remaining points
     /// when `ready` is `None`.
     fn evaluate(&mut self, ready: Option<i128>) -> Result<()> {
@@ -1046,7 +1137,34 @@ impl RangeEvaluator {
         let state = self.series.as_mut().expect("checked by check_chunk");
         let spec = self.grid.spec();
         let grid = self.grid.timestamps().map_err(external)?;
-        let range = i128::from(self.window.range_ms);
+        // A modifier also reads samples up to the lookback ahead of the window start, so they are
+        // kept that much longer.
+        let before = self
+            .window
+            .modifier
+            .map_or(0, |modifier| i128::from(modifier.before_ms()));
+        // `smoothed` interpolates the window end with the first sample at or after it, which can
+        // arrive up to the lookback later. A point is decided once every field holds a sample at
+        // or after it, or once the lookback past it has arrived. The input's last row does not say
+        // that alone: a stale row is dropped, and a field can hold no value in it.
+        let ready = match (ready, self.window.modifier) {
+            (Some(ready), Some(RangeModifier::Smoothed { lookback_ms })) => {
+                let held = self
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        field
+                            .timestamps
+                            .last()
+                            .map_or(i128::MIN, |&t| i128::from(t))
+                    })
+                    .min()
+                    .unwrap_or(i128::MIN);
+                Some(held.max(ready - i128::from(lookback_ms)))
+            }
+            (ready, _) => ready,
+        };
+        let range = i128::from(self.window.range_ms) + before;
         let mut empty_tail = false;
         while state.cursor < points_read {
             let eval_ts = grid[state.cursor];
@@ -1079,7 +1197,9 @@ impl RangeEvaluator {
                 break;
             };
             if earliest > eval_ts {
-                // Skip the points whose windows end before the earliest sample.
+                // Skip the points whose windows end before the earliest sample. A smoothed window
+                // reads past its end, but without a sample at or before its end it has no result,
+                // as Prometheus returns nothing when the first sample is after the end.
                 let step = i128::from(spec.step_ms);
                 let steps = (i128::from(earliest) - i128::from(spec.start_ms) + step - 1) / step;
                 state.cursor = usize::try_from(steps).map_or(grid.len(), |i| i.min(grid.len()));
@@ -1095,6 +1215,7 @@ impl RangeEvaluator {
                 function: self.function,
                 range_ms: self.window.range_ms,
                 offset_ms: self.window.offset_ms,
+                modifier: self.window.modifier,
             };
             match self.replay {
                 Replay::PerPoint => {
@@ -1225,6 +1346,7 @@ struct RowEvaluator<'a> {
     function: Option<RangeFunction>,
     range_ms: i64,
     offset_ms: i64,
+    modifier: Option<RangeModifier>,
 }
 
 impl RowEvaluator<'_> {
@@ -1237,6 +1359,8 @@ impl RowEvaluator<'_> {
         row: &mut Vec<Option<GridSample>>,
     ) -> Result<()> {
         row.clear();
+        // A smoothed window also reads the samples after its end.
+        let window_end = window_end + self.modifier.map_or(0, RangeModifier::after_ms);
         for field in self.fields {
             let timestamps = &field.timestamps[field.head..];
             let len = timestamps.partition_point(|&timestamp| timestamp <= window_end);
@@ -1265,6 +1389,53 @@ impl RowEvaluator<'_> {
         }
         Ok(())
     }
+}
+
+/// Rejects a modifier on a function Prometheus does not allow it with, as Prometheus rejects the
+/// query (`AnchoredSafeFunctions`, `SmoothedSafeFunctions`), and on evaluated input, which reads
+/// no raw samples around its windows.
+fn check_modifier(
+    input: &SeriesSchema,
+    modifier: RangeModifier,
+    function: RangeFunction,
+) -> Result<()> {
+    if input.eval_grid.is_some() {
+        return Err(DataFusionError::NotImplemented(format!(
+            "the {} range modifier over evaluated series",
+            modifier.name()
+        )));
+    }
+    let allowed = match modifier {
+        RangeModifier::Anchored { .. } => matches!(
+            function,
+            RangeFunction::Rate
+                | RangeFunction::Increase
+                | RangeFunction::Delta
+                | RangeFunction::Resets
+                | RangeFunction::Changes
+        ),
+        RangeModifier::Smoothed { .. } => matches!(
+            function,
+            RangeFunction::Rate | RangeFunction::Increase | RangeFunction::Delta
+        ),
+    };
+    if !allowed {
+        let list = match modifier {
+            RangeModifier::Anchored { .. } => "changes, delta, increase, rate, resets",
+            RangeModifier::Smoothed { .. } => "delta, increase, rate",
+        };
+        return Err(DataFusionError::Plan(format!(
+            "{} modifier can only be used with: {list} - not with {function:?}",
+            modifier.name()
+        )));
+    }
+    if modifier.before_ms() < 0 {
+        return Err(DataFusionError::Plan(format!(
+            "lookback must not be negative, got {} ms",
+            modifier.before_ms()
+        )));
+    }
+    Ok(())
 }
 
 /// The offset samples are shifted by: the selector offset, or for `@` the offset that places

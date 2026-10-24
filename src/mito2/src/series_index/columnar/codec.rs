@@ -28,6 +28,10 @@ pub(crate) const DICTIONARY: u16 = 2;
 #[derive(Debug, Clone, Copy)]
 #[repr(u16)]
 pub(crate) enum Compression {
+    #[allow(
+        dead_code,
+        reason = "Uncompressed encoding is supported for format tests."
+    )]
     None = 0,
     Zstd = 1,
 }

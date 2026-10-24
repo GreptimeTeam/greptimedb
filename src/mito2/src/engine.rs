@@ -1062,6 +1062,21 @@ impl EngineInner {
         // in the query's older SST snapshot.
         let series_index = region.series_index_store.as_ref().map(|store| {
             crate::series_index::SeriesIndexReadContext {
+                format: if region
+                    .series_index_version_control
+                    .formats
+                    .read()
+                    .unwrap()
+                    .index
+                    .as_ref()
+                    .is_some_and(|format| {
+                        format.format()
+                            == crate::series_index::artifact::ArtifactFormat::ColumnarSeries
+                    }) {
+                    crate::config::SeriesIndexFormat::Columnar
+                } else {
+                    crate::config::SeriesIndexFormat::Legacy
+                },
                 store: store.clone(),
                 version: region.series_index_version(),
             }

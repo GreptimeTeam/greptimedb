@@ -703,8 +703,8 @@ fn vector_operations_match_prometheus() {
     );
 }
 
-/// Binary operations with fill modifiers, evaluated by the Prometheus v3.15.0 engine; see the
-/// header of `fill_cases.txt`.
+/// Binary operations with fill modifiers, evaluated by the Prometheus engine named in the header of
+/// `fill_cases.txt`.
 #[test]
 fn fill_modifiers_match_prometheus() {
     let (matched, failed) = check_cases(include_str!("fill_cases.txt"));

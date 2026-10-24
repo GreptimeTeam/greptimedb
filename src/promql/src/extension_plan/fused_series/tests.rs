@@ -165,6 +165,7 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
                     range_ms: RANGE_MS,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 // The input is raw samples, so it has no grid of its own.
                 input_grid: None,
@@ -201,6 +202,7 @@ fn instant_window_tree() -> NativeTree {
                     range_ms: RANGE_MS,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: Some(Arc::clone(&grid)),
                 output_grid: grid,
@@ -248,6 +250,7 @@ fn nested_window_tree() -> NativeTree {
                             range_ms: 1_000,
                             offset_ms: 0,
                             anchor_ms: None,
+                            modifier: None,
                         },
                         // The inner window's input is raw samples, so it has no grid of its own.
                         input_grid: None,
@@ -262,6 +265,7 @@ fn nested_window_tree() -> NativeTree {
                     range_ms: 2_000,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 // The outer window reads the inner one's evaluated output, on that output's grid,
                 // and reports one value per field there like the inner one does.

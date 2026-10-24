@@ -367,7 +367,7 @@ mod tests {
     use super::{NodeMetric, NodePath, register_tree, walk};
     use crate::map::MathOp;
     use crate::native::plan::{
-        BoundInput, BoundMap, BoundWindow, NativeExpr, NativeNode, NativeType,
+        BoundInput, BoundMap, BoundWindow, MapOp, NativeExpr, NativeNode, NativeType,
     };
     use crate::range_eval::{RangeFunction, RangeWindow};
 
@@ -404,6 +404,7 @@ mod tests {
                         range_ms: 300_000,
                         offset_ms: 0,
                         anchor_ms: None,
+                        modifier: None,
                     },
                     input_grid: None,
                     output_grid: Arc::clone(&grid),
@@ -422,7 +423,7 @@ mod tests {
             expr: NativeExpr::Map {
                 input: Box::new(inner),
                 op: BoundMap {
-                    ops: Arc::new([MathOp::Abs]),
+                    ops: Arc::new([MapOp::Math(MathOp::Abs)]),
                 },
             },
             output: NativeType::Samples(Arc::new(SeriesSchema {

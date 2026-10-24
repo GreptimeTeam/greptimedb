@@ -14,6 +14,7 @@
 
 //! Per-series scan implementation.
 
+mod prepared;
 mod raw;
 
 use std::collections::HashSet;
@@ -187,6 +188,7 @@ impl SeriesScanMode {
 pub struct SeriesScan {
     /// Implementation used by this scan.
     mode: SeriesScanMode,
+    prepared: Arc<prepared::Preparation>,
     /// Properties of the scanner.
     properties: ScannerProperties,
     /// Context of streams.
@@ -236,6 +238,7 @@ impl SeriesScan {
 
         Self {
             mode,
+            prepared: Arc::new(prepared::Preparation::default()),
             properties,
             stream_ctx,
             pruner,
@@ -243,6 +246,14 @@ impl SeriesScan {
             candidate_receivers: Mutex::new(Vec::new()),
             metrics_list: Arc::new(PartitionMetricsList::default()),
         }
+    }
+
+    fn uses_columnar(&self) -> bool {
+        self.stream_ctx
+            .input
+            .series_index
+            .as_ref()
+            .is_some_and(|context| context.format == crate::config::SeriesIndexFormat::Columnar)
     }
 
     fn prepare_raw_scan(
@@ -311,6 +322,9 @@ impl SeriesScan {
                 return Ok(None);
             }
         }
+        if self.uses_columnar() && !is_sparse_metric_metadata(metadata) {
+            return Ok(None);
+        }
         let selected = input.mapper.output_schema();
         let mut fields = Vec::new();
         let mut specs = Vec::new();
@@ -342,7 +356,9 @@ impl SeriesScan {
                     .build(),
                 ));
             };
-            if !data_type.is_numeric() && !is_native_histogram_value_type(data_type) {
+            if (self.uses_columnar() && *data_type != ConcreteDataType::float64_datatype())
+                || (!data_type.is_numeric() && !is_native_histogram_value_type(data_type))
+            {
                 debug!(
                     "Raw series scan preflight rejected field type: region_id={}, column_id={}",
                     metadata.region_id, column.column_id,
@@ -370,13 +386,28 @@ impl SeriesScan {
             );
             return Ok(None);
         }
+        if self.uses_columnar() {
+            let ranges = self
+                .properties
+                .partitions
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>();
+            prepared::validate_inputs(&self.stream_ctx, &ranges).map_err(BoxedError::new)?;
+        }
         let schema = Arc::new(SeriesSchema {
             fields: specs.into(),
             eval_grid: None,
         });
         let typed_schema = input.mapper.input_arrow_schema(false);
         let mut predicates = Vec::new();
-        if let Some(predicate) = input.predicate_group().predicate_without_region() {
+        let predicate = if self.uses_columnar() {
+            input.predicate_group().predicate()
+        } else {
+            input.predicate_group().predicate_without_region()
+        };
+        if let Some(predicate) = predicate {
             if !predicate.dyn_filters().is_empty() {
                 debug!(
                     "Raw series scan preflight rejected dynamic predicate filters: region_id={}",
@@ -813,6 +844,9 @@ impl RegionScanner for SeriesScan {
     }
 
     fn raw_series_ordering(&self) -> SeriesOrdering {
+        if self.uses_columnar() {
+            return SeriesOrdering::KeyThenTime;
+        }
         match self.mode {
             SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
             SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
@@ -838,6 +872,35 @@ impl RegionScanner for SeriesScan {
         let Some(preparation) = self.prepare_raw_scan(label_source)? else {
             return Ok(None);
         };
+        if self.uses_columnar() {
+            let partitions = self.properties.num_partitions().max(1);
+            if partition >= partitions {
+                return Err(BoxedError::new(
+                    PartitionOutOfRangeSnafu {
+                        given: partition,
+                        all: partitions,
+                    }
+                    .build(),
+                ));
+            }
+            let future = self.prepare_series(ctx, metrics_set, label_source);
+            let schema = preparation.schema;
+            let labels = label_source.clone();
+            let stream = async_stream::try_stream! {
+                let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
+                let n = source.num_series() as u128;
+                let start = (n * partition as u128 / partitions as u128) as usize;
+                let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
+                let mut reader = source.read_series(start..end)?;
+                while let Some(chunk) = reader.try_next().await? { yield chunk; }
+            };
+            return Ok(Some(raw::from_stream(
+                schema,
+                labels,
+                SeriesOrdering::KeyThenTime,
+                Box::pin(stream),
+            )));
+        }
         let metrics = new_partition_metrics(
             &self.stream_ctx,
             ctx.explain_verbose,
@@ -860,7 +923,52 @@ impl RegionScanner for SeriesScan {
         )))
     }
 
+    fn prepare_series(
+        &self,
+        ctx: &QueryScanContext,
+        metrics_set: &ExecutionPlanMetricsSet,
+        label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn store_api::region_engine::PreparedSeriesSource>>, BoxedError>,
+    > {
+        if !self.uses_columnar() {
+            return Box::pin(async { Ok(None) });
+        }
+        let preparation = self
+            .check_scan_limit()
+            .map_err(BoxedError::new)
+            .and_then(|_| self.prepare_raw_scan(label_source));
+        let state = self.prepared.clone();
+        let stream_ctx = self.stream_ctx.clone();
+        let ranges = self
+            .properties
+            .partitions
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
+        let labels = label_source.clone();
+        let metrics = new_partition_metrics(
+            &self.stream_ctx,
+            ctx.explain_verbose,
+            metrics_set,
+            0,
+            &self.metrics_list,
+        );
+        Box::pin(async move {
+            let Some(preparation) = preparation? else {
+                return Ok(None);
+            };
+            state
+                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .await
+                .map(Some)
+        })
+    }
+
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
+        self.prepared = Arc::new(prepared::Preparation::default());
         self.properties.prepare(request);
 
         self.check_scan_limit().map_err(BoxedError::new)?;
@@ -885,6 +993,7 @@ impl RegionScanner for SeriesScan {
     }
 
     fn reset_state(&mut self) {
+        self.prepared = Arc::new(prepared::Preparation::default());
         self.stream_ctx.input.predicate.clear_dyn_filters();
         let num_workers = common_stat::get_total_cpu_cores().max(1);
         self.pruner = match self.mode {

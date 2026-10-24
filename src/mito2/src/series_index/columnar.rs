@@ -138,11 +138,9 @@ impl Manifest {
             Field::new(TSID_COLUMN, DataType::UInt64, false),
             Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
         ];
-        fields.extend(
-            self.tags
-                .iter()
-                .map(|tag| Field::new(&tag.name, DataType::Utf8, true)),
-        );
+        fields.extend(self.tags.iter().map(|tag| {
+            crate::sst::with_field_id(Field::new(&tag.name, DataType::Utf8, true), tag.column_id)
+        }));
         Arc::new(Schema::new(fields))
     }
 }

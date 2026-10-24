@@ -578,7 +578,7 @@ pub struct SeriesInfo {
 /// `Some(metric)` matching each chunk. Ordering describes the stream, not ordinal enumeration.
 ///
 /// Preparation, identity lookup, and reader creation do not load sample payloads or perform
-/// hidden blocking I/O. The selected set is bound to the partition's immutable MVCC view,
+/// hidden blocking I/O. The selected set is bound to the scanner's immutable MVCC view,
 /// predicates, authorization, projection, labels, and existing scan resources. Readers own
 /// resources needed to continue after this source or scanner is dropped. Dropping one reader
 /// does not cancel sibling readers; normal ownership cleanup applies without detached work.
@@ -688,20 +688,22 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
         todo!()
     }
 
-    /// Prepares a finite, stable set of series for independent ordinal-range reads.
+    /// Prepares scanner-wide candidates once for independent ordinal-range reads.
     ///
-    /// `None` means unsupported before consumption, so callers may use the legacy record-batch
-    /// scan. `Some`, including a source with zero series, selects this path; errors propagate
-    /// without replay. Choose exactly one entrypoint per partition per execution: this prepared
-    /// source, [`Self::scan_series_partition`], or [`Self::scan_partition`]. In particular, do
-    /// not call the legacy raw-scan default merely because this returns `None`.
-    fn prepare_series_partition(
+    /// Metadata I/O is asynchronous; sample payloads are loaded only by polling readers.
+    /// The owned future does not borrow the scanner. `None` means unsupported before
+    /// execution; errors must propagate without replay through a different scan path.
+    /// Implementations may share preparation with their raw partition adapter.
+    fn prepare_series(
         &self,
         _ctx: &QueryScanContext,
         _metrics_set: &ExecutionPlanMetricsSet,
-        _partition: usize,
-    ) -> Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError> {
-        Ok(None)
+        _label_source: &RawLabelSource,
+    ) -> futures::future::BoxFuture<
+        'static,
+        Result<Option<Arc<dyn PreparedSeriesSource>>, BoxedError>,
+    > {
+        Box::pin(async { Ok(None) })
     }
 
     /// Check if there is any predicate exclude region partition exprs that may be executed in this scanner.
@@ -1011,7 +1013,8 @@ mod tests {
         );
         assert!(
             scanner
-                .prepare_series_partition(&ctx, &metrics, 0)
+                .prepare_series(&ctx, &metrics, &RawLabelSource::Explicit)
+                .await
                 .unwrap()
                 .is_none()
         );

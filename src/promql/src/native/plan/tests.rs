@@ -20,7 +20,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -178,6 +178,7 @@ fn window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeN
                     range_ms: 300_000,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(&out),
@@ -202,6 +203,7 @@ fn window_on(
                     range_ms: 300_000,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid,
                 output_grid: Arc::clone(&out),
@@ -217,7 +219,7 @@ fn map_over(inner: NativeNode) -> NativeNode {
         expr: NativeExpr::Map {
             input: Box::new(inner),
             op: BoundMap {
-                ops: Arc::new([MathOp::Abs]),
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
             },
         },
         output: evaluated(Arc::new([]), out),
@@ -270,7 +272,7 @@ fn a_map_cannot_consume_raw_samples() {
         expr: NativeExpr::Map {
             input: Box::new(input()),
             op: BoundMap {
-                ops: Arc::new([MathOp::Abs]),
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
             },
         },
         output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
@@ -287,7 +289,7 @@ fn a_map_cannot_consume_a_scalar() {
         expr: NativeExpr::Map {
             input: Box::new(scalar_on(1.0, Arc::clone(&out))),
             op: BoundMap {
-                ops: Arc::new([MathOp::Abs]),
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
             },
         },
         output: evaluated(Arc::new([]), out),
@@ -323,7 +325,7 @@ fn a_map_cannot_change_the_field_count() {
         expr: NativeExpr::Map {
             input: Box::new(inner),
             op: BoundMap {
-                ops: Arc::new([MathOp::Abs]),
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
             },
         },
         output: evaluated(
@@ -358,6 +360,7 @@ fn a_window_cannot_change_the_field_count() {
                     range_ms: 30_000,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: Some(Arc::clone(&out)),
                 output_grid: Arc::clone(&out),

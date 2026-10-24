@@ -40,13 +40,14 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
-use crate::histogram_eval::HistogramFunction;
+use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
+use crate::map_label::LabelRewrite;
 use crate::native::metrics::{NodeMetric, NodeMetrics, NodePath};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
-    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode,
+    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode,
     NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
@@ -171,6 +172,7 @@ fn window_with(
                     range_ms,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid,
                 output_grid: Arc::clone(&output_grid),
@@ -194,6 +196,7 @@ fn window_over_fields(count: usize, output_grid: Arc<EvalGrid>) -> NativeNode {
                     range_ms: 1,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(&output_grid),
@@ -240,6 +243,10 @@ fn instant(
 }
 
 fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
+    map_ops(inner, ops.into_iter().map(MapOp::Math).collect())
+}
+
+fn map_ops(inner: NativeNode, ops: Vec<MapOp>) -> NativeNode {
     let output = inner.output.grid().expect("a map needs a grid").clone();
     NativeNode {
         expr: NativeExpr::Map {
@@ -828,6 +835,7 @@ fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
             range_ms: 300_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -942,6 +950,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 120_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -949,9 +958,14 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
     let inner_series = inner_evaluator.push(&chunk).unwrap().unwrap();
     inner_evaluator.finish().unwrap();
     let map_schema = evaluated_schema(Arc::clone(&inner_grid));
-    let mapped_chunk = map_chunk(&map_schema, &inner_series, &[MathOp::Abs])
-        .unwrap()
-        .expect("`abs` maps every position, so the chunk keeps its rows");
+    let mapped_chunk = map_chunk(
+        &map_schema,
+        &inner_series,
+        &[MapOp::Math(MathOp::Abs)],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .expect("`abs` maps every position, so the chunk keeps its rows");
     assert!(
         Arc::ptr_eq(
             mapped_chunk.series.time.grid().expect("a grid chunk"),
@@ -966,6 +980,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 240_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -6946,6 +6961,94 @@ fn a_filter_empty_nonclosing_chunk_does_not_end_the_broadcast() {
     );
 }
 
+/// A histogram function maps only the positions native histograms hold, dropping the float one
+/// between them, and drops the name.
+#[test]
+fn a_histogram_function_maps_the_histogram_positions() {
+    let grid = grid(0, 60_000, 3);
+    let mut builder = HistogramBatchBuilder::new();
+    let first = push_histogram(&mut builder, 2);
+    let second = push_histogram(&mut builder, 5);
+    let table = builder.finish().unwrap();
+    let histogram = |index| {
+        Samples::try_from_histogram(UInt32Array::from(vec![index]), Arc::clone(&table)).unwrap()
+    };
+    let field = Samples::try_from_chunks(vec![
+        histogram(first),
+        Samples::from_float(Float64Array::from(vec![7.0])),
+        histogram(second),
+    ])
+    .unwrap();
+    let series = Series {
+        metric: named_metric("a", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 3).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![field]).unwrap(),
+    };
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Count)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(EvaluatedChunk::try_new(series, true).unwrap())
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [chunk] = chunks.as_slice() else {
+        panic!("expected one chunk, got {}", chunks.len());
+    };
+    assert_eq!(chunk.series.metric.name(), None);
+    assert_eq!(chunk.series.metric.get("job"), Some("x"));
+    let positions = chunk
+        .series
+        .time
+        .positions()
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    assert_eq!(positions, vec![0, 2]);
+    assert_eq!(sample_values(chunk), vec![Some(2.0), Some(5.0)]);
+}
+
+/// A histogram function over a closing float chunk empties it, and the closing chunk is named as
+/// Prometheus' `simpleHistogramFunc` names its output: without `__name__` but with `__type__`,
+/// which math functions drop.
+#[test]
+fn a_histogram_function_names_an_emptied_closing_chunk_like_its_kernel() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let metric = SeriesLabels::try_new(
+        Some("a".into()),
+        vec![Label {
+            name: "__type__".into(),
+            value: "histogram".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Sum)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric,
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [closing] = chunks.as_slice() else {
+        panic!("expected one closing chunk, got {}", chunks.len());
+    };
+    assert!(closing.is_last);
+    assert_eq!(closing.series.time.len(), 0);
+    assert_eq!(closing.series.metric.name(), None);
+    assert_eq!(closing.series.metric.get("__type__"), Some("histogram"));
+}
+
 /// A filter that passes nothing on the chunk that closes a series still closes it.
 /// The chunk it hands over holds no row and carries the label set the operation produces, which is
 /// the only way the consumer downstream learns that the series ended rather than that no input has
@@ -8519,4 +8622,168 @@ fn count_values_reserves_a_group_per_field_sample() {
         vector_workspace_bytes(&op, &schema, &[series])
     };
     assert!(estimate(4) >= 4 * estimate(1));
+}
+
+/// `label_replace` runs in a map: each series is relabelled as it passes, and two series it gives
+/// one label set collide where both hold a value, as Prometheus' same-labelset check refuses.
+#[test]
+fn a_label_rewrite_relabels_series_and_refuses_a_shared_point() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let rewrite = LabelRewrite::replace("job", "all", "job", ".*").unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Label(Arc::new(rewrite))],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("a", "x"),
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let first = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the relabelled series");
+    assert_eq!(first.series.metric, named_metric("a", "all"));
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("a", "y"),
+            1,
+            vec![Some(3.0)],
+            true,
+        ))
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err().to_string();
+    assert!(
+        error.contains("both hold a value of field 0 at position 1"),
+        "{error}"
+    );
+}
+
+/// A chunk that math empties still closes its series, under the labels the whole chain would have
+/// given it: the label changes after the emptying step apply, and math drops the name.
+#[test]
+fn an_emptied_closing_chunk_carries_the_labels_of_the_whole_chain() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let replace = LabelRewrite::replace("job", "y", "job", "x").unwrap();
+    let join = LabelRewrite::join("both", "-", &["__name__", "job"]).unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![
+            MapOp::Label(Arc::new(replace)),
+            MapOp::Math(MathOp::Clamp { min: 2.0, max: 1.0 }),
+            MapOp::Label(Arc::new(join)),
+        ],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            named_metric("a", "x"),
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [closing] = chunks.as_slice() else {
+        panic!("expected one closing chunk, got {}", chunks.len());
+    };
+    assert!(closing.is_last);
+    assert_eq!(closing.series.time.len(), 0);
+    // The name is gone before `label_join` reads it, and `job` was rewritten before the clamp.
+    assert_eq!(closing.series.metric.name(), None);
+    assert_eq!(closing.series.metric.get("both"), Some("-y"));
+}
+
+/// A label change reads no value, so a map of label changes alone hands histogram samples and
+/// holes over as they came, where a math function would drop them.
+#[test]
+fn a_label_only_map_keeps_histogram_samples() {
+    let grid = grid(0, 60_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let table = histogram_table(2, 3);
+    let chunk = evaluated_histogram_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(0), None, Some(1)],
+        &table,
+        true,
+    );
+    let rewrite = LabelRewrite::replace("job", "y", "job", "x").unwrap();
+    let mapped = map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::new(rewrite))],
+        &mut |_| Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(mapped.series.metric.get("job"), Some("y"));
+    assert_eq!(mapped.series.time.len(), 3);
+    let samples = mapped.series.fields.as_slice()[0]
+        .iter()
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        samples.as_slice(),
+        [
+            SampleRef::Histogram(_),
+            SampleRef::Missing,
+            SampleRef::Histogram(_)
+        ]
+    ));
+}
+
+/// `label_join` over one source listed a thousand times writes a label a thousand times the
+/// input's, so the map admits that before it builds the label: the bound covers the label it
+/// writes, and a pool that cannot hold it refuses the chunk and gets every byte back.
+#[test]
+fn a_label_change_admits_the_label_it_writes_before_building_it() {
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let job = "j".repeat(1024);
+    let sources = vec!["job"; 1024];
+    let join = Arc::new(LabelRewrite::join("dst", "", &sources).unwrap());
+    let chunk = evaluated_chunk_of(&schema, named_metric("m", &job), 0, vec![Some(1.0)], true);
+
+    let mut admitted = 0;
+    map_chunk(
+        &schema,
+        &chunk,
+        &[MapOp::Label(Arc::clone(&join))],
+        &mut |bytes| {
+            admitted += bytes;
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert!(admitted >= 1024 * 1024, "{admitted}");
+    // Each capture reference of a `label_replace` template can repeat the whole source value.
+    let replace = LabelRewrite::replace("dst", &"$1".repeat(8), "job", "(.*)").unwrap();
+    let mut metric = named_metric("m", &job);
+    let bound = replace.written_bytes(&metric);
+    replace.apply(&mut metric).unwrap();
+    assert!(bound >= metric.get("dst").unwrap().len() + "dst".len());
+
+    let pool = bounded_pool(256 * 1024);
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Label(join)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool), &ExecutionPlanMetricsSet::new());
+    execution.push_evaluated(chunk).unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("Resources exhausted"), "{error}");
+    assert_eq!(pool.reserved(), 0);
 }

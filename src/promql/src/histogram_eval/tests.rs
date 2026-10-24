@@ -877,3 +877,33 @@ fn histogram_string_matches_prometheus() {
         );
     }
 }
+
+/// A series that does not fit the schema is refused, as `map_math` refuses it, rather than read
+/// with one cursor per schema field.
+#[test]
+fn native_histogram_functions_refuse_a_series_that_does_not_fit_the_schema() {
+    use crate::grid_series::reference::mixed_series;
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 2).unwrap()).unwrap());
+    let fields = |names: &[&str]| -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: names
+                .iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(*name),
+                })
+                .collect(),
+            eval_grid: Some(grid.clone()),
+        })
+    };
+    let text = "0/0/0/3ff0000000000000/3ff0000000000000/0/1_1/3ff0000000000000///";
+    let input = mixed_series(
+        &fields(&["value"]),
+        &Labels::new(),
+        &Points::new(),
+        &BTreeMap::from([(0, text.to_string())]),
+    )
+    .unwrap();
+    let wider = fields(&["value", "other"]);
+    assert!(map_native_histogram(NativeHistogramFunction::Count, &wider, &input).is_err());
+}

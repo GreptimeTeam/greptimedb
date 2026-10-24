@@ -198,19 +198,20 @@ impl Manifest {
         let mut fields = vec![
             Field::new(TABLE_ID_COLUMN, DataType::UInt32, false),
             Field::new(TSID_COLUMN, DataType::UInt64, false),
-            Field::new(
-                &self.timestamp.name,
-                DataType::Timestamp(self.timestamp.unit.arrow(), None),
-                false,
+            crate::sst::with_field_id(
+                Field::new(
+                    &self.timestamp.name,
+                    DataType::Timestamp(self.timestamp.unit.arrow(), None),
+                    false,
+                ),
+                self.timestamp.column_id,
             ),
             Field::new(SEQUENCE, DataType::UInt64, false),
             Field::new(OPERATION, DataType::UInt8, false),
         ];
-        fields.extend(
-            self.fields
-                .iter()
-                .map(|f| Field::new(&f.name, DataType::Float64, true)),
-        );
+        fields.extend(self.fields.iter().map(|f| {
+            crate::sst::with_field_id(Field::new(&f.name, DataType::Float64, true), f.column_id)
+        }));
         Arc::new(Schema::new(fields))
     }
 }

@@ -32,7 +32,7 @@ use crate::metrics::{
 };
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
-use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes};
+use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes_with_mode};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
 use crate::time_provider::TimeProviderRef;
 
@@ -234,7 +234,7 @@ impl SeriesIndexTask {
     async fn reconcile_manual(&mut self, region: MitoRegionRef) -> Result<ReconcileStats> {
         self.validate_manual_region(&region)?;
         self.refresh_usage();
-        let result = self.reconcile_region(region.clone()).await;
+        let result = self.reconcile_region_with_mode(region.clone(), true).await;
         self.refresh_usage();
         let result = result?;
         self.validate_manual_region(&region)?;
@@ -242,12 +242,20 @@ impl SeriesIndexTask {
     }
 
     async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+        self.reconcile_region_with_mode(region, false).await
+    }
+
+    async fn reconcile_region_with_mode(
+        &self,
+        region: MitoRegionRef,
+        manual: bool,
+    ) -> Result<ReconcileStats> {
         // Full capacity defers builds, but cleanup must still reclaim published usage.
         let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
         if !allow_builds {
             SERIES_INDEX_CAPACITY_DEFERRED.inc();
         }
-        let result = reconcile_series_indexes(
+        let result = reconcile_series_indexes_with_mode(
             self.worker_id,
             self.store.clone(),
             region,
@@ -256,6 +264,7 @@ impl SeriesIndexTask {
             self.purger.clone(),
             self.enable_range_index,
             allow_builds,
+            manual,
         )
         .await;
         if result.is_err() {
@@ -474,7 +483,13 @@ mod tests {
         let (engine, region) = prepare_region(&mut env).await;
         let (mut task, _purge_receiver) = new_task(region.clone());
         task.max_size = 0;
-        task.reconcile_manual(region.clone()).await.unwrap();
+        assert!(
+            task.reconcile_manual(region.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("capacity")
+        );
         assert_eq!(0, region.series_index_version().disk_usage());
         assert_eq!(0, task.disk_usage.load(Ordering::Relaxed));
 

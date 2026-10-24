@@ -23,7 +23,8 @@ use super::super::plan::{
     BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::map::MathOp;
-use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::native::plan::MapOp;
+use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
@@ -80,6 +81,7 @@ fn window_over(
                     range_ms,
                     offset_ms,
                     anchor_ms,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(&out),
@@ -95,7 +97,7 @@ fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
         expr: NativeExpr::Map {
             input: Box::new(inner),
             op: BoundMap {
-                ops: Arc::from(ops),
+                ops: ops.into_iter().map(MapOp::Math).collect(),
             },
         },
         output: evaluated(out),
@@ -464,4 +466,31 @@ fn a_vector_operation_names_its_binding() {
         .unwrap();
         assert_eq!(tree.to_string().lines().nth(1), Some(line));
     }
+}
+
+/// A window read with a range modifier names it and the lookback it reads around the window.
+#[test]
+fn a_modified_window_names_its_modifier() {
+    let out = grid(0, 60_000, 4);
+    let mut node = window_over(
+        raw_input(),
+        RangeFunction::Rate,
+        300_000,
+        0,
+        None,
+        Arc::clone(&out),
+    );
+    if let NativeExpr::Window { op, .. } = &mut node.expr {
+        op.window.modifier = Some(RangeModifier::Smoothed {
+            lookback_ms: 300_000,
+        });
+    }
+    let tree = NativeTree::try_new(node).unwrap();
+    assert_eq!(
+        tree.to_string().lines().nth(1),
+        Some(
+            "  root Window rate [300000ms] smoothed lookback 300000ms offset 0 anchor - on grid \
+             0/60000x4"
+        )
+    );
 }
