@@ -2234,6 +2234,26 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
     }
 }
 
+/// A `timestamp` over a table with several data fields falls back to the existing plan.
+///
+/// The native node reports the time of the sample each field was selected from, so a table with two
+/// fields would need it to say which field it means. The compiler declines that, and a declined shape
+/// is planned by the existing path exactly as if the flag were off.
+#[tokio::test]
+async fn native_fused_timestamp_multi_field_falls_back() {
+    let table_provider = build_test_table_provider(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        2,
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("timestamp(some_metric)", true, table_provider).await;
+
+    let display = plan.display_indent().to_string();
+    assert!(!display.contains("FusedSeries"), "{display}");
+}
+
 /// The flag off: no statement is offered to the native route at all.
 #[tokio::test]
 async fn native_fused_flag_off_keeps_the_existing_plan() {
