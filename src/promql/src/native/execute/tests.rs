@@ -40,7 +40,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
-use crate::histogram_eval::HistogramFunction;
+use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
@@ -172,6 +172,7 @@ fn window_with(
                     range_ms,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid,
                 output_grid: Arc::clone(&output_grid),
@@ -195,6 +196,7 @@ fn window_over_fields(count: usize, output_grid: Arc<EvalGrid>) -> NativeNode {
                     range_ms: 1,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(&output_grid),
@@ -833,6 +835,7 @@ fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
             range_ms: 300_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -947,6 +950,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 120_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -976,6 +980,7 @@ fn a_window_map_window_chain_keeps_each_layer_on_its_own_grid() {
             range_ms: 240_000,
             offset_ms: 0,
             anchor_ms: None,
+            modifier: None,
         },
         RangeFunction::LastOverTime,
     )
@@ -6954,6 +6959,94 @@ fn a_filter_empty_nonclosing_chunk_does_not_end_the_broadcast() {
         execution.finish().unwrap().is_empty(),
         "the sole closing chunk was handed over exactly once"
     );
+}
+
+/// A histogram function maps only the positions native histograms hold, dropping the float one
+/// between them, and drops the name.
+#[test]
+fn a_histogram_function_maps_the_histogram_positions() {
+    let grid = grid(0, 60_000, 3);
+    let mut builder = HistogramBatchBuilder::new();
+    let first = push_histogram(&mut builder, 2);
+    let second = push_histogram(&mut builder, 5);
+    let table = builder.finish().unwrap();
+    let histogram = |index| {
+        Samples::try_from_histogram(UInt32Array::from(vec![index]), Arc::clone(&table)).unwrap()
+    };
+    let field = Samples::try_from_chunks(vec![
+        histogram(first),
+        Samples::from_float(Float64Array::from(vec![7.0])),
+        histogram(second),
+    ])
+    .unwrap();
+    let series = Series {
+        metric: named_metric("a", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&grid), 0, 3).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![field]).unwrap(),
+    };
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Count)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(EvaluatedChunk::try_new(series, true).unwrap())
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [chunk] = chunks.as_slice() else {
+        panic!("expected one chunk, got {}", chunks.len());
+    };
+    assert_eq!(chunk.series.metric.name(), None);
+    assert_eq!(chunk.series.metric.get("job"), Some("x"));
+    let positions = chunk
+        .series
+        .time
+        .positions()
+        .map(|(position, _)| position)
+        .collect::<Vec<_>>();
+    assert_eq!(positions, vec![0, 2]);
+    assert_eq!(sample_values(chunk), vec![Some(2.0), Some(5.0)]);
+}
+
+/// A histogram function over a closing float chunk empties it, and the closing chunk is named as
+/// Prometheus' `simpleHistogramFunc` names its output: without `__name__` but with `__type__`,
+/// which math functions drop.
+#[test]
+fn a_histogram_function_names_an_emptied_closing_chunk_like_its_kernel() {
+    let grid = grid(0, 60_000, 2);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let metric = MetricName::try_new(
+        Some("a".into()),
+        vec![Label {
+            name: "__type__".into(),
+            value: "histogram".into(),
+        }],
+    )
+    .unwrap();
+    let tree = NativeTree::try_new(map_ops(
+        evaluated_input(Arc::clone(&grid)),
+        vec![MapOp::Histogram(NativeHistogramFunction::Sum)],
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool(), &ExecutionPlanMetricsSet::new());
+    execution
+        .push_evaluated(evaluated_chunk_of(
+            &schema,
+            metric,
+            0,
+            vec![Some(1.0), Some(2.0)],
+            true,
+        ))
+        .unwrap();
+    let chunks = run(&mut execution);
+    let [closing] = chunks.as_slice() else {
+        panic!("expected one closing chunk, got {}", chunks.len());
+    };
+    assert!(closing.is_last);
+    assert_eq!(closing.series.time.len(), 0);
+    assert_eq!(closing.series.metric.name(), None);
+    assert_eq!(closing.series.metric.get("__type__"), Some("histogram"));
 }
 
 /// A filter that passes nothing on the chunk that closes a series still closes it.

@@ -20,7 +20,7 @@
 
 use crate::functions::{EdgeKind, count_edges, extremum, instant_delta, kahan_inc};
 use crate::go_sort;
-use crate::range_eval::{BatchKernel, FloatWindow, FloatWindows, WindowKernel};
+use crate::range_eval::{BatchKernel, FloatWindow, FloatWindows, RangeModifier, WindowKernel};
 
 /// A PromQL range-vector function over float and native histogram samples.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -168,6 +168,114 @@ impl RangeFunction {
             }),
         }
     }
+}
+
+impl RangeFunction {
+    /// Returns the kernel computing this function over windows read with `modifier`, for the
+    /// functions the modifier is allowed with (`RangeEvaluator::try_new` checks that).
+    ///
+    /// The window holds the samples the modifier reads around it as well, on the evaluation
+    /// timeline, so the window itself is `(eval_ts - range_ms, eval_ts]`.
+    pub(crate) fn modified_kernel(self, modifier: RangeModifier) -> WindowKernel {
+        let smoothed = matches!(modifier, RangeModifier::Smoothed { .. });
+        match self {
+            Self::Rate => Box::new(move |window| extended_rate(&window, smoothed, true, true)),
+            Self::Increase => Box::new(move |window| extended_rate(&window, smoothed, true, false)),
+            Self::Delta => Box::new(move |window| extended_rate(&window, smoothed, false, false)),
+            Self::Resets => Box::new(|window| {
+                anchored_values(&window).map(|values| count_edges(values, EdgeKind::Resets) as f64)
+            }),
+            Self::Changes => Box::new(|window| {
+                anchored_values(&window).map(|values| count_edges(values, EdgeKind::Changes) as f64)
+            }),
+            _ => unreachable!("RangeEvaluator::try_new rejects {self:?} with a range modifier"),
+        }
+    }
+}
+
+/// Go `sort.Search(n, predicate)`: the first index in `[0, n)` the predicate holds at, or `n`.
+fn search(n: usize, predicate: impl Fn(usize) -> bool) -> usize {
+    (0..n).find(|&i| predicate(i)).unwrap_or(n)
+}
+
+/// Prometheus `extendedRate`: `rate`, `increase` or `delta` over an `anchored` or `smoothed`
+/// window. The value at the window start is the last sample at or before it, or for `smoothed`
+/// the interpolation between it and the next one; the end is picked or interpolated the same way.
+/// Nothing is extrapolated.
+fn extended_rate(
+    window: &FloatWindow<'_>,
+    smoothed: bool,
+    is_counter: bool,
+    is_rate: bool,
+) -> Option<f64> {
+    let (timestamps, values) = (window.timestamps, window.values);
+    let range_start = window.eval_ts - window.range_ms;
+    let range_end = window.eval_ts;
+    let mut last = timestamps.len() - 1;
+    let first = search(last, |i| timestamps[i] > range_start).saturating_sub(1);
+    if smoothed {
+        last = search(last, |i| timestamps[i] >= range_end);
+    }
+    if timestamps[last] <= range_start || (smoothed && timestamps[first] > range_end) {
+        return None;
+    }
+    let left = if smoothed && timestamps[first] < range_start {
+        interpolate(window, first, range_start, is_counter)
+    } else {
+        values[first]
+    };
+    let right = if smoothed && last > 0 && timestamps[last] > range_end {
+        interpolate(window, last - 1, range_end, is_counter)
+    } else {
+        values[last]
+    };
+    let mut result = right - left;
+    if is_counter {
+        // Prometheus `correctForCounterResets` over the samples strictly inside the window; the
+        // boundary values already account for the resets at the edges.
+        let inner_start = first + usize::from(timestamps[first] <= range_start);
+        let inner_end = last + 1 - usize::from(timestamps[last] >= range_end);
+        let mut correction = 0.0;
+        let mut previous = left;
+        for &value in &values[inner_start..inner_end] {
+            if value < previous {
+                correction += previous;
+            }
+            previous = value;
+        }
+        if right < previous {
+            correction += previous;
+        }
+        result += correction;
+    }
+    if is_rate {
+        result /= window.range_ms as f64 / 1000.0;
+    }
+    Some(result)
+}
+
+/// Prometheus `interpolate` between the samples at `index` and `index + 1`, at `t`: a counter
+/// that reset between them restarts from zero.
+fn interpolate(window: &FloatWindow<'_>, index: usize, t: i64, is_counter: bool) -> f64 {
+    let (t1, t2) = (window.timestamps[index], window.timestamps[index + 1]);
+    let (mut y1, y2) = (window.values[index], window.values[index + 1]);
+    if is_counter && y2 < y1 {
+        y1 = 0.0;
+    }
+    y1 + (y2 - y1) * (t - t1) as f64 / (t2 - t1) as f64
+}
+
+/// Prometheus `pickFirstSampleIndices` for an `anchored` window of floats: the values from the
+/// last sample at or before the window start on, or `None` when no sample lies after the start.
+fn anchored_values<'a>(window: &FloatWindow<'a>) -> Option<&'a [f64]> {
+    let range_start = window.eval_ts - window.range_ms;
+    let after = window
+        .timestamps
+        .partition_point(|&timestamp| timestamp <= range_start);
+    if after >= window.timestamps.len() {
+        return None;
+    }
+    Some(&window.values[after.saturating_sub(1)..])
 }
 
 /// Prometheus `funcSumOverTime`.
