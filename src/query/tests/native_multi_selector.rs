@@ -682,6 +682,8 @@ fn requirements_drive_scans_for_repeated_metric_nested_windows_and_fields() {
         compiled.inputs[1].requirement.raw_scan_bounds().unwrap()
     );
     // Each selector binds only its requested field before its selected scan rows reach the executor.
+    // The two fields rise at different rates, `2` and `10` per second, so a sample that reached the
+    // other selector's window would not read as the same answer.
     let mut pushes = Vec::new();
     for (field, rows) in [
         (
@@ -690,7 +692,7 @@ fn requirements_drive_scans_for_repeated_metric_nested_windows_and_fields() {
         ),
         (
             "other",
-            &[(0, 2.0), (1_000, 4.0), (2_000, 6.0), (3_000, 8.0)][..],
+            &[(0, 10.0), (1_000, 20.0), (2_000, 30.0), (3_000, 40.0)][..],
         ),
     ] {
         for index in 0..compiled.inputs.len() {
@@ -715,12 +717,28 @@ fn requirements_drive_scans_for_repeated_metric_nested_windows_and_fields() {
         1,
         "the same-metric windows did not match: {output:?}"
     );
+    // The scan behind the two-second window sits under `abs`, which maps over it, and the one
+    // behind the three-second window under the window itself: each is read at its own path.
+    assert_eq!(compiled.inputs[0].path.as_str(), "root.left.input.input");
+    assert_eq!(compiled.inputs[1].path.as_str(), "root.right.input");
     assert_eq!(compiled.inputs[0].schema.fields[0].name.as_ref(), "value");
     assert_eq!(compiled.inputs[1].schema.fields[0].name.as_ref(), "other");
     assert_eq!(output_chunks[0].series.fields.len(), 1);
+    let root_output = compiled
+        .tree
+        .root()
+        .output
+        .samples()
+        .expect("the addition reports evaluated samples");
+    // The operation pairs its operands' fields by position and names the output after the left
+    // side, which is the field the two-second window read.
+    assert_eq!(root_output.fields[0].name.as_ref(), "value");
+    // Each window answers its own source rows: the two-second window over a `2`-per-second field
+    // answers `1.5`, `2`, `2` and the three-second window over a `10`-per-second field answers `5`,
+    // `10`, `10`, so their sum is `6.5`, `12`, `12`.
     assert_eq!(
         output.values().next().unwrap(),
-        &vec![(1, 2.5), (2, 4.0), (3, 4.0)],
+        &vec![(1, 6.5), (2, 12.0), (3, 12.0)],
         "the two separately scanned rates were not added: {output:?}"
     );
 
