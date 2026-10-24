@@ -46,8 +46,8 @@ use common_frontend::slow_query_event::{
 };
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
-use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::metrics::MetricValue;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datatypes::arrow::array::{
     Array as _, Float64Array, StringArray, StringViewArray, TimestampMillisecondArray,
 };
