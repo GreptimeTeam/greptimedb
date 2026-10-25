@@ -24,8 +24,8 @@ use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORA
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::coop::CooperativeExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -2276,7 +2276,16 @@ async fn native_promql_two_occurrences_route_one_scan_per_partition() {
     let legacy_bounded_rows =
         native_result_rows(native_tql_output(&instance, &bounded_sql, false).await).await;
     assert_eq!(bounded_rows, legacy_bounded_rows);
-    let scan_frame_rows = bounded_plan.children()[0]
+    let child = bounded_plan.children()[0];
+    let child = child
+        .downcast_ref::<CooperativeExec>()
+        .map_or(child, |cooperative| cooperative.input());
+    let series_scan = child.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
+        panic!(
+            "bounded fused node child is not a prepared series scan: child={child:?}; plan={bounded_plan:?}"
+        )
+    });
+    let scan_frame_rows = series_scan
         .metrics()
         .expect("series scan metrics")
         .output_rows()
