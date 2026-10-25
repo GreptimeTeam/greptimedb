@@ -1953,7 +1953,7 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
     assert!(stream.next().await.is_none());
     assert!(stream.next().await.is_none());
     drop(stream);
-    let batches = vec![first];
+    let batches = [first];
     assert_eq!(1, batches.len());
     assert_eq!(schema.as_ref(), batches[0].schema().as_ref());
     assert_eq!(GRID_LEN as usize, batches[0].num_rows());
