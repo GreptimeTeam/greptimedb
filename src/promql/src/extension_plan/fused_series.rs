@@ -221,9 +221,14 @@ impl FusedSeries {
         op: BoundAggregate,
     ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
-        if children.len() != 1 || reads_across_series(tree.root()) {
+        if children.len() != 1 {
             return Err(DataFusionError::Plan(
-                "FusedSeries partial fold requires one raw child and a per-partition prefix".into(),
+                "FusedSeries partial fold requires one raw child".into(),
+            ));
+        }
+        if reads_across_series(tree.root()) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries partial fold prefix reads across series".into(),
             ));
         }
         aggregate_op(&op)?;
