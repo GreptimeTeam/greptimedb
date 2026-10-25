@@ -44,7 +44,7 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
-use promql::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
+use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
@@ -716,11 +716,11 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
 fn admitted_single_selector(expr: &PromExpr) -> bool {
     fn aggregate(expr: &PromExpr) -> bool {
         match expr {
-            PromExpr::Aggregate(_) => true,
+            PromExpr::Aggregate(_aggregate) => true,
             PromExpr::Paren(paren) => aggregate(&paren.expr),
             PromExpr::Unary(unary) => aggregate(&unary.expr),
             PromExpr::Binary(binary) => aggregate(&binary.lhs) || aggregate(&binary.rhs),
-            PromExpr::Call(call) => call.args.args.iter().any(aggregate),
+            PromExpr::Call(call) => call.args.args.iter().any(|arg| aggregate(arg)),
             _ => false,
         }
     }

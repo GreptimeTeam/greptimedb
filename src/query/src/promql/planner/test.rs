@@ -39,7 +39,6 @@ use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
-use datafusion_expr::UserDefinedLogicalNode;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
@@ -2502,7 +2501,7 @@ fn find_aggregate_finalize(plan: &LogicalPlan) -> Option<&AggregateFinalize> {
 /// The producer below a split aggregate, which exports the state one partition folded.
 fn partial_producer(finalize: &AggregateFinalize) -> &FusedSeries {
     // Bound to a local first: the slice handed out by `inputs` borrows this list.
-    let inputs = UserDefinedLogicalNode::inputs(finalize);
+    let inputs = UserDefinedLogicalNodeCore::inputs(finalize);
     let [LogicalPlan::Extension(Extension { node })] = inputs.as_slice() else {
         panic!("the merge should read one producer: {finalize:?}");
     };
