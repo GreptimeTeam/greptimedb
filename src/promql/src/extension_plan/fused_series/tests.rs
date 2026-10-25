@@ -1045,7 +1045,8 @@ fn binary_values(batches: &[RecordBatch]) -> Vec<f64> {
                 .downcast_ref::<Float64Array>()
                 .unwrap();
             (0..values.len())
-                .filter_map(|row| values.is_valid(row).then(|| values.value(row)))
+                .filter(|&row| values.is_valid(row))
+                .map(|row| values.value(row))
                 .collect::<Vec<_>>()
         })
         .collect()

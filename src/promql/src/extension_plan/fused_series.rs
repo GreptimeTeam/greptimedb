@@ -1172,11 +1172,11 @@ impl Stream for FusedSeriesStream {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
                     this.inputs.pop_front();
-                    if this.inputs.is_empty() {
-                        if let Err(error) = this.close_input() {
-                            this.fail();
-                            return Poll::Ready(Some(Err(error)));
-                        }
+                    if this.inputs.is_empty()
+                        && let Err(error) = this.close_input()
+                    {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
                     }
                 }
                 Poll::Ready(Some(Err(error))) => {
