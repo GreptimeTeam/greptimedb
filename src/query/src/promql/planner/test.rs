@@ -2379,7 +2379,6 @@ async fn native_fused_whole_vector_operation_falls_back() {
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
         "sum(rate(some_metric[5m]))",
-        "some_metric + some_metric",
         "sum_over_time(rate(some_metric[5m])[1h:])",
         "histogram_count(some_metric)",
         "ceil(some_metric)",
@@ -2398,6 +2397,21 @@ async fn native_fused_unsupported_shape_falls_back() {
             "`{query}` must keep the existing plan"
         );
     }
+}
+
+/// Identical selectors share their scan while the binary operation remains in the native tree.
+#[tokio::test]
+async fn native_fused_same_source_binary_uses_one_child() {
+    let plan = build_native_fused_plan("some_metric + some_metric", true).await;
+    let fused = find_fused_series(&plan).expect("the plan holds a native node");
+
+    assert_eq!("some_metric + some_metric", fused.promql());
+    assert_eq!(1, fused.inputs().len());
+    assert!(
+        matches!(fused.tree().root().expr, NativeExpr::Binary { .. }),
+        "the shared-source binary is not in the native tree: {:?}",
+        fused.tree().root().expr
+    );
 }
 
 /// A label rewrite stays on the existing plan, which is the one that projects its new label.
@@ -2452,7 +2466,7 @@ async fn native_fused_rate_scan_has_bounded_time_filter() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(-299999, None)")
+        display.contains("timestamp > TimestampMillisecond(-300000, None)")
             && display.contains("timestamp <= TimestampMillisecond(100000000, None)"),
         "native scan should include the bounded five-minute statement window: {display}"
     );
@@ -2465,7 +2479,7 @@ async fn native_fused_offset_rate_scan_uses_offset_window_bounds() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(-309999, None)")
+        display.contains("timestamp > TimestampMillisecond(-310000, None)")
             && display.contains("timestamp <= TimestampMillisecond(99990000, None)"),
         "native scan should account for the selector offset: {display}"
     );
@@ -2477,7 +2491,7 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(1, None)")
+        display.contains("timestamp > TimestampMillisecond(0, None)")
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
     );
