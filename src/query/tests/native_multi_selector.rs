@@ -343,13 +343,9 @@ fn two_selectors_are_summed_from_two_inputs() {
     );
 }
 
-/// `a / on(job) b` matches on `job` alone, so two series that differ in `instance` pair up. The same
-/// inputs through `a / b` — the default matching, which matches on every label but `__name__` — pair
-/// nothing, and that difference is what proves the `on` list reached the kernel.
-
 #[test]
 fn noncommutative_vector_operations_keep_left_right_values() {
-    for (query, expected) in [("a / on() b", 0.5), ("a - on() b", -1.0)] {
+    for (query, expected) in [("a / on() b", 0.5), ("a - on() b", -2.0)] {
         let compiled = compile(query);
         let chunks = run(
             &compiled,

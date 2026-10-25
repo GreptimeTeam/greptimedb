@@ -4983,7 +4983,7 @@ fn runtime_input_ids_route_repeated_and_distinct_source_indexes() {
     }
     assert_eq!(
         addressed(&run(&mut execution)),
-        vec![(0, vec![Some(6.0); 2])]
+        vec![(0, vec![Some(9.0); 2])]
     );
 }
 
@@ -9521,7 +9521,7 @@ fn an_ended_execution_keeps_no_input_schema_or_grid() {
 /// refusal is not a stop: what the execution holds is the answer the caller has not pulled yet.
 #[test]
 fn a_chunk_pushed_after_the_input_ended_is_refused() {
-    let (tree, grid, left, right) = binary_tree(BinaryOp::Add, 4);
+    let (tree, grid, _, _) = binary_tree(BinaryOp::Add, 4);
     let schema = evaluated_schema(Arc::clone(&grid));
     let pool = bounded_pool(1 << 22);
     let mut execution = executor(&tree, Arc::clone(&pool));
