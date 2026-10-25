@@ -102,12 +102,17 @@ fn plan_fused_series(
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
-    let Some(input) = physical_inputs.first() else {
+    if physical_inputs.len() != fused.children().len() || physical_inputs.is_empty() {
+        return Err(DataFusionError::Plan(
+            "FusedSeries physical child count mismatch".into(),
+        ));
+    }
+    if physical_inputs
+        .iter()
+        .any(|input| input.downcast_ref::<RegionScanExec>().is_none())
+    {
         return Ok(None);
-    };
-    let Some(scan) = input.downcast_ref::<RegionScanExec>() else {
-        return Ok(None);
-    };
+    }
 
     let binding = fused.binding();
     let Some(metric_name) = binding.metric_name.as_deref() else {
@@ -125,43 +130,42 @@ fn plan_fused_series(
         .filter(|tag| tag.as_str() != METRIC_NAME)
         .cloned()
         .collect::<Vec<_>>();
-    let field_names = binding
-        .series_schema
-        .fields
-        .iter()
-        .map(|field| field.name.to_string())
-        .collect::<Vec<_>>();
-
-    let scan = if scan.is_partition_set() {
-        Arc::new(scan.clone())
-    } else {
-        let partitions = table::table::scan::assign_partition_ranges(
-            scan.get_partition_ranges(),
-            target_partitions.max(1),
-        );
-        Arc::new(
-            scan.with_new_partitions(partitions, target_partitions.max(1))
-                .map_err(|error| DataFusionError::External(error.into_inner()))?,
-        )
-    };
-    // The scan resolves the label source and the ordering it will declare itself, against its own
-    // metadata snapshot, and hands both back through the leaf it builds. Naming them here instead
-    // would be a second copy of a binding only the scanner can make: the physical metadata and
-    // column ids a `RawLabelSource::PrimaryKey` carries are not reachable from a region scan's
-    // public surface, so the layer that resolves them is the scanner.
-    let Some(series_scan) =
-        scan.try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
-    else {
-        return Err(DataFusionError::Plan(format!(
-            "the region scan under FusedSeries could not serve a raw series frame for metric \
-             {metric_name:?}: the scanner refused the raw series path for this scan, so this node \
-             has no input to read"
-        )));
-    };
-    let label_source = series_scan.label_source().clone();
-    let ordering = series_scan.raw_series_ordering();
-
-    fused
-        .to_execution_plan(series_scan, label_source, ordering)
-        .map(Some)
+    let source_fields = super::fused_series::tree_source_fields(fused.tree())?;
+    if source_fields.len() != physical_inputs.len() {
+        return Err(DataFusionError::Plan(
+            "FusedSeries physical plan source count mismatch".into(),
+        ));
+    }
+    let mut series_inputs = Vec::with_capacity(physical_inputs.len());
+    for (physical, field_names) in physical_inputs.iter().zip(source_fields) {
+        let Some(scan) = physical.downcast_ref::<RegionScanExec>() else {
+            return Ok(None);
+        };
+        let scan = if scan.is_partition_set() {
+            Arc::new(scan.clone())
+        } else {
+            let partitions = table::table::scan::assign_partition_ranges(
+                scan.get_partition_ranges(),
+                target_partitions.max(1),
+            );
+            Arc::new(
+                scan.with_new_partitions(partitions, target_partitions.max(1))
+                    .map_err(|error| DataFusionError::External(error.into_inner()))?,
+            )
+        };
+        let Some(series_scan) =
+            scan.try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
+        else {
+            return Err(DataFusionError::Plan(format!(
+                "the region scan under FusedSeries could not serve a raw series frame for metric \
+                 {metric_name:?}: the scanner refused the raw series path for this scan"
+            )));
+        };
+        series_inputs.push((
+            series_scan.clone() as Arc<dyn ExecutionPlan>,
+            series_scan.label_source().clone(),
+            series_scan.raw_series_ordering(),
+        ));
+    }
+    fused.to_execution_plan(series_inputs).map(Some)
 }

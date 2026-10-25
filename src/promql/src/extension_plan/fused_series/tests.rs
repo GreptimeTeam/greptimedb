@@ -49,7 +49,7 @@ use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
-use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::ensure_requirements::EnsureRequirements;
@@ -57,6 +57,7 @@ use datafusion::physical_plan::execution_plan::{
     Boundedness, ChildrenPropertiesMode, EmissionType, ReplaceChildrenOptions,
 };
 use datafusion::physical_plan::metrics::{MetricValue, MetricsSet};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
     RecordBatchStream, SendableRecordBatchStream, collect, displayable,
@@ -74,10 +75,11 @@ use super::{FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET, series_t
 use crate::evaluated::EvaluatedChunk;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundWindow, Grouping, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundScalar,
+    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The query every tree here is compiled from.
 const PROMQL: &str = "rate(x[5m])";
@@ -136,6 +138,14 @@ fn two_field_schema() -> Arc<SeriesSchema> {
     })
 }
 
+/// A one-field raw schema with a distinct name for independent-source decoding tests.
+fn other_field_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: OTHER.into() }]),
+        eval_grid: None,
+    })
+}
+
 /// The tree `rate(x[5m])` compiles to over `schema`: raw samples folded by one window onto the grid.
 fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
     let grid = grid();
@@ -152,7 +162,7 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
                 expr: NativeExpr::Input(BoundInput {
                     output: raw.clone(),
                     source_index: 0,
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: raw,
             }),
@@ -177,6 +187,216 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
 /// The tree `rate(x[5m])` compiles to over one field.
 fn rate_tree() -> NativeTree {
     rate_tree_of(raw_schema())
+}
+
+/// `left + right` on one grid, both operands reading the one actual source.
+fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) -> NativeTree {
+    binary_tree_over_sources(BinaryOp::Add, left_schema, right_schema, 0, 0)
+}
+
+/// A binary tree over `op` whose operands are bound to the given source indexes.
+///
+/// `left_schema` is the operand at `root.left` and `right_schema` the one at `root.right`, so a
+/// subtracting tree answers `left - right`. Equal indexes model two leaves sharing one source;
+/// distinct dense indexes model independent physical sources. The renderer names each input index,
+/// so trees with otherwise identical operands remain distinct computations.
+fn binary_tree_over_sources(
+    op: BinaryOp,
+    left_schema: Arc<SeriesSchema>,
+    right_schema: Arc<SeriesSchema>,
+    left_source: usize,
+    right_source: usize,
+) -> NativeTree {
+    let grid = grid();
+    let left_eval = Arc::new(SeriesSchema {
+        fields: left_schema.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let right_eval = Arc::new(SeriesSchema {
+        fields: right_schema.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let output = crate::vector_match::binary_output_schema(&left_eval, &right_eval).unwrap();
+    let raw_left = Arc::clone(&left_schema);
+    let raw_right = Arc::clone(&right_schema);
+    let left = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: left_source,
+                    output: NativeType::Samples(Arc::clone(&raw_left)),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: NativeType::Samples(raw_left),
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: NativeType::Samples(left_eval),
+    };
+    let right = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: right_source,
+                    output: NativeType::Samples(Arc::clone(&raw_right)),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: NativeType::Samples(raw_right),
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: NativeType::Samples(right_eval),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .unwrap()
+}
+
+/// The constant scalar `value`, evaluated on `grid`.
+///
+/// A scalar is the one thing a tree can produce while reading no source, so this is the tree the
+/// zero-child case is about.
+fn scalar_tree(grid: Arc<EvalGrid>, value: f64) -> NativeTree {
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Scalar(BoundScalar { value }),
+        output: NativeType::Scalar(grid),
+    })
+    .expect("a constant scalar is a legal tree")
+}
+
+/// An instant selection over the tree input bound to `source_index`.
+fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
+    let raw = NativeType::Samples(raw_schema());
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index,
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: 0,
+                offset_ms: 0,
+                output_grid: Arc::clone(grid),
+            },
+        },
+        output: evaluated_of(&raw_schema(), grid),
+    }
+}
+
+/// `raw_schema`'s fields on `grid`: one value per grid point.
+fn evaluated_of(schema: &SeriesSchema, grid: &Arc<EvalGrid>) -> NativeType {
+    NativeType::Samples(Arc::new(SeriesSchema {
+        fields: schema.fields.clone(),
+        eval_grid: Some(Arc::clone(grid)),
+    }))
+}
+
+/// `tree` with the orderings its input nodes declare replaced, in the order the nodes are reached.
+///
+/// The fixtures here declare `Contiguous`, which is what the plans below them present, so a test
+/// that needs another declaration rewrites it on a clone rather than keeping a second tree builder
+/// beside the first. The rewrite is revalidated by [`NativeTree::try_new`], so one that broke a
+/// contract of the tree is refused here instead of at the node under test.
+fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> NativeTree {
+    fn rewrite(node: &NativeNode, orderings: &[SeriesOrdering], seen: &mut usize) -> NativeNode {
+        let mut expr = node.expr.clone();
+        match &mut expr {
+            NativeExpr::Input(bound) => {
+                bound.ordering = orderings[*seen];
+                *seen += 1;
+            }
+            // A constant reads no source, so it declares no ordering.
+            NativeExpr::Scalar(_) => {}
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => {
+                **input = rewrite(input, orderings, seen);
+            }
+            NativeExpr::Binary { left, right, .. } => {
+                **left = rewrite(left, orderings, seen);
+                **right = rewrite(right, orderings, seen);
+            }
+        }
+        NativeNode {
+            expr,
+            output: node.output.clone(),
+        }
+    }
+    let mut seen = 0;
+    let tree = NativeTree::try_new(rewrite(tree.root(), orderings, &mut seen))
+        .expect("another declared ordering keeps the tree legal");
+    assert_eq!(orderings.len(), seen, "one ordering per input of the tree");
+    tree
+}
+
+/// `x - 2 * x`: one source read at both operands, with a scalar multiplier on the right.
+///
+/// The subtraction and the multiplier together make the answer depend on which operand is which:
+/// this tree answers `-x` at every grid point, and the same operands paired the other way round
+/// answer `+x`. `x - x` would answer zero either way and could not tell the two apart.
+fn subtracted_scaled_tree() -> NativeTree {
+    let grid = grid();
+    let output = evaluated_of(&raw_schema(), &grid);
+    let doubled = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(instant_of(0, &grid)),
+            right: Box::new(NativeNode {
+                expr: NativeExpr::Scalar(BoundScalar { value: 2.0 }),
+                output: NativeType::Scalar(Arc::clone(&grid)),
+            }),
+            matching: BinaryMatching {
+                op: BinaryOp::Mul,
+                return_bool: false,
+                // What a scalar broadcast binds: the modifiers of a vector-vector match have no
+                // meaning here, and the runtime refuses a constant carrying them.
+                labels: MatchingLabels::Ignoring(Vec::new()),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: output.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(instant_of(0, &grid)),
+            right: Box::new(doubled),
+            matching: BinaryMatching {
+                op: BinaryOp::Sub,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output,
+    })
+    .expect("the bound tree is legal")
 }
 
 /// The same tree asking for `quantile`, whose state the runtime does not keep yet.
@@ -233,11 +453,10 @@ fn aggregate_tree() -> NativeTree {
 /// What the tree's input was compiled against, for the input schema and output tags given.
 fn binding_of(
     tree: &NativeTree,
-    series_schema: Arc<SeriesSchema>,
+    _series_schema: Arc<SeriesSchema>,
     tags: Vec<String>,
 ) -> FusedSeriesBinding {
     FusedSeriesBinding {
-        series_schema,
         grid: tree
             .root()
             .output
@@ -281,6 +500,19 @@ fn output_schema() -> SchemaRef {
     ]))
 }
 
+/// A one-to-one `on(host)` binary output schema.
+fn binary_output_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]))
+}
+
 /// The output of [`zone_node`]: the field, `host`, `zone`, the dropped name and the grid times.
 fn zone_output_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -308,7 +540,7 @@ fn zone_node() -> FusedSeries {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(frame_schema()),
+        vec![input_plan(frame_schema())],
         zone_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
@@ -342,8 +574,12 @@ fn zone_chunks() -> Vec<RawSeriesChunk> {
 }
 
 fn input_plan(schema: SchemaRef) -> LogicalPlan {
+    input_plan_with_rows(schema, false)
+}
+
+fn input_plan_with_rows(schema: SchemaRef, produce_one_row: bool) -> LogicalPlan {
     LogicalPlan::EmptyRelation(EmptyRelation {
-        produce_one_row: false,
+        produce_one_row,
         schema: schema.to_dfschema_ref().unwrap(),
     })
 }
@@ -400,6 +636,69 @@ fn staged(
         )),
         make: Box::new(make),
     })
+}
+
+/// Counts calls per partition while preserving an existing physical input unchanged.
+struct CountedExec {
+    input: Arc<dyn ExecutionPlan>,
+    calls: Arc<Vec<AtomicUsize>>,
+}
+
+impl std::fmt::Debug for CountedExec {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CountedExec").finish()
+    }
+}
+
+impl DisplayAs for CountedExec {
+    fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        self.input.fmt_as(t, f)
+    }
+}
+
+impl ExecutionPlan for CountedExec {
+    fn name(&self) -> &str {
+        "CountedExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.input.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        self.input.apply_expressions(f)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(DataFusionError::Plan(
+                "CountedExec requires one child".into(),
+            ));
+        }
+        Ok(Arc::new(Self {
+            input: children.remove(0),
+            calls: Arc::clone(&self.calls),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        self.calls[partition].fetch_add(1, Ordering::SeqCst);
+        self.input.execute(partition, context)
+    }
 }
 
 /// A physical input, so a test can stage what a memory source cannot: a pending poll, an error
@@ -558,12 +857,17 @@ impl Drop for StagedStream {
 
 fn fused(tree: NativeTree) -> FusedSeries {
     let binding = binding(&tree);
+    let output_schema = if matches!(&tree.root().expr, NativeExpr::Binary { .. }) {
+        binary_output_schema()
+    } else {
+        output_schema()
+    };
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(frame_schema()),
-        output_schema().to_dfschema_ref().unwrap(),
+        vec![input_plan(frame_schema())],
+        output_schema.to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
 }
@@ -573,7 +877,11 @@ fn plan_of(
     node: FusedSeries,
     input: Arc<dyn ExecutionPlan>,
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-    node.to_execution_plan(input, RawLabelSource::Explicit, SeriesOrdering::Contiguous)
+    node.to_execution_plan(vec![(
+        input,
+        RawLabelSource::Explicit,
+        SeriesOrdering::Contiguous,
+    )])
 }
 
 /// The physical node of `tree` over `input`.
@@ -674,6 +982,20 @@ fn frames_of(schema: &SeriesSchema, chunks: &[RawSeriesChunk]) -> Vec<RecordBatc
     chunks.iter().map(|chunk| frame_of(schema, chunk)).collect()
 }
 
+/// One frame with a different raw field layout, used to verify source-local decoding.
+fn other_field_chunk(host: &str, value: f64) -> RecordBatch {
+    let schema = other_field_schema();
+    let chunk = chunk_of(
+        &schema,
+        host,
+        metric(&[(HOST, host)], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(value)]],
+        true,
+    );
+    frame_of(&schema, &chunk)
+}
+
 /// The frames carrying `chunks` of the one-field schema of these tests, one batch each.
 fn frames(chunks: &[RawSeriesChunk]) -> Vec<RecordBatch> {
     frames_of(&raw_schema(), chunks)
@@ -710,6 +1032,24 @@ fn one_series_frames() -> Vec<RecordBatch> {
         series_chunk("web-1", &rows[4..7], false),
         series_chunk("web-1", &rows[7..], true),
     ])
+}
+
+fn binary_values(batches: &[RecordBatch]) -> Vec<f64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column_by_name(VALUE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            (0..values.len())
+                .filter(|&row| values.is_valid(row))
+                .map(|row| values.value(row))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The rows of `batches`: timestamp, value, host and metric name.
@@ -1097,7 +1437,7 @@ fn a_tree_bound_to_another_grid_is_rejected() {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(frame_schema()),
+        vec![input_plan(frame_schema())],
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect_err("the tree is not evaluated on the declared grid");
@@ -1128,10 +1468,456 @@ fn a_separately_allocated_grid_with_an_equal_spec_is_accepted() {
         Arc::from(PROMQL),
         tree,
         binding,
-        input_plan(frame_schema()),
+        vec![input_plan(frame_schema())],
         output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("an equal grid spec is the same grid");
+}
+
+/// A scalar tree is a legal logical node with no input plans, while a mismatched child is not.
+#[test]
+fn scalar_logical_node_has_no_children_and_refuses_a_child() {
+    let grid = grid();
+    let tree = scalar_tree(Arc::clone(&grid), 7.0);
+    let binding = FusedSeriesBinding {
+        grid,
+        metric_name: None,
+        time_index: TIME.to_string(),
+        tags: vec![HOST.to_string()],
+    };
+    let node = FusedSeries::try_new(
+        Arc::from("vector(7)"),
+        tree.clone(),
+        binding.clone(),
+        Vec::new(),
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("a scalar tree reads no children");
+    assert!(node.children().is_empty());
+    assert!(node.inputs().is_empty());
+    assert!(
+        FusedSeries::try_new(
+            Arc::from("vector(7)"),
+            tree,
+            binding,
+            vec![input_plan(frame_schema())],
+            output_schema().to_dfschema_ref().unwrap(),
+        )
+        .is_err(),
+        "a scalar tree cannot be bound to a child"
+    );
+}
+
+/// Logical children stay in source-index order through optimizer replacement.
+#[test]
+fn logical_children_and_inputs_roundtrip_in_source_order() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let left = input_plan_with_rows(frame_schema(), false);
+    let right = input_plan_with_rows(frame_schema(), true);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree,
+        binding(&rate_tree()),
+        vec![left.clone(), right.clone()],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("two dense source indexes bind to two plans");
+    assert_eq!(2, node.children().len());
+    assert_eq!(2, node.inputs().len());
+    assert!(matches!(
+        node.children()[0],
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        node.children()[1],
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: true,
+            ..
+        })
+    ));
+    let rebuilt = node
+        .with_exprs_and_inputs(Vec::<Expr>::new(), vec![right.clone(), left.clone()])
+        .expect("optimizer replacement preserves the replacement source order");
+    assert!(matches!(
+        rebuilt.children()[0],
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: true,
+            ..
+        })
+    ));
+    assert!(matches!(
+        rebuilt.children()[1],
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: false,
+            ..
+        })
+    ));
+    assert!(matches!(
+        rebuilt.inputs()[0],
+        LogicalPlan::EmptyRelation(EmptyRelation {
+            produce_one_row: true,
+            ..
+        })
+    ));
+}
+
+/// Invalid logical source layouts fail during construction, including a huge sparse index.
+#[test]
+fn logical_source_indexes_must_match_dense_children() {
+    let child = input_plan(frame_schema());
+    for (name, tree, children) in [
+        ("wrong child count", rate_tree(), Vec::new()),
+        (
+            "gap",
+            binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 2),
+            vec![child.clone(), child.clone(), child.clone()],
+        ),
+        (
+            "huge source index",
+            binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, usize::MAX),
+            vec![child.clone(); 2],
+        ),
+    ] {
+        assert!(
+            FusedSeries::try_new(
+                Arc::from(name),
+                tree.clone(),
+                binding(&tree),
+                children,
+                output_schema().to_dfschema_ref().unwrap(),
+            )
+            .is_err(),
+            "{name} must be refused without allocating by source index"
+        );
+    }
+}
+
+/// Repeated bindings to one source must agree on fields, and on producer ordering.
+#[test]
+fn repeated_source_bindings_validate_fields_and_second_ordering() {
+    let fields_mismatch =
+        binary_tree_over_sources(BinaryOp::Add, raw_schema(), two_field_schema(), 0, 0);
+    assert!(
+        FusedSeries::try_new(
+            Arc::from("x + x"),
+            fields_mismatch.clone(),
+            binding(&fields_mismatch),
+            vec![input_plan(frame_schema())],
+            output_schema().to_dfschema_ref().unwrap(),
+        )
+        .is_err(),
+        "one source cannot declare incompatible field lists"
+    );
+
+    let tree = binary_tree(raw_schema(), raw_schema());
+    let second_ordering = declaring_orderings(
+        &tree,
+        &[SeriesOrdering::Contiguous, SeriesOrdering::KeyThenTime],
+    );
+    let node = fused(second_ordering);
+    let error = node
+        .to_execution_plan(vec![(
+            memory_exec(Vec::new()),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )])
+        .expect_err("the second repeated leaf's incompatible ordering is rejected");
+    assert!(error.to_string().contains("ordering"), "{error}");
+}
+
+/// Logical trees with distinct dense sources are accepted by the physical adapter.
+#[tokio::test]
+async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .expect("the logical node accepts two dense sources");
+    let source = || {
+        Arc::new(CountedExec {
+            input: memory_exec(Vec::new()),
+            calls: Arc::new((0..1).map(|_| AtomicUsize::new(0)).collect()),
+        }) as Arc<dyn ExecutionPlan>
+    };
+    let plan = node
+        .to_execution_plan(vec![
+            (
+                source(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                source(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("the physical boundary accepts independent source bindings");
+    assert_eq!(2, plan.children().len());
+    let results = collect(Arc::clone(&plan), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert!(rows(&results).is_empty());
+    for child in plan.children() {
+        let counted = child
+            .downcast_ref::<CountedExec>()
+            .expect("child preserves its counted execution plan");
+        assert_eq!(1, counted.calls[0].load(Ordering::SeqCst));
+    }
+}
+
+/// Independent sources execute in source order and gather all child partitions, without zipping.
+#[tokio::test]
+async fn independent_sources_execute_all_partitions_sequentially() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), other_field_schema(), 0, 1);
+    let left_calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect());
+    let right_calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect());
+    let left = Arc::new(CountedExec {
+        input: memory_exec_partitioned(vec![
+            vec![frame(&series_chunk("web-2", &[(GRID_START, 8.0)], true))],
+            vec![frame(&series_chunk("web-1", &[(GRID_START, 9.0)], true))],
+        ]),
+        calls: Arc::clone(&left_calls),
+    });
+    let right = Arc::new(CountedExec {
+        input: memory_exec_partitioned_with(
+            frame_schema_of(&other_field_schema()),
+            vec![
+                vec![other_field_chunk("web-2", 3.0)],
+                vec![other_field_chunk("web-1", 2.0)],
+                vec![other_field_chunk("web-3", 4.0)],
+            ],
+        ),
+        calls: Arc::clone(&right_calls),
+    });
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![
+            input_plan(frame_schema()),
+            input_plan(frame_schema_of(&other_field_schema())),
+        ],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    assert_eq!(1, exec.properties().output_partitioning().partition_count());
+    let results = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let mut actual = binary_values(&results);
+    actual.sort_by(f64::total_cmp);
+    assert_eq!(vec![5.0, 7.0], actual);
+    assert_eq!(
+        vec![1, 1],
+        left_calls
+            .iter()
+            .map(|c| c.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec![1, 1, 1],
+        right_calls
+            .iter()
+            .map(|c| c.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// On-label matching projects binary output tags while retaining all raw tags for frame decoding.
+#[tokio::test]
+async fn binary_output_tags_are_projected_but_raw_binding_is_full() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let left = memory_exec(vec![frame(&chunk_of(
+        &raw_schema(),
+        "web-1",
+        metric(&[(HOST, "web-1"), (ZONE, "west")], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(9.0)]],
+        true,
+    ))]);
+    let right = memory_exec(vec![frame(&chunk_of(
+        &raw_schema(),
+        "web-1",
+        metric(&[(HOST, "web-1"), (ZONE, "east")], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(2.0)]],
+        true,
+    ))]);
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let results = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(vec![7.0], binary_values(&results));
+    assert!(
+        results
+            .iter()
+            .all(|batch| batch.column_by_name(ZONE).is_none())
+    );
+}
+
+/// Empty earlier sources do not stop later sources, and one-to-one matching can yield no rows.
+#[tokio::test]
+async fn empty_first_source_does_not_end_gather_early() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let second = memory_exec(vec![frame(&series_chunk(
+        "web-1",
+        &[(GRID_START, 2.0)],
+        true,
+    ))]);
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                memory_exec(Vec::new()),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (second, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let results = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert!(rows(&results).is_empty());
+}
+
+/// A multiparty gather requires Contiguous input, not global KeyThenTime ordering.
+#[test]
+fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
+    let tree = declaring_orderings(
+        &binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1),
+        &[SeriesOrdering::KeyThenTime, SeriesOrdering::Contiguous],
+    );
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let error = node
+        .to_execution_plan(vec![
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::KeyThenTime,
+            ),
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect_err("concatenated partitions are not globally KeyThenTime");
+    assert!(error.to_string().contains("ordering"), "{error}");
+}
+
+/// A later source failure drops streams already opened for earlier sources and releases state.
+#[tokio::test]
+async fn later_source_error_drops_all_gathered_inputs() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let dropped = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let left_schema = frame_schema();
+    let left_drop = Arc::clone(&dropped[0]);
+    let left = staged(left_schema.clone(), move || {
+        Box::pin(
+            StagedStream::new(
+                left_schema.clone(),
+                vec![frame(&series_chunk("web-1", &[(GRID_START, 9.0)], true))],
+            )
+            .dropped(&left_drop),
+        )
+    });
+    let right_schema = frame_schema();
+    let right_drop = Arc::clone(&dropped[1]);
+    let right = staged(right_schema.clone(), move || {
+        Box::pin(
+            StagedStream::new(right_schema.clone(), Vec::new())
+                .error("later source failed")
+                .dropped(&right_drop),
+        )
+    });
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("later source failed"));
+    assert!(dropped.iter().all(|flag| flag.load(Ordering::SeqCst)));
+    assert_eq!(0, pool.reserved());
+}
+
+/// The physical boundary rejects zero sources and mismatched physical source counts.
+#[test]
+fn physical_plan_requires_matching_source_count() {
+    let node = fused(rate_tree());
+    let zero = node
+        .to_execution_plan(Vec::new())
+        .expect_err("physical execution cannot run with zero sources");
+    assert!(zero.to_string().contains("source") || zero.to_string().contains("input"));
+
+    let source = memory_exec(Vec::new());
+    let tuple = || {
+        (
+            Arc::clone(&source),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )
+    };
+    let many = node
+        .to_execution_plan(vec![tuple(), tuple()])
+        .expect_err("physical input count differs from the tree's source count");
+    assert!(many.to_string().contains("source") || many.to_string().contains("input"));
 }
 
 /// An input that ends without a series still runs the tree, and yields no rows.
@@ -1320,7 +2106,7 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     )));
     let error = plan(rate_tree(), empty).expect_err("there is no partition to run");
     assert!(
-        error.to_string().contains("input has no partitions"),
+        error.to_string().contains("input 0 has no partitions"),
         "refused for another reason: {error}"
     );
     // The only count refused is zero: two partitions build and answer, which is what the
@@ -1565,6 +2351,113 @@ async fn every_partition_evaluates_its_own_series() {
     }
 }
 
+/// A single repeated source feeds both operands once in each of four independent partitions.
+#[tokio::test]
+async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
+    let partitions = (0..4)
+        .map(|partition| {
+            let samples = (0..GRID_LEN as i64)
+                .map(|index| {
+                    let time = GRID_START + index * GRID_STEP;
+                    (time, partition as f64 * 10.0 + index as f64 + 1.0)
+                })
+                .collect::<Vec<_>>();
+            vec![frame(&series_chunk(
+                &format!("web-{partition}"),
+                &samples,
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let input = memory_exec_partitioned(partitions);
+    let calls_by_partition = Arc::new((0..4).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let counted = Arc::new(CountedExec {
+        input,
+        calls: Arc::clone(&calls_by_partition),
+    });
+    let exec = plan(subtracted_scaled_tree(), counted)
+        .expect("the repeated source tree runs over one physical child");
+    assert_eq!(4, exec.properties().output_partitioning().partition_count());
+    assert_eq!(1, exec.children().len());
+
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let expected_times = grid_timestamps();
+    let mut total_rows = 0;
+    for partition in 0..4 {
+        let mut stream = exec
+            .execute(partition, Arc::clone(&context))
+            .expect("each requested partition exists");
+        let batches = stream
+            .as_mut()
+            .try_collect::<Vec<_>>()
+            .await
+            .expect("the partition completes without errors");
+        let actual = batches
+            .iter()
+            .flat_map(|batch| {
+                let time = batch
+                    .column_by_name(TIME)
+                    .expect("binary output has time")
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("time output is millisecond timestamp");
+                let value = batch
+                    .column_by_name(VALUE)
+                    .expect("binary output has value")
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("value output is Float64");
+                let host = batch
+                    .column_by_name(HOST)
+                    .expect("binary output retains host")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("host output is Utf8");
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            time.value(row),
+                            value.is_valid(row).then(|| value.value(row)),
+                            host.is_valid(row).then(|| host.value(row).to_string()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        total_rows += actual.len();
+        let host = format!("web-{partition}");
+        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
+        assert_eq!(
+            expected_times,
+            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
+            "{host} timestamps preserve grid order"
+        );
+        assert!(
+            actual
+                .iter()
+                .all(|row| row.2.as_deref() == Some(host.as_str()))
+        );
+        let expected_values = (0..GRID_LEN as usize)
+            .map(|index| Some(-((partition * 10 + index + 1) as f64)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected_values,
+            actual.iter().map(|row| row.1).collect::<Vec<_>>()
+        );
+        assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
+        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
+    }
+    assert_eq!(4 * GRID_LEN as usize, total_rows);
+    assert_eq!(
+        vec![1, 1, 1, 1],
+        calls_by_partition
+            .iter()
+            .map(|call| call.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// The optimizer inserts no exchange between a two-partition scan and this node.
 ///
 /// This is the claim the whole arrangement rests on, so it is checked against the real rule rather
@@ -1738,8 +2631,8 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         eval_grid: None,
     });
     let right = binding_of(&tree, other_schema, left.tags.clone());
-    assert_ne!(left, right);
-    assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
+    assert_eq!(left, right);
+    assert_eq!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
 
     let left_node = fused(tree.clone());
     let nullability_changed = Arc::new(Schema::new(vec![
@@ -1756,7 +2649,7 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
         Arc::from(PROMQL),
         tree,
         binding(&rate_tree()),
-        input_plan(frame_schema()),
+        vec![input_plan(frame_schema())],
         nullability_changed.to_dfschema_ref().unwrap(),
     )
     .unwrap();
@@ -1764,6 +2657,199 @@ fn unequal_binding_and_output_schema_are_not_ordered_equal() {
     assert_ne!(
         Some(std::cmp::Ordering::Equal),
         left_node.partial_cmp(&right_node)
+    );
+}
+
+/// A later repeated-source enqueue failure is surfaced before any output and releases the input.
+#[tokio::test]
+async fn a_later_repeated_source_enqueue_failure_releases_the_input() {
+    use common_query::series_frame::unpack_raw_series;
+
+    let schema = raw_schema();
+    let chunk = series_chunk("web-1", &series_samples(1.0)[..4], false);
+    let one_frame = frame_of(&schema, &chunk);
+    let decoded = unpack_raw_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            frame_schema(),
+            futures::stream::iter(vec![Ok(one_frame.clone())]),
+        )),
+        Some(Arc::clone(&schema)),
+    )
+    .expect("the frame decodes using the source decoder");
+    let mut decoded = crate::source::materialize_raw_labels(decoded)
+        .expect("the labels materialize as the source does");
+    let decoded_chunk = decoded
+        .next()
+        .await
+        .expect("the decoder returns its frame")
+        .expect("the frame decodes successfully");
+
+    let probe_pool = Arc::new(GreedyMemoryPool::new(1 << 30));
+    let probe_state = NativeExecutionState::try_new(
+        &subtracted_scaled_tree(),
+        Arc::clone(&probe_pool) as Arc<dyn MemoryPool>,
+    )
+    .expect("the repeated-source runtime builds");
+    let ids = probe_state.input_ids(0).collect::<Vec<_>>();
+    let mut probe = NativeExecutor::new(probe_state);
+    assert_eq!(2, ids.len(), "the tree has two runtime recipients");
+    probe
+        .push_raw(ids[0], decoded_chunk.clone())
+        .expect("the first recipient accepts the decoded chunk");
+    let charge = probe_pool.reserved();
+    assert!(charge > 0, "the decoded chunk reserves memory");
+    drop(probe);
+
+    let bounded_pool = Arc::new(GreedyMemoryPool::new(charge));
+    let bounded_state = NativeExecutionState::try_new(
+        &subtracted_scaled_tree(),
+        Arc::clone(&bounded_pool) as Arc<dyn MemoryPool>,
+    )
+    .expect("the repeated-source runtime builds in the bounded pool");
+    let bounded_ids = bounded_state.input_ids(0).collect::<Vec<_>>();
+    let mut bounded = NativeExecutor::new(bounded_state);
+    bounded
+        .push_raw(bounded_ids[0], decoded_chunk.clone())
+        .expect("the bounded pool admits the first recipient");
+    assert!(
+        bounded.push_raw(bounded_ids[1], decoded_chunk).is_err(),
+        "the bounded pool refuses the second recipient"
+    );
+    assert_eq!(
+        0,
+        bounded_pool.reserved(),
+        "failure releases both recipients"
+    );
+    drop(bounded);
+    assert_eq!(0, bounded_pool.reserved(), "the bounded probe releases it");
+    assert_eq!(0, probe_pool.reserved(), "dropping the probe releases it");
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let pulled = Arc::new(AtomicUsize::new(0));
+    let later_frame = frame(&series_chunk("web-2", &series_samples(2.0)[..4], false));
+    let source_schema = frame_schema();
+    let source = staged(source_schema.clone(), {
+        let dropped = Arc::clone(&dropped);
+        let pulled = Arc::clone(&pulled);
+        move || {
+            Box::pin(
+                StagedStream::new(
+                    source_schema.clone(),
+                    vec![one_frame.clone(), later_frame.clone()],
+                )
+                .dropped(&dropped)
+                .counted(&pulled),
+            )
+        }
+    });
+    let pool = Arc::new(GreedyMemoryPool::new(charge));
+    let mut stream = plan(subtracted_scaled_tree(), source)
+        .expect("the repeated-source plan builds")
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+    let error = stream
+        .next()
+        .await
+        .expect("the later enqueue fails")
+        .expect_err("no output is produced before feed-all completes");
+    assert!(
+        error_chain(&error).to_lowercase().contains("memory")
+            || error_chain(&error).to_lowercase().contains("reservation")
+            || error_chain(&error).to_lowercase().contains("resource"),
+        "the failure is the exhausted memory pool: {error}"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "failure immediately releases reservations"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "failure releases the upstream stream"
+    );
+    let batches_at_failure = pulled.load(Ordering::SeqCst);
+    assert!(
+        batches_at_failure >= 1,
+        "the first frame reached the decoder"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "the terminated stream stays ended"
+    );
+    assert_eq!(batches_at_failure, pulled.load(Ordering::SeqCst));
+}
+
+/// Logical equality distinguishes source field layouts, even when the PromQL and output match.
+#[test]
+fn logical_identity_includes_native_source_field_order() {
+    let ordered_schema = two_field_schema();
+    let mut reversed_schema = (*ordered_schema).clone();
+    reversed_schema.fields = Arc::from([
+        FieldSpec { name: OTHER.into() },
+        FieldSpec { name: VALUE.into() },
+    ]);
+    let make_node = |schema: Arc<SeriesSchema>| {
+        let tree = rate_tree_of(schema);
+        FusedSeries::try_new(
+            Arc::from(PROMQL),
+            tree.clone(),
+            binding(&tree),
+            vec![input_plan(frame_schema())],
+            output_schema().to_dfschema_ref().unwrap(),
+        )
+        .expect("the source schema is legal")
+    };
+    let left = make_node(Arc::clone(&ordered_schema));
+    let right = make_node(Arc::new(reversed_schema));
+    assert_eq!(left.promql(), right.promql());
+    assert_eq!(left.binding(), right.binding());
+    assert_ne!(left, right);
+    assert_ne!(Some(std::cmp::Ordering::Equal), left.partial_cmp(&right));
+
+    let same_order = make_node(Arc::clone(&ordered_schema));
+    assert_eq!(left, same_order);
+    assert_eq!(
+        Some(std::cmp::Ordering::Equal),
+        left.partial_cmp(&same_order)
+    );
+}
+
+/// Dropping a pending repeated-source execution releases its reservations and physical input.
+#[tokio::test]
+async fn dropping_a_pending_repeated_source_releases_input_and_reservations() {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let schema = frame_schema();
+    let partial = frame(&series_chunk("web-1", &series_samples(1.0)[..4], false));
+    let source = staged(schema.clone(), {
+        let dropped = Arc::clone(&dropped);
+        move || {
+            Box::pin(
+                StagedStream::new(schema.clone(), vec![partial.clone()])
+                    .pending_after(1)
+                    .dropped(&dropped),
+            )
+        }
+    });
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = plan(subtracted_scaled_tree(), source)
+        .expect("the repeated-source tree runs")
+        .execute(0, task_context(&pool))
+        .expect("the node executes");
+
+    assert!(futures::poll!(stream.next()).is_pending());
+    assert!(
+        pool.reserved() > 0,
+        "the pending execution holds input data"
+    );
+    assert!(
+        !dropped.load(Ordering::SeqCst),
+        "the source is still executing"
+    );
+    drop(stream);
+    assert_eq!(0, pool.reserved(), "dropping releases every reservation");
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "dropping releases the source"
     );
 }
 

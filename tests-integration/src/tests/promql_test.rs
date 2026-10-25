@@ -24,8 +24,8 @@ use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORA
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datafusion::physical_plan::ExecutionPlanProperties;
 use datafusion::physical_plan::coop::CooperativeExec;
+use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
@@ -1965,6 +1965,63 @@ fn assert_delta_rows(
     }
 }
 
+fn assert_two_source_native_plan(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    require_multiple_nonempty_partitions: bool,
+) {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    assert_eq!(plan.children().len(), 2);
+    let schema = plan.schema();
+    assert_eq!(
+        schema.fields().len(),
+        3,
+        "binary output must have ts, value, host"
+    );
+    assert!(schema.field_with_name("ts").is_ok());
+    assert!(schema.field_with_name("host").is_ok());
+    assert!(schema.field_with_name("kind").is_err());
+    let children = plan.children();
+    assert!(!Arc::ptr_eq(children[0], children[1]));
+    for (source, child) in children.iter().enumerate() {
+        assert_eq!(child.output_partitioning().partition_count(), 4);
+        let scan = child
+            .downcast_ref::<CooperativeExec>()
+            .map_or(*child, |cooperative| cooperative.input());
+        let scan = scan.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
+            panic!("source {source} is not a SeriesScanExec: {scan:?}; plan={plan:?}")
+        });
+        let metrics = scan.metrics().expect("series scan metrics");
+        assert!(metrics.output_rows().expect("series scan output rows") > 0);
+        let mut nonempty_partitions = [false; 4];
+        for metric in metrics.iter() {
+            if let MetricValue::OutputRows(count) = metric.value()
+                && let Some(partition) = metric.partition()
+                && let Some(nonempty) = nonempty_partitions.get_mut(partition)
+            {
+                *nonempty |= count.value() > 0;
+            }
+        }
+        if require_multiple_nonempty_partitions {
+            assert!(
+                nonempty_partitions
+                    .iter()
+                    .filter(|nonempty| **nonempty)
+                    .count()
+                    > 1,
+                "source {source} must produce rows on multiple physical scan partitions: {nonempty_partitions:?}"
+            );
+        }
+    }
+    let display = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert_eq!(display.matches("source=0").count(), 1, "{display}");
+    assert_eq!(display.matches("source=1").count(), 1, "{display}");
+}
+
 fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     use datafusion::physical_plan::metrics::MetricValue;
 
@@ -2078,6 +2135,510 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     .await;
     assert_eq!(native_rows, expected);
     assert_eq!(native_rows, legacy_rows);
+}
+
+/// Distinct selector scans in a binary expression retain independent bindings and bounds (#9896).
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_binary_join_uses_two_independent_scans() {
+    // Enough rows per source for each independent scan to span multiple 8,192-row read batches.
+    const HOSTS: usize = 4_608;
+    const POINTS: i64 = 6;
+    const BATCH_ROWS: usize = 512;
+
+    fn insert_request(table: &str, schema: &[ColumnSchema], rows: Vec<Row>) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                }),
+            }],
+        }
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_two_scan_binary_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_two_scan_pair";
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {table} (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, kind))"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "kind".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let mut batch = Vec::with_capacity(BATCH_ROWS);
+    for host in 0..HOSTS {
+        for (kind, intercept, slope) in [("a", 100.0, 2.0), ("b", 1_000.0, 5.0)] {
+            for point in 0..POINTS {
+                batch.push(Row {
+                    values: vec![
+                        ValueData::StringValue(format!("h{host:04}")).into(),
+                        ValueData::StringValue(kind.to_string()).into(),
+                        ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                        ValueData::F64Value(intercept + slope * point as f64).into(),
+                    ],
+                });
+                if batch.len() == BATCH_ROWS {
+                    let rows = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_ROWS));
+                    instance
+                        .handle_row_inserts(
+                            insert_request(table, &schema, rows),
+                            QueryContext::arc(),
+                            false,
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+    if !batch.is_empty() {
+        instance
+            .handle_row_inserts(
+                insert_request(table, &schema, batch),
+                QueryContext::arc(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Distinct matcher inputs produce an independently checked noncommutative result.
+    let instant_sql =
+        format!("TQL EVAL (5, 5, '1s') {table}{{kind=\"a\"}} - on(host) {table}{{kind=\"b\"}}");
+    observer.clear();
+    let instant_rows =
+        native_result_rows(native_tql_output(&instance, &instant_sql, true).await).await;
+    let instant_plan = observer.take();
+    assert_two_source_native_plan(&instant_plan, true);
+    let instant_expected = (0..HOSTS)
+        .map(|host| (5_000, format!("h{host:04}"), -915.0))
+        .collect::<Vec<_>>();
+    assert_eq!(instant_rows, instant_expected);
+    let instant_legacy =
+        native_result_rows(native_tql_output(&instance, &instant_sql, false).await).await;
+    assert_eq!(instant_rows, instant_legacy);
+
+    // Independent range windows: left reads (1, 5], right (1, 3] after offset.
+    // Positive, distinct counter slopes make the exact binary result 2 - 5 = -3 per host.
+    let sql = format!(
+        "TQL EVAL (5, 5, '1s') rate({table}{{kind=\"a\"}}[4s] @ 5) - on(host) rate({table}{{kind=\"b\"}}[2s] @ 4 offset 1s)"
+    );
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_two_source_native_plan(&plan, true);
+    let input_samples = plan
+        .metrics()
+        .expect("fused metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.input_samples" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        input_samples,
+        HOSTS * 2,
+        "the binary consumes one evaluated value from each operand per host"
+    );
+    for (metric_name, expected_samples) in [
+        ("native.root.left.input_samples", HOSTS * 4),
+        ("native.root.right.input_samples", HOSTS * 2),
+    ] {
+        let source_samples = plan
+            .metrics()
+            .expect("fused metrics")
+            .iter()
+            .filter_map(|metric| match metric.value() {
+                datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                    if name.as_ref() == metric_name =>
+                {
+                    Some(count.value())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(source_samples, expected_samples, "{metric_name}");
+    }
+    let expected = (0..HOSTS)
+        .map(|host| (5_000, format!("h{host:04}"), -3.0))
+        .collect::<Vec<_>>();
+    assert_eq!(native_rows, expected);
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+}
+
+/// Repeated selectors retain correct binary results while using independent physical scans.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_repeated_selector_binary_uses_independent_scans() {
+    // 512 hosts * 64 points = 32,768 rows, generated in 512-row insert batches: at least four
+    // 8,192-row read batches, so the ordinary scan spreads the series over all four partitions.
+    const HOSTS: usize = 512;
+    const POINTS_PER_HOST: i64 = 64;
+    const INSERT_BATCH_ROWS: usize = 512;
+
+    fn value(host: usize, point: i64) -> f64 {
+        host as f64 * 1_000.0 + point as f64
+    }
+
+    fn host_name(host: usize) -> String {
+        // Three digits keep the names in numeric order for every host below 1000: the row
+        // comparison sorts by label text, and the expected rows are generated in numeric order.
+        format!("h{host:03}")
+    }
+
+    fn insert_request(table: &str, schema: &[ColumnSchema], rows: Vec<Row>) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                }),
+            }],
+        }
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_two_occurrences_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_pair_route";
+
+    execute_all(
+        &instance,
+        &format!(
+            r#"CREATE TABLE {table} (
+                host STRING NOT NULL,
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE,
+                PRIMARY KEY(host)
+            )"#
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
+    for host in 0..HOSTS {
+        for point in 0..POINTS_PER_HOST {
+            batch.push(Row {
+                values: vec![
+                    ValueData::StringValue(host_name(host)).into(),
+                    ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                    ValueData::F64Value(value(host, point)).into(),
+                ],
+            });
+            if batch.len() == INSERT_BATCH_ROWS {
+                let rows = std::mem::replace(&mut batch, Vec::with_capacity(INSERT_BATCH_ROWS));
+                instance
+                    .handle_row_inserts(
+                        insert_request(table, &schema, rows),
+                        QueryContext::arc(),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    if !batch.is_empty() {
+        instance
+            .handle_row_inserts(
+                insert_request(table, &schema, batch),
+                QueryContext::arc(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = (0..POINTS_PER_HOST)
+        .flat_map(|point| {
+            (0..HOSTS).map(move |host| (point * 1_000, host_name(host), -value(host, point)))
+        })
+        .collect::<Vec<_>>();
+
+    let last = POINTS_PER_HOST - 1;
+    let selector = format!(r#"{table}{{host!=""}}"#);
+    let sql = format!("TQL EVAL (0, {last}, '1s') {selector} - ({selector} * 2)");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_two_source_native_plan(&plan, true);
+    assert_eq!(native_rows, expected);
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+
+    // Direct x+x exercises the other repeated-selector form without relying on subtraction's
+    // order-sensitive arithmetic to reveal a swapped input.
+    let direct_sql = format!("TQL EVAL (0, {last}, '1s') {selector} + {selector}");
+    observer.clear();
+    let direct_rows =
+        native_result_rows(native_tql_output(&instance, &direct_sql, true).await).await;
+    let direct_plan = observer.take();
+    assert_eq!(direct_plan.name(), "FusedSeriesExec");
+    assert_two_source_native_plan(&direct_plan, true);
+    let direct_expected = (0..POINTS_PER_HOST)
+        .flat_map(|point| {
+            (0..HOSTS).map(move |host| (point * 1_000, host_name(host), value(host, point) * 2.0))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(direct_rows, direct_expected);
+    let direct_legacy =
+        native_result_rows(native_tql_output(&instance, &direct_sql, false).await).await;
+    assert_eq!(direct_rows, direct_legacy);
+
+    // A single selector with an equality matcher and an explicit range anchor/offset must push
+    // down both identity and time bounds. For h000, values equal the sample index; the first
+    // counter sample is zero, so the range-start extrapolation is zero and rate is 2 / 3 per second.
+    let bounded_sql =
+        format!("TQL EVAL (4, 4, '1s') rate({table}{{host=\"h000\"}}[3s] @ 3 offset 1s)");
+    observer.clear();
+    let bounded_rows =
+        native_result_rows(native_tql_output(&instance, &bounded_sql, true).await).await;
+    let bounded_plan = observer.take();
+    assert_eq!(bounded_plan.name(), "FusedSeriesExec");
+    assert_eq!(bounded_rows, vec![(4_000, "h000".to_string(), 2.0 / 3.0)]);
+    let legacy_bounded_rows =
+        native_result_rows(native_tql_output(&instance, &bounded_sql, false).await).await;
+    assert_eq!(bounded_rows, legacy_bounded_rows);
+    let child = bounded_plan.children()[0];
+    let child = child
+        .downcast_ref::<CooperativeExec>()
+        .map_or(child, |cooperative| cooperative.input());
+    let series_scan = child.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
+        panic!(
+            "bounded fused node child is not a prepared series scan: child={child:?}; plan={bounded_plan:?}"
+        )
+    });
+    let scan_frame_rows = series_scan
+        .metrics()
+        .expect("series scan metrics")
+        .output_rows()
+        .expect("series scan reports output rows");
+    assert_eq!(
+        scan_frame_rows, 1,
+        "the anchored range returns one packed raw-series frame"
+    );
+    let root_values = bounded_plan
+        .metrics()
+        .expect("fused metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(root_values, 1, "the bounded native result was executed");
+    let root_input_samples = bounded_plan
+        .metrics()
+        .expect("fused metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.input_samples" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        root_input_samples, 3,
+        "matcher and anchored range must scan only the three h000 samples"
+    );
+
+    // Different bounds/offsets remain independent: h000 at t=1 is 1, while the
+    // one-second-offset occurrence reads t=0, so the exact answer is 1 - (0 * 2) = 1.
+    let different_bounds = format!(
+        "TQL EVAL (1, 1, '1s') {table}{{host=\"h000\"}} - on(host) ({table}{{host=\"h000\"}} offset 1s * 2)"
+    );
+    observer.clear();
+    let different_bounds_rows =
+        native_result_rows(native_tql_output(&instance, &different_bounds, true).await).await;
+    let different_bounds_plan = observer.take();
+    assert_two_source_native_plan(&different_bounds_plan, false);
+    assert_eq!(
+        different_bounds_rows,
+        vec![(1_000, "h000".to_string(), 1.0)]
+    );
+    let different_bounds_legacy =
+        native_result_rows(native_tql_output(&instance, &different_bounds, false).await).await;
+    assert_eq!(different_bounds_rows, different_bounds_legacy);
+
+    // on() drops host from the output labels; inspect that shape directly instead of using the
+    // host-requiring native_result_rows helper.
+    let on_empty_sql = format!(
+        r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
+    );
+    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64, bool)> {
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        batches
+            .iter()
+            .flat_map(|batch| {
+                assert!(batch.column_by_name("host").is_none());
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let values = batch
+                    .columns()
+                    .iter()
+                    .filter(|column| column.data_type() == &DataType::Float64)
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 1);
+                let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            timestamps.value(row),
+                            values.value(row),
+                            batch.num_columns() == 2,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    observer.clear();
+    let on_empty_rows =
+        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
+    assert!(observer.fused().is_none(), "{on_empty_sql}");
+    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0, true)]);
+    let on_empty_legacy =
+        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
+    assert_eq!(on_empty_rows, on_empty_legacy);
+
+    // Different matcher forms can still be joined natively while preserving both source bounds.
+    let different_matchers =
+        format!(r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - ({table}{{host=~"h.+"}} * 2)"#);
+    observer.clear();
+    let different_matcher_rows =
+        native_result_rows(native_tql_output(&instance, &different_matchers, true).await).await;
+    let different_matcher_plan = observer.take();
+    assert_two_source_native_plan(&different_matcher_plan, false);
+    assert_eq!(different_matcher_rows, expected[..HOSTS].to_vec());
+    let different_matcher_legacy =
+        native_result_rows(native_tql_output(&instance, &different_matchers, false).await).await;
+    assert_eq!(different_matcher_rows, different_matcher_legacy);
+
+    // Group matching drops the full series identity, and a subquery stays on the ordinary planner path.
+    let fallback_expected = expected[..HOSTS].to_vec();
+    for (sql, expected_rows) in [
+        (
+            format!(
+                r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
+            ),
+            fallback_expected.clone(),
+        ),
+        (
+            format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
+            vec![(1_000, "h000".to_string(), 0.5)],
+        ),
+    ] {
+        observer.clear();
+        let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "a fallback shape must not plan a fused node: {sql}"
+        );
+        assert_eq!(rows, expected_rows, "{sql}");
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy_rows, "{sql}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

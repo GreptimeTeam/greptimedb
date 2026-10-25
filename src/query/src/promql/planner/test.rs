@@ -2379,7 +2379,6 @@ async fn native_fused_whole_vector_operation_falls_back() {
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
         "sum(rate(some_metric[5m]))",
-        "some_metric + some_metric",
         "sum_over_time(rate(some_metric[5m])[1h:])",
         "histogram_count(some_metric)",
         "ceil(some_metric)",
@@ -2397,6 +2396,90 @@ async fn native_fused_unsupported_shape_falls_back() {
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan"
         );
+    }
+}
+
+/// Independent selector occurrences remain distinct scans in the native tree.
+#[tokio::test]
+async fn native_fused_binary_keeps_independent_scan_occurrences() {
+    for query in [
+        "some_metric + some_metric",
+        "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}",
+        "rate(some_metric[5m]) + on(tag_0) rate(some_metric[10m] offset 2m)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("the plan holds a native node");
+        assert_eq!(parser::parse(query).unwrap().to_string(), fused.promql());
+        assert_eq!(2, fused.inputs().len(), "{query}");
+        let scans = fused
+            .inputs()
+            .iter()
+            .map(|input| match input {
+                LogicalPlan::TableScan(scan) => scan,
+                other => panic!("expected direct scan, got {other}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(scans[0].table_name, scans[1].table_name, "{query}");
+        fn sources(node: &promql::native::plan::NativeNode, out: &mut Vec<usize>) {
+            match &node.expr {
+                NativeExpr::Input(input) => out.push(input.source_index),
+                NativeExpr::Instant { input, .. }
+                | NativeExpr::Window { input, .. }
+                | NativeExpr::Map { input, .. } => sources(input, out),
+                NativeExpr::Binary { left, right, .. } => {
+                    sources(left, out);
+                    sources(right, out);
+                }
+                NativeExpr::Scalar(_)
+                | NativeExpr::Aggregate { .. }
+                | NativeExpr::Vector { .. } => {}
+            }
+        }
+        let mut source_indices = Vec::new();
+        sources(fused.tree().root(), &mut source_indices);
+        assert_eq!(vec![0, 1], source_indices, "{query}");
+        assert!(matches!(
+            fused.tree().root().expr,
+            NativeExpr::Binary { .. }
+        ));
+        let filters = scans
+            .iter()
+            .map(|scan| {
+                scan.filters
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        match query {
+            "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}" => {
+                assert!(filters[0].iter().any(|filter| filter.contains("a")));
+                assert!(filters[1].iter().any(|filter| filter.contains("b")));
+            }
+            "rate(some_metric[5m]) + on(tag_0) rate(some_metric[10m] offset 2m)" => {
+                assert!(
+                    filters[0].iter().any(|filter| filter.contains("-300000")),
+                    "{:?}",
+                    filters[0]
+                );
+                assert!(
+                    filters[1].iter().any(|filter| filter.contains("-720000")),
+                    "{:?}",
+                    filters[1]
+                );
+                assert!(
+                    filters[0].iter().any(|filter| filter.contains("100000000")),
+                    "{:?}",
+                    filters[0]
+                );
+                assert!(
+                    filters[1].iter().any(|filter| filter.contains("99880000")),
+                    "{:?}",
+                    filters[1]
+                );
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2452,7 +2535,7 @@ async fn native_fused_rate_scan_has_bounded_time_filter() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(-299999, None)")
+        display.contains("timestamp > TimestampMillisecond(-300000, None)")
             && display.contains("timestamp <= TimestampMillisecond(100000000, None)"),
         "native scan should include the bounded five-minute statement window: {display}"
     );
@@ -2465,7 +2548,7 @@ async fn native_fused_offset_rate_scan_uses_offset_window_bounds() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(-309999, None)")
+        display.contains("timestamp > TimestampMillisecond(-310000, None)")
             && display.contains("timestamp <= TimestampMillisecond(99990000, None)"),
         "native scan should account for the selector offset: {display}"
     );
@@ -2477,7 +2560,7 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
     let display = plan.display_indent().to_string();
 
     assert!(
-        display.contains("timestamp >= TimestampMillisecond(1, None)")
+        display.contains("timestamp > TimestampMillisecond(0, None)")
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
     );

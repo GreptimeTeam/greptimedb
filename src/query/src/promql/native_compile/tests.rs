@@ -1003,7 +1003,7 @@ fn the_display_of_a_compiled_tree_is_the_tree() {
         [
             "NativeTree",
             "  root Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-            "    input Input raw samples",
+            "    input Input raw samples source=0",
         ]
         .join("\n")
     );
@@ -1022,7 +1022,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Aggregate sum by [job] complete",
                 "    input Binary * ignoring [] one-to-one",
                 "      left Window rate [300000ms] offset 0 anchor - on grid 0/5000x21",
-                "        input Input raw samples",
+                "        input Input raw samples source=0",
                 "      right Scalar 100",
             ],
         ),
@@ -1033,7 +1033,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Binary * ignoring [] one-to-one",
                 "    left Scalar -1",
                 "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples",
+                "      input Input raw samples source=0",
             ],
         ),
         (
@@ -1043,7 +1043,7 @@ fn the_display_of_a_tree_the_batch_added_to_is_the_query() {
                 "  root Binary < ignoring [] one-to-one",
                 "    left Scalar 0",
                 "    right Instant lookback 5000ms offset 0 on grid 0/5000x21",
-                "      input Input raw samples",
+                "      input Input raw samples source=0",
             ],
         ),
     ];

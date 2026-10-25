@@ -73,9 +73,17 @@ fn describe(node: &NativeNode) -> String {
     match &node.expr {
         NativeExpr::Input(input) => match &input.output {
             NativeType::Samples(schema) if schema.eval_grid.is_some() => {
-                format!("evaluated samples{}", ordering(input.ordering))
+                format!(
+                    "evaluated samples source={}{}",
+                    input.source_index,
+                    ordering(input.ordering)
+                )
             }
-            NativeType::Samples(_) => format!("raw samples{}", ordering(input.ordering)),
+            NativeType::Samples(_) => format!(
+                "raw samples source={}{}",
+                input.source_index,
+                ordering(input.ordering)
+            ),
             NativeType::Scalar(grid) => format!("scalar on grid {}", grid_name(grid)),
             NativeType::AggregateState(_) => "aggregate state".to_string(),
         },
