@@ -4534,7 +4534,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
     }
     let mut wrong_bound_source = compiled.tree.root().clone();
     set_input_source(&mut wrong_bound_source, 1);
-    assert!(validate_inputs(&wrong_bound_source, &[original.clone()]).is_err());
+    assert!(validate_inputs(&wrong_bound_source, std::slice::from_ref(&original)).is_err());
 
     let wrong_schema = Arc::new(SeriesSchema {
         fields: Arc::clone(&original.schema.fields),
