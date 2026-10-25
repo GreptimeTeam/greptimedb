@@ -718,6 +718,7 @@ mod tests {
         let input = NativeNode {
             expr: NativeExpr::Input(BoundInput {
                 output: raw.clone(),
+                source_index: 0,
                 ordering: SeriesOrdering::KeyThenTime,
             }),
             output: raw,
