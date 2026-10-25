@@ -2054,6 +2054,7 @@ struct NodeState {
 
 /// The caller-owned state of one input leaf.
 struct InputSlot {
+    source_index: usize,
     schema: Arc<SeriesSchema>,
     open_source_series: bool,
     state: NodeState,
@@ -2100,6 +2101,7 @@ impl RuntimeNode {
                 })?;
                 let id = InputId(inputs.len());
                 inputs.push(InputSlot {
+                    source_index: bound.source_index,
                     schema,
                     open_source_series: false,
                     state: NodeState::new("native.input", Arc::clone(&metrics), pool),
@@ -2860,6 +2862,15 @@ impl NativeExecutionState {
     /// no topology of this execution alive.
     pub(crate) fn register_metrics(&self, set: &ExecutionPlanMetricsSet, partition: usize) {
         self.root.register_metrics("root", set, partition);
+    }
+
+    /// Returns the runtime input slots bound to `source_index`.
+    pub fn input_ids(&self, source_index: usize) -> impl Iterator<Item = InputId> + '_ {
+        self.inputs
+            .iter()
+            .enumerate()
+            .filter(move |(_, slot)| slot.source_index == source_index)
+            .map(|(index, _)| InputId::new(index))
     }
 
     pub fn reserved_bytes(&self) -> usize {
