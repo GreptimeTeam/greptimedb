@@ -825,7 +825,6 @@ fn metric_scan_and_table_id(
 }
 
 /// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.
-
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
