@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod coordinator;
 pub(crate) mod history;
 mod local;
 mod planning;
@@ -26,6 +27,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
+pub(crate) use coordinator::{CompactionCoordinator, CompactionCost, ReadyUnit};
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
@@ -38,7 +40,6 @@ use tokio::sync::mpsc::Sender;
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::memory_manager::CompactionMemoryManager;
-use crate::compaction::task::MAX_PARALLEL_COMPACTION;
 use crate::config::MitoConfig;
 use crate::error::{
     CompactionCancelledSnafu, Error, ManualCompactionAlreadyRunningSnafu, RegionClosedSnafu,
@@ -49,7 +50,6 @@ use crate::region::{ManifestContextRef, RegionLeaderState, RegionRoleState};
 use crate::request::{DdlRequest, OptionOutputTx, SenderDdlRequest, WorkerRequestWithTime};
 #[cfg(test)]
 use crate::schedule::RequestCancelResult;
-use crate::schedule::scheduler::SchedulerRef;
 use crate::worker::WorkerListener;
 
 /// Internal testing switch to prevent SST compaction from changing file layouts
@@ -88,7 +88,7 @@ pub(crate) struct CompactionScheduler {
     /// Initialized from [`DISABLE_COMPACTION`] and fixed for the scheduler's lifetime
     /// in production; unit tests can override it without changing the process environment.
     disable_compaction: bool,
-    scheduler: SchedulerRef,
+    coordinator: Arc<CompactionCoordinator>,
     /// All loaded regions, including idle regions and regions executing DDLs.
     region_status: HashMap<RegionId, CompactionStatus>,
     /// Request sender of the worker that this scheduler belongs to.
@@ -154,7 +154,7 @@ impl CompactionScheduler {
     /// same worker so region state transitions remain serialized.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        scheduler: SchedulerRef,
+        coordinator: Arc<CompactionCoordinator>,
         request_sender: Sender<WorkerRequestWithTime>,
         cache_manager: CacheManagerRef,
         engine_config: Arc<MitoConfig>,
@@ -165,7 +165,7 @@ impl CompactionScheduler {
     ) -> Self {
         Self {
             disable_compaction: *DISABLE_COMPACTION,
-            scheduler,
+            coordinator,
             region_status: HashMap::new(),
             request_sender,
             cache_manager,
@@ -235,7 +235,7 @@ impl CompactionScheduler {
             OptionOutputTx::none(),
             manifest_ctx,
             schema_metadata_manager,
-            1, // Default for automatic compaction
+            self.engine_config.max_background_compactions,
             None,
         )
     }
@@ -696,7 +696,7 @@ impl CompactionScheduler {
             manifest_ctx,
             self.listener.clone(),
             schema_metadata_manager,
-            MAX_PARALLEL_COMPACTION,
+            self.engine_config.max_background_compactions,
         );
         // Bump the counter through a disjoint field borrow so the `status`
         // borrow stays alive; nothing could have removed the status since it
@@ -765,6 +765,7 @@ impl CompactionScheduler {
         if let Some(mut status) = self.region_status.remove(&region_id) {
             status.on_failure(err);
         }
+        self.coordinator.forget_region(region_id);
     }
 
     /// Fails a cycle without discarding the loaded region's registration.
@@ -885,6 +886,7 @@ impl Drop for CompactionScheduler {
         for (region_id, mut status) in self.region_status.drain() {
             // We are shutting down so notify all pending tasks.
             status.on_failure(Arc::new(RegionClosedSnafu { region_id }.build()));
+            self.coordinator.forget_region(region_id);
         }
     }
 }

@@ -179,6 +179,18 @@ lazy_static! {
     pub static ref COMPACTION_FAILURE_COUNT: IntCounter =
         register_int_counter!("greptime_mito_compaction_failure_total", "mito compaction failure total").unwrap();
 
+    /// Prepared compaction units waiting for global admission.
+    pub static ref COMPACTION_READY_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_ready_units", "Prepared units waiting for global admission"
+    ).unwrap();
+    /// Includes authorized work not yet polled, through task exit and lease release.
+    pub static ref COMPACTION_ADMITTED_UNITS: IntGauge = register_int_gauge!(
+        "greptime_mito_compaction_admitted_units", "Compaction units holding global execution capacity"
+    ).unwrap();
+    pub static ref COMPACTION_ADMISSION_WAIT: Histogram = register_histogram!(
+        "greptime_mito_compaction_admission_wait_seconds", "Time prepared units wait for admission",
+        exponential_buckets(0.001, 4.0, 10).unwrap()
+    ).unwrap();
     /// Gauge for inflight compaction tasks: local units and remote jobs.
     pub static ref INFLIGHT_COMPACTION_COUNT: IntGauge =
         register_int_gauge!(
