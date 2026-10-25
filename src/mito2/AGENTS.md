@@ -99,6 +99,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   only close/drop unregisters them. See `compaction/scheduler/state.rs`.
 - Local compaction units use the snapshot-free `CompactionContext`. Retaining a
   full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
+- Candidate waiting history is owned by the region scheduler (`scheduler/history.rs`).
+  Background planning works on a private snapshot; only a fenced result may replace
+  resident history. TWCS discovery must not mutate scheduler state.
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.

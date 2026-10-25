@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 use api::v1::region::compact_request;
@@ -31,8 +31,9 @@ use tokio::sync::mpsc::{self, Sender};
 use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
-use crate::compaction::picker::history::PickHistory;
-use crate::compaction::picker::{PickerOutput, new_picker_with_history};
+use crate::compaction::last_non_null;
+use crate::compaction::picker::{PickerOutput, new_picker, new_twcs_picker};
+use crate::compaction::scheduler::history::PickHistory;
 use crate::compaction::scheduler::state::{
     CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
 };
@@ -45,7 +46,7 @@ use crate::metrics::{
     COMPACTION_MEMORY_REJECTED, COMPACTION_STAGE_ELAPSED, INFLIGHT_COMPACTION_COUNT,
 };
 use crate::region::ManifestContextRef;
-use crate::region::options::RegionOptions;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::request::{BackgroundNotify, OutputTx, WorkerRequest, WorkerRequestWithTime};
 use crate::schedule::remote_job_scheduler::{
     CompactionJob, DefaultNotifier, RemoteJob, RemoteJobSchedulerRef,
@@ -56,7 +57,7 @@ use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
-    pub(crate) pick_history: Arc<Mutex<PickHistory>>,
+    pub(crate) pick_history: PickHistory,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: CompactionVersion,
     pub(crate) access_layer: AccessLayerRef,
@@ -80,7 +81,7 @@ impl CompactionRequest {
 /// Result returned to the worker after background compaction planning.
 pub(crate) enum CompactionPlanningResult {
     Prepared(PreparedCompaction),
-    NoPlan,
+    NoPlan(Option<PickHistory>),
     Error(Arc<Error>),
 }
 
@@ -91,7 +92,7 @@ impl fmt::Debug for CompactionPlanningResult {
                 .debug_tuple("Prepared")
                 .field(&prepared.compaction_region.region_id)
                 .finish(),
-            Self::NoPlan => f.write_str("NoPlan"),
+            Self::NoPlan(_) => f.write_str("NoPlan"),
             Self::Error(err) => f.debug_tuple("Error").field(err).finish(),
         }
     }
@@ -106,10 +107,36 @@ pub(crate) struct CompactionPickFinished {
 }
 
 pub(crate) struct PreparedCompaction {
+    pick_history: Option<PickHistory>,
     pub(super) compaction_region: CompactionRegion,
     pub(super) picker_output: PickerOutput,
     start_time: Instant,
     ttl: TimeToLive,
+}
+
+/// Scheduler policy applied between stateless discovery and semantic closure.
+/// Runs on the planning runtime with a private history snapshot, never on the
+/// worker or through a shared mutex. Stale results cannot mutate resident state.
+pub(crate) async fn pick_automatic(
+    region: &CompactionRegion,
+    history: &mut PickHistory,
+    max_outputs: Option<usize>,
+    time_range: Option<TimestampRange>,
+) -> Result<Option<PickerOutput>> {
+    let picker = new_twcs_picker(&region.region_options, max_outputs, time_range, false);
+    let (mut candidates, mut output) = picker.discover(region).await?;
+    let last_non_null = region.region_options.merge_mode() == MergeMode::LastNonNull;
+    candidates.candidates = history.select_candidates(
+        candidates.candidates,
+        if last_non_null { None } else { max_outputs },
+        Instant::now(),
+    );
+    output.outputs = candidates.finish().await?;
+    if last_non_null {
+        last_non_null::close_outputs(region, output, max_outputs).await
+    } else {
+        Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
+    }
 }
 
 impl CompactionScheduler {
@@ -210,22 +237,9 @@ impl CompactionScheduler {
             compaction: dynamic_compaction_opts,
             ..request.current_version.options.clone()
         };
-        request
-            .pick_history
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .discard_selection();
-        let picker = new_picker_with_history(
-            &options,
-            &region_options,
-            Some(max_picker_outputs),
-            time_range,
-            trigger == CompactionTrigger::Manual,
-            (trigger == CompactionTrigger::Automatic).then(|| request.pick_history.clone()),
-        );
         let region_id = request.region_id();
         let CompactionRequest {
-            pick_history: _,
+            pick_history,
             engine_config,
             current_version,
             access_layer,
@@ -237,11 +251,6 @@ impl CompactionScheduler {
             schema_metadata_manager: _,
             max_parallelism,
         } = request;
-
-        debug!(
-            "Pick compaction strategy {:?} for region: {}, ttl: {:?}",
-            picker, region_id, ttl
-        );
 
         let compaction_region = CompactionRegion {
             region_id,
@@ -262,16 +271,36 @@ impl CompactionScheduler {
         let _pick_timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["pick"])
             .start_timer();
-        let picker_output = match picker.pick(&compaction_region).await {
-            Ok(output) => output,
+        let mut history = (trigger == CompactionTrigger::Automatic
+            && matches!(options, compact_request::Options::Regular(_)))
+        .then_some(pick_history);
+        let picked = if let Some(history) = &mut history {
+            pick_automatic(
+                &compaction_region,
+                history,
+                Some(max_picker_outputs),
+                time_range,
+            )
+            .await
+        } else {
+            new_picker(
+                &options,
+                &compaction_region.region_options,
+                Some(max_picker_outputs),
+                time_range,
+                trigger == CompactionTrigger::Manual,
+            )
+            .pick(&compaction_region)
+            .await
+        };
+        let picker_output = match picked {
+            Ok(Some(output)) => output,
+            Ok(None) => return CompactionPlanningResult::NoPlan(history),
             Err(err) => return CompactionPlanningResult::Error(Arc::new(err)),
         };
 
-        let Some(picker_output) = picker_output else {
-            return CompactionPlanningResult::NoPlan;
-        };
-
         CompactionPlanningResult::Prepared(PreparedCompaction {
+            pick_history: history,
             compaction_region,
             picker_output,
             start_time,
@@ -295,7 +324,7 @@ impl CompactionScheduler {
     ) -> CompactionTransition {
         let region_id = finished.region_id;
         let plan_id = finished.plan_id;
-        let Some(status) = self.region_status.get(&region_id) else {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return CompactionTransition::NoAction;
         };
 
@@ -310,8 +339,15 @@ impl CompactionScheduler {
             );
         }
 
+        // Manual/error results retain the resident history, but must not credit
+        // an earlier failed selection. Automatic snapshots replace this cleared
+        // selection below after passing the same lifecycle fence.
+        status.pick_history.discard_selection();
         match finished.result {
             CompactionPlanningResult::Prepared(mut prepared) => {
+                if let Some(history) = prepared.pick_history.take() {
+                    status.pick_history = history;
+                }
                 let current = status.version_control.current().version;
                 let Some(picker_output) =
                     refresh_picker_output(prepared.picker_output, &current.ssts)
@@ -335,11 +371,12 @@ impl CompactionScheduler {
                         )
                         .await;
                 };
-                status
-                    .pick_history
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .accept(&picker_output);
+                status.pick_history.accept_inputs(
+                    picker_output
+                        .outputs
+                        .iter()
+                        .flat_map(|output| output.inputs.iter().map(FileHandle::file_id)),
+                );
                 prepared.picker_output = picker_output;
                 let Some(status) = self.region_status.get_mut(&region_id) else {
                     return CompactionTransition::NoAction;
@@ -376,7 +413,10 @@ impl CompactionScheduler {
             }
             // These paths never create an execution. Finish the Picking
             // lifecycle here and release DDLs if no follow-up was scheduled.
-            CompactionPlanningResult::NoPlan => {
+            CompactionPlanningResult::NoPlan(history) => {
+                if let Some(history) = history {
+                    status.pick_history = history;
+                }
                 self.finish_compaction_planning(
                     region_id,
                     None,
@@ -452,6 +492,7 @@ impl CompactionScheduler {
         plan_id: u64,
     ) -> Result<Option<CompactionPhase>> {
         let PreparedCompaction {
+            pick_history: _,
             compaction_region,
             picker_output,
             start_time,
@@ -545,16 +586,12 @@ impl CompactionScheduler {
             );
             false
         });
-        if let Some(status) = self.region_status.get(&region_id) {
-            status
-                .pick_history
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .accept_inputs(
-                    units
-                        .iter()
-                        .flat_map(|unit| unit.inputs.iter().map(FileHandle::file_id)),
-                );
+        if let Some(status) = self.region_status.get_mut(&region_id) {
+            status.pick_history.accept_inputs(
+                units
+                    .iter()
+                    .flat_map(|unit| unit.inputs.iter().map(FileHandle::file_id)),
+            );
         }
         if units.is_empty() {
             return Ok(None);

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod history;
 mod local;
 mod planning;
 mod state;
@@ -27,6 +28,8 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
+#[cfg(test)]
+pub(crate) use planning::pick_automatic;
 pub(crate) use state::CompactionExecution;
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
@@ -639,14 +642,12 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         made_progress: bool,
     ) -> CompactionTransition {
-        let Some(status) = self.region_status.get(&region_id) else {
+        let Some(status) = self.region_status.get_mut(&region_id) else {
             return CompactionTransition::NoAction;
         };
         if made_progress {
             status
                 .pick_history
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .finish_success(std::time::Instant::now());
         }
 

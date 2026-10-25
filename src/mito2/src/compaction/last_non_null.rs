@@ -58,47 +58,54 @@ impl Picker for LastNonNullPicker {
         let max_outputs = self.base_picker.max_background_tasks;
 
         // Find all possible compaction seeds
-        let Some(mut all_seeds) = self
+        let Some(all_seeds) = self
             .base_picker
             .pick_with_output_limit(region, None)
             .await?
         else {
             return Ok(None);
         };
-        let version = region.current_version.clone();
-        common_runtime::spawn_blocking_compact(move || {
-            let expired: HashSet<_> = all_seeds
-                .expired_ssts
-                .iter()
-                .map(FileHandle::file_id)
-                .collect();
-            // Include busy files and all levels/windows. Request ranges and
-            // TWCS size/file-count limits only constrain seeds, not correctness.
-            let all_files = version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files())
-                .filter(|file| !expired.contains(&file.file_id()))
-                .cloned()
-                .collect();
-            all_seeds.outputs =
-                build_closed_outputs(all_seeds.outputs, all_files, &version.metadata);
-            all_seeds.outputs.retain(|output| {
-                inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
-            });
-            if let Some(limit) = max_outputs {
-                // Only eligible closures consume the budget. Keep the high-priority
-                // tail because the compactor pops from the end of the output list.
-                let excess = all_seeds.outputs.len().saturating_sub(limit);
-                all_seeds.outputs.drain(..excess);
-            }
-            (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty())
-                .then_some(all_seeds)
-        })
-        .await
-        .context(JoinSnafu)
+        close_outputs(region, all_seeds, max_outputs).await
     }
+}
+
+/// Closes the selected seeds before applying the execution budget.
+pub(super) async fn close_outputs(
+    region: &CompactionRegion,
+    mut all_seeds: PickerOutput,
+    max_outputs: Option<usize>,
+) -> Result<Option<PickerOutput>> {
+    let version = region.current_version.clone();
+    common_runtime::spawn_blocking_compact(move || {
+        let expired: HashSet<_> = all_seeds
+            .expired_ssts
+            .iter()
+            .map(FileHandle::file_id)
+            .collect();
+        // Include busy files and all levels/windows. Request ranges and
+        // TWCS size/file-count limits only constrain seeds, not correctness.
+        let all_files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .filter(|file| !expired.contains(&file.file_id()))
+            .cloned()
+            .collect();
+        all_seeds.outputs = build_closed_outputs(all_seeds.outputs, all_files, &version.metadata);
+        all_seeds.outputs.retain(|output| {
+            inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
+        });
+        if let Some(limit) = max_outputs {
+            // Only eligible closures consume the budget. Keep the high-priority
+            // tail because the compactor pops from the end of the output list.
+            let excess = all_seeds.outputs.len().saturating_sub(limit);
+            all_seeds.outputs.drain(..excess);
+        }
+        (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty()).then_some(all_seeds)
+    })
+    .await
+    .context(JoinSnafu)
 }
 
 /// Imported SSTs can be newer than pending writes. A merge must not attach an
@@ -294,16 +301,23 @@ mod tests {
             .unwrap()
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
-        let picker = crate::compaction::picker::new_picker_with_history(
-            &request,
-            &region.region_options,
-            limit,
-            None,
-            false,
-            fair.then(|| std::sync::Arc::new(std::sync::Mutex::new(Default::default()))),
-        );
-
-        let picked = picker.pick(&region).await.unwrap().unwrap();
+        let picked = if fair {
+            crate::compaction::scheduler::pick_automatic(
+                &region,
+                &mut Default::default(),
+                limit,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap()
+        } else {
+            new_picker(&request, &region.region_options, limit, None, false)
+                .pick(&region)
+                .await
+                .unwrap()
+                .unwrap()
+        };
         assert_eq!(expected_windows.len(), picked.outputs.len());
         assert!(picked.expired_ssts.is_empty());
         // The execution pops outputs from the end, not the front.

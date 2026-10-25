@@ -16,8 +16,9 @@ use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::compaction::picker::PickerOutput;
-use crate::compaction::twcs::PickClass;
+use crate::compaction::twcs::{PickClass, WindowCandidate};
+use crate::metrics::TWCS_SELECTED_CANDIDATES;
+use crate::sst::file::FileHandle;
 use crate::sst::file::RegionFileId;
 
 /// Waiting compensation starts after one minute. This is a promotion threshold,
@@ -35,7 +36,7 @@ pub(crate) struct PickKey {
 /// Region-resident scheduling metadata. It owns no file handles or reservations.
 /// Planning only discovers/selects work; the owner acknowledges service after a
 /// successful execution. Cancelled, stale and failed plans do not reset ages.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct PickHistory {
     waiting: HashMap<PickKey, Instant>,
     selected: Vec<(PickKey, Vec<RegionFileId>)>,
@@ -73,17 +74,49 @@ impl PickHistory {
         self.selected.push((key, inputs));
     }
 
-    /// Closure expansion and stale-plan validation may discard selected seeds.
-    /// Only seeds wholly included in the accepted batch can receive service.
-    pub(crate) fn accept(&mut self, output: &PickerOutput) {
-        self.accept_inputs(
-            output
-                .outputs
-                .iter()
-                .flat_map(|o| o.inputs.iter().map(|file| file.file_id())),
-        );
+    /// Applies region fairness to a complete discovery result. Planning uses a
+    /// private snapshot; the worker installs it only after validating the plan ID.
+    pub(crate) fn select_candidates(
+        &mut self,
+        mut candidates: Vec<WindowCandidate>,
+        max_outputs: Option<usize>,
+        now: Instant,
+    ) -> Vec<WindowCandidate> {
+        let key = |candidate: &WindowCandidate| PickKey {
+            window: candidate.window,
+            class: candidate.pick.class,
+        };
+        self.observe(candidates.iter().map(key), now);
+        candidates.sort_by_key(|candidate| self.priority(key(candidate), now));
+        // Alternatives may share files or semantic dependencies within a window.
+        let mut windows = HashSet::new();
+        candidates.retain(|candidate| windows.insert(candidate.window));
+        candidates.truncate(max_outputs.unwrap_or(usize::MAX));
+        for candidate in &candidates {
+            let key = key(candidate);
+            let priority = if self.priority(key, now).1.is_some() {
+                "promoted"
+            } else {
+                "normal"
+            };
+            TWCS_SELECTED_CANDIDATES
+                .with_label_values(&[key.class.as_str(), priority])
+                .inc();
+            self.select(
+                key,
+                candidate
+                    .pick
+                    .inputs
+                    .iter()
+                    .map(FileHandle::file_id)
+                    .collect(),
+            );
+        }
+        candidates
     }
 
+    /// Closure expansion, stale-plan validation and memory admission can discard
+    /// seeds. Only wholly accepted seeds may receive service acknowledgement.
     pub(crate) fn accept_inputs(&mut self, inputs: impl Iterator<Item = RegionFileId>) {
         let inputs: HashSet<_> = inputs.collect();
         self.selected
@@ -163,7 +196,7 @@ mod tests {
         let mut history = PickHistory::default();
         history.observe([key].into_iter(), start);
         history.select(key, vec![file.file_id()]);
-        history.accept(&PickerOutput::default());
+        history.accept_inputs(std::iter::empty());
         history.finish_success(start + PROMOTION_DELAY);
         assert_eq!(start, history.waiting[&key]);
         history.select(key, vec![file.file_id()]);
