@@ -154,7 +154,7 @@ fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
                 expr: NativeExpr::Input(BoundInput {
                     output: raw.clone(),
                     source_index: 0,
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering: SeriesOrdering::Contiguous,
                 }),
                 output: raw,
             }),

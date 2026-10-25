@@ -51,11 +51,11 @@ TQL EVAL (4, 4, '1s') fused_multi_standalone{kind="left",host="h1"} + on(host) g
 TQL EVAL (4, 4, '1s') rate(fused_multi_standalone[3s] @ 3 offset 1s);
 
 -- Incomplete matching identity via on() stays on fallback, even for one series.
--- SQLNESS SORT_RESULT 2 1
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (4, 4, '1s') fused_multi_standalone{host="h1",kind="left"} - on() (fused_multi_standalone{host="h1",kind="left"} * 2);
 
 -- Aggregate and subquery forms stay on the legacy fallback source path.
--- SQLNESS SORT_RESULT 2 1
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (4, 4, '1s') sum(rate(fused_multi_standalone[5s]));
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (4, 4, '1s') rate(fused_multi_standalone[5s:1s]);
