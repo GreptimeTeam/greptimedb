@@ -31,7 +31,7 @@ use promql::native::plan::{
     Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql::vector_match::{BinaryMatching, BinaryOp};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
 use promql_parser::parser::{
     AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
     VectorMatchFillValues,
@@ -40,6 +40,27 @@ use promql_parser::parser::{
 use super::{
     CompiledInput, SelectorRequirement, SelectorTiming, compile, compile_selectors, validate_inputs,
 };
+
+/// Whether a matching names its labels with `on` (`true`) or `ignoring` (`false`), and which.
+fn matching_labels(labels: &MatchingLabels) -> (bool, Vec<&str>) {
+    match labels {
+        MatchingLabels::On(names) => (true, names.iter().map(|name| &**name).collect()),
+        MatchingLabels::Ignoring(names) => (false, names.iter().map(|name| &**name).collect()),
+    }
+}
+
+/// Which cardinality a matching declares, and the labels it copies from the one side.
+fn matching_cardinality(cardinality: &Cardinality) -> (&'static str, Vec<&str>) {
+    match cardinality {
+        Cardinality::OneToOne => ("one-to-one", Vec::new()),
+        Cardinality::ManyToOne(names) => {
+            ("many-to-one", names.iter().map(|name| &**name).collect())
+        }
+        Cardinality::OneToMany(names) => {
+            ("one-to-many", names.iter().map(|name| &**name).collect())
+        }
+    }
+}
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -1623,31 +1644,167 @@ fn a_constant_operand_binds_the_value_it_folds_to() {
     }
 }
 
-/// Binary operations between vectors remain unsupported in the native lowering stage.
+/// Two vectors bind independently, while the compatibility entry refuses to hide the two inputs.
 #[test]
-fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity() {
-    for query in [
-        "a + b",
-        "a > b",
-        "rate(a[5m]) * rate(b[5m])",
-        "sum(a) + sum(b)",
+fn a_two_vector_operation_binds_one_input_per_selector() {
+    let compiled = compile_selectors(
+        &eval_stmt("a + b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_or_else(|error| panic!("`a + b` was refused: {error}"));
+    assert_eq!(compiled.inputs.len(), 2);
+    assert_eq!(compiled.inputs[0].requirement.metric.as_deref(), Some("a"));
+    assert_eq!(compiled.inputs[1].requirement.metric.as_deref(), Some("b"));
+    assert!(matches!(
+        compiled.tree.root().expr,
+        NativeExpr::Binary { .. }
+    ));
+
+    let error = compile(
+        &eval_stmt("a + b"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("`a + b` requires separately bound selector inputs");
+    assert!(matches!(error, DataFusionError::NotImplemented(_)));
+    assert!(
+        error.to_string().contains("use `compile_selectors`"),
+        "{error}"
+    );
+}
+
+#[test]
+fn vector_binary_matching_binds_labels_cardinality_fills_and_bool() {
+    for (query, on, labels, card, copies, lhs, rhs, bool_result) in [
+        (
+            "a + on(job) b",
+            true,
+            vec!["job"],
+            "one-to-one",
+            vec![],
+            None,
+            None,
+            false,
+        ),
+        (
+            "a / ignoring(zone) b",
+            false,
+            vec!["zone"],
+            "one-to-one",
+            vec![],
+            None,
+            None,
+            false,
+        ),
+        (
+            "a + on(job) group_left(zone) b",
+            true,
+            vec!["job"],
+            "many-to-one",
+            vec!["zone"],
+            None,
+            None,
+            false,
+        ),
+        (
+            "a - on(job) group_right(zone) b",
+            true,
+            vec!["job"],
+            "one-to-many",
+            vec!["zone"],
+            None,
+            None,
+            false,
+        ),
+        (
+            "a + fill_left(0) b",
+            false,
+            vec![],
+            "one-to-one",
+            vec![],
+            Some(0.0),
+            None,
+            false,
+        ),
+        (
+            "a + fill_right(1.5) b",
+            false,
+            vec![],
+            "one-to-one",
+            vec![],
+            None,
+            Some(1.5),
+            false,
+        ),
+        (
+            "a + fill(2) b",
+            false,
+            vec![],
+            "one-to-one",
+            vec![],
+            Some(2.0),
+            Some(2.0),
+            false,
+        ),
+        (
+            "a > bool ignoring(zone) b",
+            false,
+            vec!["zone"],
+            "one-to-one",
+            vec![],
+            None,
+            None,
+            true,
+        ),
     ] {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let (_, _, matching) = binary_parts(compiled.tree.root());
+        assert_eq!(matching_labels(&matching.labels), (on, labels), "{query}");
+        assert_eq!(
+            matching_cardinality(&matching.cardinality),
+            (card, copies),
+            "{query}"
         );
-        let message = error.to_string();
-        assert!(
-            message.contains("between two vectors"),
-            "`{query}` did not say what it found: {message}"
+        assert_eq!(
+            (matching.fill.lhs, matching.fill.rhs),
+            (lhs, rhs),
+            "{query}"
         );
-        assert!(
-            message.contains("selector"),
-            "`{query}` did not name what an input is missing: {message}"
-        );
+        assert_eq!(matching.return_bool, bool_result, "{query}");
     }
+}
+
+#[test]
+fn vector_binary_matching_keeps_ignoring_and_group_left_separate() {
+    let compiled = compile_selectors(
+        &eval_stmt("a / ignoring(instance) group_left(host) b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let (_, _, matching) = binary_parts(compiled.tree.root());
+    assert_eq!(matching_labels(&matching.labels), (false, vec!["instance"]));
+    assert_eq!(
+        matching_cardinality(&matching.cardinality),
+        ("many-to-one", vec!["host"])
+    );
+}
+
+#[test]
+fn vector_binary_set_operators_remain_rejected_explicitly() {
+    let error = compile_selectors(
+        &eval_stmt("a and b"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("set operators have no binary value node");
+    assert!(error.to_string().contains("set operator `and`"), "{error}");
 }
 
 /// A set operator has no node at all, so it is refused as the set operator it is rather than as an
