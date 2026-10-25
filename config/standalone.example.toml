@@ -603,6 +603,12 @@ data_home = "./greptimedb_data"
 ## directory containing them, or migrate the files to object storage before upgrading.
 #+ copy_root = "./greptimedb_data/copy"
 
+## Whether to self-test every remote object storage when the datanode starts.
+## The self-test writes, reads, lists and deletes a probe object under `.greptime_self_test/`,
+## and a failure aborts startup. Disable it when the storage may be unavailable at startup
+## or when the credentials are scoped to prefixes other than `.greptime_self_test/`.
+self_test_on_startup = true
+
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.
 ## - `S3`: the data is stored in the S3 object storage.

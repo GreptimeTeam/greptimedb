@@ -472,6 +472,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Failed to run object storage self-test for provider '{name}' at step '{step}'"
+    ))]
+    ObjectStoreSelfTest {
+        name: String,
+        step: &'static str,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -554,6 +566,7 @@ impl ErrorExt for Error {
             SerializeJson { .. } => StatusCode::Internal,
 
             ObjectStore { source, .. } => source.status_code(),
+            ObjectStoreSelfTest { .. } => StatusCode::StorageUnavailable,
         }
     }
 
@@ -593,6 +606,9 @@ impl ErrorExt for Error {
             BuildMetricEngine { source, .. } => source.retry_hint(),
             ListStorageSsts { source, .. } => source.retry_hint(),
             ObjectStore { source, .. } => source.retry_hint(),
+            ObjectStoreSelfTest { error, .. } => {
+                object_store::error::retry_hint_from_opendal_error(error)
+            }
             _ => RetryHint::NonRetryable,
         }
     }

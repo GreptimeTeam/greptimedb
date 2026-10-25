@@ -44,6 +44,7 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
+use futures::future::join_all;
 use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
@@ -461,17 +462,42 @@ impl DatanodeBuilder {
         .await
     }
 
-    /// Builds [ObjectStoreManager] from [StorageConfig].
-    pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
+    /// Builds [ObjectStoreManager] from [StorageConfig] and self-tests every remote
+    /// object store it contains, unless `self_test_on_startup` is disabled.
+    ///
+    /// The self-test fails the build when a store rejects any of the operations the
+    /// engines and the WAL rely on, so a misconfigured storage surfaces here instead
+    /// of failing on the first write.
+    pub async fn build_object_store_manager(
+        cfg: &StorageConfig,
+        node_id: u64,
+    ) -> Result<ObjectStoreManagerRef> {
         let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
         let default_name = cfg.store.config_name();
-        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
-        for store in &cfg.providers {
-            object_store_manager.add(
-                store.config_name(),
-                store::new_object_store(store.clone(), &cfg.data_home).await?,
-            );
+        let mut checks = Vec::with_capacity(1 + cfg.providers.len());
+        if cfg.store.is_object_storage() {
+            checks.push((default_name.to_string(), object_store.clone()));
         }
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for provider in &cfg.providers {
+            let name = provider.config_name();
+            let object_store = store::new_object_store(provider.clone(), &cfg.data_home).await?;
+            if provider.is_object_storage() {
+                checks.push((name.to_string(), object_store.clone()));
+            }
+            object_store_manager.add(name, object_store);
+        }
+
+        if cfg.self_test_on_startup && !checks.is_empty() {
+            let prefix = store::self_test_key_prefix(node_id);
+            let checks = checks.iter().map(|(name, object_store)| {
+                store::self_test_object_store(object_store, name, &prefix)
+            });
+            for result in join_all(checks).await {
+                result?;
+            }
+        }
+
         Ok(Arc::new(object_store_manager))
     }
 
@@ -568,7 +594,11 @@ impl DatanodeBuilder {
         );
         region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
-        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
+        let object_store_manager = Self::build_object_store_manager(
+            &opts.storage,
+            opts.node_id.context(MissingNodeIdSnafu)?,
+        )
+        .await?;
         let engines = self
             .build_store_engines(
                 object_store_manager,
@@ -1069,6 +1099,7 @@ mod tests {
     use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
+    use common_base::secrets::SecretString;
     use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
@@ -1087,6 +1118,7 @@ mod tests {
     use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, build_rows, rows_schema};
     use object_store::ObjectStore;
+    use object_store::config::{S3Config, S3Connection};
     use object_store::manager::ObjectStoreManager;
     use partition::manager::PartitionRuleManagerRef;
     use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
@@ -1095,7 +1127,7 @@ mod tests {
     use store_api::region_request::{PathType, RegionOpenRequest, RegionPutRequest, RegionRequest};
     use store_api::storage::RegionId;
 
-    use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
+    use crate::config::{DatanodeOptions, ObjectStoreConfig, RegionEngineConfig, StorageConfig};
     use crate::datanode::{
         Datanode, DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
         wal_object_store,
@@ -1453,6 +1485,31 @@ mod tests {
                 ..
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_object_store_self_test_can_be_disabled() {
+        // The endpoint does not accept connections, so this only succeeds when the
+        // self-test does not run.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            self_test_on_startup: false,
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
     }
 
     struct CountingRegionQueryHandlerFactory(Arc<AtomicUsize>);
