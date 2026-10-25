@@ -64,7 +64,7 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
@@ -590,7 +590,7 @@ fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
 
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
-enum OutputColumn {
+pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
@@ -600,9 +600,9 @@ enum OutputColumn {
 }
 
 /// Classifies every output column, rejecting anything the conversion cannot produce.
-fn classify_output(
+pub(crate) fn classify_output(
     output_schema: &SchemaRef,
-    series_schema: &SeriesSchema,
+    series_fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
@@ -617,11 +617,7 @@ fn classify_output(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
             )));
         }
-        if series_schema
-            .fields
-            .iter()
-            .any(|field| field.name.as_ref() == tag)
-        {
+        if series_fields.iter().any(|field| field.name.as_ref() == tag) {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
@@ -629,7 +625,7 @@ fn classify_output(
     }
 
     let mut time_seen = false;
-    let mut field_seen = vec![false; series_schema.fields.len()];
+    let mut field_seen = vec![false; series_fields.len()];
     let mut tag_seen = vec![false; tags.len()];
     let mut classification = Vec::with_capacity(output_schema.fields().len());
     for field in output_schema.fields() {
@@ -657,8 +653,7 @@ fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_schema
-            .fields
+        if let Some(index) = series_fields
             .iter()
             .position(|field| field.name.as_ref() == name)
         {
@@ -719,7 +714,7 @@ fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_schema.fields[index].name
+                series_fields[index].name
             )));
         }
     }
@@ -833,7 +828,12 @@ impl FusedSeriesExec {
         let classification = if partial_fold.is_some() {
             Vec::new()
         } else {
-            classify_output(&output_schema, output_series, &output_tags, &time_column)?
+            classify_output(
+                &output_schema,
+                &output_series.fields,
+                &output_tags,
+                &time_column,
+            )?
         };
         let partition_count = inputs[0].0.properties().partitioning.partition_count();
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
@@ -1070,7 +1070,7 @@ impl ExecutionPlan for FusedSeriesExec {
 ///
 /// The time column is the absolute grid positions the chunk carries, missing samples are nulls and
 /// ordinary NaN stays a value.
-fn series_to_record_batch(
+pub(crate) fn series_to_record_batch(
     classification: &[OutputColumn],
     tags: &[String],
     output_schema: &SchemaRef,

@@ -3039,8 +3039,8 @@ async fn repeated_metrics_reads_register_nothing_and_outlive_the_execution() {
 
 /// One chunk of the series keyed `key`, carrying `labels` and closing when `last`.
 ///
-/// The key and the labels are separate so a test can hold two raw series under one label set: the
-/// collision check reads the labels, and two different keys are what makes such a pair two series.
+/// The key and labels are separate so a test can hold two raw series under one label set; different
+/// keys make such a pair two series.
 fn labelled_chunk(
     key: &str,
     labels: &[(&str, &str)],
@@ -3069,7 +3069,11 @@ fn partial_op(kind: AggregateKind, grouped_by: &[&str]) -> BoundAggregate {
 
 /// The binding of the prefix tree, declaring `tags` as the node's labels.
 fn partial_binding_of(tree: &NativeTree, tags: &[&str]) -> FusedSeriesBinding {
-    binding_of(tree, tags.iter().map(|tag| (*tag).to_string()).collect())
+    binding_of(
+        tree,
+        raw_schema(),
+        tags.iter().map(|tag| (*tag).to_string()).collect(),
+    )
 }
 
 /// The logical node that runs the prefix and exports `kind`'s state, grouped by `host`.

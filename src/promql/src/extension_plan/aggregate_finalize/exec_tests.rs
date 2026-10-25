@@ -129,6 +129,7 @@ fn window_on(grid: &Arc<EvalGrid>) -> NativeNode {
                     range_ms: 300_000,
                     offset_ms: 0,
                     anchor_ms: None,
+                    modifier: None,
                 },
                 input_grid: None,
                 output_grid: Arc::clone(grid),
