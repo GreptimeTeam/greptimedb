@@ -129,10 +129,11 @@ pub struct AggregateStateSchema {
 /// rejecting an interleaved input; no other consumer reads it yet.
 #[derive(Clone, Debug)]
 pub struct BoundInput {
-    /// Occurrence index of this selector binding in the compiled input list, and the corresponding
-    /// child position in the DataFusion plan.
+    /// Child index in the DataFusion plan. The compiler initially assigns selector-occurrence
+    /// indices; the caller maps them to child indices when constructing the plan.
     ///
-    /// Multiple logical inputs may bind to one child after plan collapse.
+    /// Multiple logical inputs may reference the same child after plan collapse. This is not a
+    /// runtime `InputId` or an identity for an input leaf.
     pub source_index: usize,
     /// What the input produces: raw samples from a scan, or state from an exchange boundary.
     pub output: NativeType,

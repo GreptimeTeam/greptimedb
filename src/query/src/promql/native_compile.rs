@@ -176,6 +176,11 @@ pub struct SelectorRequirement {
 }
 
 impl SelectorRequirement {
+    /// Returns `(start_ms, end_ms, include_start)` for the scan hull covering this selector.
+    ///
+    /// The upper endpoint is inclusive. The hull can include timestamps unused by a sparse
+    /// evaluation grid; `grid_end_ms` is its actual last point, not the statement's end. The lower
+    /// endpoint is inclusive only for a zero-lookback instant selector.
     pub fn raw_scan_bounds(&self) -> Result<(i64, i64, bool)> {
         let end = self
             .at_ms
@@ -198,8 +203,11 @@ impl SelectorRequirement {
     }
 }
 
+/// One compiled selector occurrence and the scan layout bound for it.
 #[derive(Clone, Debug)]
 pub struct CompiledInput {
+    /// Occurrence number assigned in compiler traversal order, starting at zero. The caller maps this
+    /// occurrence to the appropriate scan; different occurrences may map to a shared scan child.
     pub source_index: usize,
     pub requirement: SelectorRequirement,
     pub schema: Arc<SeriesSchema>,
@@ -263,10 +271,8 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
 /// [`NativeNode::validate`] refuses the same ordering in its `Instant` and `Window` branches, as a
 /// backstop for a tree built some other way.
 ///
-/// The tree carries no metric name and no matchers, so `rate(x{job="a"}[5m])` and `rate(y[5m])`
-/// compile to identical trees, and an `EXPLAIN` built on this display cannot tell them apart. That
-/// is fine while a tree has one selector; a tree with two inputs will need each `Input` to name its
-/// selector.
+/// This compatibility entry accepts exactly one selector. Call [`compile_selectors`] to retain
+/// each selector's requirement and binding when compiling more than one input.
 pub fn compile(
     stmt: &EvalStmt,
     input: Arc<SeriesSchema>,
@@ -282,6 +288,10 @@ pub fn compile(
     Ok(compiled.tree)
 }
 
+/// Compiles a statement and returns a binding record for each selector occurrence.
+///
+/// `bindings` is called once per selector with its requirements. The resulting source indices are
+/// occurrence numbers in compiler traversal order; the caller maps them to scan children.
 pub fn compile_selectors(
     stmt: &EvalStmt,
     bindings: &dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
@@ -354,11 +364,9 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
     ))
 }
 
-/// What every node of one compilation derives from the statement rather than from the expression.
+/// Shared statement, per-selector binding callback, occurrence records, ordering and current grid.
 ///
-/// The three are the same for the whole tree: one statement decides the grid, the lookback and the
-/// anchors, one caller binds the raw input, and one scan guarantees the ordering. Passing them as
-/// one value is what lets [`compile_expr`] recurse without restating what it was handed.
+/// A subquery substitutes its own grid while reusing the statement-level bindings and input list.
 struct Context<'a> {
     stmt: &'a EvalStmt,
     bindings: &'a dyn Fn(&SelectorRequirement) -> Result<Arc<SeriesSchema>>,
@@ -1133,6 +1141,8 @@ fn subquery_window(
              in its anchored interval or the statement's range"
         ))
     })?;
+    // Keep subquery grids deferred: selector binding needs only their spec endpoints, not a
+    // materialized timestamp vector proportional to the range.
     let child_grid = Arc::new(EvalGrid::try_deferred(child_spec).map_err(grid_error)?);
     let inner = compile_expr(
         &Context {

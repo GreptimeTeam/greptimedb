@@ -27,8 +27,8 @@ use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInstant, BoundMap, BoundWindow, Grouping,
-    MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundWindow,
+    Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp};
@@ -37,7 +37,9 @@ use promql_parser::parser::{
     VectorMatchFillValues,
 };
 
-use super::{SelectorTiming, compile, compile_selectors};
+use super::{
+    CompiledInput, SelectorRequirement, SelectorTiming, compile, compile_selectors, validate_inputs,
+};
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -4353,16 +4355,268 @@ fn selector_requirements_capture_bounds_and_source_occurrence() {
     assert_eq!(bound.source_index, 0);
 }
 
+fn selector_requirement(
+    grid_start_ms: i64,
+    grid_end_ms: i64,
+    offset_ms: i64,
+    at_ms: Option<i64>,
+    timing: SelectorTiming,
+) -> SelectorRequirement {
+    SelectorRequirement {
+        metric: None,
+        matchers: promql_parser::label::Matchers::empty(),
+        offset_ms,
+        at_ms,
+        grid_start_ms,
+        grid_end_ms,
+        timing,
+    }
+}
+
 #[test]
-fn legacy_compile_refuses_multiple_selector_bindings() {
-    let error = compile(
-        &eval_stmt("rate(x[5m]) + rate(y[5m])"),
-        raw_schema(),
+fn selector_scan_bounds_cover_instant_ranges_anchors_and_overflow() {
+    let cases = [
+        ("x", (-5_000, 95_000, false)), // 5s lookback, end before non-aligned statement end
+        ("rate(x[10s])", (-10_000, 95_000, false)),
+        ("rate(x[10s] offset 2s)", (-12_000, 93_000, false)),
+        ("rate(x[10s] offset -2s)", (-8_000, 97_000, false)),
+        ("rate(x[10s] @ start())", (-10_000, 0, false)),
+        ("rate(x[10s] @ end())", (87_000, 97_000, false)),
+        ("rate(x[10s] @ end() offset 2s)", (85_000, 95_000, false)),
+    ];
+    for (query, expected) in cases {
+        let mut stmt = eval_stmt_over(query, Duration::from_secs(97));
+        if query == "x" {
+            stmt.lookback_delta = Duration::from_secs(5);
+        }
+        let tree = compile_selectors(&stmt, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime)
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+        assert_eq!(
+            tree.inputs[0].requirement.raw_scan_bounds().unwrap(),
+            expected,
+            "{query}"
+        );
+    }
+
+    let mut zero = eval_stmt("x");
+    zero.lookback_delta = Duration::ZERO;
+    let tree =
+        compile_selectors(&zero, &|_| Ok(raw_schema()), SeriesOrdering::KeyThenTime).unwrap();
+    assert_eq!(
+        tree.inputs[0].requirement.raw_scan_bounds().unwrap(),
+        (0, 100_000, true)
+    );
+
+    for (req, edge) in [
+        (
+            selector_requirement(
+                0,
+                0,
+                -1,
+                Some(i64::MAX),
+                SelectorTiming::Instant { lookback_ms: 0 },
+            ),
+            "end",
+        ),
+        (
+            selector_requirement(
+                i64::MIN,
+                0,
+                1,
+                None,
+                SelectorTiming::Instant { lookback_ms: 0 },
+            ),
+            "start",
+        ),
+        (
+            selector_requirement(i64::MIN, 0, 0, None, SelectorTiming::Window { range_ms: 1 }),
+            "duration",
+        ),
+    ] {
+        assert!(
+            matches!(req.raw_scan_bounds(), Err(DataFusionError::Plan(_))),
+            "{edge}"
+        );
+    }
+}
+
+#[test]
+fn subquery_selector_bounds_use_inner_grid_and_selector_offset() {
+    for (query, expected_grid, expected_scan) in [
+        (
+            "max_over_time(rate(x[1m] offset 10s)[5m:30s])",
+            (-270_000, 90_000),
+            (-340_000, 80_000, false),
+        ),
+        (
+            "max_over_time(rate(x[1m])[5m:30s] @ 1234 offset 1m)",
+            (900_000, 1_170_000),
+            (840_000, 1_170_000, false),
+        ),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|e| panic!("{query}: {e}"));
+        let req = &compiled.inputs[0].requirement;
+        assert_eq!(
+            (req.grid_start_ms, req.grid_end_ms),
+            expected_grid,
+            "{query}"
+        );
+        assert_eq!(req.raw_scan_bounds().unwrap(), expected_scan, "{query}");
+    }
+}
+
+#[test]
+fn selector_binding_callback_error_is_returned_once() {
+    let calls = std::cell::Cell::new(0);
+    let error = compile_selectors(
+        &eval_stmt("rate(x[1m])"),
+        &|_| {
+            calls.set(calls.get() + 1);
+            Err(DataFusionError::Plan("bind failed".into()))
+        },
         SeriesOrdering::KeyThenTime,
     )
     .unwrap_err();
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "{error}"
-    );
+    assert_eq!(calls.get(), 1);
+    assert!(matches!(error, DataFusionError::Plan(_)));
+    assert!(error.to_string().contains("bind failed"));
+}
+
+#[test]
+fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
+    for query in ["x * 2", "2 * x"] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        validate_inputs(compiled.tree.root(), &compiled.inputs).unwrap();
+    }
+    let compiled = compile_selectors(
+        &eval_stmt("x * 2"),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let original = compiled.inputs[0].clone();
+
+    for records in [Vec::new(), vec![original.clone(), original.clone()]] {
+        assert!(matches!(
+            validate_inputs(compiled.tree.root(), &records),
+            Err(DataFusionError::Internal(_))
+        ));
+    }
+    let mut wrong_source_record = original.clone();
+    wrong_source_record.source_index = 1;
+    assert!(validate_inputs(compiled.tree.root(), &[wrong_source_record]).is_err());
+
+    let scalar_output = compiled.tree.root().output.clone();
+    fn set_input_source(node: &mut NativeNode, source: usize) {
+        match &mut node.expr {
+            NativeExpr::Input(bound) => bound.source_index = source,
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::Aggregate { input, .. } => set_input_source(input, source),
+            NativeExpr::Binary { left, right, .. } => {
+                set_input_source(left, source);
+                set_input_source(right, source);
+            }
+            NativeExpr::Scalar(_) => {}
+        }
+    }
+    let mut wrong_bound_source = compiled.tree.root().clone();
+    set_input_source(&mut wrong_bound_source, 1);
+    assert!(validate_inputs(&wrong_bound_source, &[original.clone()]).is_err());
+
+    let wrong_schema = Arc::new(SeriesSchema {
+        fields: Arc::clone(&original.schema.fields),
+        eval_grid: None,
+    });
+    let mut wrong_record = original.clone();
+    wrong_record.schema = wrong_schema;
+    assert!(validate_inputs(compiled.tree.root(), &[wrong_record]).is_err());
+    let mut wrong_ordering = original;
+    wrong_ordering.ordering = SeriesOrdering::Contiguous;
+    assert!(validate_inputs(compiled.tree.root(), &[wrong_ordering]).is_err());
+
+    // A scalar is not an input leaf and must not consume an input record.
+    let scalar = NativeNode {
+        expr: NativeExpr::Scalar(promql::native::plan::BoundScalar { value: 2.0 }),
+        output: scalar_output,
+    };
+    assert!(validate_inputs(&scalar, &[]).is_ok());
+}
+
+#[test]
+fn validate_inputs_accepts_distinct_occurrences_sharing_a_schema() {
+    let schema = raw_schema();
+    let input = |source_index| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index,
+            output: NativeType::Samples(Arc::clone(&schema)),
+            ordering: SeriesOrdering::KeyThenTime,
+        }),
+        output: NativeType::Samples(Arc::clone(&schema)),
+    };
+    let compiled = compile_selectors(
+        &eval_stmt("x"),
+        &|_| Ok(Arc::clone(&schema)),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let scalar_tree = compile_selectors(
+        &eval_stmt("x + 1"),
+        &|_| Ok(Arc::clone(&schema)),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    let NativeExpr::Binary { matching, .. } = &scalar_tree.tree.root().expr else {
+        panic!("not binary")
+    };
+    let tree = NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(input(0)),
+            right: Box::new(input(1)),
+            matching: matching.clone(),
+        },
+        output: NativeType::Samples(Arc::clone(&schema)),
+    };
+    let requirements = [0, 1].map(|source_index| CompiledInput {
+        source_index,
+        requirement: compiled.inputs[0].requirement.clone(),
+        schema: Arc::clone(&schema),
+        ordering: SeriesOrdering::KeyThenTime,
+    });
+    validate_inputs(&tree, &requirements).unwrap();
+    let mut wrong = requirements;
+    wrong[1].source_index = 0;
+    assert!(validate_inputs(&tree, &wrong).is_err());
+}
+
+#[test]
+fn selector_binding_callback_receives_matchers_once() {
+    let calls = std::cell::Cell::new(0);
+    let compiled = compile_selectors(
+        &eval_stmt("rate(x{job=\"api\"}[1m])"),
+        &|requirement| {
+            calls.set(calls.get() + 1);
+            assert_eq!(requirement.metric.as_deref(), Some("x"));
+            assert_eq!(requirement.matchers.matchers.len(), 1);
+            assert_eq!(requirement.matchers.matchers[0].name, "job");
+            assert_eq!(requirement.matchers.matchers[0].value, "api");
+            Ok(raw_schema())
+        },
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(calls.get(), 1);
+    assert_eq!(compiled.inputs.len(), 1);
 }
