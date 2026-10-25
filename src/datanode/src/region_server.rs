@@ -77,7 +77,7 @@ use session::context::{
 };
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, RELATIONAL_ENGINE_NAME,
 };
 use store_api::region_engine::{
     RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
@@ -2074,6 +2074,9 @@ impl RegionServerInner {
                     RegionAttribute::File => {
                         // do nothing
                     }
+                    RegionAttribute::Relational => {
+                        // do nothing
+                    }
                 }
             }
             RegionChange::Deregisters => {
@@ -2281,7 +2284,7 @@ fn is_metric_engine(engine: &str) -> bool {
 /// Records failed open attempts without using arbitrary engine names as metric labels.
 fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
     let engine = match engine {
-        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME | RELATIONAL_ENGINE_NAME => engine,
         _ => "unknown",
     };
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
@@ -2330,6 +2333,7 @@ fn parse_region_attribute(
             Ok(RegionAttribute::Metric { physical })
         }
         FILE_ENGINE_NAME => Ok(RegionAttribute::File),
+        RELATIONAL_ENGINE_NAME => Ok(RegionAttribute::Relational),
         _ => error::UnexpectedSnafu {
             violated: format!("Unknown engine: {}", engine),
         }
@@ -2342,6 +2346,7 @@ enum RegionAttribute {
     Mito,
     Metric { physical: bool },
     File,
+    Relational,
 }
 
 impl RegionAttribute {
@@ -2350,6 +2355,7 @@ impl RegionAttribute {
             RegionAttribute::Mito => MITO_ENGINE_NAME,
             RegionAttribute::Metric { .. } => METRIC_ENGINE_NAME,
             RegionAttribute::File => FILE_ENGINE_NAME,
+            RegionAttribute::Relational => RELATIONAL_ENGINE_NAME,
         }
     }
 }

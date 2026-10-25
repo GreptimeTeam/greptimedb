@@ -23,7 +23,7 @@ use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE, RELATIONAL_ENGINE};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -61,6 +61,7 @@ use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::TableProviderFactoryRef;
 use query::region_query::RegionQueryHandlerFactoryRef;
+use relational_engine::engine::RelationalEngine;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -673,6 +674,7 @@ impl DatanodeBuilder {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
         let mut mito_engine_config = MitoConfig::default();
         let mut file_engine_config = file_engine::config::EngineConfig::default();
+        let mut relational_engine_config = relational_engine::config::EngineConfig::default();
 
         for engine in &self.opts.region_engine {
             match engine {
@@ -684,6 +686,9 @@ impl DatanodeBuilder {
                 }
                 RegionEngineConfig::Metric(metric_config) => {
                     metric_engine_config = metric_config.clone();
+                }
+                RegionEngineConfig::Relational(config) => {
+                    relational_engine_config = config.clone();
                 }
             }
         }
@@ -710,10 +715,16 @@ impl DatanodeBuilder {
             self.local_file_access.clone(),
         );
 
+        let relational_engine = RelationalEngine::new(
+            relational_engine_config,
+            object_store_manager.default_object_store().clone(),
+        );
+
         Ok(vec![
             Arc::new(mito_engine) as _,
             Arc::new(metric_engine) as _,
             Arc::new(file_engine) as _,
+            Arc::new(relational_engine) as _,
         ])
     }
 
@@ -933,6 +944,7 @@ fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
             RegionEngineConfig::Mito(_) => MITO_ENGINE,
             RegionEngineConfig::File(_) => FILE_ENGINE,
             RegionEngineConfig::Metric(_) => METRIC_ENGINE,
+            RegionEngineConfig::Relational(_) => RELATIONAL_ENGINE,
         };
         if let Some(first_index) = engine_indices.insert(engine, index) {
             return DuplicateRegionEngineConfigSnafu {
@@ -1146,7 +1158,9 @@ mod tests {
     use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use common_meta::cache::{SchemaCacheRef, TableSchemaCacheRef};
     use common_meta::key::RegionRoleSet;
+    use common_meta::key::SchemaMetadataManager;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1159,6 +1173,7 @@ mod tests {
     use log_store::error::Error as LogStoreError;
     use meta_client::client::MetaClientBuilder;
     use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::sst::file_ref::FileReferenceManager;
     use mito2::test_util::{CreateRequestBuilder, build_rows, rows_schema};
     use object_store::ObjectStore;
     use object_store::config::{S3Config, S3Connection};
@@ -2005,5 +2020,52 @@ mod tests {
             ..config
         };
         validate_object_store_wal_config(&derived).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_store_engines_registers_relational_engine() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let cache_registry = Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
+        let schema_cache: SchemaCacheRef = cache_registry.get().unwrap();
+        let table_id_schema_cache: TableSchemaCacheRef = cache_registry.get().unwrap();
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
+            table_id_schema_cache,
+            schema_cache,
+        ));
+        let file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(Some(0), false));
+
+        let data_home = create_temp_dir("build-store-engines");
+        let mut opts = DatanodeOptions {
+            node_id: Some(0),
+            wal: DatanodeWalConfig::Noop,
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+
+        let object_store_manager = DatanodeBuilder::build_object_store_manager(&opts.storage)
+            .await
+            .unwrap();
+
+        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), kv_backend);
+        let engines = builder
+            .build_store_engines(
+                object_store_manager,
+                schema_metadata_manager,
+                file_ref_manager,
+                Plugins::default(),
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = engines.iter().map(|engine| engine.name()).collect();
+        assert_eq!(engines.len(), 4, "expected 4 engines, got: {names:?}");
+        for expected in [MITO_ENGINE_NAME, "metric", "file", "relational"] {
+            assert!(
+                names.contains(&expected),
+                "engine {expected:?} not registered, got: {names:?}"
+            );
+        }
     }
 }
