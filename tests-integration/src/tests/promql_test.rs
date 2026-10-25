@@ -2263,7 +2263,8 @@ async fn native_promql_two_occurrences_route_one_scan_per_partition() {
     assert_eq!(direct_rows, direct_expected);
 
     // A single selector with an equality matcher and an explicit range anchor/offset must push
-    // down both identity and time bounds. For h000, values equal the sample index, so rate is 1/s.
+    // down both identity and time bounds. For h000, values equal the sample index; the first
+    // counter sample is zero, so the range-start extrapolation is zero and rate is 2 / 3 per second.
     let bounded_sql =
         format!("TQL EVAL (4, 4, '1s') rate({table}{{host=\"h000\"}}[3s] @ 3 offset 1s)");
     observer.clear();
@@ -2271,7 +2272,10 @@ async fn native_promql_two_occurrences_route_one_scan_per_partition() {
         native_result_rows(native_tql_output(&instance, &bounded_sql, true).await).await;
     let bounded_plan = observer.take();
     assert_eq!(bounded_plan.name(), "FusedSeriesExec");
-    assert_eq!(bounded_rows, vec![(4_000, "h000".to_string(), 1.0)]);
+    assert_eq!(bounded_rows, vec![(4_000, "h000".to_string(), 2.0 / 3.0)]);
+    let legacy_bounded_rows =
+        native_result_rows(native_tql_output(&instance, &bounded_sql, false).await).await;
+    assert_eq!(bounded_rows, legacy_bounded_rows);
     let scan_frame_rows = bounded_plan.children()[0]
         .metrics()
         .expect("series scan metrics")
@@ -2392,7 +2396,7 @@ async fn native_promql_two_occurrences_route_one_scan_per_partition() {
         ),
         (
             format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
-            vec![(1_000, "h000".to_string(), 1.0)],
+            vec![(1_000, "h000".to_string(), 0.5)],
         ),
     ] {
         observer.clear();
