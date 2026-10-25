@@ -24,8 +24,8 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use table::table::scan::RegionScanExec;
 
 use crate::extension_plan::{
-    Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
-    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
+    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -72,6 +72,13 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 physical_inputs,
                 session.config_options().execution.target_partitions,
             )
+        } else if let Some(node) = node.as_any().downcast_ref::<AggregateFinalize>() {
+            // The merge runs where every partition's state arrives, so its own input is the plan
+            // that exports them.
+            let Some(input) = physical_inputs.first() else {
+                return Ok(None);
+            };
+            Ok(Some(node.to_execution_plan(Arc::clone(input))?))
         } else {
             Ok(None)
         }

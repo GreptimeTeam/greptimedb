@@ -25,8 +25,10 @@
 //! gives the exact 1. Explicit NaN and infinite inputs follow the same rules as the serial fold. Where the serial fold keeps the first of two equal
 //! values, as `min` and `max` do for `0` and `-0`, a merge keeps the one merged first.
 
+use std::collections::btree_map::Entry as BTreeEntry;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
+use std::mem::size_of;
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
@@ -34,8 +36,9 @@ use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
 
 use crate::aggregate::{
-    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey, count_series,
-    finish_groups, kahan_inc, label_key,
+    AggregateOp, BLOCK_POINTS, Counts, FloatAggregator, FloatState, Group, LabelKey,
+    btree_backing_bytes, count_series, finish_groups, finish_groups_budgeted,
+    hash_map_backing_bytes, kahan_inc, label_key, metric_bytes, next_hash_capacity,
 };
 use crate::map::validate_float_series;
 
@@ -99,33 +102,118 @@ pub struct PartialAggregate {
 impl FloatAggregator {
     /// The state folded so far, for a merge with the state of other partitions.
     pub fn finish_partial(self) -> PartialAggregate {
+        self.finish_partial_inner()
+    }
+
+    /// [`Self::finish_partial`] that admits what it builds first: the fold state and the group,
+    /// point and state vectors, at the exact capacity [`Self::finish_partial_inner`] gives them. A
+    /// refusal consumes the aggregator, so the caller drops the execution.
+    pub(crate) fn finish_partial_budgeted(
+        self,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<PartialAggregate> {
         let width = self.schema.fields.len();
-        let groups = self
-            .groups
-            .into_iter()
-            .map(|group| {
-                let mut points = Vec::new();
-                for (&block, states) in &group.blocks {
-                    for (offset, point) in states.chunks_exact(width).enumerate() {
-                        if point.iter().any(|state| state.seen) {
-                            points.push((
-                                block * BLOCK_POINTS + offset,
-                                point.iter().map(|state| state.partial()).collect(),
-                            ));
-                        }
+        let mut partial_bytes = self.groups.len().saturating_mul(size_of::<PartialGroup>());
+        for group in &self.groups {
+            let points = seen_points(group, width);
+            partial_bytes = partial_bytes
+                .saturating_add(points.saturating_mul(size_of::<Point>()))
+                .saturating_add(
+                    points
+                        .saturating_mul(width)
+                        .saturating_mul(size_of::<Option<AccumulatorState>>()),
+                );
+        }
+        budget(self.state_bytes().saturating_add(partial_bytes))?;
+        Ok(self.finish_partial_inner())
+    }
+
+    fn finish_partial_inner(self) -> PartialAggregate {
+        let width = self.schema.fields.len();
+        let mut groups: Vec<PartialGroup> = Vec::with_capacity(self.groups.len());
+        for group in self.groups {
+            let mut points: Vec<Point> = Vec::with_capacity(seen_points(&group, width));
+            for (&block, states) in &group.blocks {
+                for (offset, point) in states.chunks_exact(width).enumerate() {
+                    if point.iter().any(|state| state.seen) {
+                        points.push((
+                            block * BLOCK_POINTS + offset,
+                            point.iter().map(|state| state.partial()).collect(),
+                        ));
                     }
                 }
-                PartialGroup {
-                    metric: group.metric,
-                    points,
-                }
-            })
-            .collect();
+            }
+            groups.push(PartialGroup {
+                metric: group.metric,
+                points,
+            });
+        }
         PartialAggregate {
             op: self.op,
             groups,
         }
     }
+}
+
+/// One point of a partial group: its grid position and one state per field.
+type Point = (usize, Vec<Option<AccumulatorState>>);
+
+/// The points of `group` that carry a state: the ones a partial of it holds.
+fn seen_points(group: &Group, width: usize) -> usize {
+    group.blocks.values().fold(0usize, |count, states| {
+        count.saturating_add(
+            states
+                .chunks_exact(width)
+                .filter(|point| point.iter().any(|state| state.seen))
+                .count(),
+        )
+    })
+}
+
+/// Bytes one partial group keeps: its labels and its point and state vectors at the capacity they
+/// were built with, so spare capacity is paid for rather than skipped.
+fn group_bytes(group: &PartialGroup) -> usize {
+    metric_bytes(&group.metric)
+        .saturating_add(group.points.capacity().saturating_mul(size_of::<Point>()))
+        .saturating_add(group.points.iter().fold(0usize, |bytes, (_, states)| {
+            bytes.saturating_add(
+                states
+                    .capacity()
+                    .saturating_mul(size_of::<Option<AccumulatorState>>()),
+            )
+        }))
+}
+
+/// Bytes a group's label key holds: a pair per capacity slot, and the `__name__` entry, whose
+/// label and value `label_key` copies, each with its own `Arc` header. The other label strings are
+/// the metric's, already counted with it.
+fn key_bytes(key: &LabelKey) -> usize {
+    let name = key
+        .iter()
+        .find(|(label, _)| &**label == "__name__")
+        .map_or(0, |(label, value)| {
+            label
+                .len()
+                .saturating_add(value.len())
+                .saturating_add(4 * size_of::<usize>())
+        });
+    key.capacity()
+        .saturating_mul(size_of::<(Arc<str>, Arc<str>)>())
+        .saturating_add(name)
+}
+
+/// Coarse bytes the key of `metric` holds while it is built: a pair per slot, the `__name__` label
+/// and a copy of the metric name, each with its `Arc` header.
+fn key_workspace_bytes(metric: &SeriesLabels) -> usize {
+    metric
+        .tags()
+        .len()
+        .saturating_add(1)
+        .saturating_mul(size_of::<(Arc<str>, Arc<str>)>())
+        .saturating_add("__name__".len())
+        .saturating_add(metric.name().map_or(0, str::len))
+        .saturating_add(4 * size_of::<usize>())
+        .saturating_add(size_of::<LabelKey>())
 }
 
 /// Merges the partial states of one aggregation into its result. Groups are identified by their
@@ -135,6 +223,7 @@ pub struct FloatMerger {
     op: AggregateOp,
     group_index: HashMap<LabelKey, usize>,
     groups: Vec<Group>,
+    retained: usize,
 }
 
 impl FloatMerger {
@@ -149,12 +238,30 @@ impl FloatMerger {
             op,
             group_index: HashMap::new(),
             groups: Vec::new(),
+            retained: 0,
         })
     }
 
     /// Merges the state of one partition. A partial that does not fit this merge, by its
     /// aggregation, field count or grid positions, fails and leaves the merge unchanged.
     pub fn merge(&mut self, partial: PartialAggregate) -> Result<()> {
+        self.merge_budgeted(partial, |_| Ok(()))
+    }
+
+    /// Bytes this merge keeps: groups, labels, blocks, B-tree nodes, index table and its keys. Added
+    /// to by the allocations that change it, never recounted.
+    pub(crate) fn state_bytes(&self) -> usize {
+        self.retained
+    }
+
+    /// [`Self::merge`] that admits each allocation before making it: the partial that stays live,
+    /// the key, and the group, index and block backing about to be reserved. A refusal leaves the
+    /// merge half applied, so a caller that budgets must drop it rather than merge into it again.
+    pub(crate) fn merge_budgeted(
+        &mut self,
+        partial: PartialAggregate,
+        mut budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
         let width = self.schema.fields.len();
         let points = self
             .schema
@@ -178,27 +285,140 @@ impl FloatMerger {
                 }
             }
         }
+        let input_live = partial.groups.iter().fold(
+            partial
+                .groups
+                .capacity()
+                .saturating_mul(size_of::<PartialGroup>()),
+            |bytes, group| bytes.saturating_add(group_bytes(group)),
+        );
         for group in partial.groups {
-            let index = match self.group_index.entry(label_key(&group.metric)) {
-                Entry::Occupied(entry) => *entry.get(),
-                Entry::Vacant(entry) => {
-                    self.groups.push(Group {
-                        metric: group.metric,
-                        blocks: BTreeMap::new(),
-                    });
-                    *entry.insert(self.groups.len() - 1)
+            let metric = group.metric;
+            // `label_key` copies the metric name into its own `Arc`, so the copy is admitted
+            // before it is made. A group that is already merged needs a key too, and its
+            // admission comes before anything else this call can allocate.
+            budget(
+                self.retained
+                    .saturating_add(input_live)
+                    .saturating_add(key_workspace_bytes(&metric)),
+            )?;
+            let key = label_key(&metric);
+            let live = input_live.saturating_add(key_bytes(&key));
+            let index = match self.group_index.get(&key).copied() {
+                Some(index) => index,
+                None => self.open_group(metric, key, live, &mut budget)?,
+            };
+            self.merge_points(index, group.points, live, &mut budget)?;
+        }
+        Ok(())
+    }
+
+    /// Adds a group and its key, admitting the group vector and index growth first.
+    fn open_group(
+        &mut self,
+        metric: SeriesLabels,
+        key: LabelKey,
+        live: usize,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<usize> {
+        let capacity = self.groups.capacity();
+        let next_capacity = if self.groups.len() == capacity {
+            capacity.saturating_mul(2).max(4)
+        } else {
+            capacity
+        };
+        let map_capacity = self.group_index.capacity();
+        let next_map_capacity = if self.group_index.len().saturating_add(1) > map_capacity {
+            next_hash_capacity(map_capacity)
+        } else {
+            map_capacity
+        };
+        let key_live = key_bytes(&key);
+        let metric_live = metric_bytes(&metric);
+        // A realloc that cannot grow in place keeps both buffers alive while it copies, so a
+        // growing step admits the new buffer beside the old one, which `retained` already holds.
+        budget(
+            self.retained
+                .saturating_add(live)
+                .saturating_add(key_live)
+                .saturating_add(metric_live)
+                .saturating_add(if next_capacity > capacity {
+                    next_capacity.saturating_mul(size_of::<Group>())
+                } else {
+                    0
+                })
+                .saturating_add(if next_map_capacity > map_capacity {
+                    hash_map_backing_bytes(next_map_capacity)
+                } else {
+                    0
+                }),
+        )?;
+        self.groups.try_reserve(1).map_err(|error| {
+            DataFusionError::Execution(format!("cannot reserve aggregate groups: {error}"))
+        })?;
+        self.groups.push(Group {
+            metric,
+            blocks: BTreeMap::new(),
+        });
+        let index = self.groups.len() - 1;
+        self.group_index.insert(key, index);
+        self.retained = self
+            .retained
+            .saturating_add(
+                self.groups
+                    .capacity()
+                    .saturating_sub(capacity)
+                    .saturating_mul(size_of::<Group>()),
+            )
+            .saturating_add(
+                hash_map_backing_bytes(self.group_index.capacity())
+                    .saturating_sub(hash_map_backing_bytes(map_capacity)),
+            )
+            .saturating_add(metric_live)
+            .saturating_add(key_live);
+        Ok(index)
+    }
+
+    /// Adds the points of one partial group to group `index`. A missing block is admitted with its
+    /// states and B-tree node before either is allocated; an existing one only merges state.
+    fn merge_points(
+        &mut self,
+        index: usize,
+        points: Vec<Point>,
+        live: usize,
+        budget: &mut impl FnMut(usize) -> Result<()>,
+    ) -> Result<()> {
+        let width = self.schema.fields.len();
+        let block_bytes = BLOCK_POINTS
+            .saturating_mul(width)
+            .saturating_mul(size_of::<FloatState>());
+        let blocks = &mut self.groups[index].blocks;
+        for (point, states) in points {
+            let block_index = point / BLOCK_POINTS;
+            let entries = blocks.len();
+            let block = match blocks.entry(block_index) {
+                BTreeEntry::Occupied(entry) => entry.into_mut(),
+                BTreeEntry::Vacant(entry) => {
+                    budget(
+                        self.retained
+                            .saturating_add(live)
+                            .saturating_add(block_bytes)
+                            .saturating_add(btree_backing_bytes(entries.saturating_add(1))),
+                    )?;
+                    self.retained = self
+                        .retained
+                        .saturating_add(block_bytes)
+                        .saturating_add(btree_backing_bytes(entries.saturating_add(1)))
+                        .saturating_sub(btree_backing_bytes(entries));
+                    entry.insert(
+                        vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice(),
+                    )
                 }
             };
-            let blocks = &mut self.groups[index].blocks;
-            for (point, states) in group.points {
-                let block = blocks.entry(point / BLOCK_POINTS).or_insert_with(|| {
-                    vec![FloatState::default(); BLOCK_POINTS * width].into_boxed_slice()
-                });
-                let offset = (point % BLOCK_POINTS) * width;
-                for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
-                    if let Some(state) = state {
-                        slot.merge(self.op, FloatState::from_partial(state));
-                    }
+            let offset = (point % BLOCK_POINTS) * width;
+            for (slot, state) in block[offset..offset + width].iter_mut().zip(states) {
+                if let Some(state) = state {
+                    slot.merge(self.op, FloatState::from_partial(state));
                 }
             }
         }
@@ -208,6 +428,15 @@ impl FloatMerger {
     /// The result of every group, in the order the groups first arrived.
     pub fn finish(self) -> Result<Vec<Series>> {
         finish_groups(self.schema, self.op, self.groups)
+    }
+
+    /// [`Self::finish`] that admits the result it builds, on top of what the merge still holds. The
+    /// merge is consumed either way, so a caller that budgets drops it on a refusal.
+    pub(crate) fn finish_budgeted(
+        self,
+        budget: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Vec<Series>> {
+        finish_groups_budgeted(self.schema, self.op, self.groups, self.retained, budget)
     }
 }
 
