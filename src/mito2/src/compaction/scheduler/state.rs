@@ -320,6 +320,7 @@ impl DdlExecution {
 
 /// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
+    /// Resident automatic-pick history, retained across batches until region unload.
     pub(crate) pick_history: PickHistory,
     /// Id of the region.
     pub(super) region_id: RegionId,

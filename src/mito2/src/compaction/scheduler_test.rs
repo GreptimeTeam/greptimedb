@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use std::assert_matches;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use api::v1::region::StrictWindow;
 use api::v1::region::compact_request::Options;
@@ -426,17 +426,17 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         window: 0,
         class: PickClass::FileReduction,
     };
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     scheduler
         .region_status
         .get_mut(&id)
         .unwrap()
         .pick_history
-        .observe([key].into_iter(), start);
+        .observe_for_test([key].into_iter(), start);
     let later = start + Duration::from_secs(120);
     let priority = scheduler.region_status[&id]
         .pick_history
-        .priority(key, later);
+        .priority_for_test(key, later);
     assert!(priority.1.is_some());
     scheduler.region_status.get_mut(&id).unwrap().become_idle();
     scheduler.register_region(&version, &env.access_layer);
@@ -444,14 +444,14 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority(key, later)
+            .priority_for_test(key, later)
     );
     scheduler.on_compaction_failed(id, Arc::new(InvalidSchedulerStateSnafu.build()));
     assert_eq!(
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority(key, later)
+            .priority_for_test(key, later)
     );
     let manifest = env
         .mock_manifest_context(version.current().version.metadata.clone())
@@ -466,20 +466,22 @@ async fn test_pick_history_survives_cycles_but_not_region_replacement() {
         schemas,
         1,
     );
-    assert_eq!(priority, request.pick_history.priority(key, later));
-    request.pick_history.observe(std::iter::empty(), later);
+    assert_eq!(priority, request.pick_history.priority_for_test(key, later));
+    request
+        .pick_history
+        .observe_for_test(std::iter::empty(), later);
     assert_eq!(
         priority,
         scheduler.region_status[&id]
             .pick_history
-            .priority(key, later)
+            .priority_for_test(key, later)
     );
     let replacement = Arc::new(VersionControlBuilder::new().build());
     scheduler.register_region(&replacement, &env.access_layer);
     assert!(
         scheduler.region_status[&id]
             .pick_history
-            .priority(key, later)
+            .priority_for_test(key, later)
             .1
             .is_none()
     );
@@ -508,13 +510,15 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
         window: 0,
         class: PickClass::FileReduction,
     };
-    let start = Instant::now();
+    let start = std::time::Instant::now();
     let now = start + Duration::from_secs(120);
-    status.pick_history.observe([key].into_iter(), start);
+    status
+        .pick_history
+        .observe_for_test([key].into_iter(), start);
     status.start_picking_with_trigger(7, CompactionTrigger::Automatic);
     let mut planned_history = status.pick_history.clone();
-    planned_history.observe(std::iter::empty(), now);
-    assert!(status.pick_history.priority(key, now).1.is_some());
+    planned_history.observe_for_test(std::iter::empty(), now);
+    assert!(status.pick_history.priority_for_test(key, now).1.is_some());
     let result = if failed {
         CompactionPlanningResult::Error(Arc::new(InvalidSchedulerStateSnafu.build()))
     } else {
@@ -535,7 +539,7 @@ async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] fai
         failed,
         scheduler.region_status[&id]
             .pick_history
-            .priority(key, now)
+            .priority_for_test(key, now)
             .1
             .is_some()
     );
@@ -1002,17 +1006,17 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         window: -999,
         class: PickClass::FileReduction,
     };
-    let now = Instant::now();
+    let now = std::time::Instant::now();
     scheduler
         .region_status
         .get_mut(&region_id)
         .unwrap()
         .pick_history
-        .observe([key].into_iter(), now - Duration::from_secs(120));
+        .observe_for_test([key].into_iter(), now - Duration::from_secs(120));
     let (mut finished, manifest_ctx, schema_metadata_manager) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
     let history = &scheduler.region_status[&region_id].pick_history;
-    assert!(history.priority(key, now).1.is_some());
+    assert!(history.priority_for_test(key, now).1.is_some());
     let (waiter_tx, mut waiter_rx) = oneshot::channel();
     scheduler
         .region_status
@@ -1026,7 +1030,7 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         .await;
 
     let history = &scheduler.region_status[&region_id].pick_history;
-    assert!(history.priority(key, now).1.is_some());
+    assert!(history.priority_for_test(key, now).1.is_some());
     assert_eq!(job_scheduler.num_jobs(), 0);
     assert_eq!(scheduler.region_status[&region_id].active.waiters.len(), 1);
     assert_matches!(
@@ -1053,17 +1057,17 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
         window: -999,
         class: PickClass::FileReduction,
     };
-    let now = Instant::now();
+    let now = std::time::Instant::now();
     scheduler
         .region_status
         .get_mut(&id)
         .unwrap()
         .pick_history
-        .observe([key].into_iter(), now - Duration::from_secs(120));
+        .observe_for_test([key].into_iter(), now - Duration::from_secs(120));
     let (finished, manifest, schemas) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
     let history = &scheduler.region_status[&id].pick_history;
-    assert!(history.priority(key, now).1.is_some());
+    assert!(history.priority_for_test(key, now).1.is_some());
     scheduler
         .region_status
         .get_mut(&id)
@@ -1073,7 +1077,7 @@ async fn test_cancelled_prepared_plan_preserves_resident_history() {
         .handle_compaction_pick_finished(finished, &manifest, schemas)
         .await;
     let history = &scheduler.region_status[&id].pick_history;
-    assert!(history.priority(key, now).1.is_some());
+    assert!(history.priority_for_test(key, now).1.is_some());
     assert_eq!(0, executor.num_jobs());
 }
 

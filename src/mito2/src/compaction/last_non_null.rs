@@ -302,7 +302,7 @@ mod tests {
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
         let picked = if fair {
-            crate::compaction::scheduler::pick_automatic(
+            crate::compaction::scheduler::pick_automatic_for_test(
                 &region,
                 &mut Default::default(),
                 limit,

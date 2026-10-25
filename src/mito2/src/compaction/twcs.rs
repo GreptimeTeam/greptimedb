@@ -294,7 +294,7 @@ impl TwcsPicker {
                                     },
                                 )
                                 .into_iter()
-                                .map(|pick| (window, pick)),
+                                .map(|pick| WindowCandidate { window, pick }),
                         );
                     }
                     picks
@@ -309,7 +309,7 @@ impl TwcsPicker {
             if !all_candidates
                 && picks
                     .iter()
-                    .filter(|(_, pick)| pick.class == PickClass::L0Merge)
+                    .filter(|candidate| candidate.pick.class == PickClass::L0Merge)
                     .count()
                     >= max_outputs
             {
@@ -319,14 +319,11 @@ impl TwcsPicker {
 
         if !all_candidates {
             // Manual/stateless callers retain their existing early-exit policy.
-            picks.sort_by_key(|(_, pick)| pick.class);
+            picks.sort_by_key(|candidate| candidate.pick.class);
             picks.truncate(max_outputs);
         }
         Ok(TwcsCandidates {
-            candidates: picks
-                .into_iter()
-                .map(|(window, pick)| WindowCandidate { window, pick })
-                .collect(),
+            candidates: picks,
             windows: time_windows,
             active_window,
             primary_key_mapper,
@@ -1449,20 +1446,18 @@ mod tests {
 
         async fn build_output_with_history(
             &self,
-            region_id: RegionId,
             time_windows: BTreeMap<i64, Window>,
             active_window: Option<i64>,
-            time_window_size: Option<i64>,
             history: &mut PickHistory,
         ) -> Result<Vec<CompactionOutput>> {
             let mut candidates = self
                 .build_candidates(
-                    region_id,
+                    RegionId::from_u64(1),
                     time_windows,
                     WindowOutputContext {
                         all_candidates: true,
                         active_window,
-                        time_window_size,
+                        time_window_size: None,
                         max_outputs: None,
                         primary_key_mapper: Arc::new(primary_key_mapper_for_test()),
                     },
@@ -3342,13 +3337,7 @@ mod tests {
         let mut history = PickHistory::default();
         let picker = priority_test_picker(1);
         let first = picker
-            .build_output_with_history(
-                RegionId::from_u64(1),
-                assign_to_windows(files.iter(), 1),
-                Some(10),
-                None,
-                &mut history,
-            )
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
             .await
             .unwrap();
         assert_eq!(1, first.len());
@@ -3362,15 +3351,9 @@ mod tests {
             class,
         };
         history = PickHistory::default();
-        history.observe([key].into_iter(), Instant::now() - Duration::from_secs(120));
+        history.observe_for_test([key].into_iter(), Instant::now() - Duration::from_secs(120));
         let output = picker
-            .build_output_with_history(
-                RegionId::from_u64(1),
-                assign_to_windows(files.iter(), 1),
-                Some(10),
-                None,
-                &mut history,
-            )
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
             .await
             .unwrap();
         assert_eq!(1, output.len());
@@ -3407,7 +3390,7 @@ mod tests {
         let picker = priority_test_picker(1);
         let mut history = PickHistory::default();
         if fair && promoted {
-            history.observe(
+            history.observe_for_test(
                 [PickKey {
                     window: 0,
                     class: PickClass::FileReduction,
@@ -3440,10 +3423,8 @@ mod tests {
         let output = if fair {
             picker
                 .build_output_with_history(
-                    RegionId::from_u64(1),
                     assign_to_windows(files.iter(), 1),
                     Some(10),
-                    None,
                     &mut history,
                 )
                 .await
@@ -3490,13 +3471,7 @@ mod tests {
         let picker = priority_test_picker(1);
         let mut history = PickHistory::default();
         let output = picker
-            .build_output_with_history(
-                RegionId::from_u64(1),
-                assign_to_windows(files.iter(), 1),
-                Some(10),
-                None,
-                &mut history,
-            )
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
             .await
             .unwrap();
         assert_eq!(1, output.len());
@@ -3525,7 +3500,7 @@ mod tests {
             new_file_handle_with_size_and_sequence(FileId::random(), 100, 199, 0, 1, 1000)
         }));
         let mut history = PickHistory::default();
-        history.observe(
+        history.observe_for_test(
             [PickKey {
                 window: 0,
                 class: PickClass::FileReduction,
@@ -3535,13 +3510,7 @@ mod tests {
         );
         let picker = priority_test_picker(1);
         let output = picker
-            .build_output_with_history(
-                RegionId::from_u64(1),
-                assign_to_windows(files.iter(), 1),
-                Some(10),
-                None,
-                &mut history,
-            )
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
             .await
             .unwrap();
         if l0_count == 1 {
@@ -3621,13 +3590,7 @@ mod tests {
         let picker = priority_test_picker(4);
         let mut history = PickHistory::default();
         let output = picker
-            .build_output_with_history(
-                RegionId::from_u64(1),
-                assign_to_windows(files.iter(), 1),
-                Some(0),
-                None,
-                &mut history,
-            )
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(0), &mut history)
             .await
             .unwrap();
         assert_eq!(1, output.len());

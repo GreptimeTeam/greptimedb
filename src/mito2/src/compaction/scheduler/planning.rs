@@ -57,6 +57,7 @@ use crate::worker::WorkerListener;
 
 /// Region compaction request.
 pub struct CompactionRequest {
+    /// Private snapshot for automatic planning; never mutates resident history.
     pub(crate) pick_history: PickHistory,
     pub(crate) engine_config: Arc<MitoConfig>,
     pub(crate) current_version: CompactionVersion,
@@ -81,6 +82,7 @@ impl CompactionRequest {
 /// Result returned to the worker after background compaction planning.
 pub(crate) enum CompactionPlanningResult {
     Prepared(PreparedCompaction),
+    /// Returns automatic history even for an empty plan, to prune stale eligibility.
     NoPlan(Option<PickHistory>),
     Error(Arc<Error>),
 }
@@ -107,6 +109,8 @@ pub(crate) struct CompactionPickFinished {
 }
 
 pub(crate) struct PreparedCompaction {
+    /// Updated automatic snapshot, installed only after the worker accepts the plan.
+    /// Manual planning returns `None` and leaves resident waiting ages unchanged.
     pick_history: Option<PickHistory>,
     pub(super) compaction_region: CompactionRegion,
     pub(super) picker_output: PickerOutput,
@@ -117,7 +121,7 @@ pub(crate) struct PreparedCompaction {
 /// Scheduler policy applied between stateless discovery and semantic closure.
 /// Runs on the planning runtime with a private history snapshot, never on the
 /// worker or through a shared mutex. Stale results cannot mutate resident state.
-pub(crate) async fn pick_automatic(
+async fn pick_automatic(
     region: &CompactionRegion,
     history: &mut PickHistory,
     max_outputs: Option<usize>,
@@ -137,6 +141,17 @@ pub(crate) async fn pick_automatic(
     } else {
         Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
     }
+}
+
+/// Exercises automatic selection and closure from cross-module regression tests.
+#[cfg(test)]
+pub(crate) async fn pick_automatic_for_test(
+    region: &CompactionRegion,
+    history: &mut PickHistory,
+    max_outputs: Option<usize>,
+    time_range: Option<TimestampRange>,
+) -> Result<Option<PickerOutput>> {
+    pick_automatic(region, history, max_outputs, time_range).await
 }
 
 impl CompactionScheduler {

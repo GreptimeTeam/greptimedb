@@ -1831,16 +1831,10 @@ mod tests {
         assert!(pick.reduces_files);
         assert!(overlap.is_none());
         let legacy = closed_merge_with_budget(&files, MAX_OUTPUT, 1 << 10).unwrap();
+        assert!(legacy.dense_fallback);
+        assert!(legacy.reduces_files);
+        assert!((2..=16).contains(&legacy.inputs.len()));
         assert_eq!(ids(&legacy.inputs), ids(&pick.inputs));
-    }
-
-    #[test]
-    fn test_dense_closed_merge_reduces_files() {
-        let files = dense_files(300);
-        let pick = closed_merge_with_budget(&files, MAX_OUTPUT, 1 << 10).unwrap();
-        assert!(pick.dense_fallback);
-        assert!(pick.reduces_files);
-        assert!((2..=16).contains(&pick.inputs.len()));
     }
 
     #[test]

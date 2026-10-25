@@ -23,13 +23,16 @@ use crate::sst::file::RegionFileId;
 
 /// Waiting compensation starts after one minute. This is a promotion threshold,
 /// not a deadline: an executing batch is never preempted to run an overdue pick.
+/// It is checked at pick time and does not wake the scheduler on its own.
 const PROMOTION_DELAY: Duration = Duration::from_secs(60);
 
 /// A work identity survives file replacement and picking epochs, but not a region
 /// incarnation. Different classes in the same window retain independent ages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct PickKey {
+    /// Window identity, independent of the current input files.
     pub(crate) window: i64,
+    /// Work category whose waiting age is tracked independently in this window.
     pub(crate) class: PickClass,
 }
 
@@ -38,26 +41,29 @@ pub(crate) struct PickKey {
 /// successful execution. Cancelled, stale and failed plans do not reset ages.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PickHistory {
+    /// First observation or last successful service time for each eligible key.
+    /// Repeated picks preserve this timestamp until service is acknowledged.
     waiting: HashMap<PickKey, Instant>,
+    /// Selected seeds and their original input IDs, pending service acknowledgement.
+    /// Input validation may remove seeds without resetting their waiting ages.
     selected: Vec<(PickKey, Vec<RegionFileId>)>,
 }
 
 impl PickHistory {
-    /// Refreshes eligible identities without resetting surviving work. Storage
-    /// is bounded by the current snapshot's windows times the three pick classes.
-    pub(crate) fn observe(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
+    /// Refreshes all eligible identities before selection limits hide any work.
+    /// Preserves surviving ages and drops absent keys without changing selection.
+    fn observe(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
         let live: HashSet<_> = keys.collect();
         self.waiting.retain(|key, _| live.contains(key));
         for key in live {
             self.waiting.entry(key).or_insert(now);
         }
-        self.selected.clear();
     }
 
-    /// Overdue work precedes ordinary priority, oldest first. Normal picks retain
-    /// the existing class/newest-window ordering. The caller supplies one clock
-    /// reading for the entire sort, so the comparator stays consistent.
-    pub(crate) fn priority(
+    /// Returns an ascending sort key: promoted work first, oldest waiting first.
+    /// Below [`PROMOTION_DELAY`], age does not affect class/newest-window ordering.
+    /// One shared `now` keeps the comparator consistent across the entire sort.
+    fn priority(
         &self,
         key: PickKey,
         now: Instant,
@@ -70,18 +76,21 @@ impl PickHistory {
         (overdue.is_none(), overdue, key.class, Reverse(key.window))
     }
 
-    pub(crate) fn select(&mut self, key: PickKey, inputs: Vec<RegionFileId>) {
+    /// Records a seed for later service acknowledgement without resetting its age.
+    fn select(&mut self, key: PickKey, inputs: Vec<RegionFileId>) {
         self.selected.push((key, inputs));
     }
 
     /// Applies region fairness to a complete discovery result. Planning uses a
     /// private snapshot; the worker installs it only after validating the plan ID.
+    /// Keeps at most one alternative per window, then applies `max_outputs`.
     pub(crate) fn select_candidates(
         &mut self,
         mut candidates: Vec<WindowCandidate>,
         max_outputs: Option<usize>,
         now: Instant,
     ) -> Vec<WindowCandidate> {
+        self.selected.clear();
         let key = |candidate: &WindowCandidate| PickKey {
             window: candidate.window,
             class: candidate.pick.class,
@@ -123,6 +132,8 @@ impl PickHistory {
             .retain(|(_, files)| files.iter().all(|id| inputs.contains(id)));
     }
 
+    /// Resets ages only for accepted seeds after a successful batch makes progress.
+    /// Drains the selection so later completions cannot acknowledge it again.
     pub(crate) fn finish_success(&mut self, now: Instant) {
         for (key, _) in self.selected.drain(..) {
             if let Some(since) = self.waiting.get_mut(&key) {
@@ -132,9 +143,26 @@ impl PickHistory {
     }
 
     /// A manual request does not use automatic selection and cannot acknowledge
-    /// the selection of a previously failed automatic cycle.
+    /// the selection of a previously failed automatic cycle. Waiting ages survive.
     pub(crate) fn discard_selection(&mut self) {
         self.selected.clear();
+    }
+}
+
+#[cfg(test)]
+impl PickHistory {
+    /// Seeds waiting ages for cross-module scheduling tests.
+    pub(crate) fn observe_for_test(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
+        self.observe(keys, now);
+    }
+
+    /// Inspects ordering without exposing the production policy helper.
+    pub(crate) fn priority_for_test(
+        &self,
+        key: PickKey,
+        now: Instant,
+    ) -> (bool, Option<Instant>, PickClass, Reverse<i64>) {
+        self.priority(key, now)
     }
 }
 
@@ -144,6 +172,24 @@ mod tests {
 
     fn key(window: i64, class: PickClass) -> PickKey {
         PickKey { window, class }
+    }
+
+    #[test]
+    fn test_observation_preserves_selection_until_next_pick() {
+        let start = Instant::now();
+        let key = key(0, PickClass::FileReduction);
+        let mut history = PickHistory::default();
+        history.observe([key].into_iter(), start);
+        history.select(key, Vec::new());
+
+        let now = start + PROMOTION_DELAY;
+        history.observe([key].into_iter(), now);
+        assert_eq!(start, history.waiting[&key]);
+        assert_eq!(vec![(key, Vec::new())], history.selected);
+
+        assert!(history.select_candidates(Vec::new(), None, now).is_empty());
+        assert!(history.selected.is_empty());
+        assert!(history.waiting.is_empty());
     }
 
     #[test]

@@ -29,7 +29,7 @@ use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
-pub(crate) use planning::pick_automatic;
+pub(crate) use planning::pick_automatic_for_test;
 pub(crate) use state::CompactionExecution;
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
