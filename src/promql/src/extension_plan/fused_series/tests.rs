@@ -1924,12 +1924,18 @@ async fn physical_plan_accepts_scalar_root_without_sources() {
         tree,
         binding.clone(),
         Vec::new(),
-        schema.to_dfschema_ref().unwrap(),
+        schema.clone().to_dfschema_ref().unwrap(),
     )
     .unwrap();
     let exec = node.to_execution_plan(Vec::new()).unwrap();
     assert_eq!(1, exec.properties().output_partitioning().partition_count());
-    let rebuilt = exec.clone().with_new_children(Vec::new()).unwrap();
+    let rebuilt = exec
+        .clone()
+        .replace_children(
+            Vec::new(),
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .unwrap();
     assert!(matches!(
         exec.properties().boundedness,
         Boundedness::Bounded
