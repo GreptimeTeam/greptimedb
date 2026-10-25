@@ -38,9 +38,17 @@ TQL EVAL (4, 4, '1s') fused_multi_standalone{host!="",kind!=""} + on(host, kind)
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (4, 4, '1s') fused_multi_standalone{host!="",kind!=""} == bool fused_multi_standalone{host!="",kind!=""};
 
--- Different matchers cannot share one fused scan; on(host) keeps host: h1 55 and h2 110.
+-- Independent matcher-bearing inputs match on host: h1 55 and h2 110.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (4, 4, '1s') fused_multi_standalone{kind="left"} + on(host) fused_multi_standalone{kind="right"};
+
+-- Noncommutative matching detects swapped or reused inputs: h1 -45 and h2 -90.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (4, 4, '1s') fused_multi_standalone{kind="left"} - on(host) fused_multi_standalone{kind="right"};
+
+-- Each range input keeps its own bounds: left ends at 2s, right at 4s; rates differ by -9/-18.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (4, 4, '1s') rate(fused_multi_standalone{kind="left"}[3s] @ 3 offset 1s) - on(host) rate(fused_multi_standalone{kind="right"}[2s] @ 4);
 
 -- group_right keeps the right-side kind: h1/left 10 and h1/right 55.
 -- SQLNESS SORT_RESULT 3 1

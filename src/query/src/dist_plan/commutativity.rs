@@ -29,7 +29,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-use crate::promql::planner::native::{pointwise_operand, two_occurrences_pair_one_source};
+use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scan};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -244,11 +244,20 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                // The raw-series reader can be placed region-side only over one TableScan child.
-                let [child] = fused.children() else {
-                    return Commutativity::NonCommutative;
-                };
-                if !matches!(child, LogicalPlan::TableScan(_)) {
+                // The raw-series reader supports one scan, or the narrow same-table two-scan
+                // one-to-one case. This classification is for region-local execution only.
+                let children = fused.children();
+                let pair = children.len() == 2
+                    && children
+                        .iter()
+                        .all(|child| matches!(child, LogicalPlan::TableScan(_)))
+                    && same_table_scan(&children[0], &children[1])
+                    && independent_scan_pair(fused.tree().root());
+                if children.len() == 1 {
+                    if !matches!(children[0], LogicalPlan::TableScan(_)) {
+                        return Commutativity::NonCommutative;
+                    }
+                } else if !pair {
                     return Commutativity::NonCommutative;
                 }
                 let binding = fused.binding();
@@ -256,20 +265,13 @@ impl Categorizer {
                     return Commutativity::NonCommutative;
                 }
                 let root = fused.tree().root();
-                let per_series =
-                    pointwise_operand(root) || two_occurrences_pair_one_source(root, &binding.tags);
+                let per_series = pointwise_operand(root) || independent_scan_pair(root);
                 if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }
 
-                // A region evaluates the whole tree over the series its scan returns, so this is
-                // only correct while each series reaches exactly one region: a series split
-                // across regions would be ranged per fragment, and a range over fragments is not
-                // the range over the series. Native admission
-                // (`promql::planner::native::try_plan_native_fused`) only builds the node when
-                // every partition column of the table is one of the binding's tag columns, so
-                // the partition key is a function of the label set and a series cannot straddle
-                // regions.
+                // The two-scan exception describes only in-process, same-table region-local
+                // execution. It is not a claim that matching is globally commutative across regions.
                 Commutativity::Commutative
             }
             name if name == SeriesNormalize::name()
@@ -412,7 +414,7 @@ mod tests {
     use super::*;
     use crate::dist_plan::DistPlannerAnalyzer;
     use crate::optimizer::test_util::mock_table_provider;
-    use crate::promql::native_compile::{compile, statement_grid};
+    use crate::promql::native_compile::{compile, compile_selectors, statement_grid};
     use crate::query_engine::DefaultSerializer;
 
     #[test]
@@ -468,6 +470,52 @@ mod tests {
     /// where the node may be placed, not what it computes.
     fn fused_series_plan(input: LogicalPlan) -> LogicalPlan {
         fused_series_plan_named(input, Some("some_metric"))
+    }
+
+    fn fused_pair_plan(left: LogicalPlan, right: LogicalPlan) -> LogicalPlan {
+        let mut stmt = native_statement();
+        stmt.expr =
+            parser::parse("some_metric{host=\"left\"} + on(host) some_metric{host=\"right\"}")
+                .unwrap();
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        });
+        let tree = compile_selectors(
+            &stmt,
+            &|_| Ok(Arc::clone(&series_schema)),
+            SeriesOrdering::Contiguous,
+        )
+        .unwrap()
+        .tree;
+        let binding = FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            time_index: "ts".to_string(),
+            tags: vec!["host".to_string()],
+            metric_name: Some(Arc::from("some_metric")),
+        };
+        let output_schema: DFSchemaRef = Arc::new(
+            DFSchema::new_with_metadata(
+                vec![(
+                    None,
+                    Arc::new(Field::new("v0", ArrowDataType::Float64, true)),
+                )],
+                Default::default(),
+            )
+            .unwrap(),
+        );
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                FusedSeries::try_new(
+                    Arc::from("some_metric{host=\"left\"} + on(host) some_metric{host=\"right\"}"),
+                    tree,
+                    binding,
+                    vec![left, right],
+                    output_schema,
+                )
+                .unwrap(),
+            ),
+        })
     }
 
     /// The same node, with the metric name it binds chosen by the caller.
@@ -535,6 +583,26 @@ mod tests {
         .unwrap()
         .build()
         .unwrap()
+    }
+
+    fn table_scan_plan_with_filter(value: &str) -> LogicalPlan {
+        let LogicalPlan::TableScan(mut scan) = table_scan_plan() else {
+            unreachable!();
+        };
+        scan.filters
+            .push(datafusion_expr::col("k0").eq(datafusion_expr::lit(value)));
+        LogicalPlan::TableScan(scan)
+    }
+
+    fn remote_fused_pair(plan: &LogicalPlan) -> Option<&FusedSeries> {
+        if let Some(merge_scan) = as_merge_scan(plan)
+            && let LogicalPlan::Extension(extension) = merge_scan.input()
+            && let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>()
+            && fused.children().len() == 2
+        {
+            return Some(fused);
+        }
+        plan.inputs().into_iter().find_map(remote_fused_pair)
     }
 
     fn holds_fused_series(plan: &LogicalPlan) -> bool {
@@ -651,6 +719,10 @@ mod tests {
         analyzer.analyze(plan, &ConfigOptions::default()).unwrap()
     }
 
+    fn analyzed(analyzer: DistPlannerAnalyzer, plan: LogicalPlan) -> DfResult<LogicalPlan> {
+        analyzer.analyze(plan, &ConfigOptions::default())
+    }
+
     /// Whether the remote input of any merge scan in `plan` holds a node `wanted` accepts.
     fn any_remote_input_holds(plan: &LogicalPlan, wanted: fn(&LogicalPlan) -> bool) -> bool {
         let mut holds = false;
@@ -750,6 +822,92 @@ mod tests {
         )
         .unwrap();
         assert!(!reads_across_series(single_selector.root()));
+    }
+
+    #[test]
+    fn same_table_two_scan_fused_pair_is_region_local_commutative() {
+        let pair = fused_pair_plan(table_scan_plan(), table_scan_plan());
+        let LogicalPlan::Extension(extension) = pair else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::Commutative
+        ));
+
+        let other_table = LogicalPlanBuilder::scan(
+            "other_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(mock_table_provider(
+                RegionId::new(1, 1),
+            )))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let pair = fused_pair_plan(table_scan_plan(), other_table);
+        let LogicalPlan::Extension(extension) = pair else {
+            unreachable!();
+        };
+        assert!(matches!(
+            Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
+            Commutativity::NonCommutative
+        ));
+    }
+
+    #[test]
+    fn in_process_pair_bypasses_generic_multi_input_requirement_gate_only_for_root_pair() {
+        let left = table_scan_plan_with_filter("left");
+        let right = table_scan_plan_with_filter("right");
+        let pair = fused_pair_plan(left, right);
+        let result = analyzed(DistPlannerAnalyzer::new(true), pair.clone());
+        assert!(
+            result.is_ok(),
+            "in-process root pair should be placeable: {result:?}"
+        );
+        let analyzed_plan = result.unwrap();
+        let fused = remote_fused_pair(&analyzed_plan).expect("one remote root pair");
+        assert_eq!(2, fused.children().len());
+        let remote_scan = first_merge_scan(&analyzed_plan).expect("one merge scan");
+        let LogicalPlan::Extension(remote_pair) = remote_scan.input() else {
+            panic!("expected fused remote input: {}", remote_scan.input());
+        };
+        let remote_fused = remote_pair
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap();
+        let LogicalPlan::TableScan(left) = &remote_fused.children()[0] else {
+            unreachable!()
+        };
+        let LogicalPlan::TableScan(right) = &remote_fused.children()[1] else {
+            unreachable!()
+        };
+        assert_ne!(left.filters, right.filters);
+        let inputs = fused.tree().root();
+        let NativeExpr::Binary { left, right, .. } = &inputs.expr else {
+            panic!("expected binary root: {:?}", inputs.expr);
+        };
+        let NativeExpr::Instant { input: left, .. } = &left.expr else {
+            panic!("expected left selector input: {:?}", left.expr);
+        };
+        let NativeExpr::Input(left) = &left.expr else {
+            panic!("expected left source: {:?}", left.expr);
+        };
+        let NativeExpr::Instant { input: right, .. } = &right.expr else {
+            panic!("expected right selector input: {:?}", right.expr);
+        };
+        let NativeExpr::Input(right) = &right.expr else {
+            panic!("expected right source: {:?}", right.expr);
+        };
+        assert_eq!((0, 1), (left.source_index, right.source_index));
+
+        let not_in_process = analyzed(DistPlannerAnalyzer::new(false), pair);
+        assert!(
+            not_in_process.is_err()
+                || remote_fused_pair(not_in_process.as_ref().unwrap()).is_none(),
+            "wire transport must not carry the pair exception"
+        );
     }
 
     /// The encoding gate is what kept the node on the frontend, and it only exists for a plan that

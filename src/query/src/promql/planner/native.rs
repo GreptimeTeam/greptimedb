@@ -16,9 +16,10 @@
 //!
 //! [`PromPlanner::try_plan_native_fused`] offers a small experimental subset to the native
 //! compiler: a vector selector (optionally parenthesized), or nested unary `rate`, `increase`,
-//! `sum_over_time`, and `abs` calls over a selector. It replaces that expression with one
-//! [`FusedSeries`] node over the selector's table scan. Other expression shapes keep the existing
-//! planner's route.
+//! `sum_over_time`, and `abs` calls over a selector, plus a one-to-one arithmetic match between two
+//! such operands from the same ordinary Mito table. It replaces that expression with one
+//! [`FusedSeries`] node, retaining a separate scan for each selector occurrence. Other expression
+//! shapes keep the existing planner's route.
 //!
 //! What the node needs from here is three things the existing planner already resolves: the raw
 //! series schema the tree's input was compiled against (the selector's selected field columns), the
@@ -41,7 +42,7 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
-use promql::native::plan::{NativeExpr, NativeNode, NativeTree, reads_across_series};
+use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
@@ -51,7 +52,6 @@ use promql_parser::parser::{
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
-use table::metadata::TableMeta;
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile_selectors, statement_grid};
@@ -93,22 +93,7 @@ pub(crate) fn native_promql_requested(query_ctx: &QueryContextRef) -> bool {
 /// `Interleaved`, so a tree compiled here runs on either scanner.
 const NATIVE_ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
-/// The primary-key column names that carry pipeline metadata rather than series identity.
-///
-/// A window, a map and a binary operation drop these three labels wherever they read them, while
-/// this route reports a series under the primary key it carries. A key column with one of these
-/// names therefore keeps the existing plan however whole the rest of the key is: a node that drops
-/// one of them can leave two raw series on one canonical label set, and the label set then no
-/// longer names the series the partition holds.
-const METADATA_KEY_TAGS: [&str; 3] = ["__name__", "__type__", "__unit__"];
-
-/// One prepared occurrence of a selector: the scan that reads it, the raw-series layout it was
-/// prepared against, and the columns its series are reported under.
-///
-/// The last three are the node's rather than one scan's — the binding names a time index, a tag list
-/// and a metric name once — so they are compared across the occurrences and then travel to the
-/// binding together. The first two are what [`same_source`] compares, which is the check that two
-/// occurrences of one selector are one scan.
+/// One prepared occurrence of a selector: its scan, raw-series layout and reporting columns.
 type PreparedInput = (
     LogicalPlan,
     Arc<SeriesSchema>,
@@ -126,8 +111,9 @@ impl PromPlanner {
     /// tree is compiled against.
     ///
     /// `None` is not a failure: unsupported shapes and queries this route cannot bind faithfully
-    /// continue through the existing planner. Admission is limited to selectors and unary calls
-    /// named above, plus the scan, schema, matcher, and grid constraints checked below.
+    /// continue through the existing planner. Admission is limited to selectors, the unary calls
+    /// named above, and a same-table one-to-one arithmetic pair, with the scan, schema, matcher,
+    /// and grid constraints checked below.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
@@ -262,6 +248,8 @@ impl PromPlanner {
                 // default `None`. A metric-engine table is served only through the logical rewrite
                 // recognised above, which is what makes its series the table's own.
                 if !supports_native_raw_series(&table_meta.engine)
+                    || (selectors.len() == 2
+                        && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
                     return Ok(None);
@@ -282,13 +270,11 @@ impl PromPlanner {
                 {
                     return Ok(None);
                 }
-                // FusedSeries evaluates each region independently, so partition keys must identify a
-                // series.
-                if !table
-                    .table_info()
-                    .meta
-                    .partition_column_names()
-                    .all(|column| tags.iter().any(|tag| tag == column))
+                // Preserve the existing single-selector guard that its partition keys are tags.
+                if selectors.len() == 1
+                    && !table_meta
+                        .partition_column_names()
+                        .all(|column| tags.iter().any(|tag| tag == column))
                 {
                     return Ok(None);
                 }
@@ -300,15 +286,6 @@ impl PromPlanner {
                 if !fields.iter().all(|field| {
                     Self::field_column_type(input.schema(), field) == Some(&ArrowDataType::Float64)
                 }) {
-                    return Ok(None);
-                }
-                // Two occurrences are admitted only when the scan's raw series keys name one
-                // logical series each, so that either occurrence reads the same series in whichever
-                // partition holds it. A single occurrence needs no such proof: it reads its own scan
-                // once, and the checks above are the ones it has always had.
-                if selectors.len() == 2
-                    && !identity_keys_are_injective(&matchers, table_meta, &tags)
-                {
                     return Ok(None);
                 }
                 let series_schema = Arc::new(SeriesSchema {
@@ -339,11 +316,8 @@ impl PromPlanner {
         let Some(mut prepared) = preparation? else {
             return Ok(None);
         };
-        // The time index, the tag list and the metric name are the node's, not one scan's: the
-        // output schema and the binding name them once, and every occurrence reports its series
-        // under them. Two occurrences that disagree are two different reportings, which one node
-        // cannot be built for. Both occurrences of an admitted pair share the layout, so the first
-        // one's schema also speaks for the node below.
+        // The time index, the raw tag list and metric name are shared binding properties. The
+        // output tags may be narrower for a PromQL `on(...)` vector match.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
         };
@@ -450,55 +424,22 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
             }
         }
-        // Two occurrences are admitted only when both read one scan plan: the node then runs one
-        // execution per partition of that one child, and both sides of the match see the same series
-        // in the same partition. Two actual scans — a different table, different matchers, different
-        // bounds — stay with the existing planner, which is where a match over more than one source
-        // is answered rather than in a region that holds part of it.
-        if selectors.len() == 2 && !same_source(&prepared[0], &prepared[1]) {
+        if selectors.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0) {
             return Ok(None);
         }
-        let mut children = prepared
+        let children = prepared
             .into_iter()
             .map(|(scan, _, _, _, _)| scan)
             .collect::<Vec<_>>();
-        // A tree run once per scan partition has to read one series at a time: an aggregate folds a
-        // label set's series together and a vector operation (`sort`, `absent`, `topk`,
-        // `histogram_quantile`, ...) reads the whole vector at a grid point, so one region's share
-        // of the series cannot answer either. Declining here is the only place that still works:
-        // once the `FusedSeries` node exists the logical plan is fixed, and the categorizer merely
-        // declining to push it down would leave a node the physical layer must build anyway. What
-        // does read one series at a time is one occurrence's samples - a selection, a window, a map
-        // over either, or a constant broadcast - and, for a statement that names one selector
-        // twice, a one-to-one match whose key holds the whole identity over one scan, which the
-        // collapse below reads as that scan.
+        // A tree run once per region must be point-wise over a series. Binary matches between two
+        // series are supported only for the narrowly admitted one-to-one root pair.
         let root = compiled.tree.root();
         if reads_across_series(root)
-            && !(pointwise_operand(root)
-                || (selectors.len() == 2 && two_occurrences_pair_one_source(root, &tags)))
+            && !(pointwise_operand(root) || (selectors.len() == 2 && independent_scan_pair(root)))
         {
             return Ok(None);
         }
-        // Two occurrences of one selector read the same series only when the tree between them is
-        // point-wise, both scans are the same scan, and the match key holds the whole identity,
-        // which the checks above have just admitted. Both occurrences are then one child, so the
-        // tree is rebuilt with both inputs bound to it. A tree this route admits but cannot rebind
-        // is a compiler defect it declines (`NotImplemented`) rather than rewrites, and the existing
-        // plan answers the query; an error of any other kind is a defect to report.
-        let tree = if selectors.len() == 2 {
-            match collapsed_pair_tree(&compiled.tree) {
-                Ok(tree) => {
-                    // Both occurrences read the one plan, so the two prepared children are that
-                    // same plan and only one of them is kept.
-                    children.truncate(1);
-                    tree
-                }
-                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-                Err(e) => return Err(e).context(DataFusionPlanningSnafu),
-            }
-        } else {
-            compiled.tree
-        };
+        let tree = compiled.tree;
         let root_fields = tree
             .root()
             .output
@@ -517,7 +458,8 @@ impl PromPlanner {
         }) {
             return Ok(None);
         }
-        let output_schema = fused_output_schema(&root_fields, &tags, &time)?;
+        let output_tags = fused_output_tags(tree.root(), &tags);
+        let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -621,33 +563,8 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
     lower.and(column.lt_eq(upper))
 }
 
-/// Whether a tree is two occurrences of one selector matched point-wise over the whole identity.
-///
-/// The claim is about one series: it is whole in the partition it was scanned in, so a tree whose
-/// nodes each read one series separately can run one execution per partition. What breaks that is a
-/// node that reads a *series* rather than its samples point by point — an aggregate folds a group,
-/// and two vectors matched against each other pair one series with another — so those keep the
-/// existing plan. The remaining shapes are the ones a scan's own samples support: an instant
-/// selection or a window directly over the raw input, a point-wise map over either, and a binary
-/// operation with a constant on one side, which is a broadcast over the same positions.
-///
-/// A one-to-one match is admitted without rejecting its fill values: the compiler binds
-/// `fill_left`/`fill_right` for a one-to-one match too, and what the admission rests on is the key
-/// and the operands, not the absence of a fill — see [`matching_keys_on_identity`].
-///
-/// The pair's scans are the caller's claim: this function reads the tree and the tags, and a caller
-/// that admits a pair on two actual scans would still be admitting a match over two sources. Both
-/// the planner that collapses a pair onto one scan and the categorizer that places the node
-/// region-side ask this, so the two cannot disagree about which pairs read one series: a pair
-/// admitted here but refused there becomes a node the physical layer cannot build.
-///
-/// The raw keys themselves are proven to name one logical series each by the caller's preparation,
-/// which checks the table's primary key against the tags this binding reports
-/// (`identity_keys_are_injective`). That is a planning-time check over the scan the planner
-/// prepared, not a property this function re-derives: a tree and binding built by anything other
-/// than this planner carries no such proof, so a manual `FusedSeries` node is only as safe as the
-/// binding its builder passed.
-pub(crate) fn two_occurrences_pair_one_source(root: &NativeNode, tags: &[String]) -> bool {
+/// Whether `root` is a supported one-to-one match between two independent scan occurrences.
+pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     let NativeExpr::Binary {
         left,
         right,
@@ -656,14 +573,58 @@ pub(crate) fn two_occurrences_pair_one_source(root: &NativeNode, tags: &[String]
     else {
         return false;
     };
-    // A root with a constant on one side is a broadcast of that constant, not two occurrences
-    // matched, and `group_left`/`group_right` pair a group against one series.
+
+    let supported_operator = matches!(
+        matching.op,
+        promql::vector_match::BinaryOp::Add
+            | promql::vector_match::BinaryOp::Sub
+            | promql::vector_match::BinaryOp::Mul
+            | promql::vector_match::BinaryOp::Div
+            | promql::vector_match::BinaryOp::Mod
+            | promql::vector_match::BinaryOp::Pow
+            | promql::vector_match::BinaryOp::Atan2
+    );
+    let supported_labels = match &matching.labels {
+        MatchingLabels::On(names) => !names.is_empty(),
+        MatchingLabels::Ignoring(names) => names.is_empty(),
+    };
     matching.cardinality == Cardinality::OneToOne
+        && supported_operator
+        && supported_labels
         && pointwise_operand(left)
         && pointwise_operand(right)
-        // A key that does not hold the whole identity pairs series Prometheus keeps apart, and a
-        // partition that holds one of them cannot tell that the other is missing.
-        && matching_keys_on_identity(&matching.labels, tags)
+}
+
+/// Whether two prepared plans scan the same table. Filters, projections and bounds are
+/// occurrence-specific and deliberately do not participate in this check.
+pub(crate) fn same_table_scan(left: &LogicalPlan, right: &LogicalPlan) -> bool {
+    let (LogicalPlan::TableScan(left), LogicalPlan::TableScan(right)) = (left, right) else {
+        return false;
+    };
+    left.table_name == right.table_name
+}
+
+/// Tags exposed by a binary PromQL match. The binding retains all raw tags for decoding.
+fn fused_output_tags(root: &NativeNode, tags: &[String]) -> Vec<String> {
+    let NativeExpr::Binary { matching, .. } = &root.expr else {
+        return tags.to_vec();
+    };
+    if matching.cardinality != Cardinality::OneToOne {
+        return tags.to_vec();
+    }
+    match &matching.labels {
+        MatchingLabels::On(names) if !names.is_empty() => tags
+            .iter()
+            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+            .cloned()
+            .collect(),
+        MatchingLabels::Ignoring(names) => tags
+            .iter()
+            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
+            .cloned()
+            .collect(),
+        MatchingLabels::On(_) => tags.to_vec(),
+    }
 }
 
 /// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
@@ -700,142 +661,6 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         | NativeExpr::Scalar(_)
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. } => false,
-    }
-}
-
-/// Whether `labels` matches on the whole series identity `tags` names.
-///
-/// `on(...)` keeps the identity when every tag is listed, because two series that differ in any
-/// tag then differ in the key. Anything else — a tag left out of `on`, or a tag named in
-/// `ignoring` — pairs two series that Prometheus reads as two, and each partition would then
-/// answer for the half it happens to hold.
-pub(crate) fn matching_keys_on_identity(labels: &MatchingLabels, tags: &[String]) -> bool {
-    match labels {
-        MatchingLabels::On(names) => tags
-            .iter()
-            .all(|tag| names.iter().any(|name| name.as_ref() == tag.as_str())),
-        MatchingLabels::Ignoring(names) => tags
-            .iter()
-            .all(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str())),
-    }
-}
-
-/// Whether the raw series keys `meta` declares name one logical series each.
-///
-/// The label set this route reports is the primary key it reads off a series, so the key is only a
-/// faithful identity when it is the whole label set and its values are distinct strings: a hidden
-/// key column (a metric engine's internals), a key column with a metadata name a window or a map
-/// drops, and a key column that can read both NULL and the empty string — Prometheus's one absent
-/// label, but two raw keys — all keep the existing plan. A matcher that rejects the empty value is
-/// what makes a nullable key column safe: it leaves no row whose key could read either way.
-fn identity_keys_are_injective(matchers: &Matchers, meta: &TableMeta, tags: &[String]) -> bool {
-    // A table with no key column has one label set for every series, and a metric engine keeps its
-    // identity in columns the planner hides from `tags`.
-    if tags.is_empty() || meta.engine == METRIC_ENGINE_NAME {
-        return false;
-    }
-    // The planner hides exactly `__table_id` and `__tsid`; a key that differs from the columns this
-    // route reports means part of the identity is not in the label set.
-    if !meta.row_key_column_names().eq(tags.iter()) {
-        return false;
-    }
-    tags.iter().all(|tag| {
-        if METADATA_KEY_TAGS.contains(&tag.as_str()) {
-            return false;
-        }
-        let Some(column) = meta.schema.column_schema_by_name(tag) else {
-            return false;
-        };
-        // The label set is reported as strings, which is what a string key column already is.
-        if column.data_type != datatypes::prelude::ConcreteDataType::string_datatype() {
-            return false;
-        }
-        // A non-nullable column cannot read NULL, so an empty value and an absent one are two
-        // different keys.
-        !column.is_nullable()
-            || matchers
-                .matchers
-                .iter()
-                .any(|matcher| matcher.name == tag.as_str() && !matcher.is_match(""))
-    })
-}
-
-/// Whether two prepared occurrences read the same scan, and so produce the same series.
-///
-/// Everything below the node is compared, not only the table name: two selectors over one table
-/// with different matchers or different bounds read different rows, and a partition that holds one
-/// of them is not the partition that holds the other. DataFusion's own scan comparison covers the
-/// table name, the projection, the schema, the filters and the fetch; the source is compared by
-/// identity, because it is what resolves those rows in the first place. The reporting columns — the
-/// metric name, the time index and the tags — are not compared here: they are checked once for
-/// every prepared occurrence, before this runs.
-fn same_source(left: &PreparedInput, right: &PreparedInput) -> bool {
-    let (left_input, left_schema, ..) = left;
-    let (right_input, right_schema, ..) = right;
-    let (LogicalPlan::TableScan(left_scan), LogicalPlan::TableScan(right_scan)) =
-        (left_input, right_input)
-    else {
-        return false;
-    };
-    // Both schemas are raw series schemas, so the fields are what the tree's input was compiled
-    // against, in the order it reads them.
-    let same_fields = left_schema
-        .fields
-        .iter()
-        .map(|field| &field.name)
-        .eq(right_schema.fields.iter().map(|field| &field.name));
-    same_fields && left_scan == right_scan && Arc::ptr_eq(&left_scan.source, &right_scan.source)
-}
-
-/// Rebuilds an admitted pair's tree so both of its occurrences read the one child prepared for them.
-///
-/// The compiler numbers occurrences in binding order, so an admitted pair's two input nodes are
-/// numbered `0` and `1`; the planner prepared one plan for them, which is child `0`. Giving every
-/// input node that index is what makes the executor hand each chunk of that child to both of them,
-/// and what makes the node report one child for the whole match.
-///
-/// The tree is rebuilt rather than patched in place because a node's inputs are shared: the rebuilt
-/// tree is validated again by [`NativeTree::try_new`], so a rebind can never produce a tree the
-/// runtime would refuse. A tree whose inputs are not exactly those two occurrences is declined.
-fn collapsed_pair_tree(tree: &NativeTree) -> datafusion::error::Result<NativeTree> {
-    let mut root = tree.root().clone();
-    let mut occurrences = 0;
-    let numbered = rebind_pair_inputs(&mut root, &mut occurrences);
-    if !numbered || occurrences != 2 {
-        return Err(DataFusionError::NotImplemented(format!(
-            "a two-occurrence tree whose {occurrences} input(s) are not the two occurrences \
-             numbered from zero, which this route cannot bind to one child"
-        )));
-    }
-    NativeTree::try_new(root)
-}
-
-/// Rebinds every input below `node` to child `0`, counting them and checking their numbering.
-///
-/// The walk visits inputs in the order the compiler bound them — an operand before the next one, the
-/// left operand before the right — so occurrence `i` of the walk is the input the compiler numbered
-/// `i`. `false` means the tree is not the pair this route admitted: a node carried a number the walk
-/// did not expect, or a shape the admission does not cover. An `Aggregate` or a `Vector` below the
-/// root is one of those shapes — neither is point-wise, so the pair was never admitted — and the
-/// walk refuses it rather than rebinding a tree this route does not run.
-fn rebind_pair_inputs(node: &mut NativeNode, next: &mut usize) -> bool {
-    match &mut node.expr {
-        NativeExpr::Input(bound) => {
-            let numbered = bound.source_index == *next;
-            bound.source_index = 0;
-            *next += 1;
-            numbered
-        }
-        NativeExpr::Scalar(_) => true,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. } => rebind_pair_inputs(input, next),
-        NativeExpr::Binary { left, right, .. } => {
-            let left_numbered = rebind_pair_inputs(left, next);
-            let right_numbered = rebind_pair_inputs(right, next);
-            left_numbered && right_numbered
-        }
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => false,
     }
 }
 
@@ -949,12 +774,10 @@ mod tests {
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
     use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
-    use promql::vector_match::MatchingLabels;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, collapsed_pair_tree,
-        matching_keys_on_identity, native_promql_requested, pointwise_operand, scan_time_filter,
-        two_occurrences_pair_one_source,
+        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, fused_output_tags, independent_scan_pair,
+        native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -1001,45 +824,36 @@ mod tests {
     }
 
     #[test]
-    fn pair_input_collapse_rebinds_only_two_numbered_occurrences() {
-        let tree = compiled_test_tree("x + x");
-        assert_eq!(input_sources(tree.root()), vec![0, 1]);
-        let collapsed = collapsed_pair_tree(&tree).unwrap();
-        assert_eq!(input_sources(collapsed.root()), vec![0, 0]);
-        assert_eq!(
-            tree.to_string().replace("source=1", "source=0"),
-            collapsed.to_string()
-        );
-        assert!(collapsed_pair_tree(&compiled_test_tree("x")).is_err());
-        assert!(collapsed_pair_tree(&compiled_test_tree("x + x + x")).is_err());
+    fn independent_scan_pair_keeps_both_numbered_occurrences() {
+        for query in [
+            "x + on(host) x",
+            "x - (x * 2)",
+            "rate(x[5s]) + rate(x[10s] offset 2s)",
+        ] {
+            let tree = compiled_test_tree(query);
+            assert_eq!(input_sources(tree.root()), vec![0, 1], "{query}");
+            assert!(independent_scan_pair(tree.root()), "{query}");
+        }
+        assert!(!independent_scan_pair(
+            compiled_test_tree("sum(x) + x").root()
+        ));
+        assert!(!independent_scan_pair(
+            compiled_test_tree("x + on() x").root()
+        ));
+        assert!(!independent_scan_pair(
+            compiled_test_tree("x == on(host) x").root()
+        ));
     }
 
     #[test]
-    fn binary_admission_requires_a_pointwise_whole_identity_match() {
-        let tags = vec!["host".to_string(), "rack".to_string()];
-        let pair = compiled_test_tree("x + on(host, rack) x");
-        assert!(two_occurrences_pair_one_source(pair.root(), &tags));
-        assert!(!pointwise_operand(pair.root()));
-        let partial = compiled_test_tree("x + on(host) x");
-        assert!(!two_occurrences_pair_one_source(partial.root(), &tags));
-        let nested_pair = compiled_test_tree("x - (x * 2)");
-        assert!(!pointwise_operand(nested_pair.root()));
-        assert!(two_occurrences_pair_one_source(nested_pair.root(), &tags));
-        let collapsed = collapsed_pair_tree(&nested_pair).unwrap();
-        assert_eq!(input_sources(collapsed.root()), vec![0, 0]);
-        assert_eq!(
-            nested_pair.to_string().replace("source=1", "source=0"),
-            collapsed.to_string(),
-            "collapsing inputs must preserve the noncommutative operand order"
-        );
-        assert!(matching_keys_on_identity(
-            &MatchingLabels::Ignoring(vec![]),
-            &tags
-        ));
-        assert!(!matching_keys_on_identity(
-            &MatchingLabels::Ignoring(vec!["host".into()]),
-            &tags
-        ));
+    fn match_output_tags_follow_promql_vector_matching() {
+        let tags = vec!["host".to_string(), "kind".to_string()];
+        let on = compiled_test_tree("x + on(host) x");
+        assert_eq!(vec!["host"], fused_output_tags(on.root(), &tags));
+        let ignoring = compiled_test_tree("x + x");
+        assert_eq!(tags, fused_output_tags(ignoring.root(), &tags));
+        let empty_on = compiled_test_tree("x + on() x");
+        assert_eq!(tags, fused_output_tags(empty_on.root(), &tags));
     }
 
     #[test]

@@ -138,6 +138,14 @@ fn two_field_schema() -> Arc<SeriesSchema> {
     })
 }
 
+/// A one-field raw schema with a distinct name for independent-source decoding tests.
+fn other_field_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: OTHER.into() }]),
+        eval_grid: None,
+    })
+}
+
 /// The tree `rate(x[5m])` compiles to over `schema`: raw samples folded by one window onto the grid.
 fn rate_tree_of(schema: Arc<SeriesSchema>) -> NativeTree {
     let grid = grid();
@@ -189,11 +197,9 @@ fn binary_tree(left_schema: Arc<SeriesSchema>, right_schema: Arc<SeriesSchema>) 
 /// A binary tree over `op` whose operands are bound to the given source indexes.
 ///
 /// `left_schema` is the operand at `root.left` and `right_schema` the one at `root.right`, so a
-/// subtracting tree answers `left - right`. One source read at both operands is what a statement
-/// that names one selector twice plans to; two different indexes are what a statement whose
-/// operands are two scans plans to, which the runtime refuses for now. The tree is the same shape
-/// either way, and the renderer names the index each input reads, so the trees are distinct
-/// computations.
+/// subtracting tree answers `left - right`. Equal indexes model two leaves sharing one source;
+/// distinct dense indexes model independent physical sources. The renderer names each input index,
+/// so trees with otherwise identical operands remain distinct computations.
 fn binary_tree_over_sources(
     op: BinaryOp,
     left_schema: Arc<SeriesSchema>,
@@ -486,6 +492,19 @@ fn output_schema() -> SchemaRef {
         Field::new(VALUE, DataType::Float64, true),
         Field::new(HOST, DataType::Utf8, true),
         Field::new(NAME, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]))
+}
+
+/// A one-to-one `on(host)` binary output schema.
+fn binary_output_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
         Field::new(
             TIME,
             DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -838,12 +857,17 @@ impl Drop for StagedStream {
 
 fn fused(tree: NativeTree) -> FusedSeries {
     let binding = binding(&tree);
+    let output_schema = if matches!(&tree.root().expr, NativeExpr::Binary { .. }) {
+        binary_output_schema()
+    } else {
+        output_schema()
+    };
     FusedSeries::try_new(
         Arc::from(PROMQL),
         tree,
         binding,
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        output_schema.to_dfschema_ref().unwrap(),
     )
     .expect("the binding matches the tree")
 }
@@ -958,6 +982,20 @@ fn frames_of(schema: &SeriesSchema, chunks: &[RawSeriesChunk]) -> Vec<RecordBatc
     chunks.iter().map(|chunk| frame_of(schema, chunk)).collect()
 }
 
+/// One frame with a different raw field layout, used to verify source-local decoding.
+fn other_field_chunk(host: &str, value: f64) -> RecordBatch {
+    let schema = other_field_schema();
+    let chunk = chunk_of(
+        &schema,
+        host,
+        metric(&[(HOST, host)], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(value)]],
+        true,
+    );
+    frame_of(&schema, &chunk)
+}
+
 /// The frames carrying `chunks` of the one-field schema of these tests, one batch each.
 fn frames(chunks: &[RawSeriesChunk]) -> Vec<RecordBatch> {
     frames_of(&raw_schema(), chunks)
@@ -994,6 +1032,23 @@ fn one_series_frames() -> Vec<RecordBatch> {
         series_chunk("web-1", &rows[4..7], false),
         series_chunk("web-1", &rows[7..], true),
     ])
+}
+
+fn binary_values(batches: &[RecordBatch]) -> Vec<f64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let values = batch
+                .column_by_name(VALUE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            (0..values.len())
+                .filter_map(|row| values.is_valid(row).then(|| values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// The rows of `batches`: timestamp, value, host and metric name.
@@ -1572,26 +1627,25 @@ fn repeated_source_bindings_validate_fields_and_second_ordering() {
     assert!(error.to_string().contains("ordering"), "{error}");
 }
 
-/// Physical trees may have logical sources 0 and 1, but their physical adapter remains one-source.
-#[test]
-fn logical_two_source_tree_is_rejected_by_physical_adapter() {
+/// Logical trees with distinct dense sources are accepted by the physical adapter.
+#[tokio::test]
+async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
     let node = FusedSeries::try_new(
         Arc::from("left + right"),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        binary_output_schema().to_dfschema_ref().unwrap(),
     )
     .expect("the logical node accepts two dense sources");
-    let calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
     let source = || {
         Arc::new(CountedExec {
             input: memory_exec(Vec::new()),
-            calls: Arc::clone(&calls),
+            calls: Arc::new((0..1).map(|_| AtomicUsize::new(0)).collect()),
         }) as Arc<dyn ExecutionPlan>
     };
-    let error = node
+    let plan = node
         .to_execution_plan(vec![
             (
                 source(),
@@ -1604,20 +1658,247 @@ fn logical_two_source_tree_is_rejected_by_physical_adapter() {
                 SeriesOrdering::Contiguous,
             ),
         ])
-        .expect_err("the physical boundary refuses the two-source runtime");
-    assert!(error.to_string().contains("source") || error.to_string().contains("input"));
+        .expect("the physical boundary accepts independent source bindings");
+    assert_eq!(2, plan.children().len());
+    let results = collect(Arc::clone(&plan), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert!(rows(&results).is_empty());
+    for child in plan.children() {
+        let counted = child
+            .downcast_ref::<CountedExec>()
+            .expect("child preserves its counted execution plan");
+        assert_eq!(1, counted.calls[0].load(Ordering::SeqCst));
+    }
+}
+
+/// Independent sources execute in source order and gather all child partitions, without zipping.
+#[tokio::test]
+async fn independent_sources_execute_all_partitions_sequentially() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), other_field_schema(), 0, 1);
+    let left_calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect());
+    let right_calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect());
+    let left = Arc::new(CountedExec {
+        input: memory_exec_partitioned(vec![
+            vec![frame(&series_chunk("web-2", &[(GRID_START, 8.0)], true))],
+            vec![frame(&series_chunk("web-1", &[(GRID_START, 9.0)], true))],
+        ]),
+        calls: Arc::clone(&left_calls),
+    });
+    let right = Arc::new(CountedExec {
+        input: memory_exec_partitioned_with(
+            frame_schema_of(&other_field_schema()),
+            vec![
+                vec![other_field_chunk("web-2", 3.0)],
+                vec![other_field_chunk("web-1", 2.0)],
+                vec![other_field_chunk("web-3", 4.0)],
+            ],
+        ),
+        calls: Arc::clone(&right_calls),
+    });
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![
+            input_plan(frame_schema()),
+            input_plan(frame_schema_of(&other_field_schema())),
+        ],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    assert_eq!(1, exec.properties().output_partitioning().partition_count());
+    let results = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let mut actual = binary_values(&results);
+    actual.sort_by(f64::total_cmp);
+    assert_eq!(vec![5.0, 7.0], actual);
     assert_eq!(
-        vec![0, 0],
-        calls
+        vec![1, 1],
+        left_calls
             .iter()
-            .map(|call| call.load(Ordering::SeqCst))
+            .map(|c| c.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        vec![1, 1, 1],
+        right_calls
+            .iter()
+            .map(|c| c.load(Ordering::SeqCst))
             .collect::<Vec<_>>()
     );
 }
 
-/// The physical boundary accepts one source only and rejects zero or multiple sources early.
+/// On-label matching projects binary output tags while retaining all raw tags for frame decoding.
+#[tokio::test]
+async fn binary_output_tags_are_projected_but_raw_binding_is_full() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let left = memory_exec(vec![frame(&chunk_of(
+        &raw_schema(),
+        "web-1",
+        metric(&[(HOST, "web-1"), (ZONE, "west")], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(9.0)]],
+        true,
+    ))]);
+    let right = memory_exec(vec![frame(&chunk_of(
+        &raw_schema(),
+        "web-1",
+        metric(&[(HOST, "web-1"), (ZONE, "east")], Some(METRIC)),
+        &[GRID_START],
+        vec![vec![Some(2.0)]],
+        true,
+    ))]);
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let results = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(vec![7.0], binary_values(&results));
+    assert!(
+        results
+            .iter()
+            .all(|batch| batch.column_by_name(ZONE).is_none())
+    );
+}
+
+/// Empty earlier sources do not stop later sources, and one-to-one matching can yield no rows.
+#[tokio::test]
+async fn empty_first_source_does_not_end_gather_early() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let second = memory_exec(vec![frame(&series_chunk(
+        "web-1",
+        &[(GRID_START, 2.0)],
+        true,
+    ))]);
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                memory_exec(Vec::new()),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (second, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let results = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert!(rows(&results).is_empty());
+}
+
+/// A multiparty gather requires Contiguous input, not global KeyThenTime ordering.
 #[test]
-fn physical_plan_requires_exactly_one_source() {
+fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
+    let tree = declaring_orderings(
+        &binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1),
+        &[SeriesOrdering::KeyThenTime, SeriesOrdering::Contiguous],
+    );
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let error = node
+        .to_execution_plan(vec![
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::KeyThenTime,
+            ),
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect_err("concatenated partitions are not globally KeyThenTime");
+    assert!(error.to_string().contains("ordering"), "{error}");
+}
+
+/// A later source failure drops streams already opened for earlier sources and releases state.
+#[tokio::test]
+async fn later_source_error_drops_all_gathered_inputs() {
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let dropped = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let left_schema = frame_schema();
+    let left_drop = Arc::clone(&dropped[0]);
+    let left = staged(left_schema.clone(), move || {
+        Box::pin(
+            StagedStream::new(
+                left_schema.clone(),
+                vec![frame(&series_chunk("web-1", &[(GRID_START, 9.0)], true))],
+            )
+            .dropped(&left_drop),
+        )
+    });
+    let right_schema = frame_schema();
+    let right_drop = Arc::clone(&dropped[1]);
+    let right = staged(right_schema.clone(), move || {
+        Box::pin(
+            StagedStream::new(right_schema.clone(), Vec::new())
+                .error("later source failed")
+                .dropped(&right_drop),
+        )
+    });
+    let exec = node
+        .to_execution_plan(vec![
+            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        ])
+        .unwrap();
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut stream = exec.execute(0, task_context(&pool)).unwrap();
+    let error = stream.next().await.unwrap().unwrap_err();
+    assert!(error.to_string().contains("later source failed"));
+    assert!(dropped.iter().all(|flag| flag.load(Ordering::SeqCst)));
+    assert_eq!(0, pool.reserved());
+}
+
+/// The physical boundary rejects zero sources and mismatched physical source counts.
+#[test]
+fn physical_plan_requires_matching_source_count() {
     let node = fused(rate_tree());
     let zero = node
         .to_execution_plan(Vec::new())
@@ -1634,7 +1915,7 @@ fn physical_plan_requires_exactly_one_source() {
     };
     let many = node
         .to_execution_plan(vec![tuple(), tuple()])
-        .expect_err("physical execution cannot run with multiple sources");
+        .expect_err("physical input count differs from the tree's source count");
     assert!(many.to_string().contains("source") || many.to_string().contains("input"));
 }
 
@@ -1824,7 +2105,7 @@ fn an_input_with_no_partitions_is_rejected_when_the_plan_is_built() {
     )));
     let error = plan(rate_tree(), empty).expect_err("there is no partition to run");
     assert!(
-        error.to_string().contains("input has no partitions"),
+        error.to_string().contains("input 0 has no partitions"),
         "refused for another reason: {error}"
     );
     // The only count refused is zero: two partitions build and answer, which is what the
@@ -2088,10 +2369,10 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
         })
         .collect::<Vec<_>>();
     let input = memory_exec_partitioned(partitions);
-    let calls = Arc::new((0..4).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let calls_by_partition = Arc::new((0..4).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
     let counted = Arc::new(CountedExec {
         input,
-        calls: Arc::clone(&calls),
+        calls: Arc::clone(&calls_by_partition),
     });
     let exec = plan(subtracted_scaled_tree(), counted)
         .expect("the repeated source tree runs over one physical child");
@@ -2111,7 +2392,38 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             .try_collect::<Vec<_>>()
             .await
             .expect("the partition completes without errors");
-        let actual = rows(&batches);
+        let actual = batches
+            .iter()
+            .flat_map(|batch| {
+                let time = batch
+                    .column_by_name(TIME)
+                    .expect("binary output has time")
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .expect("time output is millisecond timestamp");
+                let value = batch
+                    .column_by_name(VALUE)
+                    .expect("binary output has value")
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .expect("value output is Float64");
+                let host = batch
+                    .column_by_name(HOST)
+                    .expect("binary output retains host")
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("host output is Utf8");
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            time.value(row),
+                            value.is_valid(row).then(|| value.value(row)),
+                            host.is_valid(row).then(|| host.value(row).to_string()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         total_rows += actual.len();
         let host = format!("web-{partition}");
         assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
@@ -2125,7 +2437,6 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
                 .iter()
                 .all(|row| row.2.as_deref() == Some(host.as_str()))
         );
-        assert!(actual.iter().all(|row| row.3.is_none()));
         let expected_values = (0..GRID_LEN as usize)
             .map(|index| Some(-((partition * 10 + index + 1) as f64)))
             .collect::<Vec<_>>();
@@ -2133,13 +2444,13 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             expected_values,
             actual.iter().map(|row| row.1).collect::<Vec<_>>()
         );
-        assert_eq!(1, calls[partition].load(Ordering::SeqCst));
+        assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
         assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
     assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
         vec![1, 1, 1, 1],
-        calls
+        calls_by_partition
             .iter()
             .map(|call| call.load(Ordering::SeqCst))
             .collect::<Vec<_>>()

@@ -107,14 +107,12 @@ fn plan_fused_series(
             "FusedSeries physical child count mismatch".into(),
         ));
     }
-    if physical_inputs.len() != 1 {
-        return Err(DataFusionError::Plan(
-            "FusedSeries currently requires one physical child".into(),
-        ));
-    }
-    let Some(scan) = physical_inputs[0].downcast_ref::<RegionScanExec>() else {
+    if physical_inputs
+        .iter()
+        .any(|input| input.downcast_ref::<RegionScanExec>().is_none())
+    {
         return Ok(None);
-    };
+    }
 
     let binding = fused.binding();
     let Some(metric_name) = binding.metric_name.as_deref() else {
@@ -133,43 +131,41 @@ fn plan_fused_series(
         .cloned()
         .collect::<Vec<_>>();
     let source_fields = super::fused_series::tree_source_fields(fused.tree())?;
-    let [field_names] = source_fields.as_slice() else {
+    if source_fields.len() != physical_inputs.len() {
         return Err(DataFusionError::Plan(
-            "FusedSeries physical plan requires one raw source".into(),
+            "FusedSeries physical plan source count mismatch".into(),
         ));
-    };
-    let field_names = field_names.clone();
-
-    let scan = if scan.is_partition_set() {
-        Arc::new(scan.clone())
-    } else {
-        let partitions = table::table::scan::assign_partition_ranges(
-            scan.get_partition_ranges(),
-            target_partitions.max(1),
-        );
-        Arc::new(
-            scan.with_new_partitions(partitions, target_partitions.max(1))
-                .map_err(|error| DataFusionError::External(error.into_inner()))?,
-        )
-    };
-    // The scan resolves the label source and the ordering it will declare itself, against its own
-    // metadata snapshot, and hands both back through the leaf it builds. Naming them here instead
-    // would be a second copy of a binding only the scanner can make: the physical metadata and
-    // column ids a `RawLabelSource::PrimaryKey` carries are not reachable from a region scan's
-    // public surface, so the layer that resolves them is the scanner.
-    let Some(series_scan) =
-        scan.try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
-    else {
-        return Err(DataFusionError::Plan(format!(
-            "the region scan under FusedSeries could not serve a raw series frame for metric \
-             {metric_name:?}: the scanner refused the raw series path for this scan, so this node \
-             has no input to read"
-        )));
-    };
-    let label_source = series_scan.label_source().clone();
-    let ordering = series_scan.raw_series_ordering();
-
-    fused
-        .to_execution_plan(vec![(series_scan, label_source, ordering)])
-        .map(Some)
+    }
+    let mut series_inputs = Vec::with_capacity(physical_inputs.len());
+    for (physical, field_names) in physical_inputs.iter().zip(source_fields) {
+        let Some(scan) = physical.downcast_ref::<RegionScanExec>() else {
+            return Ok(None);
+        };
+        let scan = if scan.is_partition_set() {
+            Arc::new(scan.clone())
+        } else {
+            let partitions = table::table::scan::assign_partition_ranges(
+                scan.get_partition_ranges(),
+                target_partitions.max(1),
+            );
+            Arc::new(
+                scan.with_new_partitions(partitions, target_partitions.max(1))
+                    .map_err(|error| DataFusionError::External(error.into_inner()))?,
+            )
+        };
+        let Some(series_scan) =
+            scan.try_to_named_series_scan(metric_name, &logical_tags, &field_names)?
+        else {
+            return Err(DataFusionError::Plan(format!(
+                "the region scan under FusedSeries could not serve a raw series frame for metric \
+                 {metric_name:?}: the scanner refused the raw series path for this scan"
+            )));
+        };
+        series_inputs.push((
+            series_scan.clone() as Arc<dyn ExecutionPlan>,
+            series_scan.label_source().clone(),
+            series_scan.raw_series_ordering(),
+        ));
+    }
+    fused.to_execution_plan(series_inputs).map(Some)
 }

@@ -56,6 +56,7 @@ use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::optimizer::expr_depth;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
+use crate::promql::planner::native::{independent_scan_pair, same_table_scan};
 use crate::query_engine::DefaultSerializer;
 
 #[cfg(test)]
@@ -505,6 +506,24 @@ struct PlanRewriter {
     new_child_plan: Option<LogicalPlan>,
 }
 
+fn is_admitted_pair_plan(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::Extension(extension) = plan else {
+        return false;
+    };
+    let Some(fused) = extension.node.as_any().downcast_ref::<FusedSeries>() else {
+        return false;
+    };
+    let children = fused.children();
+    children.len() == 2
+        && children
+            .iter()
+            .all(|child| matches!(child, LogicalPlan::TableScan(_)))
+        && {
+            same_table_scan(&children[0], &children[1])
+                && independent_scan_pair(fused.tree().root())
+        }
+}
+
 fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
     matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>())
 }
@@ -824,17 +843,23 @@ impl PlanRewriter {
             // if there is a new child plan, use it as the new root
             on_node = new_child_plan;
         }
-        let mut rewriter = EnforceDistRequirementRewriter::new(
-            std::mem::take(&mut self.column_requirements),
-            self.level,
-        );
-        debug!(
-            "PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}"
-        );
-        on_node = on_node.rewrite(&mut rewriter)?.data;
-        debug!(
-            "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
-        );
+        let bypass_multi_input_gate =
+            self.skip_encodability_gate && is_admitted_pair_plan(&on_node);
+        if bypass_multi_input_gate {
+            self.column_requirements.clear();
+        } else {
+            let mut rewriter = EnforceDistRequirementRewriter::new(
+                std::mem::take(&mut self.column_requirements),
+                self.level,
+            );
+            debug!(
+                "PlanRewriter: enforce column requirements for node: {on_node} with rewriter: {rewriter:?}"
+            );
+            on_node = on_node.rewrite(&mut rewriter)?.data;
+            debug!(
+                "PlanRewriter: after enforced column requirements with rewriter: {rewriter:?} for node:\n{on_node}"
+            );
+        }
 
         debug!(
             "PlanRewriter: expand on node: {on_node} with partition col alias mapping: {:?}",
