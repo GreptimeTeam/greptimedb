@@ -61,8 +61,8 @@ use tokio::sync::{Mutex, Semaphore, mpsc, oneshot, watch};
 use crate::access_layer::new_fs_cache_store;
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::cache::{CacheManager, CacheManagerRef, WriteCacheUploadStoreWrapperRef};
-use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::{CompactionMemoryManager, new_compaction_memory_manager};
+use crate::compaction::{CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
@@ -148,7 +148,7 @@ pub(crate) struct WorkerGroup {
     /// Flush background job pool.
     flush_job_pool: SchedulerRef,
     /// Compaction background job pool.
-    compact_job_pool: SchedulerRef,
+    compact_job_pool: Arc<CompactionCoordinator>,
     /// Scheduler for index build jobs.
     index_build_job_pool: SchedulerRef,
     /// Scheduler for file purgers.
@@ -205,7 +205,10 @@ impl WorkerGroup {
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let compact_job_pool = Arc::new(CompactionCoordinator::new(
+            Arc::new(LocalScheduler::new(config.max_background_compactions)),
+            config.max_background_compactions,
+        ));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -316,7 +319,7 @@ impl WorkerGroup {
 
         // TODO(yingwen): Do we need to stop gracefully?
         // Stops the scheduler gracefully.
-        self.compact_job_pool.stop(true).await?;
+        self.compact_job_pool.stop().await?;
         // Stops the scheduler gracefully.
         self.flush_job_pool.stop(true).await?;
         // Stops the purge scheduler gracefully.
@@ -474,7 +477,10 @@ impl WorkerGroup {
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let memtable_compact_dispatcher =
             Arc::new(CompactDispatcher::new(config.max_background_compactions));
-        let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let compact_job_pool = Arc::new(CompactionCoordinator::new(
+            Arc::new(LocalScheduler::new(config.max_background_compactions)),
+            config.max_background_compactions,
+        ));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let puffin_manager_factory = PuffinManagerFactory::new(
@@ -646,7 +652,7 @@ struct WorkerStarter<S> {
     log_store: Arc<S>,
     object_store_manager: ObjectStoreManagerRef,
     write_buffer_manager: WriteBufferManagerRef,
-    compact_job_pool: SchedulerRef,
+    compact_job_pool: Arc<CompactionCoordinator>,
     index_build_job_pool: SchedulerRef,
     series_index_store: Option<ObjectStore>,
     series_index_disk_usage: Arc<AtomicU64>,

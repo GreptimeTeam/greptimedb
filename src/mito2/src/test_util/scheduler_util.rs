@@ -28,8 +28,8 @@ use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayer, AccessLayerRef};
 use crate::cache::CacheManager;
-use crate::compaction::CompactionScheduler;
 use crate::compaction::memory_manager::new_compaction_memory_manager;
+use crate::compaction::{CompactionCoordinator, CompactionScheduler};
 use crate::config::MitoConfig;
 use crate::error::Result;
 use crate::flush::FlushScheduler;
@@ -104,7 +104,10 @@ impl SchedulerEnv {
         let scheduler = self.get_scheduler();
 
         CompactionScheduler::new(
-            scheduler,
+            Arc::new(CompactionCoordinator::new(
+                scheduler,
+                config.max_background_compactions,
+            )),
             request_sender,
             Arc::new(CacheManager::default()),
             Arc::new(config),

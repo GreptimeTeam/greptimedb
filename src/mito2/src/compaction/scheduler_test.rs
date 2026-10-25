@@ -42,7 +42,7 @@ use crate::error::InvalidSchedulerStateSnafu;
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::metrics::COMPACTION_MEMORY_REJECTED;
 use crate::region::ManifestContext;
-use crate::request::{BackgroundNotify, OutputTx, WorkerRequest};
+use crate::request::{BackgroundNotify, CompactionUnitNotification, OutputTx, WorkerRequest};
 use crate::schedule::remote_job_scheduler::{RemoteJob, RemoteJobSchedulerRef};
 use crate::schedule::scheduler::{Job, Scheduler};
 use crate::sst::FormatType;
@@ -1082,7 +1082,14 @@ async fn test_pick_result_installs_history_after_unrelated_flush() {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
-    let mut scheduler = env.mock_compaction_scheduler(tx);
+    // A single-unit batch keeps the history assertions below focused on plan
+    // acceptance. Multi-window batching is covered separately by the automatic
+    // planning tests.
+    let config = MitoConfig {
+        max_background_compactions: 1,
+        ..Default::default()
+    };
+    let mut scheduler = env.mock_compaction_scheduler_with_config(tx, config);
     let mut builder = VersionControlBuilder::new();
     for start in [0, 3_600_000] {
         for offset in 0..4 {
@@ -1224,7 +1231,22 @@ async fn test_pick_result_local_submission_failure_releases_and_notifies_once() 
         .merge_waiter(OptionOutputTx::from(waiter_tx));
 
     scheduler
-        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
+        .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
+        .await;
+
+    let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let WorkerRequest::Background {
+        notify: BackgroundNotify::CompactionUnit(CompactionUnitNotification::Released { plan_id }),
+        ..
+    } = request.request
+    else {
+        panic!("expected rejected unit's resource-release notification");
+    };
+    scheduler
+        .on_unit_released(region_id, plan_id, &manifest_ctx, schema_metadata_manager)
         .await;
 
     assert!(waiter_rx.await.unwrap().is_err());
@@ -2014,7 +2036,7 @@ async fn test_automatic_trigger_during_execution_clears_continuation_scope() {
 }
 
 #[tokio::test]
-async fn test_automatic_planning_picks_one_output_before_repicking() {
+async fn test_automatic_planning_prepares_independent_windows_up_to_global_capacity() {
     let env = SchedulerEnv::new().await;
     let (tx, mut rx) = mpsc::channel(4);
     let config = MitoConfig {
@@ -2067,13 +2089,15 @@ async fn test_automatic_planning_picks_one_output_before_repicking() {
         panic!("expected prepared compaction");
     };
 
-    assert_eq!(1, prepared.picker_output.outputs.len());
-    assert!(
-        prepared.picker_output.outputs[0]
-            .inputs
-            .iter()
-            .all(|file| { file.time_range().0 >= Timestamp::new_millisecond(2 * 3_600_000) })
-    );
+    assert_eq!(2, prepared.picker_output.outputs.len());
+    assert_eq!(4, prepared.compaction_region.max_parallelism);
+    let windows: std::collections::HashSet<_> = prepared
+        .picker_output
+        .outputs
+        .iter()
+        .map(|o| o.inputs[0].time_range().0.value() / 3_600_000)
+        .collect();
+    assert_eq!(std::collections::HashSet::from([0, 2]), windows);
 }
 
 #[tokio::test]
