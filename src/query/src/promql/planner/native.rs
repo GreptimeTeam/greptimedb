@@ -14,12 +14,14 @@
 
 //! The native fused-series route of the PromQL planner.
 //!
-//! [`PromPlanner::try_plan_native_fused`] offers a small experimental subset to the native
-//! compiler: a vector selector (optionally parenthesized), or nested unary `rate`, `increase`,
-//! `sum_over_time`, and `abs` calls over a selector, plus a one-to-one arithmetic match between two
-//! such operands from the same ordinary Mito table. It replaces that expression with one
-//! [`FusedSeries`] node, retaining a separate scan for each selector occurrence. Other expression
-//! shapes keep the existing planner's route.
+//! [`PromPlanner::try_plan_native_fused`] offers a whole statement expression to the native
+//! compiler and, when the compiler accepts it, replaces everything the existing path would plan
+//! below the root with one [`FusedSeries`] node over the selector's own table scan. A tree that
+//! folds across series - an aggregate - is split instead: its per-series prefix runs in a
+//! `FusedSeries` producer and an [`AggregateFinalize`] merges the state every partition exports,
+//! because a region holds only part of a group. Declining is the normal answer: every shape the
+//! compiler does not accept, and every query this route cannot bind to a scan faithfully, keeps the
+//! plan the existing planner builds.
 //!
 //! What the node needs from here is three things the existing planner already resolves: the raw
 //! series schema the tree's input was compiled against (the selector's selected field columns), the
@@ -41,7 +43,7 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{FusedSeries, FusedSeriesBinding};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
 use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
@@ -56,6 +58,7 @@ use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_E
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{compile_selectors, statement_grid};
 use crate::promql::planner::PromPlanner;
+use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
 ///
@@ -103,20 +106,28 @@ type PreparedInput = (
 );
 
 impl PromPlanner {
-    /// Plans `prom_expr` as one [`FusedSeries`] node, or returns `None` to keep the existing plan.
+    /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// The route is offered the whole expression so its tree computes the requested expression
-    /// over the planner's resolved selector context: table name, time index, tag columns, and
-    /// field columns (after any `__field__` matcher). These are the raw series schema the input
-    /// tree is compiled against.
+    /// `query_engine_state` is only read to build the *existing* plan of an aggregate query, whose
+    /// column names and grouped labels are what the rows of a split aggregate are named after. That
+    /// plan is built for its schema, its names are copied, and it is dropped: it is never executed
+    /// and never stored, so the batch that answers the query is the native route's own.
     ///
-    /// `None` is not a failure: unsupported shapes and queries this route cannot bind faithfully
-    /// continue through the existing planner. Admission is limited to selectors, the unary calls
-    /// named above, and a same-table one-to-one arithmetic pair, with the scan, schema, matcher,
-    /// and grid constraints checked below.
+    /// The route is offered a whole expression because the compiler folds a range function and the
+    /// math functions over it into one tree: offering a sub-expression instead would compile a tree
+    /// that computes something the reader did not write. Everything else about the node comes from
+    /// the planner's resolved selector context: the table name, the time index column, the tag
+    /// columns and the field columns, which are exactly the raw series schema the tree's input
+    /// has to be compiled against. Selectors with a `__field__` matcher keep legacy planning.
+    ///
+    /// `None` is not a failure. It says this query cannot take the route unchanged, and the caller
+    /// plans it with the existing planner as if this method did not exist. The aggregate split only
+    /// admits shapes the split can carry; other vector-wide operations, subqueries, alternative
+    /// matchers, and unbindable scans keep existing planning.
     pub(super) async fn try_plan_native_fused(
         &mut self,
         prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
         if !self.native_fused {
             return Ok(None);
@@ -138,7 +149,7 @@ impl PromPlanner {
         }
         // Preserve the original single-selector admission allowlist. Broader binary syntax is only
         // considered for a two-occurrence root, where the compiled-tree proof below constrains it.
-        if selectors.len() == 1 && admitted_selector(prom_expr).is_none() {
+        if selectors.len() == 1 && !admitted_single_selector(prom_expr) {
             return Ok(None);
         }
         let Some(stmt) = self.native_statement(prom_expr) else {
@@ -431,13 +442,49 @@ impl PromPlanner {
             .into_iter()
             .map(|(scan, _, _, _, _)| scan)
             .collect::<Vec<_>>();
-        // A tree run once per region must be point-wise over a series. Binary matches between two
-        // series are supported only for the narrowly admitted one-to-one root pair.
+        // Ordinary pointwise trees and the existing two-occurrence same-source route keep their
+        // current admission unchanged. Aggregate splits are restricted to one raw scan child.
         let root = compiled.tree.root();
-        if reads_across_series(root)
-            && !(pointwise_operand(root) || (selectors.len() == 2 && independent_scan_pair(root)))
-        {
-            return Ok(None);
+        let per_partition = !reads_across_series(root)
+            || pointwise_operand(root)
+            || (selectors.len() == 2 && independent_scan_pair(root));
+        if !per_partition {
+            if selectors.len() != 1
+                || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
+            {
+                return Ok(None);
+            }
+            let saved = self.ctx.clone();
+            let planned = self
+                .prom_root_expr_to_plan(prom_expr, query_engine_state)
+                .await;
+            let legacy_fields = self.ctx.field_columns.clone();
+            let legacy_tags = self.ctx.tag_columns.clone();
+            self.ctx = saved;
+            drop(planned?);
+            let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
+            let Some(rawinput) = children.into_iter().next() else {
+                return Ok(None);
+            };
+            let node = match AggregateFinalize::try_new(
+                Arc::from(prom_expr.to_string()),
+                compiled.tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index: time,
+                    tags,
+                    metric_name: metric,
+                },
+                rawinput,
+                output_schema,
+            ) {
+                Ok(node) => node,
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            return Ok(Some(LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            })));
         }
         let tree = compiled.tree;
         let root_fields = tree
@@ -664,7 +711,24 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// The single-selector route is limited to a selector or supported unary calls over one selector.
+/// Whether a single-selector expression belongs to the native route's existing selector allowlist
+/// or is an aggregate expression handled by the aggregate split.
+fn admitted_single_selector(expr: &PromExpr) -> bool {
+    fn aggregate(expr: &PromExpr) -> bool {
+        match expr {
+            PromExpr::Aggregate(_aggregate) => true,
+            PromExpr::Paren(paren) => aggregate(&paren.expr),
+            PromExpr::Unary(unary) => aggregate(&unary.expr),
+            PromExpr::Binary(binary) => aggregate(&binary.lhs) || aggregate(&binary.rhs),
+            PromExpr::Call(call) => call.args.args.iter().any(|arg| aggregate(arg)),
+            _ => false,
+        }
+    }
+
+    admitted_selector(expr).is_some() || aggregate(expr)
+}
+
+/// The existing selector allowlist: a selector or supported unary calls over one selector.
 fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     match expr {
         PromExpr::VectorSelector(selector) => Some(selector),
@@ -682,7 +746,6 @@ fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     }
 }
 
-/// Collect selector occurrences in compiler binding order; reject unsupported expression shapes.
 fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) -> bool {
     match expr {
         PromExpr::VectorSelector(selector) => out.push(selector),
@@ -701,7 +764,20 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
         }
         // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
         PromExpr::NumberLiteral(_) => return true,
-        _ => return false,
+        PromExpr::Unary(unary) => return collect_selectors(&unary.expr, out),
+        PromExpr::Call(call) => {
+            if matches!(call.func.name, "label_replace" | "label_join") {
+                return false;
+            }
+            for arg in &call.args.args {
+                if !collect_selectors(arg, out) {
+                    return false;
+                }
+            }
+        }
+        PromExpr::Aggregate(aggregate) => return collect_selectors(&aggregate.expr, out),
+        PromExpr::Subquery(_) => return false,
+        _ => {}
     }
     true
 }
@@ -748,6 +824,7 @@ fn metric_scan_and_table_id(
     Some((scan.clone(), filter.predicate.clone()))
 }
 
+/// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.
 fn calls_rate_or_increase(expr: &PromExpr) -> bool {
     match expr {
         PromExpr::Call(call) => {
@@ -759,6 +836,7 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
             calls_rate_or_increase(&binary.lhs) || calls_rate_or_increase(&binary.rhs)
         }
         PromExpr::Unary(unary) => calls_rate_or_increase(&unary.expr),
+        PromExpr::Aggregate(aggregate) => calls_rate_or_increase(&aggregate.expr),
         _ => false,
     }
 }
@@ -767,17 +845,17 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use session::context::QueryContextBuilder;
-
     use std::time::{Duration, UNIX_EPOCH};
 
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
     use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
+    use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, fused_output_tags, independent_scan_pair,
-        native_promql_requested, scan_time_filter,
+        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
+        collect_selectors, fused_output_tags, independent_scan_pair, native_promql_requested,
+        scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -823,6 +901,29 @@ mod tests {
         sources
     }
 
+    /// The selectors `query` names, in the order the compiler binds them.
+    fn collected_selectors(query: &str) -> Vec<String> {
+        let expr = promql_parser::parser::parse(query).expect("the query parses");
+        let mut selectors = Vec::new();
+        assert!(collect_selectors(&expr, &mut selectors));
+        selectors
+            .iter()
+            .map(|selector| selector.name.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn collect_selectors_descends_into_aggregate_inputs() {
+        for query in [
+            "sum(x)",
+            "sum by (job) (x)",
+            "sum without (instance) (rate(x[5m]))",
+        ] {
+            assert_eq!(collected_selectors(query), vec!["x"], "{query}");
+        }
+    }
+
+    /// The compiler retains both source indices for independent selector occurrences.
     #[test]
     fn independent_scan_pair_keeps_both_numbered_occurrences() {
         for query in [
@@ -865,6 +966,10 @@ mod tests {
         for query in ["x", "rate(x[5s])", "sum_over_time(x[5s])", "abs(x)"] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_some(), "{query}");
+        }
+        for query in ["sum(x)", "sum by (job) (rate(x[5m]))"] {
+            let expression = promql_parser::parser::parse(query).unwrap();
+            assert!(admitted_single_selector(&expression), "{query}");
         }
     }
 

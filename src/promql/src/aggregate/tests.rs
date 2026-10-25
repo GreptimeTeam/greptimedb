@@ -1446,6 +1446,247 @@ fn merged_and_serial(op: AggregateOp, partitions: &[&[f64]]) -> (f64, f64) {
     )
 }
 
+/// Runs `run` with a budget that admits everything, returning the largest figure it was asked
+/// for: the pool a call needs to succeed.
+fn peak_admission(
+    run: impl FnOnce(
+        &mut dyn FnMut(usize) -> Result<(), DataFusionError>,
+    ) -> Result<(), DataFusionError>,
+) -> (usize, Result<(), DataFusionError>) {
+    let mut peak = 0usize;
+    let result = run(&mut |bytes| {
+        peak = peak.max(bytes);
+        Ok(())
+    });
+    (peak, result)
+}
+
+#[test]
+fn finish_partial_reserves_one_slot_per_seen_point() {
+    const SEEN: usize = 65_537;
+    let schema = schema_with_grid_len(&["value"], SEEN as u64);
+    let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0); SEEN]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&series).unwrap();
+    let expected = aggregator
+        .state_bytes()
+        .saturating_add(std::mem::size_of::<PartialGroup>())
+        .saturating_add(
+            SEEN.saturating_mul(std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>()),
+        )
+        .saturating_add(SEEN.saturating_mul(std::mem::size_of::<Option<AccumulatorState>>()));
+    let mut peak = 0usize;
+    let partial = aggregator
+        .finish_partial_budgeted(|bytes| {
+            peak = peak.max(bytes);
+            Ok(())
+        })
+        .unwrap();
+    // The vector is reserved once, at the points that carry a state, so pushing does not double it.
+    assert_eq!(partial.groups[0].points.len(), SEEN);
+    assert_eq!(partial.groups[0].points.capacity(), SEEN);
+    assert_eq!(peak, expected);
+}
+
+#[test]
+fn merge_charges_the_capacity_of_an_input_partial() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[]), 0, &[vec![Some(1.0)]]);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&series).unwrap();
+    let partial = aggregator.finish_partial();
+    assert_eq!(partial.groups[0].points.capacity(), 1);
+    let mut spare = partial.clone();
+    let point = spare.groups[0].points.pop().unwrap();
+    let mut points = Vec::with_capacity(1024);
+    points.push(point);
+    spare.groups[0].points = points;
+    let peak = |partial: PartialAggregate| {
+        let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
+        result.unwrap();
+        peak
+    };
+    let slack = 1023 * std::mem::size_of::<(usize, Vec<Option<AccumulatorState>>)>();
+    assert!(
+        peak(spare) >= peak(partial).saturating_add(slack),
+        "spare capacity was not admitted"
+    );
+}
+
+#[test]
+fn merge_charges_one_block_per_new_block_not_per_point() {
+    let names: Vec<String> = (0..64).map(|field| format!("f{field}")).collect();
+    let labels: Vec<&str> = names.iter().map(String::as_str).collect();
+    let schema = schema_with_grid_len(&labels, 64);
+    let fields: Vec<Vec<Option<f64>>> = (0..64).map(|_| vec![Some(1.0); 64]).collect();
+    let series = input(&schema, metric("m", &[]), 0, &fields);
+    let mut aggregator =
+        FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+    aggregator.update(&series).unwrap();
+    let partial = aggregator.finish_partial();
+    assert_eq!(partial.groups[0].points.len(), 64);
+    let block = BLOCK_POINTS * 64 * std::mem::size_of::<FloatState>();
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial, budget));
+    result.unwrap();
+    assert!(
+        peak < 8 * block,
+        "admitted {peak} for the one block of {block} the points share"
+    );
+    assert_eq!(
+        values_of(&merger.finish().unwrap(), 0, 64).1,
+        [Some(1.0); 64]
+    );
+}
+
+#[test]
+fn merge_admits_groups_and_blocks_before_it_inserts_them() {
+    let schema = schema(&["value"]);
+    let partial = |ids: std::ops::Range<usize>| PartialAggregate {
+        op: AggregateOp::Sum,
+        groups: ids
+            .map(|id| PartialGroup {
+                metric: metric("m", &[("i", &id.to_string())]),
+                points: Vec::new(),
+            })
+            .collect(),
+    };
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    let (peak, result) = peak_admission(|budget| merger.merge_budgeted(partial(0..64), budget));
+    result.unwrap();
+    assert!(peak > 0 && merger.state_bytes() > 0);
+    // A refused group or block leaves nothing of itself behind; the caller drops the merge.
+    let retained = merger.state_bytes();
+    let refused = |_| Err(DataFusionError::Execution("pool exhausted".into()));
+    assert!(merger.merge_budgeted(partial(100..108), refused).is_err());
+    assert_eq!(merger.state_bytes(), retained);
+    let mut invalid = partial(200..201);
+    invalid.groups[0].points.push((256, Vec::new()));
+    assert!(merger.merge(invalid).is_err());
+    assert_eq!(merger.state_bytes(), retained);
+    assert!(
+        merger
+            .finish_budgeted(|_| Err(DataFusionError::Execution("pool exhausted".into())))
+            .is_err()
+    );
+}
+
+/// Building a label key copies the metric name, so the copy is admitted before it is made: a
+/// refusal arrives before the merge touches anything, even for a group and block it already has.
+#[test]
+fn merge_admits_the_key_before_it_builds_it() {
+    let schema = schema(&["value"]);
+    let series = input(&schema, metric("m", &[("job", "a")]), 0, &[vec![Some(1.0)]]);
+    let partial = || {
+        let mut aggregator =
+            FloatAggregator::try_new(&schema, AggregateOp::Sum, Grouping::By(&[])).unwrap();
+        aggregator.update(&series).unwrap();
+        aggregator.finish_partial()
+    };
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    merger.merge(partial()).unwrap();
+    let retained = merger.state_bytes();
+    let mut calls = 0;
+    let result = merger.merge_budgeted(partial(), |_| {
+        calls += 1;
+        Err(DataFusionError::Execution("pool exhausted".into()))
+    });
+    assert!(result.is_err());
+    assert!(calls > 0, "the key was built without an admission");
+    assert_eq!(merger.state_bytes(), retained, "a refused key was kept");
+
+    // An existing group and block allocate no block, but the key still is admitted.
+    let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+    merger.merge(partial()).unwrap();
+    let mut calls = 0;
+    merger
+        .merge_budgeted(partial(), |_| {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        calls > 0,
+        "an existing group was merged without an admission"
+    );
+}
+
+/// The merge holds two allocations of the metric name: its group's labels, and the copy its label
+/// key made. Only one of them is why a longer name costs twice as much.
+#[test]
+fn a_long_metric_name_is_held_by_the_group_and_by_its_key() {
+    let schema = schema(&["value"]);
+    let retained = |name: &str| {
+        let partial = PartialAggregate {
+            op: AggregateOp::Sum,
+            groups: vec![PartialGroup {
+                metric: metric(name, &[]),
+                points: Vec::new(),
+            }],
+        };
+        let mut merger = FloatMerger::try_new(&schema, AggregateOp::Sum).unwrap();
+        merger.merge(partial).unwrap();
+        merger.state_bytes()
+    };
+    const EXTRA: usize = 1000;
+    let long = format!("m{}", "x".repeat(EXTRA));
+    let delta = retained(&long) - retained("m");
+    assert_eq!(
+        delta,
+        2 * EXTRA,
+        "the name is held once by the group and once by the key"
+    );
+}
+
+/// The budgeted partial path keeps the numbers of the public one: one partition, so the merged
+/// result is the serial fold bit for bit, for every supported aggregation.
+#[test]
+fn budgeted_partial_state_merges_to_the_public_numbers() {
+    let schema = schema(&["value"]);
+    let series = input(
+        &schema,
+        metric("m", &[]),
+        0,
+        &[vec![Some(1.0), None, Some(3.0), Some(-2.0)]],
+    );
+    for op in [
+        AggregateOp::Sum,
+        AggregateOp::Count,
+        AggregateOp::Avg,
+        AggregateOp::Min,
+        AggregateOp::Max,
+        AggregateOp::Group,
+        AggregateOp::Stddev,
+        AggregateOp::Stdvar,
+    ] {
+        let serial = aggregate_float(
+            &schema,
+            std::slice::from_ref(&series),
+            op,
+            Grouping::By(&[]),
+        )
+        .unwrap();
+        let expected = values_of(&serial, 0, 128);
+        let mut aggregator = FloatAggregator::try_new(&schema, op, Grouping::By(&[])).unwrap();
+        aggregator.update(&series).unwrap();
+        let partial = aggregator.finish_partial_budgeted(|_| Ok(())).unwrap();
+        let mut merger = FloatMerger::try_new(&schema, op).unwrap();
+        merger.merge_budgeted(partial.clone(), |_| Ok(())).unwrap();
+        let merged = merger.finish_budgeted(|_| Ok(())).unwrap();
+        assert_eq!(values_of(&merged, 0, 128), expected, "{op:?} budgeted");
+        let mut plain = FloatMerger::try_new(&schema, op).unwrap();
+        plain.merge(partial).unwrap();
+        assert_eq!(
+            values_of(&plain.finish().unwrap(), 0, 128),
+            expected,
+            "{op:?}"
+        );
+    }
+}
+
 /// Partial states merged in any partition and merge order give the serial result, within the
 /// rounding a regrouped fold may change: the same groups, points and fields, the same NaN and
 /// infinities. Each partial keeps only the components its aggregation declares, so the layout

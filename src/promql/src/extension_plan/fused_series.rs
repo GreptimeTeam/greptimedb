@@ -41,7 +41,7 @@ use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
@@ -53,7 +53,7 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::UnboundedMemoryPool;
+use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
@@ -64,14 +64,18 @@ use datafusion::physical_plan::{
 };
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::{DenseSamplesRef, SampleRef, Samples, SeriesSchema};
+use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
 use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
 
 use crate::evaluated::EvaluatedChunk;
+use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
-use crate::native::plan::{NativeExpr, NativeNode, NativeTree, NativeType};
+use crate::native::plan::{
+    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    reads_across_series,
+};
 use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
@@ -176,6 +180,11 @@ pub struct FusedSeries {
     children: Vec<LogicalPlan>,
     /// The columns this node produces.
     output_schema: DFSchemaRef,
+    /// The aggregate whose partition-local state this node exports instead of query rows.
+    ///
+    /// This row-state bridge is temporary: native final aggregation will consume series frames
+    /// directly, removing state-row encoding and reconstruction.
+    partial_fold: Option<BoundAggregate>,
 }
 
 impl FusedSeries {
@@ -199,7 +208,46 @@ impl FusedSeries {
             binding,
             children,
             output_schema,
+            partial_fold: None,
         })
+    }
+
+    /// Creates a one-source node that exports partition-local state for a complete aggregate.
+    pub(crate) fn try_new_partial(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+        op: BoundAggregate,
+    ) -> DataFusionResult<Self> {
+        validate_binding(&tree, &binding, children.len())?;
+        if children.len() != 1 {
+            return Err(DataFusionError::Plan(
+                "FusedSeries partial fold requires one raw child".into(),
+            ));
+        }
+        if reads_across_series(tree.root()) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries partial fold prefix reads across series".into(),
+            ));
+        }
+        aggregate_op(&op)?;
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(state_schema(
+            &binding.tags,
+        ))?);
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            children,
+            output_schema,
+            partial_fold: Some(op),
+        })
+    }
+
+    /// The aggregate whose partition-local state this node exports.
+    pub fn partial_fold(&self) -> Option<&BoundAggregate> {
+        self.partial_fold.as_ref()
     }
 
     /// The PromQL text this node was compiled from.
@@ -239,13 +287,14 @@ impl FusedSeries {
                 self.children.len()
             )));
         }
-        Ok(Arc::new(FusedSeriesExec::try_new(
+        Ok(Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
             output_schema,
             self.binding.time_index.clone(),
             self.binding.tags.clone(),
+            self.partial_fold.clone(),
         )?))
     }
 }
@@ -270,7 +319,15 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
     }
 
     fn fmt_for_explain(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeries: {}", self.promql)
+        match &self.partial_fold {
+            Some(op) => write!(
+                f,
+                "FusedSeries: {} [partial {}]",
+                self.promql,
+                render_partial_fold(op)
+            ),
+            None => write!(f, "FusedSeries: {}", self.promql),
+        }
     }
 
     fn with_exprs_and_inputs(
@@ -285,6 +342,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             binding: self.binding.clone(),
             children: inputs,
             output_schema: Arc::clone(&self.output_schema),
+            partial_fold: self.partial_fold.clone(),
         })
     }
 }
@@ -301,6 +359,7 @@ impl PartialEq for FusedSeries {
             && self.binding == other.binding
             && self.children == other.children
             && self.output_schema == other.output_schema
+            && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
     }
 }
 
@@ -312,6 +371,7 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.children.hash(state);
         self.output_schema.hash(state);
+        partial_key(self.partial_fold.as_ref()).hash(state);
     }
 }
 
@@ -333,6 +393,12 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
+        match partial_key(self.partial_fold.as_ref())
+            .partial_cmp(&partial_key(other.partial_fold.as_ref()))
+        {
+            Some(Ordering::Equal) => {}
+            ord => return ord,
+        }
         match tree_input_fields(&self.tree).cmp(&tree_input_fields(&other.tree)) {
             Ordering::Equal => {}
             ord => return Some(ord),
@@ -343,6 +409,24 @@ impl PartialOrd for FusedSeries {
             None
         }
     }
+}
+
+/// Renders a partial aggregate with the stable names used by the exchange plan.
+fn render_partial_fold(op: &BoundAggregate) -> String {
+    let group = match &op.group {
+        Grouping::By(labels) => format!("by ({})", labels.join(", ")),
+        Grouping::Without(labels) => format!("without ({})", labels.join(", ")),
+    };
+    let kind = match op.kind {
+        AggregateKind::Quantile { quantile } => format!("quantile({quantile})"),
+        kind => format!("{kind:?}").to_lowercase(),
+    };
+    format!("{kind} {group} {:?}", op.stage)
+}
+
+/// A stable comparable representation for an optional partial fold.
+fn partial_key(partial: Option<&BoundAggregate>) -> Option<String> {
+    partial.map(render_partial_fold)
 }
 
 /// The raw field names bound to each input leaf, retaining source association and leaf order.
@@ -506,7 +590,7 @@ fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
 
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
-enum OutputColumn {
+pub(crate) enum OutputColumn {
     /// The evaluation grid timestamps of the current chunk.
     Time,
     /// Series field by index in the bound series schema.
@@ -516,9 +600,9 @@ enum OutputColumn {
 }
 
 /// Classifies every output column, rejecting anything the conversion cannot produce.
-fn classify_output(
+pub(crate) fn classify_output(
     output_schema: &SchemaRef,
-    series_schema: &SeriesSchema,
+    series_fields: &[FieldSpec],
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
@@ -533,11 +617,7 @@ fn classify_output(
                 "tag column {tag:?} of FusedSeriesExec cannot be the time column"
             )));
         }
-        if series_schema
-            .fields
-            .iter()
-            .any(|field| field.name.as_ref() == tag)
-        {
+        if series_fields.iter().any(|field| field.name.as_ref() == tag) {
             return Err(DataFusionError::Plan(format!(
                 "tag column {tag:?} of FusedSeriesExec clashes with a series field"
             )));
@@ -545,7 +625,7 @@ fn classify_output(
     }
 
     let mut time_seen = false;
-    let mut field_seen = vec![false; series_schema.fields.len()];
+    let mut field_seen = vec![false; series_fields.len()];
     let mut tag_seen = vec![false; tags.len()];
     let mut classification = Vec::with_capacity(output_schema.fields().len());
     for field in output_schema.fields() {
@@ -573,8 +653,7 @@ fn classify_output(
             classification.push(OutputColumn::Time);
             continue;
         }
-        if let Some(index) = series_schema
-            .fields
+        if let Some(index) = series_fields
             .iter()
             .position(|field| field.name.as_ref() == name)
         {
@@ -635,7 +714,7 @@ fn classify_output(
         if !seen {
             return Err(DataFusionError::Plan(format!(
                 "missing field column {:?} in FusedSeriesExec output schema",
-                series_schema.fields[index].name
+                series_fields[index].name
             )));
         }
     }
@@ -671,6 +750,8 @@ pub struct FusedSeriesExec {
     output_schema: SchemaRef,
     /// Per-node metrics, registered by each execution of the tree.
     metric: ExecutionPlanMetricsSet,
+    /// Aggregate state exported by each partition, when this is the partial mode.
+    partial_fold: Option<BoundAggregate>,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -695,6 +776,18 @@ impl FusedSeriesExec {
         time_column: String,
         tags: Vec<String>,
     ) -> DataFusionResult<Self> {
+        Self::build(promql, inputs, tree, output_schema, time_column, tags, None)
+    }
+
+    fn build(
+        promql: Arc<str>,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        tree: Arc<NativeTree>,
+        output_schema: SchemaRef,
+        time_column: String,
+        tags: Vec<String>,
+        partial_fold: Option<BoundAggregate>,
+    ) -> DataFusionResult<Self> {
         let raw_schemas = validate_physical_tree(&tree)?;
         if inputs.len() != raw_schemas.len() || inputs.is_empty() {
             return Err(DataFusionError::Plan(format!(
@@ -710,8 +803,17 @@ impl FusedSeriesExec {
             .output
             .samples()
             .ok_or_else(|| DataFusionError::Plan("FusedSeries output is not samples".into()))?;
+        if let Some(op) = &partial_fold {
+            aggregate_op(op)?;
+        }
+        if partial_fold.is_some() && (inputs.len() != 1 || reads_across_series(tree.root())) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
+            ));
+        }
         let mut output_tags = tags.clone();
-        if let NativeExpr::Binary { matching, .. } = &tree.root().expr
+        if partial_fold.is_none()
+            && let NativeExpr::Binary { matching, .. } = &tree.root().expr
             && matching.cardinality == crate::vector_match::Cardinality::OneToOne
         {
             match &matching.labels {
@@ -723,8 +825,16 @@ impl FusedSeriesExec {
                 }
             }
         }
-        let classification =
-            classify_output(&output_schema, output_series, &output_tags, &time_column)?;
+        let classification = if partial_fold.is_some() {
+            Vec::new()
+        } else {
+            classify_output(
+                &output_schema,
+                &output_series.fields,
+                &output_tags,
+                &time_column,
+            )?
+        };
         let partition_count = inputs[0].0.properties().partitioning.partition_count();
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
@@ -773,6 +883,7 @@ impl FusedSeriesExec {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
+            partial_fold,
         })
     }
 
@@ -792,7 +903,11 @@ impl DisplayAs for FusedSeriesExec {
     /// The query, then the tree it compiles to: the tree is rendered by [`NativeTree`]'s own
     /// `Display`, so `EXPLAIN` and the node's metrics name the same nodes.
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)
+        write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
+        if let Some(op) = &self.partial_fold {
+            write!(f, "\npartial state: {}", render_partial_fold(op))?;
+        }
+        Ok(())
     }
 }
 
@@ -858,13 +973,14 @@ impl ExecutionPlan for FusedSeriesExec {
             .collect();
         // Rebuilt rather than patched: the new child's schema is what the frame is validated
         // against, so a child that changed shape is refused instead of decoded with a stale layout.
-        Ok(Arc::new(Self::try_new(
+        Ok(Arc::new(Self::build(
             Arc::clone(&self.promql),
             children,
             Arc::clone(&self.tree),
             self.output_schema.clone(),
             self.time_column.clone(),
             self.tags.to_vec(),
+            self.partial_fold.clone(),
         )?))
     }
 
@@ -910,6 +1026,27 @@ impl ExecutionPlan for FusedSeriesExec {
         let input_ids = (0..self.series_schemas.len())
             .map(|source| state.input_ids(source).collect())
             .collect();
+        let export_budget = Arc::new(Mutex::new(None));
+        let partial_fold = self
+            .partial_fold
+            .clone()
+            .map(|op| {
+                PartialFold::try_new(
+                    op,
+                    self.tree
+                        .root()
+                        .output
+                        .samples()
+                        .ok_or_else(|| {
+                            DataFusionError::Plan("FusedSeries output is not samples".into())
+                        })?
+                        .clone(),
+                    Arc::clone(&self.tags),
+                    Arc::clone(&export_budget),
+                    &context.runtime_env().memory_pool,
+                )
+            })
+            .transpose()?;
         Ok(Box::pin(FusedSeriesStream {
             inputs: streams,
             executor: Some(NativeExecutor::new(state)),
@@ -917,6 +1054,8 @@ impl ExecutionPlan for FusedSeriesExec {
             classification: Arc::clone(&self.classification),
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
+            partial_fold,
+            _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
         }))
@@ -931,7 +1070,7 @@ impl ExecutionPlan for FusedSeriesExec {
 ///
 /// The time column is the absolute grid positions the chunk carries, missing samples are nulls and
 /// ordinary NaN stays a value.
-fn series_to_record_batch(
+pub(crate) fn series_to_record_batch(
     classification: &[OutputColumn],
     tags: &[String],
     output_schema: &SchemaRef,
@@ -1034,6 +1173,10 @@ pub struct FusedSeriesStream {
     tags: Arc<[String]>,
     /// The schema of every batch this stream yields.
     output_schema: SchemaRef,
+    /// Per-partition aggregate state fold, if this stream exports a partial result.
+    partial_fold: Option<PartialFold>,
+    /// Keeps exported state batches charged for as long as this stream holds them.
+    _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// The batches the executor settled since the last poll of the input.
     ready: VecDeque<RecordBatch>,
     /// Whether the input ended and everything it settled has been handed out.
@@ -1105,13 +1248,26 @@ impl FusedSeriesStream {
     fn fail(&mut self) {
         self.done = true;
         self.executor = None;
+        self.partial_fold = None;
         self.inputs.clear();
+        // This reservation belongs only to this execution. Release it even if the consumer keeps
+        // the failed stream and the plan alive.
+        self._export_budget
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
         // A batch queued before the error was settled by a run that has now stopped.
         self.ready.clear();
     }
 
-    /// Converts the chunks the executor settled into batches, in the order it produced them.
+    /// Converts settled chunks into query rows or folds them into partial aggregate state.
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
+        if let Some(fold) = self.partial_fold.as_mut() {
+            for chunk in chunks {
+                fold.update(chunk)?;
+            }
+            return Ok(());
+        }
         for chunk in &chunks {
             let batch = series_to_record_batch(
                 &self.classification,
@@ -1120,6 +1276,14 @@ impl FusedSeriesStream {
                 chunk,
             )?;
             self.ready.push_back(batch);
+        }
+        Ok(())
+    }
+
+    /// Publishes the partition's fold only after the input and native execution have drained.
+    fn finish_fold(&mut self) -> DataFusionResult<()> {
+        if let Some(mut fold) = self.partial_fold.take() {
+            self.ready.extend(fold.finish()?);
         }
         Ok(())
     }
@@ -1157,6 +1321,10 @@ impl Stream for FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
+                        if let Err(error) = this.finish_fold() {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
                         this.done = true;
                         continue;
                     }
