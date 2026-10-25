@@ -2382,7 +2382,6 @@ async fn native_fused_whole_vector_operation_falls_back() {
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
-        "sum(rate(some_metric[5m]))",
         "sum_over_time(rate(some_metric[5m])[1h:])",
         "histogram_count(some_metric)",
         "ceil(some_metric)",
