@@ -2080,6 +2080,333 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
+/// Regression for the two occurrences of one selector that read one scan (#9896).
+///
+/// `m{host!=""} - (m{host!=""} * 2)` names one selector twice; the native route binds both tree
+/// inputs to the one physical child it prepares, which needs an ordinary Mito table keyed by the
+/// whole label set (`host` NOT NULL, empty match rejected). Series scans read 8,192-row batches
+/// and hand whole series to successive partitions, so the fixture must exceed one batch: 512
+/// hosts x 64 points is 32,768 rows, i.e. at least four batches reaching all four partitions.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_occurrences_route_one_scan_per_partition() {
+    // 512 hosts * 64 points = 32,768 rows, generated in 512-row insert batches: at least four
+    // 8,192-row read batches, so the ordinary scan spreads the series over all four partitions.
+    const HOSTS: usize = 512;
+    const POINTS_PER_HOST: i64 = 64;
+    const INSERT_BATCH_ROWS: usize = 512;
+
+    fn value(host: usize, point: i64) -> f64 {
+        host as f64 * 1_000.0 + point as f64
+    }
+
+    fn host_name(host: usize) -> String {
+        // Three digits keep the names in numeric order for every host below 1000: the row
+        // comparison sorts by label text, and the expected rows are generated in numeric order.
+        format!("h{host:03}")
+    }
+
+    fn insert_request(table: &str, schema: &[ColumnSchema], rows: Vec<Row>) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                }),
+            }],
+        }
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_two_occurrences_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_pair_route";
+
+    execute_all(
+        &instance,
+        &format!(
+            r#"CREATE TABLE {table} (
+                host STRING NOT NULL,
+                ts TIMESTAMP TIME INDEX,
+                val DOUBLE,
+                PRIMARY KEY(host)
+            )"#
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let mut batch = Vec::with_capacity(INSERT_BATCH_ROWS);
+    for host in 0..HOSTS {
+        for point in 0..POINTS_PER_HOST {
+            batch.push(Row {
+                values: vec![
+                    ValueData::StringValue(host_name(host)).into(),
+                    ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                    ValueData::F64Value(value(host, point)).into(),
+                ],
+            });
+            if batch.len() == INSERT_BATCH_ROWS {
+                let rows = std::mem::replace(&mut batch, Vec::with_capacity(INSERT_BATCH_ROWS));
+                instance
+                    .handle_row_inserts(
+                        insert_request(table, &schema, rows),
+                        QueryContext::arc(),
+                        false,
+                        false,
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+    if !batch.is_empty() {
+        instance
+            .handle_row_inserts(
+                insert_request(table, &schema, batch),
+                QueryContext::arc(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let expected = (0..POINTS_PER_HOST)
+        .flat_map(|point| {
+            (0..HOSTS).map(move |host| (point * 1_000, host_name(host), -value(host, point)))
+        })
+        .collect::<Vec<_>>();
+
+    let last = POINTS_PER_HOST - 1;
+    let selector = format!(r#"{table}{{host!=""}}"#);
+    let sql = format!("TQL EVAL (0, {last}, '1s') {selector} - ({selector} * 2)");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(
+        plan.children().len(),
+        1,
+        "the two occurrences must read one physical child"
+    );
+    assert_four_native_partitions(&plan);
+    let display = datafusion::physical_plan::displayable(plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert_eq!(
+        display.matches("source=0").count(),
+        2,
+        "both tree inputs must route to the one child:\n{display}"
+    );
+    assert!(
+        !display.contains("source=1"),
+        "no tree input may route to a child that does not exist:\n{display}"
+    );
+    assert_eq!(native_rows, expected);
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+
+    // Direct x+x exercises the other repeated-selector form without relying on subtraction's
+    // order-sensitive arithmetic to reveal a swapped input.
+    let direct_sql = format!("TQL EVAL (0, {last}, '1s') {selector} + {selector}");
+    observer.clear();
+    let direct_rows =
+        native_result_rows(native_tql_output(&instance, &direct_sql, true).await).await;
+    let direct_plan = observer.take();
+    assert_eq!(direct_plan.name(), "FusedSeriesExec");
+    assert_eq!(direct_plan.children().len(), 1);
+    assert_four_native_partitions(&direct_plan);
+    let direct_display = datafusion::physical_plan::displayable(direct_plan.as_ref())
+        .indent(false)
+        .to_string();
+    assert_eq!(
+        direct_display.matches("source=0").count(),
+        2,
+        "{direct_display}"
+    );
+    assert!(!direct_display.contains("source=1"), "{direct_display}");
+    let direct_expected = (0..POINTS_PER_HOST)
+        .flat_map(|point| {
+            (0..HOSTS).map(move |host| (point * 1_000, host_name(host), value(host, point) * 2.0))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(direct_rows, direct_expected);
+
+    // A single selector with an equality matcher and an explicit range anchor/offset must push
+    // down both identity and time bounds. For h000, values equal the sample index, so rate is 1/s.
+    let bounded_sql =
+        format!("TQL EVAL (4, 4, '1s') rate({table}{{host=\"h000\"}}[3s] @ 3 offset 1s)");
+    observer.clear();
+    let bounded_rows =
+        native_result_rows(native_tql_output(&instance, &bounded_sql, true).await).await;
+    let bounded_plan = observer.take();
+    assert_eq!(bounded_plan.name(), "FusedSeriesExec");
+    assert_eq!(bounded_rows, vec![(4_000, "h000".to_string(), 1.0)]);
+    let scan_frame_rows = bounded_plan.children()[0]
+        .metrics()
+        .expect("series scan metrics")
+        .output_rows()
+        .expect("series scan reports output rows");
+    assert_eq!(
+        scan_frame_rows, 1,
+        "the anchored range returns one packed raw-series frame"
+    );
+    let root_values = bounded_plan
+        .metrics()
+        .expect("fused metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.output_values" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(root_values, 1, "the bounded native result was executed");
+    let root_input_samples = bounded_plan
+        .metrics()
+        .expect("fused metrics")
+        .iter()
+        .filter_map(|metric| match metric.value() {
+            datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                if name.as_ref() == "native.root.input_samples" =>
+            {
+                Some(count.value())
+            }
+            _ => None,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        root_input_samples, 3,
+        "matcher and anchored range must scan only the three h000 samples"
+    );
+
+    // Different bounds/offsets must not be fused together: h000 at t=1 is 1, while the
+    // one-second-offset occurrence reads t=0, so the exact answer is 1 - (0 * 2) = 1.
+    let different_bounds = format!(
+        "TQL EVAL (1, 1, '1s') {table}{{host=\"h000\"}} - ({table}{{host=\"h000\"}} offset 1s * 2)"
+    );
+    observer.clear();
+    let different_bounds_rows =
+        native_result_rows(native_tql_output(&instance, &different_bounds, true).await).await;
+    assert!(observer.fused().is_none(), "{different_bounds}");
+    assert_eq!(
+        different_bounds_rows,
+        vec![(1_000, "h000".to_string(), 1.0)]
+    );
+
+    // on() drops host from the output labels; inspect that shape directly instead of using the
+    // host-requiring native_result_rows helper.
+    let on_empty_sql = format!(
+        r#"TQL EVAL (1, 1, '1s') {table}{{host="h001"}} - on() ({table}{{host="h001"}} * 2)"#
+    );
+    async fn unlabeled_rows(output: Output) -> Vec<(i64, f64, bool)> {
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        batches
+            .iter()
+            .flat_map(|batch| {
+                assert!(batch.column_by_name("host").is_none());
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let values = batch
+                    .columns()
+                    .iter()
+                    .filter(|column| column.data_type() == &DataType::Float64)
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 1);
+                let values = values[0].as_any().downcast_ref::<Float64Array>().unwrap();
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            timestamps.value(row),
+                            values.value(row),
+                            batch.num_columns() == 2,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+    observer.clear();
+    let on_empty_rows =
+        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, true).await).await;
+    assert!(observer.fused().is_none(), "{on_empty_sql}");
+    assert_eq!(on_empty_rows, vec![(1_000, -1_001.0, true)]);
+    let on_empty_legacy =
+        unlabeled_rows(native_tql_output(&instance, &on_empty_sql, false).await).await;
+    assert_eq!(on_empty_rows, on_empty_legacy);
+
+    // A group match drops the full series identity; different matchers, group matching, and a
+    // subquery all stay on the ordinary planner path.
+    let fallback_expected = expected[..HOSTS].to_vec();
+    for (sql, expected_rows) in [
+        (
+            format!(r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - ({table}{{host=~"h.+"}} * 2)"#),
+            fallback_expected.clone(),
+        ),
+        (
+            format!(
+                r#"TQL EVAL (0, 0, '1s') {table}{{host!=""}} - on(host) group_left() ({table}{{host!=""}} * 2)"#
+            ),
+            fallback_expected.clone(),
+        ),
+        (
+            format!(r#"TQL EVAL (1, 1, '1s') rate({table}{{host="h000"}}[2s:1s])"#),
+            vec![(1_000, "h000".to_string(), 1.0)],
+        ),
+    ] {
+        observer.clear();
+        let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "a fallback shape must not plan a fused node: {sql}"
+        );
+        assert_eq!(rows, expected_rows, "{sql}");
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(rows, legacy_rows, "{sql}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_rate_and_abs_rate_match_legacy_across_storage_encodings() {
     common_telemetry::init_default_ut_logging();

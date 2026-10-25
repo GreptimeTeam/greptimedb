@@ -102,10 +102,17 @@ fn plan_fused_series(
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
-    let Some(input) = physical_inputs.first() else {
-        return Ok(None);
-    };
-    let Some(scan) = input.downcast_ref::<RegionScanExec>() else {
+    if physical_inputs.len() != fused.children().len() || physical_inputs.is_empty() {
+        return Err(DataFusionError::Plan(
+            "FusedSeries physical child count mismatch".into(),
+        ));
+    }
+    if physical_inputs.len() != 1 {
+        return Err(DataFusionError::Plan(
+            "FusedSeries currently requires one physical child".into(),
+        ));
+    }
+    let Some(scan) = physical_inputs[0].downcast_ref::<RegionScanExec>() else {
         return Ok(None);
     };
 
@@ -125,12 +132,13 @@ fn plan_fused_series(
         .filter(|tag| tag.as_str() != METRIC_NAME)
         .cloned()
         .collect::<Vec<_>>();
-    let field_names = binding
-        .series_schema
-        .fields
-        .iter()
-        .map(|field| field.name.to_string())
-        .collect::<Vec<_>>();
+    let source_fields = super::fused_series::tree_source_fields(fused.tree())?;
+    let [field_names] = source_fields.as_slice() else {
+        return Err(DataFusionError::Plan(
+            "FusedSeries physical plan requires one raw source".into(),
+        ));
+    };
+    let field_names = field_names.clone();
 
     let scan = if scan.is_partition_set() {
         Arc::new(scan.clone())
@@ -162,6 +170,6 @@ fn plan_fused_series(
     let ordering = series_scan.raw_series_ordering();
 
     fused
-        .to_execution_plan(series_scan, label_source, ordering)
+        .to_execution_plan(vec![(series_scan, label_source, ordering)])
         .map(Some)
 }

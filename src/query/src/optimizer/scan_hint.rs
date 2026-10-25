@@ -1582,7 +1582,6 @@ mod test {
         )
         .unwrap();
         let binding = FusedSeriesBinding {
-            series_schema,
             grid: statement_grid(&stmt).unwrap(),
             metric_name: Some("some_metric".into()),
             time_index: "ts".to_string(),
@@ -1612,7 +1611,7 @@ mod test {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    input,
+                    vec![input],
                     output_schema,
                 )
                 .unwrap(),

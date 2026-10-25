@@ -29,6 +29,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
+use crate::promql::planner::native::{pointwise_operand, two_occurrences_pair_one_source};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -243,23 +244,21 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                // A region builds this node from the region scan itself: the conversion takes that
-                // scan's raw-series entrypoint and cannot look through anything in between, so a
-                // node whose input is not that scan has nothing to read where it would be placed
-                // and stays where it was planned.
-                if !matches!(fused.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                // The raw-series reader can be placed region-side only over one TableScan child.
+                let [child] = fused.children() else {
+                    return Commutativity::NonCommutative;
+                };
+                if !matches!(child, LogicalPlan::TableScan(_)) {
                     return Commutativity::NonCommutative;
                 }
-                // The region asks the scan for the series of one named metric, so a node that binds
-                // no name cannot be built there at all.
-                if fused.binding().metric_name.is_none() {
+                let binding = fused.binding();
+                if binding.metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
-                // A region evaluates the tree over whatever series its own scan returns, so this
-                // is only answerable when every node of the tree reads one series at a time. An
-                // aggregate or a binary operation would fold or pair across series, and one region
-                // holds only part of them.
-                if reads_across_series(fused.tree().root()) {
+                let root = fused.tree().root();
+                let per_series =
+                    pointwise_operand(root) || two_occurrences_pair_one_source(root, &binding.tags);
+                if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }
 
@@ -485,11 +484,10 @@ mod tests {
         )
         .unwrap();
         let binding = FusedSeriesBinding {
-            series_schema,
             grid: statement_grid(&stmt).unwrap(),
-            metric_name: metric_name.map(Arc::from),
             time_index: "ts".to_string(),
             tags: Vec::new(),
+            metric_name: metric_name.map(Arc::from),
         };
         let output_schema: DFSchemaRef = Arc::new(
             DFSchema::new_with_metadata(
@@ -518,7 +516,7 @@ mod tests {
                     Arc::from("some_metric"),
                     tree,
                     binding,
-                    input,
+                    vec![input],
                     output_schema,
                 )
                 .unwrap(),

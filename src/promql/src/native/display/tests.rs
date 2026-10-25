@@ -119,7 +119,7 @@ fn the_first_line_names_the_tree() {
 
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input raw samples"])
+        shown(&["NativeTree", "  root Input raw samples source=0"])
     );
     assert_eq!(tree.to_string().lines().next(), Some("NativeTree"));
 }
@@ -143,7 +143,7 @@ fn a_window_over_raw_samples_is_shown_once_per_node() {
         shown(&[
             "NativeTree",
             "  root Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "    input Input raw samples",
+            "    input Input raw samples source=0",
         ])
     );
 }
@@ -171,7 +171,7 @@ fn a_map_nests_below_the_window_it_maps() {
             "NativeTree",
             "  root Map abs, round 3",
             "    input Window rate [300000ms] offset 60000 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input raw samples source=0",
         ])
     );
 }
@@ -195,7 +195,7 @@ fn a_window_names_its_constant_argument_and_its_anchor() {
         shown(&[
             "NativeTree",
             "  root Window quantile_over_time 0.9 [60000ms] offset 0 anchor 42 on grid 1000/60000x4",
-            "    input Input raw samples",
+            "    input Input raw samples source=0",
         ])
     );
 }
@@ -219,7 +219,10 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(evaluated_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input evaluated samples, contiguous",])
+        shown(&[
+            "NativeTree",
+            "  root Input evaluated samples source=0, contiguous",
+        ])
     );
 
     let interleaved = NativeType::Samples(Arc::new(SeriesSchema {
@@ -237,7 +240,10 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let tree = NativeTree::try_new(raw_input).unwrap();
     assert_eq!(
         tree.to_string(),
-        shown(&["NativeTree", "  root Input raw samples, interleaved"])
+        shown(&[
+            "NativeTree",
+            "  root Input raw samples source=0, interleaved"
+        ])
     );
 }
 
@@ -270,7 +276,7 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
         shown(&[
             "NativeTree",
             "  root Instant lookback 300000ms offset 60000 on grid 0/60000x4",
-            "    input Input raw samples",
+            "    input Input raw samples source=0",
         ])
     );
 }
@@ -305,7 +311,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "NativeTree",
             "  root Aggregate sum by [job] complete",
             "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input raw samples source=0",
         ])
     );
 
@@ -343,7 +349,7 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             "  root Binary + ignoring [] one-to-one",
             "    left Scalar 2",
             "    right Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input raw samples source=0",
         ])
     );
 
@@ -396,7 +402,7 @@ fn a_without_grouping_does_not_read_as_by() {
             "NativeTree",
             "  root Aggregate sum without [job] complete",
             "    input Window rate [300000ms] offset 0 anchor - on grid 0/60000x4",
-            "      input Input raw samples",
+            "      input Input raw samples source=0",
         ])
     );
 }
