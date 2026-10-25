@@ -37,7 +37,7 @@ use promql_parser::parser::{
     VectorMatchFillValues,
 };
 
-use super::compile;
+use super::{SelectorTiming, compile, compile_selectors};
 
 /// The raw series schema a caller binds from the table: one field and no evaluation grid.
 fn raw_schema() -> Arc<SeriesSchema> {
@@ -1621,9 +1621,7 @@ fn a_constant_operand_binds_the_value_it_folds_to() {
     }
 }
 
-/// An operation between two vectors is refused because the tree cannot say which selector each
-/// `Input` reads: `a + b` and `a + a` would compile to the same tree. The refusal names the missing
-/// identity rather than the query it found, so whoever adds it knows what to add.
+/// Binary operations between vectors remain unsupported in the native lowering stage.
 #[test]
 fn an_operation_between_two_vectors_is_refused_for_the_missing_selector_identity() {
     for query in [
@@ -4326,4 +4324,45 @@ fn an_invalid_label_replace_expression_fails_the_statement() {
     )
     .unwrap_err();
     assert!(matches!(error, DataFusionError::Plan(_)), "{error}");
+}
+
+#[test]
+fn selector_requirements_capture_bounds_and_source_occurrence() {
+    let compiled = compile_selectors(
+        &eval_stmt("rate(x[10s] offset 2s @ 50)"),
+        &|requirement| {
+            assert_eq!(requirement.metric.as_deref(), Some("x"));
+            assert_eq!(requirement.raw_scan_bounds()?, (38_000, 48_000, false));
+            Ok(raw_schema())
+        },
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap();
+    assert_eq!(compiled.inputs.len(), 1);
+    assert_eq!(compiled.inputs[0].source_index, 0);
+    assert_eq!(
+        compiled.inputs[0].requirement.timing,
+        SelectorTiming::Window { range_ms: 10_000 }
+    );
+    let NativeExpr::Window { input, .. } = &compiled.tree.root().expr else {
+        panic!("not window")
+    };
+    let NativeExpr::Input(bound) = &input.expr else {
+        panic!("not input")
+    };
+    assert_eq!(bound.source_index, 0);
+}
+
+#[test]
+fn legacy_compile_refuses_multiple_selector_bindings() {
+    let error = compile(
+        &eval_stmt("rate(x[5m]) + rate(y[5m])"),
+        raw_schema(),
+        SeriesOrdering::KeyThenTime,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
 }

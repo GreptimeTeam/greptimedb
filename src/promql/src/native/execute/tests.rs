@@ -110,6 +110,7 @@ fn raw_input_with_ordering(ordering: SeriesOrdering) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering,
         }),
         output,
@@ -122,6 +123,7 @@ fn raw_input_of(count: usize) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
@@ -139,6 +141,7 @@ fn evaluated_input_with_ordering(grid: Arc<EvalGrid>, ordering: SeriesOrdering) 
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering,
         }),
         output,
@@ -4694,6 +4697,7 @@ fn evaluated_input_of(count: usize, grid: Arc<EvalGrid>) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,

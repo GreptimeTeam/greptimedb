@@ -58,6 +58,7 @@ fn raw_input() -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
@@ -210,6 +211,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let evaluated_input = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: contiguous.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Contiguous,
         }),
         output: contiguous,
@@ -227,6 +229,7 @@ fn an_input_reports_whether_it_is_raw_and_what_ordering_it_guarantees() {
     let raw_input = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: interleaved.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Interleaved,
         }),
         output: interleaved,

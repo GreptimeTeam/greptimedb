@@ -62,6 +62,7 @@ fn input() -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
@@ -75,6 +76,7 @@ fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Contiguous,
         }),
         output,
@@ -90,6 +92,7 @@ fn input_with_fields(count: usize) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
@@ -102,6 +105,7 @@ fn interleaved_input() -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Interleaved,
         }),
         output,
@@ -1190,6 +1194,7 @@ fn an_input_must_report_the_binding_it_was_bound_to() {
     let node = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: raw(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output: raw(),
@@ -1205,6 +1210,7 @@ fn an_input_can_bind_aggregate_state() {
     let bound = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: state.output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Contiguous,
         }),
         output: state.output.clone(),
@@ -1218,6 +1224,7 @@ fn an_input_can_bind_aggregate_state() {
     let other = NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: state.output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::Contiguous,
         }),
         output: partial_aggregate(window_over(input(), None)).output,

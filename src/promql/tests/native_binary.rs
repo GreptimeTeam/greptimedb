@@ -110,6 +110,7 @@ fn source(schema: &Arc<SeriesSchema>) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
+            source_index: 0,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
