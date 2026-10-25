@@ -4023,8 +4023,8 @@ fn rebuilding_a_frame_node_keeps_its_output_format() {
 ///
 /// A scalar has no series to name, so it is not a series of float samples; an aggregate-state root is
 /// refused by the same check for the same reason, and `partial_node` cannot even be built with a
-/// frame format. Both refusals happen while the plan is built, because a plan that is built is a
-/// plan that runs.
+/// frame format. The refusal is a planning error, so a caller learns about it before the query runs
+/// rather than from a partition that fails later.
 #[test]
 fn a_series_frame_refuses_a_root_it_cannot_carry() {
     let scalar = scalar_tree(grid(), 1.0);
@@ -4061,21 +4061,32 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
     );
 }
 
-/// A pending input hands the rows a frame already holds over before it reports pending.
+/// A pending input hands the rows a frame already encoded over before it reports pending.
 ///
 /// The builder buffers up to a batch, and a closing row only exists once its chunk is encoded. If a
-/// pending input could hold those rows, a consumer waiting for a series to close would wait for
-/// input that may never arrive.
+/// pending input could hold those rows, a consumer waiting for a series to close would wait for input
+/// that may never arrive.
+///
+/// This polls by hand rather than awaiting the stream: `StagedStream` reports pending once and then
+/// wakes itself, so an `await` would run straight through the boundary and satisfy every later
+/// assertion whether or not the rows were handed over at the right moment. What is checked instead is
+/// the poll that *meets* the pending input - it has to return rows, and the input has to have been
+/// read only once by then.
 #[tokio::test]
 async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     let schema = frame_schema();
     let batches = one_series_frames();
+    let handed = Arc::new(AtomicUsize::new(0));
     let staged_schema = Arc::clone(&schema);
+    let staged_handed = Arc::clone(&handed);
     let source = staged(Arc::clone(&schema), move || {
         Box::pin(
             StagedStream::new(Arc::clone(&staged_schema), batches.clone())
-                // One batch is in the decoder's hands when the stream reports pending.
-                .pending_after(1),
+                // The third read is the one that reports pending. By then the first two chunks have
+                // filled an evaluation window, so the encoder is holding rows: the boundary is met
+                // with something buffered, which is the case worth checking.
+                .pending_after(2)
+                .counted(&staged_handed),
         )
     });
     let tree = rate_tree();
@@ -4094,18 +4105,31 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
         .execute(0, SessionContext::default().task_ctx())
         .expect("the node executes");
 
-    let first = stream
-        .next()
-        .await
-        .expect("the rows the node already encoded come out before the pending poll")
-        .expect("the frame is not an error");
+    // Poll by hand so the boundary is observable: `await` runs through the pending poll, and every
+    // later assertion would then hold whether or not the rows came out at the right moment.
+    //
+    // The pending poll is the one under test. `StagedStream` wakes itself straight after reporting
+    // pending, so a stream that answered nothing there would still be collected correctly; the only
+    // way to see the difference is to look at what that single poll returned. Two chunks have been
+    // read by then and an evaluation window is full, so the encoder is holding rows: it must answer
+    // them, not pending.
+    let next = stream.next();
+    futures::pin_mut!(next);
+    let mut answered = match futures::poll!(next) {
+        std::task::Poll::Ready(Some(Ok(batch))) => vec![batch],
+        std::task::Poll::Ready(Some(Err(error))) => panic!("the frame answered {error}"),
+        std::task::Poll::Ready(None) => panic!("the frame ended before answering a row"),
+        std::task::Poll::Pending => panic!(
+            "the pending input held the rows the frame already encoded: the input handed over {} \
+             batches",
+            handed.load(Ordering::SeqCst)
+        ),
+    };
     assert_eq!(
         declared.as_ref(),
-        first.schema().as_ref(),
+        answered[0].schema().as_ref(),
         "a batch is declared as the plan declared it"
     );
-
-    let mut answered = vec![first];
     answered.extend(
         stream
             .try_collect::<Vec<_>>()
@@ -4149,5 +4173,253 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     assert_eq!(
         expected, times,
         "every row the row table answers is in the frame, none twice"
+    );
+}
+
+/// A closed chain that holds no value still reaches the consumer of a frame.
+///
+/// The last sample sits past the grid, so no evaluation point has a sample in its window and the
+/// window closes the series with a chunk that carries no position. Dropping it would lose the only
+/// signal that says this series is done - the row table has no row for it at all, which is exactly
+/// why the frame has to keep it.
+#[tokio::test]
+async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
+    let schema = raw_schema();
+    // Every sample is newer than the last grid point, so `rate` decides nothing at any of them.
+    let late = [(GRID_START + RANGE_MS + SAMPLE_STEP, 1.0)];
+    let chunk = chunk_of(
+        &schema,
+        "late",
+        metric(&[(HOST, "late")], Some(METRIC)),
+        &late.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+        vec![late.iter().map(|(_, value)| Some(*value)).collect()],
+        true,
+    );
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("a rate tree is evaluated on a grid");
+    let exec = plan_of(node, memory_exec(vec![frame_of(&schema, &chunk)]))
+        .expect("the runtime executes the tree");
+    let declared = exec.schema();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the frame runs");
+    assert!(
+        batches
+            .iter()
+            .all(|batch| batch.schema().as_ref() == declared.as_ref()),
+        "every batch carries the declared schema"
+    );
+    let stream = Box::pin(RecordBatchStreamAdapter::new(
+        declared,
+        futures::stream::iter(batches.into_iter().map(Ok)),
+    ));
+    let decoded = unpack_evaluated_series(stream, None)
+        .expect("the node declares the frame it yields")
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the frame decodes");
+
+    assert_eq!(
+        1,
+        decoded.len(),
+        "the closing chunk is one frame row, not a dropped chunk: {decoded:?}"
+    );
+    let (series, is_last) = &decoded[0];
+    assert!(is_last, "that row is the one that closes the chain");
+    assert!(
+        series.time.is_empty(),
+        "it carries no grid position: {:?}",
+        series.time.positions().collect::<Vec<_>>()
+    );
+
+    // The row table answers nothing for the same input, which is what makes this chunk worth keeping.
+    let plain = plan(rate_tree(), memory_exec(vec![frame_of(&schema, &chunk)]))
+        .expect("the runtime executes a tree");
+    let rows = rows(
+        &collect(plain, SessionContext::default().task_ctx())
+            .await
+            .expect("the row table runs"),
+    );
+    assert!(
+        rows.is_empty(),
+        "the row table drops the closing chunk entirely: {rows:?}"
+    );
+}
+
+/// A sparse series keeps its own runs through the output boundary, holes and all.
+///
+/// `rate` over samples that only cover the first part of the grid decides values at the first few
+/// points and nothing at the rest. The frame must carry exactly those positions: filling a hole
+/// would answer a value the query never computed.
+#[tokio::test]
+async fn a_frame_keeps_a_sparse_series_runs() {
+    let schema = raw_schema();
+    // Two samples one step apart: a single window has a value, and every later point has none.
+    let samples = [(0, 1.0), (SAMPLE_STEP, 2.0)];
+    let chunk = chunk_of(
+        &schema,
+        "sparse",
+        metric(&[(HOST, "sparse")], Some(METRIC)),
+        &samples.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+        vec![samples.iter().map(|(_, value)| Some(*value)).collect()],
+        true,
+    );
+    let batches = vec![frame_of(&schema, &chunk)];
+
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("a rate tree is evaluated on a grid");
+    let exec = plan_of(node, memory_exec(batches.clone())).expect("the runtime executes the tree");
+    let declared = exec.schema();
+    let decoded = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            declared,
+            futures::stream::iter(
+                collect(exec, SessionContext::default().task_ctx())
+                    .await
+                    .expect("the frame runs")
+                    .into_iter()
+                    .map(Ok),
+            ),
+        )),
+        None,
+    )
+    .expect("the node declares the frame it yields")
+    .try_collect::<Vec<_>>()
+    .await
+    .expect("the frame decodes");
+
+    let mut positions = Vec::new();
+    for (series, _) in &decoded {
+        positions.extend(series.time.positions().map(|(position, _)| position));
+    }
+    // The same input through the row table says which points carry a value; the frame has to agree,
+    // and it must not have invented a position for any point the row table leaves empty.
+    let plain = plan(rate_tree(), memory_exec(batches)).expect("the runtime executes a rate tree");
+    let mut expected = rows(
+        &collect(plain, SessionContext::default().task_ctx())
+            .await
+            .expect("the row table runs"),
+    )
+    .into_iter()
+    .map(|(time, _, _, _)| time)
+    .collect::<Vec<_>>();
+    expected.sort_unstable();
+    let mut expected_positions = expected
+        .iter()
+        .map(|time| usize::try_from((*time - GRID_START) / GRID_STEP).expect("a grid position"))
+        .collect::<Vec<_>>();
+    expected_positions.sort_unstable();
+    positions.sort_unstable();
+    assert_eq!(
+        expected_positions, positions,
+        "the frame carries exactly the points the row table answers, no filled hole"
+    );
+    assert!(
+        positions.len() < GRID_LEN as usize,
+        "the fixture has to be sparse for this to prove anything: {positions:?}"
+    );
+}
+
+/// Two chains that close on one label set are both emitted, each closing itself.
+///
+/// A range function drops the metric name, so two different raw series can reach the output under the
+/// same complete labels. A frame carries one chain per chunk and the later one is a further
+/// contribution, not a repeat of the first: refusing it as a duplicate identity would drop values the
+/// query answers with.
+#[tokio::test]
+async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
+    // `rate` drops `__name__`, and neither series declares any other tag, so both collapse to the
+    // same empty label set.
+    let schema = raw_schema();
+    let chunk_of_host = |host: &str, scale: f64| {
+        let samples = series_samples(scale);
+        chunk_of(
+            &schema,
+            host,
+            metric(&[], None),
+            &samples.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
+            vec![samples.iter().map(|(_, value)| Some(*value)).collect()],
+            true,
+        )
+    };
+    let partitions = vec![
+        vec![frame_of(&schema, &chunk_of_host("web-1", 1.0))],
+        vec![frame_of(&schema, &chunk_of_host("web-2", 2.0))],
+    ];
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("a rate tree is evaluated on a grid");
+    let exec =
+        plan_of(node, memory_exec_partitioned(partitions)).expect("the runtime executes the tree");
+    assert_eq!(
+        2,
+        exec.properties().partitioning.partition_count(),
+        "the frame keeps the input's partition count"
+    );
+    let declared = exec.schema();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("both chains are legal");
+    let decoded = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            declared,
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        )),
+        None,
+    )
+    .expect("the node declares the frame it yields")
+    .try_collect::<Vec<_>>()
+    .await
+    .expect("the frame decodes");
+
+    assert_eq!(
+        2,
+        decoded.iter().filter(|(_, last)| *last).count(),
+        "each chain closes once, in its own partition"
+    );
+    assert_eq!(
+        decoded[0].0.metric, decoded[1].0.metric,
+        "the two chains carry the one label set"
+    );
+    let mut values = Vec::new();
+    for (series, _) in &decoded {
+        for sample in series.fields.get(0).expect("one field").iter() {
+            if let datatypes::series::samples::SampleRef::Float(value) = sample {
+                values.push(value);
+            }
+        }
+    }
+    values.sort_by(f64::total_cmp);
+    assert_eq!(
+        2 * GRID_LEN as usize,
+        values.len(),
+        "both chains' values survive, so neither was mistaken for a duplicate: {values:?}"
+    );
+    assert!(
+        values.windows(2).any(|pair| pair[0] != pair[1]),
+        "the two chains answered different values, so a lost chain would show: {values:?}"
     );
 }

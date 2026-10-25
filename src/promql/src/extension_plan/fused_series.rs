@@ -176,15 +176,6 @@ pub enum FusedOutputFormat {
     SeriesFrame,
 }
 
-impl FusedOutputFormat {
-    const fn as_str(self) -> Option<&'static str> {
-        match self {
-            Self::PlainRows => None,
-            Self::SeriesFrame => Some("series_frame"),
-        }
-    }
-}
-
 fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
     match &tree.root().output {
         NativeType::Samples(schema) if schema.eval_grid.is_some() => Ok(Arc::clone(schema)),
@@ -408,7 +399,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 self.promql,
                 render_partial_fold(op)
             ),
-            None if self.format.as_str().is_some() => {
+            None if self.format == FusedOutputFormat::SeriesFrame => {
                 write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
             }
             None => write!(f, "FusedSeries: {}", self.promql),
@@ -1084,7 +1075,7 @@ impl DisplayAs for FusedSeriesExec {
         write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
         if let Some(op) = &self.partial_fold {
             write!(f, "\npartial state: {}", render_partial_fold(op))?;
-        } else if self.format.as_str().is_some() {
+        } else if self.format == FusedOutputFormat::SeriesFrame {
             write!(f, "\noutput: series_frame")?;
         }
         Ok(())
@@ -1474,7 +1465,8 @@ impl FusedSeriesStream {
         self.ready.clear();
     }
 
-    /// Converts settled chunks into query rows or folds them into partial aggregate state.
+    /// Converts settled chunks into the node's output: query rows, an evaluated series frame, or
+    /// partition-local state for a later aggregate merge.
     fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
         if let Some(fold) = self.partial_fold.as_mut() {
             for chunk in chunks {
