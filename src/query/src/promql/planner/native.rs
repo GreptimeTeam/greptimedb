@@ -999,8 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn single_selector_admission_keeps_scalar_binaries_on_fallback() {
-        for query in ["x * 2", "2 - x", "(x * 2) + 3"] {
+    fn single_selector_admission_accepts_literal_broadcasts_and_unary() {
+        for query in ["x * 2", "2 - x", "(x * 2) + 3", "-x"] {
+            let expression = promql_parser::parser::parse(query).unwrap();
+            assert!(admitted_selector(&expression).is_some(), "{query}");
+        }
+        for query in ["time() + x", "scalar(x) + x", "x + y"] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_none(), "{query}");
         }
