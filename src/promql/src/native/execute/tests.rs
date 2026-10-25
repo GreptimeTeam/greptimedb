@@ -106,11 +106,18 @@ fn input() -> NativeNode {
 
 /// The same raw source, declaring `ordering`.
 fn raw_input_with_ordering(ordering: SeriesOrdering) -> NativeNode {
+    raw_input_with_source_index_and_ordering(0, ordering)
+}
+
+fn raw_input_with_source_index_and_ordering(
+    source_index: usize,
+    ordering: SeriesOrdering,
+) -> NativeNode {
     let output = NativeType::Samples(raw_schema());
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
-            source_index: 0,
+            source_index,
             ordering,
         }),
         output,
@@ -132,16 +139,28 @@ fn raw_input_of(count: usize) -> NativeNode {
 
 /// A source whose chunks are already evaluated, such as the inner result of a subquery.
 fn evaluated_input(grid: Arc<EvalGrid>) -> NativeNode {
-    evaluated_input_with_ordering(grid, SeriesOrdering::KeyThenTime)
+    evaluated_input_with_source_index(grid, 0)
+}
+
+fn evaluated_input_with_source_index(grid: Arc<EvalGrid>, source_index: usize) -> NativeNode {
+    evaluated_input_with_source_index_and_ordering(grid, source_index, SeriesOrdering::KeyThenTime)
 }
 
 /// A source of evaluated chunks that guarantees `ordering`.
 fn evaluated_input_with_ordering(grid: Arc<EvalGrid>, ordering: SeriesOrdering) -> NativeNode {
+    evaluated_input_with_source_index_and_ordering(grid, 0, ordering)
+}
+
+fn evaluated_input_with_source_index_and_ordering(
+    grid: Arc<EvalGrid>,
+    source_index: usize,
+    ordering: SeriesOrdering,
+) -> NativeNode {
     let output = evaluated(grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
-            source_index: 0,
+            source_index,
             ordering,
         }),
         output,
@@ -487,6 +506,7 @@ fn raw_shared_histogram_chunk(
 /// rather than off a node: a source reserves for what the caller queued at it and for nothing else.
 fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
     InputSlot {
+        source_index: 0,
         schema: raw_schema(),
         open_source_series: false,
         state: NodeState::new("native.input", Arc::new(NodeMetrics::default()), pool),
@@ -1547,6 +1567,85 @@ fn an_error_releases_the_reservation() {
     );
     drop(unfinished);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// Runtime routing keeps a raw input's source index and feeds its actual leaf id.
+#[test]
+fn runtime_input_ids_route_raw_sources() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(window_with(
+        raw_input_with_source_index_and_ordering(7, SeriesOrdering::KeyThenTime),
+        RangeFunction::LastOverTime,
+        1,
+        None,
+        Arc::clone(&out_grid),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let id = execution.state().input_ids(7).next().unwrap();
+    execution
+        .push_raw(
+            id,
+            raw_chunk(&raw_schema(), &[0, 60_000], &[4.0, 5.0], true),
+        )
+        .unwrap();
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(4.0), Some(5.0)])]
+    );
+}
+
+/// A fanout enqueue failure stops the whole execution and releases earlier recipients' reservations.
+#[test]
+fn a_fanout_enqueue_failure_releases_every_recipient() {
+    let out_grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(binary_of(
+        window_with(
+            raw_input_with_source_index_and_ordering(0, SeriesOrdering::KeyThenTime),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            Arc::clone(&out_grid),
+        ),
+        window_with(
+            raw_input_with_source_index_and_ordering(0, SeriesOrdering::KeyThenTime),
+            RangeFunction::LastOverTime,
+            1,
+            None,
+            out_grid,
+        ),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let schema = raw_schema();
+    let chunk = raw_chunk(&schema, &[0], &[1.0], true);
+    let first_charge = raw_bytes(&chunk);
+    let pool = bounded_pool(first_charge);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let ids: Vec<_> = execution.state().input_ids(0).collect();
+    let first = ids[0];
+    let second = ids[1];
+    let error = execution
+        .push_raw(first, chunk.clone())
+        .and_then(|()| execution.push_raw(second, chunk))
+        .expect_err("second fanout recipient exceeded the shared pool");
+    assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error"),
+        "a failed fanout execution continued"
+    );
+    assert!(
+        execution
+            .push_raw(first, raw_chunk(&schema, &[1], &[2.0], true))
+            .is_err(),
+        "a failed fanout execution accepted another input"
+    );
 }
 
 /// A chunk the pool cannot admit fails the execution and gives back everything it already held.
@@ -4842,6 +4941,50 @@ fn binary_tree(op: BinaryOp, points: u64) -> (NativeTree, Arc<EvalGrid>, InputId
         InputId::new(0),
         InputId::new(1),
     )
+}
+
+/// Runtime source indexes map to all matching leaf slots, including below unary and scalar nodes.
+#[test]
+fn runtime_input_ids_route_repeated_and_distinct_source_indexes() {
+    let out_grid = grid(0, 60_000, 2);
+    let tree = NativeTree::try_new(binary_of(
+        binary_of(
+            map(
+                evaluated_input_with_source_index(Arc::clone(&out_grid), 0),
+                vec![MathOp::Abs],
+            ),
+            evaluated_input_with_source_index(Arc::clone(&out_grid), 7),
+            binary_matching(BinaryOp::Add),
+        ),
+        broadcast_right(
+            evaluated_input_with_source_index(Arc::clone(&out_grid), 0),
+            3.0,
+            BinaryOp::Add,
+            false,
+        ),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let ids_0: Vec<_> = execution.state().input_ids(0).collect();
+    let ids_7: Vec<_> = execution.state().input_ids(7).collect();
+    assert_eq!(ids_0.len(), 2);
+    assert_eq!(ids_7.len(), 1);
+    assert_ne!(ids_0[0], ids_0[1]);
+    assert_ne!(ids_0[0], ids_7[0]);
+    assert_ne!(ids_0[1], ids_7[0]);
+    assert!(execution.state().input_ids(99).next().is_none());
+
+    let schema = evaluated_schema(Arc::clone(&out_grid));
+    for (id, value) in [(ids_0[0], 1.0), (ids_7[0], 2.0), (ids_0[1], 3.0)] {
+        execution
+            .push_evaluated(id, evaluated_chunk(&schema, 0, vec![value; 2], true))
+            .unwrap();
+    }
+    assert_eq!(
+        addressed(&run(&mut execution)),
+        vec![(0, vec![Some(6.0); 2])]
+    );
 }
 
 /// Two evaluated sources under a binary node add the series they match, point by point.
@@ -9382,6 +9525,8 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     let schema = evaluated_schema(Arc::clone(&grid));
     let pool = bounded_pool(1 << 22);
     let mut execution = executor(&tree, Arc::clone(&pool));
+    let left = execution.state().input_ids(0).next().unwrap();
+    let right = execution.state().input_ids(0).nth(1).unwrap();
     // Two matched series on each side, so the answer is two chunks and pulling one leaves one
     // queued: `{job="a"}` adds two to one, `{job="b"}` adds three to two.
     for (side, metric, value) in [
@@ -9430,7 +9575,7 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
 
     let rejection = execution
         .push_evaluated(
-            InputId::new(0),
+            left,
             evaluated_chunk_of(
                 &schema,
                 named_metric("m", "late"),
