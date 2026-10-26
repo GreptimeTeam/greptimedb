@@ -134,33 +134,12 @@ pub(crate) fn hybrid_binary_admitted(
                     || matches!(&modifier.matching, Some(LabelModifier::Exclude(labels)) if labels.labels.is_empty()))
         }
     };
-    let has_aggregate = |expr: &PromExpr| {
-        fn visit(expr: &PromExpr) -> bool {
-            match expr {
-                PromExpr::Aggregate(_) => true,
-                PromExpr::Paren(x) => visit(&x.expr),
-                PromExpr::Unary(x) => visit(&x.expr),
-                PromExpr::Binary(x) => visit(&x.lhs) || visit(&x.rhs),
-                PromExpr::Call(x) => x.args.args.iter().any(|arg| visit(arg)),
-                _ => false,
-            }
-        }
-        visit(expr)
-    };
-    let one_selector = |expr: &PromExpr| {
-        let mut selectors = Vec::new();
-        collect_selectors(expr, &mut selectors) && selectors.len() == 1
-    };
     supported_op
         && supported_matching
         && lhs.value_type() == ValueType::Vector
         && rhs.value_type() == ValueType::Vector
-        && admitted_single_selector(lhs)
-        && admitted_single_selector(rhs)
-        && !has_aggregate(lhs)
-        && !has_aggregate(rhs)
-        && one_selector(lhs)
-        && one_selector(rhs)
+        && admitted_selector(lhs).is_some()
+        && admitted_selector(rhs).is_some()
 }
 
 impl PromPlanner {
@@ -169,35 +148,24 @@ impl PromPlanner {
         expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        let mut selectors = Vec::new();
-        if !collect_selectors(expr, &mut selectors)
-            || selectors.len() != 1
-            || !admitted_single_selector(expr)
-        {
+        if admitted_selector(expr).is_none() {
             return Ok(None);
         }
-        let selector = selectors[0];
         let saved = self.ctx.clone();
-        let plan = match self.try_plan_native_fused(expr, query_engine_state).await? {
-            Some(plan) => plan,
-            None => return Ok(None),
-        };
-        self.ctx = saved.clone();
-        if self
-            .preprocess_label_matchers(&selector.matchers, &selector.name)
-            .is_err()
+        let (plan, operand_ctx) = match self
+            .try_plan_native_fused_with_context(expr, query_engine_state)
+            .await?
         {
-            self.ctx = saved;
-            return Ok(None);
-        }
-        if self.setup_context().await?.is_some() {
-            self.ctx = saved;
-            return Ok(None);
-        }
-        let mut operand_ctx = self.ctx.clone();
-        operand_ctx.use_tsid = false;
-        let table_ref = self.table_ref()?;
+            Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
+            _ => {
+                self.ctx = saved;
+                return Ok(None);
+            }
+        };
+        self.ctx = operand_ctx.clone();
+        let table_ref = self.table_ref();
         self.ctx = saved;
+        let table_ref = table_ref?;
         let plan = LogicalPlanBuilder::from(plan)
             .alias(table_ref)
             .context(DataFusionPlanningSnafu)?
@@ -229,6 +197,17 @@ impl PromPlanner {
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
+        Ok(self
+            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .await?
+            .map(|(plan, _)| plan))
+    }
+
+    async fn try_plan_native_fused_with_context(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
         }
@@ -284,13 +263,17 @@ impl PromPlanner {
                 output_schema,
             )
             .context(DataFusionPlanningSnafu)?;
-            return Ok(Some(LogicalPlan::Extension(Extension {
-                node: Arc::new(node),
-            })));
+            return Ok(Some((
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                }),
+                None,
+            )));
         }
         let original_context = self.ctx.clone();
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
+            let mut single_input_context = None;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -305,6 +288,9 @@ impl PromPlanner {
                     };
                 if self.setup_context().await?.is_some() {
                     return Ok(None);
+                }
+                if selectors.len() == 1 {
+                    single_input_context = Some(self.ctx.clone());
                 }
                 let (Some(metric), Some(time)) = (
                     self.ctx.table_name.clone(),
@@ -450,11 +436,11 @@ impl PromPlanner {
                 }
                 prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
             }
-            Ok(Some(prepared))
+            Ok(Some((prepared, single_input_context)))
         }
         .await;
         self.ctx = original_context;
-        let Some(mut prepared) = preparation? else {
+        let Some((mut prepared, single_input_context)) = preparation? else {
             return Ok(None);
         };
         // The time index, the raw tag list and metric name are shared binding properties. The
@@ -612,9 +598,12 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            return Ok(Some(LogicalPlan::Extension(Extension {
-                node: Arc::new(node),
-            })));
+            return Ok(Some((
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                }),
+                single_input_context,
+            )));
         }
         let tree = compiled.tree;
         let root_fields = tree
@@ -650,9 +639,12 @@ impl PromPlanner {
             output_schema,
         )
         .context(DataFusionPlanningSnafu)?;
-        Ok(Some(LogicalPlan::Extension(Extension {
-            node: Arc::new(node),
-        })))
+        Ok(Some((
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            }),
+            single_input_context,
+        )))
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
