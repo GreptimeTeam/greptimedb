@@ -109,6 +109,7 @@ otel-arrow-rust.workspace = true
 paste.workspace = true
 pipeline.workspace = true
 plugins.workspace = true
+promql.workspace = true
 prost.workspace = true
 rand.workspace = true
 rskafka.workspace = true

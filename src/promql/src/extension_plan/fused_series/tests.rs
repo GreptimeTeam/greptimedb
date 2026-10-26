@@ -32,11 +32,11 @@
 use std::collections::VecDeque;
 use std::fmt::{self, Display, Formatter};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::unpack_evaluated_series;
+use common_query::series_frame::{unpack_evaluated_series, unpack_raw_series};
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -67,19 +67,21 @@ use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
-    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
-    raw_series_frame_schema, series_frame_schema,
+    LabelDecodeSpec, LabelDecodeTag, SeriesFrameBuilder, SeriesFrameDeclaration,
+    pack_raw_series_chunk, raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
-use store_api::region_engine::RawLabelSource;
+use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
+
+mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
-    series_to_record_batch,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesStream, OutputColumn,
+    POLL_BUDGET, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
@@ -2502,6 +2504,215 @@ async fn a_ready_batch_is_returned_before_later_input_is_read() {
     assert!(total > 1, "the fixture has to outlast the first answer");
 }
 
+fn direct_frame_stream(
+    schema: Arc<SeriesSchema>,
+    input: Option<SendableRawSeriesStream>,
+) -> FusedSeriesStream {
+    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
+    let builder = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .unwrap();
+    FusedSeriesStream {
+        inputs: input.into_iter().map(|input| (0, input)).collect(),
+        executor: None,
+        input_ids: Vec::new(),
+        classification: Arc::from([]),
+        tags: Arc::from([]),
+        output_schema,
+        partial_fold: None,
+        frame_builder: Some(builder),
+        eval_schema: Some(schema),
+        frame_cursor: None,
+        _export_budget: Arc::new(Mutex::new(None)),
+        ready: VecDeque::new(),
+        done: false,
+    }
+}
+
+fn sparse_eval_chunk(rows: usize, value: f64) -> (Arc<SeriesSchema>, EvaluatedChunk) {
+    let grid =
+        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, (rows * 2) as u64).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: VALUE.into() }]),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let axis =
+        TimeAxis::from_grid_spans(grid, (0..rows).map(|i| GridSpan::new(i * 2, 1)).collect())
+            .unwrap();
+    let chunk = EvaluatedChunk::try_new(
+        Series {
+            metric: SeriesLabels::try_new(Some(Arc::from(METRIC)), Vec::new()).unwrap(),
+            time: axis,
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![value; rows]))),
+        },
+        true,
+    )
+    .unwrap();
+    (schema, chunk)
+}
+
+/// A large evaluated chunk is encoded over successive polls rather than queued as all of its
+/// physical frame batches at once.
+#[tokio::test]
+async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
+    const ROWS: usize = 800;
+    let value = f64::from_bits(0x4009_21fb_5444_2d18);
+    let (schema, chunk) = sparse_eval_chunk(ROWS, value);
+    let mut stream = direct_frame_stream(Arc::clone(&schema), None);
+    stream
+        .convert(chunk)
+        .expect("the evaluated chunk becomes a cursor");
+    assert!(
+        stream.ready.is_empty(),
+        "conversion must not eagerly queue frame batches"
+    );
+    assert!(
+        stream.frame_cursor.is_some(),
+        "unencoded rows remain owned by the cursor"
+    );
+
+    let first = stream.next().await.unwrap().unwrap();
+    assert!(first.num_rows() <= SeriesFrameBuilder::DEFAULT_MAX_ROWS);
+    assert!(
+        stream.frame_cursor.is_some(),
+        "the first batch cannot drain 800 rows"
+    );
+    assert!(stream.ready.is_empty());
+
+    let mut batches = vec![first];
+    while let Some(batch) = stream.next().await {
+        batches.push(batch.unwrap());
+    }
+    assert!(batches.len() > 1);
+    let decoded = unpack_evaluated_series(
+        Box::pin(RecordBatchStreamAdapter::new(
+            batches[0].schema(),
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        )),
+        None,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    let mut decoded_rows = Vec::new();
+    let mut closing_chunks = 0;
+    for (series, last) in &decoded {
+        if *last {
+            closing_chunks += 1;
+        }
+        assert_eq!(Some(METRIC), series.metric.name());
+        for (position, row) in series.time.positions() {
+            let value = match series.fields.as_slice()[0].sample(row) {
+                datatypes::series::samples::SampleRef::Float(value) => value,
+                _ => panic!("the decoded field remains a present Float64"),
+            };
+            decoded_rows.push((position, value.to_bits()));
+        }
+    }
+    decoded_rows.sort_unstable_by_key(|(position, _)| *position);
+    assert_eq!(1, closing_chunks, "the chunk closes exactly once");
+    assert_eq!(
+        (0..ROWS)
+            .map(|i| (i * 2, 0x4009_21fb_5444_2d18))
+            .collect::<Vec<_>>(),
+        decoded_rows,
+        "every sparse position carries the exact expected float bits",
+    );
+
+    assert!(stream.next().await.is_none(), "EOF remains stable");
+    assert!(stream.next().await.is_none(), "repeated EOF remains stable");
+}
+
+/// The cursor and its input are both released when the consumer drops an unfinished frame.
+#[tokio::test]
+async fn dropping_a_partly_emitted_frame_releases_its_input() {
+    const ROWS: usize = 800;
+    let (schema, mut chunk) = sparse_eval_chunk(ROWS, 3.0);
+    let name = Arc::<str>::from(METRIC);
+    let name_weak = Arc::downgrade(&name);
+    chunk
+        .series
+        .metric
+        .set("__name__", Arc::clone(&name))
+        .unwrap();
+    drop(name);
+    let raw = raw_schema();
+    let raw_chunk = series_chunk("cursor-source", &[(0, 1.0)], true);
+    let raw_frame = frame_of(&raw, &raw_chunk);
+    let dropped = Arc::new(AtomicBool::new(false));
+    let raw_input = Box::pin(StagedStream::new(frame_schema(), vec![raw_frame]).dropped(&dropped));
+    let input = unpack_raw_series(raw_input, Some(Arc::clone(&raw))).unwrap();
+    let mut stream = direct_frame_stream(Arc::clone(&schema), Some(input));
+    stream.convert(chunk).unwrap();
+    assert!(stream.next().await.unwrap().unwrap().num_rows() > 0);
+    assert!(stream.frame_cursor.is_some());
+    assert!(
+        name_weak.upgrade().is_some(),
+        "the cursor retains its unencoded label identity"
+    );
+    assert!(!dropped.load(Ordering::SeqCst));
+    assert_eq!(1, stream.inputs.len());
+    drop(stream);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(
+        name_weak.upgrade().is_none(),
+        "dropping the cursor releases its label identity"
+    );
+}
+
+/// An upstream error clears rows buffered in the frame builder before any batch is delivered.
+#[tokio::test]
+async fn frame_upstream_error_discards_buffered_rows_and_terminates() {
+    let (schema, chunk) = sparse_eval_chunk(2, 5.0);
+    let raw = raw_schema();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let input = unpack_raw_series(
+        Box::pin(
+            StagedStream::new(frame_schema(), Vec::new())
+                .error("frame input failed")
+                .dropped(&dropped),
+        ),
+        Some(Arc::clone(&raw)),
+    )
+    .unwrap();
+    let mut stream = direct_frame_stream(schema, Some(input));
+    stream.convert(chunk).unwrap();
+    assert!(stream.advance_frame_cursor().unwrap().is_none());
+    assert!(
+        stream.frame_cursor.is_none(),
+        "small rows sit buffered in the builder"
+    );
+    assert!(stream.ready.is_empty());
+
+    let error = stream
+        .next()
+        .await
+        .expect("the upstream error is yielded")
+        .expect_err("buffered frame rows cannot hide the source error");
+    assert!(error.to_string().contains("frame input failed"));
+    assert!(
+        stream.next().await.is_none(),
+        "the failed stream terminates once"
+    );
+    assert!(
+        stream.next().await.is_none(),
+        "EOF after failure remains stable"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "failure releases the source"
+    );
+    assert!(stream.frame_builder.is_none());
+    assert!(stream.frame_cursor.is_none());
+    assert!(stream.ready.is_empty());
+}
+
 /// A chunk whose rows form several runs is converted row by row from the rows it carries.
 ///
 /// A sparse result is one chunk holding two runs with a hole between them
@@ -4254,88 +4465,6 @@ async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
     );
 }
 
-/// A sparse series keeps its own runs through the output boundary, holes and all.
-///
-/// `rate` over samples that only cover the first part of the grid decides values at the first few
-/// points and nothing at the rest. The frame must carry exactly those positions: filling a hole
-/// would answer a value the query never computed.
-#[tokio::test]
-async fn a_frame_keeps_a_sparse_series_runs() {
-    let schema = raw_schema();
-    // Two samples one step apart: a single window has a value, and every later point has none.
-    let samples = [(0, 1.0), (SAMPLE_STEP, 2.0)];
-    let chunk = chunk_of(
-        &schema,
-        "sparse",
-        metric(&[(HOST, "sparse")], Some(METRIC)),
-        &samples.iter().map(|(time, _)| *time).collect::<Vec<_>>(),
-        vec![samples.iter().map(|(_, value)| Some(*value)).collect()],
-        true,
-    );
-    let batches = vec![frame_of(&schema, &chunk)];
-
-    let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
-        tree.clone(),
-        binding(&tree),
-        vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
-    )
-    .expect("a rate tree is evaluated on a grid");
-    let exec = plan_of(node, memory_exec(batches.clone())).expect("the runtime executes the tree");
-    let declared = exec.schema();
-    let decoded = unpack_evaluated_series(
-        Box::pin(RecordBatchStreamAdapter::new(
-            declared,
-            futures::stream::iter(
-                collect(exec, SessionContext::default().task_ctx())
-                    .await
-                    .expect("the frame runs")
-                    .into_iter()
-                    .map(Ok),
-            ),
-        )),
-        None,
-    )
-    .expect("the node declares the frame it yields")
-    .try_collect::<Vec<_>>()
-    .await
-    .expect("the frame decodes");
-
-    let mut positions = Vec::new();
-    for (series, _) in &decoded {
-        positions.extend(series.time.positions().map(|(position, _)| position));
-    }
-    // The same input through the row table says which points carry a value; the frame has to agree,
-    // and it must not have invented a position for any point the row table leaves empty.
-    let plain = plan(rate_tree(), memory_exec(batches)).expect("the runtime executes a rate tree");
-    let mut expected = rows(
-        &collect(plain, SessionContext::default().task_ctx())
-            .await
-            .expect("the row table runs"),
-    )
-    .into_iter()
-    .map(|(time, _, _, _)| time)
-    .collect::<Vec<_>>();
-    expected.sort_unstable();
-    let mut expected_positions = expected
-        .iter()
-        .map(|time| usize::try_from((*time - GRID_START) / GRID_STEP).expect("a grid position"))
-        .collect::<Vec<_>>();
-    expected_positions.sort_unstable();
-    positions.sort_unstable();
-    assert_eq!(
-        expected_positions, positions,
-        "the frame carries exactly the points the row table answers, no filled hole"
-    );
-    assert!(
-        positions.len() < GRID_LEN as usize,
-        "the fixture has to be sparse for this to prove anything: {positions:?}"
-    );
-}
-
 /// Two chains that close on one label set are both emitted, each closing itself.
 ///
 /// A range function drops the metric name, so two different raw series can reach the output under the
@@ -4404,22 +4533,34 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
         decoded[0].0.metric, decoded[1].0.metric,
         "the two chains carry the one label set"
     );
-    let mut values = Vec::new();
-    for (series, _) in &decoded {
-        for sample in series.fields.get(0).expect("one field").iter() {
-            if let datatypes::series::samples::SampleRef::Float(value) = sample {
-                values.push(value);
-            }
+    let mut per_chain = Vec::new();
+    for (series, last) in &decoded {
+        assert!(*last, "each partition's single chain closes exactly once");
+        assert_eq!(None, series.metric.name(), "rate drops the metric name");
+        assert!(
+            series.metric.tags().is_empty(),
+            "both chains have empty labels"
+        );
+        let mut rows = Vec::new();
+        for (position, row) in series.time.positions() {
+            let value = match series.fields.as_slice()[0].sample(row) {
+                datatypes::series::samples::SampleRef::Float(value) => value,
+                _ => panic!("each rate grid position has a present value"),
+            };
+            rows.push((position, value.to_bits()));
         }
+        rows.sort_unstable_by_key(|(position, _)| *position);
+        per_chain.push(rows);
     }
-    values.sort_by(f64::total_cmp);
-    assert_eq!(
-        2 * GRID_LEN as usize,
-        values.len(),
-        "both chains' values survive, so neither was mistaken for a duplicate: {values:?}"
-    );
-    assert!(
-        values.windows(2).any(|pair| pair[0] != pair[1]),
-        "the two chains answered different values, so a lost chain would show: {values:?}"
-    );
+    assert_eq!(2, per_chain.len(), "one closing chain from each partition");
+    per_chain.sort();
+    for (rows, value) in per_chain.iter().zip([1.0f64, 2.0]) {
+        assert_eq!(
+            (0..GRID_LEN as usize)
+                .map(|i| (i, value.to_bits()))
+                .collect::<Vec<_>>(),
+            *rows,
+            "each chain preserves every exact grid position and value",
+        );
+    }
 }

@@ -952,16 +952,6 @@ impl FusedSeriesExec {
                 }
             }
         }
-        // A scalar root answers one value per grid point and names no series, so it is not something
-        // a frame of evaluated samples can carry. Refusing it here names the shape the caller asked
-        // for; `evaluated_output` would reach the same verdict later with a narrower message.
-        if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame && scalar_root {
-            return Err(DataFusionError::Plan(
-                "FusedSeries frame output requires evaluated samples, but this tree has a scalar \
-                 root and no raw source"
-                    .into(),
-            ));
-        }
         let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
             let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
             if declared != output_schema {
@@ -1257,6 +1247,7 @@ impl ExecutionPlan for FusedSeriesExec {
             partial_fold,
             frame_builder,
             eval_schema,
+            frame_cursor: None,
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
@@ -1379,6 +1370,8 @@ pub struct FusedSeriesStream {
     partial_fold: Option<PartialFold>,
     frame_builder: Option<SeriesFrameBuilder>,
     eval_schema: Option<Arc<SeriesSchema>>,
+    /// The evaluated chunk whose frame is still being appended across downstream polls.
+    frame_cursor: Option<SeriesFrameCursor>,
     /// Keeps exported state batches charged for as long as this stream holds them.
     _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// The batches the executor settled since the last poll of the input.
@@ -1402,11 +1395,18 @@ impl FusedSeriesStream {
         })? {
             executor.push_raw(*input_id, chunk.clone())?;
         }
-        let mut settled = Vec::new();
-        while let Some(chunk) = executor.next_chunk()? {
-            settled.push(chunk);
+        if self.frame_builder.is_some() {
+            Ok(())
+        } else {
+            let mut settled = Vec::new();
+            while let Some(chunk) = executor.next_chunk()? {
+                settled.push(chunk);
+            }
+            for chunk in settled {
+                self.convert(chunk)?;
+            }
+            Ok(())
         }
-        self.convert(settled)
     }
 
     /// Ends the input, so the tree settles what it was holding.
@@ -1454,6 +1454,7 @@ impl FusedSeriesStream {
         self.executor = None;
         self.partial_fold = None;
         self.frame_builder = None;
+        self.frame_cursor = None;
         self.inputs.clear();
         // This reservation belongs only to this execution. Release it even if the consumer keeps
         // the failed stream and the plan alive.
@@ -1465,44 +1466,51 @@ impl FusedSeriesStream {
         self.ready.clear();
     }
 
-    /// Converts settled chunks into the node's output: query rows, an evaluated series frame, or
-    /// partition-local state for a later aggregate merge.
-    fn convert(&mut self, chunks: Vec<EvaluatedChunk>) -> DataFusionResult<()> {
+    /// Converts one settled chunk into the node's output: query rows, an evaluated series frame,
+    /// or partition-local state for a later aggregate merge.
+    fn convert(&mut self, chunk: EvaluatedChunk) -> DataFusionResult<()> {
         if let Some(fold) = self.partial_fold.as_mut() {
-            for chunk in chunks {
-                fold.update(chunk)?;
-            }
+            fold.update(chunk)?;
             return Ok(());
         }
-        for chunk in &chunks {
-            if let (Some(schema), Some(builder)) =
-                (self.eval_schema.as_ref(), self.frame_builder.as_mut())
-            {
-                let mut cursor = SeriesFrameCursor::try_new_evaluated(
-                    schema,
-                    chunk.series.clone(),
-                    chunk.is_last,
-                )
-                .map_err(|error| {
-                    DataFusionError::Execution(format!("cannot frame evaluated chunk: {error}"))
-                })?;
-                while let Some(batch) = cursor.append_to(builder).map_err(|error| {
-                    DataFusionError::Execution(format!("cannot append evaluated frame: {error}"))
-                })? {
-                    self.ready
-                        .push_back(batch.with_schema(self.output_schema.clone())?);
-                }
-            } else {
-                let batch = series_to_record_batch(
-                    &self.classification,
-                    &self.tags,
-                    &self.output_schema,
-                    chunk,
-                )?;
-                self.ready.push_back(batch);
-            }
+        if let Some(schema) = self.eval_schema.as_ref()
+            && self.frame_builder.is_some()
+        {
+            self.frame_cursor = Some(
+                SeriesFrameCursor::try_new_evaluated(schema, chunk.series, chunk.is_last).map_err(
+                    |error| {
+                        DataFusionError::Execution(format!("cannot frame evaluated chunk: {error}"))
+                    },
+                )?,
+            );
+        } else {
+            let batch = series_to_record_batch(
+                &self.classification,
+                &self.tags,
+                &self.output_schema,
+                &chunk,
+            )?;
+            self.ready.push_back(batch);
         }
         Ok(())
+    }
+
+    /// Appends only until the current evaluated chunk yields one batch.
+    fn advance_frame_cursor(&mut self) -> DataFusionResult<Option<RecordBatch>> {
+        let (Some(cursor), Some(builder)) =
+            (self.frame_cursor.as_mut(), self.frame_builder.as_mut())
+        else {
+            return Ok(None);
+        };
+        match cursor.append_to(builder).map_err(|error| {
+            DataFusionError::Execution(format!("cannot append evaluated frame: {error}"))
+        })? {
+            Some(batch) => Ok(Some(batch.with_schema(self.output_schema.clone())?)),
+            None => {
+                self.frame_cursor = None;
+                Ok(None)
+            }
+        }
     }
 
     fn flush_frames(&mut self) -> DataFusionResult<()> {
@@ -1543,8 +1551,42 @@ impl Stream for FusedSeriesStream {
         // A batch that is already settled is handed over before anything is read, so a bounded
         // poll never delays one that is ready behind more input.
         for _ in 0..POLL_BUDGET {
+            if this.frame_cursor.is_some() {
+                match this.advance_frame_cursor() {
+                    Ok(Some(batch)) => return Poll::Ready(Some(Ok(batch))),
+                    Ok(None) => {}
+                    Err(error) => {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
+            }
             if let Some(batch) = this.ready.pop_front() {
                 return Poll::Ready(Some(Ok(batch)));
+            }
+            if !this.done && this.frame_builder.is_some() && this.frame_cursor.is_none() {
+                let next = this
+                    .executor
+                    .as_mut()
+                    .map_or(Ok(None), NativeExecutor::next_chunk);
+                match next {
+                    Ok(Some(chunk)) => {
+                        if let Err(error) = this.convert(chunk) {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                        continue;
+                    }
+                    Ok(None) => {
+                        if this.inputs.is_empty() {
+                            this.executor = None;
+                        }
+                    }
+                    Err(error) => {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                }
             }
             if this.done {
                 return Poll::Ready(None);
@@ -1552,7 +1594,7 @@ impl Stream for FusedSeriesStream {
             let Some((source, input)) = this.inputs.front_mut() else {
                 match this.pull_one() {
                     Ok(Some(chunk)) => {
-                        if let Err(error) = this.convert(vec![chunk]) {
+                        if let Err(error) = this.convert(chunk) {
                             this.fail();
                             return Poll::Ready(Some(Err(error)));
                         }
