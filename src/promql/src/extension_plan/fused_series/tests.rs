@@ -2510,6 +2510,13 @@ async fn a_ready_batch_is_returned_before_later_input_is_read() {
     assert!(total > 1, "the fixture has to outlast the first answer");
 }
 
+/// A chunk whose rows form several runs is converted row by row from the rows it carries.
+///
+/// A sparse result is one chunk holding two runs with a hole between them
+/// ([`EvaluatedChunk::range`] answers `None` for it). Reading the hole as rows would invent grid
+/// points this series holds no value at, and reading positions as compact rows would shift every
+/// row after the hole onto the wrong timestamp: the batch has to hold exactly the carried rows, at
+/// their absolute grid times, with nulls nowhere else.
 #[test]
 fn a_chunk_of_several_runs_converts_its_own_rows_only() {
     let grid = grid();
@@ -4222,7 +4229,7 @@ async fn fused_frame_input_error_terminates_and_releases_input() {
         .unwrap();
     let error = match output.next().await {
         Some(Err(error)) => error,
-        Some(Ok(_)) => panic!("buffered frame output escaped before the upstream failure"),
+        Some(Ok(_)) => panic!("unexpected output before the upstream failure"),
         None => panic!("the upstream failure was swallowed"),
     };
     assert!(error.to_string().contains("fused frame input failed"));

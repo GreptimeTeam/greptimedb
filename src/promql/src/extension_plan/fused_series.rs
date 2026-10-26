@@ -1228,7 +1228,6 @@ impl ExecutionPlan for FusedSeriesExec {
             output_schema: self.output_schema.clone(),
             partial_fold,
             frame_mode,
-
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
@@ -1357,6 +1356,7 @@ pub struct FusedSeriesStream {
     output_schema: SchemaRef,
     /// Per-partition aggregate state fold, if this stream exports a partial result.
     partial_fold: Option<PartialFold>,
+    /// Whether evaluated chunks are emitted as series frames rather than converted to rows.
     frame_mode: bool,
     /// Keeps exported state batches charged for as long as this stream holds them.
     _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
@@ -1599,19 +1599,13 @@ impl Stream for FusedEvaluatedStream {
             Poll::Ready(Some(Ok(FusedOutput::Rows(_)))) => {
                 self.source.fail();
                 Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
-                    common_query::error::Error::GeneralDataFusion {
-                        error: DataFusionError::Internal(
-                            "row batch reached the evaluated stream adapter".into(),
-                        ),
-                        location: snafu::Location::default(),
-                    },
+                    common_query::error::Error::from(DataFusionError::Internal(
+                        "row batch reached the evaluated stream adapter".into(),
+                    )),
                 ))))
             }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(
-                common_error::ext::BoxedError::new(common_query::error::Error::GeneralDataFusion {
-                    error,
-                    location: snafu::Location::default(),
-                }),
+                common_error::ext::BoxedError::new(common_query::error::Error::from(error)),
             ))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
