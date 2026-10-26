@@ -278,8 +278,9 @@ impl NodeLease {
         self.max_lease.fetch_max(lease, Ordering::Relaxed);
     }
 
-    /// Returns the longest lease length seen, so a deadline minus it is never later than the
-    /// heartbeat the lease was granted for. Returns `None` once a lease was too long to store.
+    /// Returns the longest lease length seen. Once a lease has been seen, a deadline minus it is
+    /// never later than the heartbeat the lease was granted for (the datanode always renews before
+    /// it applies grants). Returns `None` once a lease was too long to store.
     pub(crate) fn max_lease(&self) -> Option<Duration> {
         match self.max_lease.load(Ordering::Relaxed) {
             u64::MAX => None,
@@ -513,11 +514,11 @@ impl MitoRegion {
         self.manifest_ctx.set_role(next_role, self.region_id);
     }
 
-    /// Raises the grant gate to now, then sets `role`.
-    pub(crate) fn demote(&self, role: RegionRole) {
+    /// Raises the grant gate to now, then marks the region downgrading.
+    pub(crate) fn demote(&self) {
         let mut gate = self.grant_gate.lock().unwrap();
         *gate = Some(Instant::now());
-        self.set_role(role);
+        self.set_role(RegionRole::DowngradingLeader);
     }
 
     /// Applies a Leader grant that lasts until `deadline`, unless the region was demoted after

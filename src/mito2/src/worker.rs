@@ -52,7 +52,7 @@ use rand::{Rng, rng};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
-    RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -1518,7 +1518,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Downgrading, and earlier ones have finished. This only
                 // changes a writable or staging leader, but always fences
                 // Leader grants for heartbeats sent before.
-                region.demote(RegionRole::DowngradingLeader);
+                region.demote();
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;

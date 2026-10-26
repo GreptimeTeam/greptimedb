@@ -303,13 +303,14 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
         .await
         .unwrap();
     let demoted = engine.get_region(REGION_ID).unwrap().state();
-    // A later reply shortens the lease.
+    // A later reply shortens the lease. Send times still come from the longest lease seen.
     engine.renew_node_lease(Instant::now() + LEASE, LEASE);
 
     // The grant for a heartbeat sent before the downgrade arrives late.
     grant(&engine, RegionRole::Leader, sent_before + 2 * LEASE);
     assert_eq!(demoted, engine.get_region(REGION_ID).unwrap().state());
 
+    // The grant for a heartbeat sent now, under the longest lease seen.
     grant(&engine, RegionRole::Leader, Instant::now() + 2 * LEASE);
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
@@ -378,6 +379,9 @@ async fn test_grant_gate_survives_reopen() {
 
     grant(&engine, RegionRole::Leader, sent_before + LEASE);
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
+
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
 #[tokio::test]
