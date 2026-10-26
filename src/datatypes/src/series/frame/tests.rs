@@ -249,6 +249,28 @@ fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
     }
 }
 
+fn assert_evaluated_sample_equal(actual: SampleRef<'_>, expected: SampleRef<'_>, index: usize) {
+    match (actual, expected) {
+        (SampleRef::Missing, SampleRef::Missing) => {}
+        (SampleRef::Float(actual), SampleRef::Float(expected)) => {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+        }
+        (SampleRef::Histogram(actual), SampleRef::Histogram(expected)) => {
+            assert_eq!(
+                actual.sum.to_bits(),
+                expected.sum.to_bits(),
+                "position {index}"
+            );
+            assert_eq!(
+                actual.count.to_bits(),
+                expected.count.to_bits(),
+                "position {index}"
+            );
+        }
+        _ => panic!("sample kind changed at position {index}"),
+    }
+}
+
 /// Packs one owned chunk through the public cursor/builder pair, mirroring the explicit
 /// single-chunk wrapper: every batch the walk produces, then the final flush.
 fn pack_chunk_with_budget(
@@ -1341,14 +1363,18 @@ fn evaluated_incremental_measure_matches_full_measure_at_exact_byte_budget() {
     let metric = metric(Some("cpu"), &[("host", "a")]);
     let floats = Float64Array::from(
         (0..9)
-            .map(|index| (index != 3).then_some(index as f64))
+            .map(|index| (index != 3 && index != 6).then_some(index as f64))
             .collect::<Vec<_>>(),
     );
     let table = histogram_batch();
-    let indices = UInt32Array::from(vec![Some(0); 9]);
+    let indices = UInt32Array::from(
+        (0..9)
+            .map(|index| (index != 3 && index != 6).then_some(0))
+            .collect::<Vec<_>>(),
+    );
     let mixed_indices = UInt32Array::from(
         (0..9)
-            .map(|index| (index == 3).then_some(0))
+            .map(|index| (index == 3 || index == 6).then_some(0))
             .collect::<Vec<_>>(),
     );
     let cases = vec![
@@ -1407,7 +1433,27 @@ fn evaluated_incremental_measure_matches_full_measure_at_exact_byte_budget() {
                     .sum::<usize>(),
                 9
             );
+            assert_eq!(decoded.iter().filter(|(_, is_last)| *is_last).count(), 1);
             assert!(decoded.last().unwrap().1);
+            assert_eq!(
+                decoded
+                    .iter()
+                    .flat_map(|(series, _)| series.time.runs())
+                    .map(|run| (run.position, run.len))
+                    .collect::<Vec<_>>(),
+                [(0, 8), (10, 1)]
+            );
+            let decoded_samples = decoded
+                .iter()
+                .flat_map(|(series, _)| {
+                    (0..series.time.len())
+                        .map(move |index| series.fields.get(0).unwrap().sample(index))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(decoded_samples.len(), 9);
+            for (index, actual) in decoded_samples.into_iter().enumerate() {
+                assert_evaluated_sample_equal(actual, samples.sample(index), index);
+            }
         }
     }
 }
@@ -1427,41 +1473,86 @@ fn evaluated_many_sparse_runs_form_one_row_without_losing_positions() {
             .unwrap(),
         )),
     };
-    let values = (0..128).map(|value| Some(value as f64)).collect::<Vec<_>>();
-    let series = evaluated_series(
-        &schema,
-        spans.clone(),
-        SeriesFields::one(Samples::from_float(Float64Array::from(values.clone()))),
-    );
-    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
-    let mut builder =
-        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1 << 20).unwrap();
-    while cursor.append_to(&mut builder).unwrap().is_some() {}
-    let batch = builder.flush().unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 1);
-    let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
-        .unwrap()
-        .decode_evaluated(&batch)
-        .unwrap();
-    assert_eq!(decoded.len(), 1);
-    assert_eq!(
-        decoded[0]
-            .0
-            .time
-            .runs()
-            .map(|run| (run.position, run.len))
-            .collect::<Vec<_>>(),
-        spans
-            .iter()
-            .map(|span| (span.start(), span.len()))
-            .collect::<Vec<_>>()
-    );
-    let DenseSamplesRef::Float(decoded_values) =
-        decoded[0].0.fields.get(0).unwrap().dense().unwrap()
-    else {
-        panic!("expected float values")
+    let missing = |index| matches!(index, 7 | 8 | 63 | 64 | 127);
+    let floats = (0..128)
+        .map(|index| match index {
+            index if missing(index) => None,
+            0 => Some(f64::from_bits(0x7ff8_0000_dead_beef)),
+            1 => Some(-0.0),
+            _ => Some(index as f64),
+        })
+        .collect::<Vec<_>>();
+    let histograms = (0..128)
+        .map(|index| (!missing(index)).then_some(0))
+        .collect::<Vec<_>>();
+    let mixed_floats = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 0).then(|| floats[index].unwrap()))
+        .collect::<Vec<_>>();
+    let mixed_histograms = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 1).then_some(0))
+        .collect::<Vec<_>>();
+    let prefix_float = |values: Vec<Option<f64>>| {
+        Float64Array::from(
+            std::iter::once(Some(999.0))
+                .chain(values)
+                .collect::<Vec<_>>(),
+        )
+        .slice(1, 128)
     };
-    assert_eq!(decoded_values, &Float64Array::from(values));
+    let prefix_indices = |values: Vec<Option<u32>>| {
+        UInt32Array::from(std::iter::once(Some(999)).chain(values).collect::<Vec<_>>())
+            .slice(1, 128)
+    };
+    let table = histogram_batch();
+    let cases = vec![
+        Samples::from_float(prefix_float(floats)),
+        Samples::try_from_histogram(prefix_indices(histograms), table.clone()).unwrap(),
+        Samples::try_from_mixed(
+            prefix_float(mixed_floats),
+            crate::series::samples::HistogramSamples::try_new(
+                prefix_indices(mixed_histograms),
+                table,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    ];
+    for samples in cases {
+        let series = evaluated_series(&schema, spans.clone(), SeriesFields::one(samples.clone()));
+        let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+        let mut builder =
+            SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1 << 20)
+                .unwrap();
+        while cursor.append_to(&mut builder).unwrap().is_some() {}
+        let batch = builder.flush().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+            .unwrap()
+            .decode_evaluated(&batch)
+            .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].1);
+        assert_eq!(
+            decoded[0]
+                .0
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            spans
+                .iter()
+                .map(|span| (span.start(), span.len()))
+                .collect::<Vec<_>>()
+        );
+        let decoded_samples = decoded[0].0.fields.get(0).unwrap();
+        for index in 0..128 {
+            assert_evaluated_sample_equal(
+                decoded_samples.sample(index),
+                samples.sample(index),
+                index,
+            );
+        }
+    }
 }
 
 #[test]

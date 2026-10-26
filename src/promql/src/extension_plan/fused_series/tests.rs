@@ -2508,24 +2508,15 @@ fn direct_frame_stream(
     schema: Arc<SeriesSchema>,
     input: Option<SendableRawSeriesStream>,
 ) -> FusedSeriesStream {
-    direct_frame_stream_with_limits(
-        schema,
-        input,
+    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
+    let builder = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
         SeriesFrameBuilder::DEFAULT_MAX_ROWS,
         SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
-}
-
-fn direct_frame_stream_with_limits(
-    schema: Arc<SeriesSchema>,
-    input: Option<SendableRawSeriesStream>,
-    max_rows: usize,
-    max_bytes: usize,
-) -> FusedSeriesStream {
-    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
-    let builder =
-        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, max_rows, max_bytes)
-            .unwrap();
+    .unwrap();
     FusedSeriesStream {
         inputs: input.into_iter().map(|input| (0, input)).collect(),
         executor: None,
@@ -2557,7 +2548,14 @@ fn sparse_eval_chunk(rows: usize, value: f64) -> (Arc<SeriesSchema>, EvaluatedCh
         Series {
             metric: SeriesLabels::try_new(Some(Arc::from(METRIC)), Vec::new()).unwrap(),
             time: axis,
-            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![value; rows]))),
+            fields: SeriesFields::one(
+                Samples::try_from_chunks(
+                    (0..rows)
+                        .map(|_| Samples::from_float(Float64Array::from(vec![value])))
+                        .collect(),
+                )
+                .unwrap(),
+            ),
         },
         true,
     )
@@ -2572,7 +2570,7 @@ async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
     const ROWS: usize = 800;
     let value = f64::from_bits(0x4009_21fb_5444_2d18);
     let (schema, chunk) = sparse_eval_chunk(ROWS, value);
-    let mut stream = direct_frame_stream_with_limits(Arc::clone(&schema), None, usize::MAX, 1);
+    let mut stream = direct_frame_stream(Arc::clone(&schema), None);
     stream
         .convert(chunk)
         .expect("the evaluated chunk becomes a cursor");
@@ -2586,11 +2584,7 @@ async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
     );
 
     let first = stream.next().await.unwrap().unwrap();
-    assert!(first.num_rows() <= SeriesFrameBuilder::DEFAULT_MAX_ROWS);
-    assert!(
-        first.num_rows() < ROWS,
-        "the first batch cannot drain 800 rows"
-    );
+    assert_eq!(SeriesFrameBuilder::DEFAULT_MAX_ROWS, first.num_rows());
     assert!(
         stream.frame_cursor.is_some(),
         "the first batch cannot drain 800 rows"
@@ -2661,8 +2655,7 @@ async fn dropping_a_partly_emitted_frame_releases_its_input() {
     let dropped = Arc::new(AtomicBool::new(false));
     let raw_input = Box::pin(StagedStream::new(frame_schema(), vec![raw_frame]).dropped(&dropped));
     let input = unpack_raw_series(raw_input, Some(Arc::clone(&raw))).unwrap();
-    let mut stream =
-        direct_frame_stream_with_limits(Arc::clone(&schema), Some(input), usize::MAX, 1);
+    let mut stream = direct_frame_stream(Arc::clone(&schema), Some(input));
     stream.convert(chunk).unwrap();
     assert!(stream.next().await.unwrap().unwrap().num_rows() > 0);
     assert!(stream.frame_cursor.is_some());

@@ -1160,37 +1160,27 @@ impl EvaluatedWalk {
             if take == 0 {
                 return invalid_series("empty sample segment");
             }
-            total = add_checked(total, take)?;
-            let mut samples = Vec::with_capacity(series.fields.len());
-            for (index, field) in series.fields.iter().enumerate() {
-                samples.push(segment(field, segments[index])?.slice(offsets[index], total)?);
-            }
+            let proposed_total = add_checked(total, take)?;
+            let sample_growth = sample_range_growth(&series.fields, segments, total, take)?;
             if let Some(row) = &mut row {
                 let RowTime::Spans(row_spans) = &mut row.time else {
                     unreachable!("evaluated row has spans")
                 };
-                row_spans.push(GridSpan::new(current.position + next_offset, take));
-                let old_bytes = row.bytes;
-                let sample_growth = sample_growth(&row.samples, &samples)?;
-                let proposed_span_count = row_spans.len();
+                let proposed_span_count = row_spans
+                    .len()
+                    .checked_add(1)
+                    .ok_or_else(|| err("raw series frame offset overflow"))?;
                 checked_offset(proposed_span_count)?;
-                checked_offset(total)?;
+                checked_offset(proposed_total)?;
                 let proposed_bytes = add_checked(
-                    add_checked(old_bytes, add_checked(SPAN_CHARGE, 2)?)?,
+                    add_checked(row.bytes, add_checked(SPAN_CHARGE, 2)?)?,
                     sample_growth,
                 )?;
-                let old_samples = std::mem::replace(&mut row.samples, samples);
-                let old_last = row.is_last;
-                row.is_last = *is_last && next_run + 1 == runs.len() && take == remaining;
                 if available_bytes.is_some_and(|available| proposed_bytes > available) {
-                    if let RowTime::Spans(row_spans) = &mut row.time {
-                        row_spans.pop();
-                    }
-                    row.samples = old_samples;
-                    row.is_last = old_last;
-                    row.bytes = old_bytes;
                     break;
                 }
+                row_spans.push(GridSpan::new(current.position + next_offset, take));
+                row.is_last = *is_last && next_run + 1 == runs.len() && take == remaining;
                 row.bytes = proposed_bytes;
             } else {
                 let mut candidate = FrameRow {
@@ -1198,12 +1188,13 @@ impl EvaluatedWalk {
                     metric: Some(series.metric.clone()),
                     is_last: *is_last && next_run + 1 == runs.len() && take == remaining,
                     time: RowTime::Spans(vec![GridSpan::new(current.position + next_offset, take)]),
-                    samples,
+                    samples: Vec::new(),
                     bytes: 0,
                 };
-                candidate.bytes = measure_row(&candidate)?;
+                candidate.bytes = add_checked(measure_row(&candidate)?, sample_growth)?;
                 row = Some(candidate);
             }
+            total = proposed_total;
             next_offset += take;
             if next_offset == current.len {
                 next_run += 1;
@@ -1226,7 +1217,12 @@ impl EvaluatedWalk {
             }
         }
         if let Some(row) = &mut row {
-            row.bytes = measure_row(row)?;
+            row.samples = series
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| segment(field, segments[index])?.slice(offsets[index], total))
+                .collect::<Result<Vec<_>>>()?;
         }
         *run = next_run;
         *offset = next_offset;
@@ -1319,20 +1315,73 @@ impl RowTime {
     }
 }
 
-/// Incrementally measures one field's added charge while an evaluated row grows.
-fn sample_growth(old: &[Samples], proposed: &[Samples]) -> Result<usize> {
-    old.iter()
-        .zip(proposed)
-        .try_fold(0usize, |growth, (old, proposed)| {
-            let old_charge = sample_charge(old)?;
-            let proposed_charge = sample_charge(proposed)?;
-            let added = proposed_charge
-                .checked_sub(old_charge)
-                .ok_or_else(|| err("evaluated sample measure decreased"))?;
-            growth
-                .checked_add(added)
-                .ok_or_else(|| err("raw series frame offset overflow"))
+/// Measures the added dense positions without slicing Arrow arrays or rescanning histogram tables.
+fn sample_range_growth(
+    fields: &SeriesFields,
+    segments: &[usize],
+    previous: usize,
+    added: usize,
+) -> Result<usize> {
+    let end = previous
+        .checked_add(added)
+        .ok_or_else(|| err("raw series frame offset overflow"))?;
+    checked_offset(end)?;
+    let bitmap_growth = bitmap_bytes(end).saturating_sub(bitmap_bytes(previous));
+    fields
+        .iter()
+        .enumerate()
+        .try_fold(0usize, |bytes, (index, field)| {
+            let part = segment(field, segments[index])?;
+            let (value_width, bitmap_count, table_charge) = match part
+                .dense()
+                .ok_or_else(|| err("sample segment is not dense"))?
+            {
+                DenseSamplesRef::Float(_) => (8, 1, None),
+                DenseSamplesRef::Histogram(values) => (4, 1, Some(values)),
+                DenseSamplesRef::Mixed(values) => (12, 2, Some(values.histograms())),
+            };
+            let mut charge = mul_checked(added, value_width)?;
+            charge = add_checked(charge, mul_checked(bitmap_growth, bitmap_count)?)?;
+            if previous == 0 {
+                charge = add_checked(charge, FIELD_CHARGE)?;
+                if let Some(values) = table_charge {
+                    charge = add_checked(charge, histogram_table_charge(values)?)?;
+                }
+            }
+            add_checked(bytes, charge)
         })
+}
+
+fn histogram_table_charge(values: &HistogramSamples) -> Result<usize> {
+    let table = values.batch().as_arrow();
+    checked_offset(table.len())?;
+    let mut bytes = add_checked(
+        HISTOGRAM_TABLE_CHARGE,
+        mul_checked(table.len(), HISTOGRAM_ROW_CHARGE)?,
+    )?;
+    for (position, width) in HISTOGRAM_LIST_WIDTHS.iter().enumerate() {
+        let list = table
+            .column(7 + position)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .ok_or_else(|| err("histogram table schema mismatch"))?;
+        // Charge the visible offset range, not the backing child array: the table may be sliced.
+        let offsets = list.value_offsets();
+        let first = offsets
+            .first()
+            .copied()
+            .ok_or_else(|| err("histogram table schema mismatch"))?;
+        let last = offsets
+            .get(list.len())
+            .copied()
+            .ok_or_else(|| err("histogram table schema mismatch"))?;
+        let span = last
+            .checked_sub(first)
+            .and_then(|span| usize::try_from(span).ok())
+            .ok_or_else(|| err("histogram table offsets are invalid"))?;
+        bytes = add_checked(bytes, mul_checked(span, *width)?)?;
+    }
+    Ok(bytes)
 }
 
 fn sample_charges(samples: &[Samples]) -> Result<usize> {
@@ -1402,40 +1451,10 @@ fn float_charge(len: usize) -> Result<usize> {
 fn histogram_charge(values: &HistogramSamples) -> Result<usize> {
     let indices = values.indices();
     checked_offset(indices.len())?;
-    let mut bytes = add_checked(mul_checked(indices.len(), 4)?, bitmap_bytes(indices.len()))?;
-    let table = values.batch().as_arrow();
-    checked_offset(table.len())?;
-    bytes = add_checked(
-        bytes,
-        add_checked(
-            HISTOGRAM_TABLE_CHARGE,
-            mul_checked(table.len(), HISTOGRAM_ROW_CHARGE)?,
-        )?,
-    )?;
-    for (position, width) in HISTOGRAM_LIST_WIDTHS.iter().enumerate() {
-        let list = table
-            .column(7 + position)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .ok_or_else(|| err("histogram table schema mismatch"))?;
-        // `value_offsets` is already a view of the visible slice; the retained child array may be
-        // wider than the offsets span, so charge the visible extent rather than its length.
-        let offsets = list.value_offsets();
-        let first = offsets
-            .first()
-            .copied()
-            .ok_or_else(|| err("histogram table schema mismatch"))?;
-        let last = offsets
-            .get(list.len())
-            .copied()
-            .ok_or_else(|| err("histogram table schema mismatch"))?;
-        let span = last
-            .checked_sub(first)
-            .and_then(|span| usize::try_from(span).ok())
-            .ok_or_else(|| err("histogram table offsets are invalid"))?;
-        bytes = add_checked(bytes, mul_checked(span, *width)?)?;
-    }
-    Ok(bytes)
+    add_checked(
+        add_checked(mul_checked(indices.len(), 4)?, bitmap_bytes(indices.len()))?,
+        histogram_table_charge(values)?,
+    )
 }
 
 /// Encodes buffered rows as one batch with direct N-row Arrow array construction.
