@@ -29,6 +29,7 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
+use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
@@ -44,9 +45,16 @@ pub struct PostgresServer {
 }
 
 impl PostgresServer {
-    /// Creates a new Postgres server with provided query_handler and async runtime
+    /// Creates a new Postgres server with provided query_handler and async runtime.
+    ///
+    /// `query_handler` and `copy_in_handler` are expected to be handles to
+    /// the same frontend instance (the SQL and COPY FROM STDIN facets of
+    /// one object); they are separate parameters only because they are
+    /// separate traits.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_handler: ServerSqlQueryHandlerRef,
+        copy_in_handler: CopyInHandlerRef,
         force_tls: bool,
         tls_server_config: Arc<ReloadableTlsServerConfig>,
         keep_alive_secs: u64,
@@ -57,6 +65,7 @@ impl PostgresServer {
         let make_handler = Arc::new(
             MakePostgresServerHandlerBuilder::default()
                 .query_handler(query_handler.clone())
+                .copy_in_handler(copy_in_handler)
                 .user_provider(user_provider.clone())
                 .force_tls(force_tls)
                 .build()
