@@ -88,13 +88,23 @@ fn describe(node: &NativeNode) -> String {
             NativeType::AggregateState(_) => "aggregate state".to_string(),
         },
         NativeExpr::Scalar(scalar) => scalar.value.to_string(),
-        NativeExpr::Instant { op, .. } => format!(
-            "lookback {}ms offset {} on grid {}",
-            op.lookback_ms,
-            op.offset_ms,
-            grid_name(&op.output_grid)
-        ),
+        NativeExpr::Instant { op, .. } => {
+            let mut text = format!(
+                "lookback {}ms offset {} on grid {}",
+                op.lookback_ms,
+                op.offset_ms,
+                grid_name(&op.output_grid)
+            );
+            if let Some(at) = op.at_ms {
+                text.push_str(&format!(" @ {at}ms"));
+            }
+            if op.timestamp {
+                text.push_str(" timestamp");
+            }
+            text
+        }
         NativeExpr::Window { op, .. } => window(op),
+        NativeExpr::Timestamp { .. } => "evaluation time".to_string(),
         NativeExpr::Map { op, .. } => {
             let ops: Vec<String> = op.ops.iter().map(map_op).collect();
             ops.join(", ")
@@ -335,6 +345,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Instant { .. } => "Instant",
         NativeExpr::Window { .. } => "Window",
         NativeExpr::Map { .. } => "Map",
+        NativeExpr::Timestamp { .. } => "Timestamp",
         NativeExpr::Aggregate { .. } => "Aggregate",
         NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
@@ -359,6 +370,7 @@ fn display_node(
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. } => display_node(f, input, depth + 1, "input")?,
         NativeExpr::Binary { left, right, .. } => {

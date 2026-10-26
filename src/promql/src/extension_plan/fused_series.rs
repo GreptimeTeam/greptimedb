@@ -533,6 +533,7 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => collect(input, inputs),
             NativeExpr::Binary { left, right, .. } => {

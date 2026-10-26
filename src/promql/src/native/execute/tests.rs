@@ -253,6 +253,8 @@ fn instant(
             op: BoundInstant {
                 lookback_ms,
                 offset_ms,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&output_grid),
             },
         },
@@ -955,6 +957,7 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. } => walk(input, out),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
@@ -1096,6 +1099,41 @@ fn a_window_over_raw_input_evaluates_onto_its_own_grid() {
         vec![(0, vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)])]
     );
     assert_eq!(addressed(&out), expected);
+}
+
+/// Timestamp projection reserves its grid-sized workspace before allocating and releases it on failure.
+#[test]
+fn timestamp_projection_workspace_failure_releases_runtime() {
+    let schema = evaluated_schema(grid(0, 1, 10_000));
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index: 0,
+            output: NativeType::Samples(Arc::clone(&schema)),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::Samples(Arc::clone(&schema)),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input),
+        },
+        output: NativeType::Samples(schema),
+    })
+    .unwrap();
+    let pool = bounded_pool(4096);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk(&evaluated_schema(grid(0, 1, 10_000)), 0, vec![1.0], true),
+        )
+        .unwrap();
+    assert!(matches!(
+        execution.next_chunk(),
+        Err(DataFusionError::ResourcesExhausted(_))
+    ));
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
 }
 
 /// `Window -> Map -> Window` keeps the inner grid inside and the outer grid outside.

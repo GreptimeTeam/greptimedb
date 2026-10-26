@@ -235,6 +235,8 @@ fn binary_tree_over_sources(
             op: BoundInstant {
                 lookback_ms: 0,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -253,6 +255,8 @@ fn binary_tree_over_sources(
             op: BoundInstant {
                 lookback_ms: 0,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -303,6 +307,8 @@ fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
             op: BoundInstant {
                 lookback_ms: 0,
                 offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
                 output_grid: Arc::clone(grid),
             },
         },
@@ -337,6 +343,7 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => {
                 **input = rewrite(input, orderings, seen);

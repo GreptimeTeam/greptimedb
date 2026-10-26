@@ -2137,6 +2137,336 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     assert_eq!(native_rows, legacy_rows);
 }
 
+/// Native instant selectors preserve anchored evaluation and sample timestamps in standalone.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_instant_at_uses_sample_time_and_anchor() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_instant_at_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_at (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_at (host, ts, val) VALUES ('a', -1500, 1), ('a', 500, 2), ('a', 1500, 3), ('a', 3500, 4), ('b', -1500, 9), ('missing', 500, 8), ('missing', 1500, NULL), ('stale', 500, 7)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // Add the stale marker after a finite older sample so it must suppress that sample.
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".into(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".into(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".into(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    instance
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: "native_at".into(),
+                    rows: Some(Rows {
+                        schema,
+                        rows: vec![Row {
+                            values: vec![
+                                ValueData::StringValue("stale".into()).into(),
+                                ValueData::TimestampMillisecondValue(1_500).into(),
+                                ValueData::F64Value(f64::from_bits(PROMETHEUS_STALE_NAN_BITS))
+                                    .into(),
+                            ],
+                        }],
+                    }),
+                }],
+            },
+            QueryContext::arc(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+    let expected_rows = |start_ms: i64, host: &str, values: &[f64]| {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, value)| (start_ms + i as i64 * 1_000, host.to_string(), *value))
+            .collect::<Vec<_>>()
+    };
+    // Grid times and values are independently explicit: fixed anchors, offsets, and timestamp
+    // functions have expected source-sample versus evaluation-grid semantics.
+    let cases = vec![
+        (
+            "native_at{host=\"a\"} @ 1",
+            0,
+            4_000,
+            5_000,
+            "a",
+            vec![2.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} @ start()",
+            0,
+            4_000,
+            2_000,
+            "a",
+            vec![1.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} @ end()",
+            0,
+            4_000,
+            5_000,
+            "a",
+            vec![4.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} @ 2 offset 1s",
+            0,
+            4_000,
+            2_000,
+            "a",
+            vec![2.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} @ 2 offset -1s",
+            0,
+            4_000,
+            5_000,
+            "a",
+            vec![3.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} @ -1.5",
+            0,
+            4_000,
+            2_000,
+            "a",
+            vec![1.; 5],
+        ),
+        (
+            "native_at{host=\"a\"} offset 1s",
+            0,
+            4_000,
+            2_000,
+            "a",
+            vec![1., 1., 2., 3., 3.],
+        ),
+        (
+            "native_at{host=\"a\"} offset -1s",
+            0,
+            4_000,
+            2_000,
+            "a",
+            vec![2., 3., 3., 4., 4.],
+        ),
+        // At 499ms, -1500ms is 1999ms old and eligible; at 500ms, the strict lower
+        // boundary excludes it. Zero lookback admits equality at the sample timestamp.
+        ("native_at{host=\"b\"}", 499, 499, 2_000, "b", vec![9.]),
+        ("native_at{host=\"b\"}", 500, 500, 2_000, "b", vec![]),
+        ("native_at{host=\"b\"} @ -1.5", 0, 0, 0, "b", vec![9.]),
+        (
+            "native_at{host=\"missing\"}",
+            2_000,
+            2_000,
+            5_000,
+            "missing",
+            vec![],
+        ),
+        (
+            "timestamp(native_at{host=\"missing\"})",
+            2_000,
+            2_000,
+            5_000,
+            "missing",
+            vec![],
+        ),
+        (
+            "timestamp(abs(native_at{host=\"missing\"}))",
+            2_000,
+            2_000,
+            5_000,
+            "missing",
+            vec![],
+        ),
+        (
+            "native_at{host=\"stale\"}",
+            2_000,
+            2_000,
+            5_000,
+            "stale",
+            vec![],
+        ),
+        (
+            "timestamp(native_at{host=\"stale\"})",
+            2_000,
+            2_000,
+            5_000,
+            "stale",
+            vec![],
+        ),
+        (
+            "timestamp(abs(native_at{host=\"stale\"}))",
+            2_000,
+            2_000,
+            5_000,
+            "stale",
+            vec![],
+        ),
+        // timestamp(raw @ t) reports original sample time (.5s); timestamp(abs()) reports
+        // the evaluation-grid time at each of the five evaluation positions.
+        (
+            "timestamp(native_at{host=\"a\"} @ 1)",
+            0,
+            4_000,
+            5_000,
+            "a",
+            vec![0.5; 5],
+        ),
+        (
+            "timestamp(abs(native_at{host=\"a\"} @ 1))",
+            0,
+            4_000,
+            5_000,
+            "a",
+            vec![0., 1., 2., 3., 4.],
+        ),
+        (
+            "timestamp(native_at{host=\"a\"} @ 2 offset 1s)",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![0.5],
+        ),
+        (
+            "timestamp(native_at{host=\"a\"} @ 2 offset -1s)",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![1.5],
+        ),
+    ];
+
+    for (expr, start_ms, end_ms, lookback_ms, host, values) in cases {
+        observer.clear();
+        let expected = expected_rows(start_ms, host, &values);
+        let native = promql_query(
+            instance.clone(),
+            expr,
+            None,
+            native_query_context(true, 4),
+            UNIX_EPOCH + Duration::from_millis(start_ms as u64),
+            UNIX_EPOCH + Duration::from_millis(end_ms as u64),
+            Duration::from_secs(1),
+            Duration::from_millis(lookback_ms as u64),
+        )
+        .await
+        .unwrap();
+        let native_rows = native_result_rows(native).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{expr}");
+        let output_count = plan
+            .metrics()
+            .unwrap()
+            .iter()
+            .filter_map(|metric| match metric.value() {
+                datafusion::physical_plan::metrics::MetricValue::Count { name, count }
+                    if name.as_ref() == "native.root.output_values" =>
+                {
+                    Some(count.value())
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        if expected.is_empty() {
+            assert_eq!(output_count, 0, "empty native result: {expr}");
+        } else {
+            assert!(
+                output_count > 0,
+                "native fused output was not executed: {expr}"
+            );
+        }
+        assert_eq!(native_rows, expected, "native: {expr}");
+
+        let legacy = promql_query(
+            instance.clone(),
+            expr,
+            None,
+            native_query_context(false, 4),
+            UNIX_EPOCH + Duration::from_millis(start_ms as u64),
+            UNIX_EPOCH + Duration::from_millis(end_ms as u64),
+            Duration::from_secs(1),
+            Duration::from_millis(lookback_ms as u64),
+        )
+        .await
+        .unwrap();
+        if expr == "native_at{host=\"missing\"}" {
+            // Legacy preserves the selected NULL sample row; native selectors drop all-missing rows.
+            let batches = match legacy.data {
+                OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+                OutputData::RecordBatches(batches) => batches,
+                _ => unreachable!("TQL EVAL returns record batches"),
+            };
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                1,
+                "legacy missing selector must retain exactly the selected NULL row"
+            );
+            for batch in batches.iter().filter(|batch| batch.num_rows() > 0) {
+                assert_eq!(batch.num_rows(), 1);
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                let hosts = cast(
+                    batch.column_by_name("host").unwrap().as_ref(),
+                    &DataType::Utf8,
+                )
+                .unwrap();
+                let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+                let value_columns = batch
+                    .columns()
+                    .iter()
+                    .filter(|column| column.data_type() == &DataType::Float64)
+                    .collect::<Vec<_>>();
+                assert_eq!(value_columns.len(), 1, "expected one Float64 value column");
+                let values = value_columns[0]
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(timestamps.null_count(), 0);
+                assert_eq!(hosts.null_count(), 0);
+                assert_eq!(values.null_count(), 1);
+                assert_eq!(timestamps.value(0), 2_000);
+                assert_eq!(hosts.value(0), "missing");
+            }
+        } else {
+            assert_eq!(
+                native_rows,
+                native_result_rows(legacy).await,
+                "legacy: {expr}"
+            );
+        }
+    }
+}
+
 /// Distinct selector scans in a binary expression retain independent bindings and bounds (#9896).
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_binary_join_uses_two_independent_scans() {

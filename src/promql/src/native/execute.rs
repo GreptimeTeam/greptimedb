@@ -41,7 +41,9 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
-use crate::instant_eval::select_instants;
+use crate::instant_eval::{
+    select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
+};
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
     map_compare, map_math,
@@ -863,6 +865,9 @@ impl InstantRuntime {
     /// reads two timestamps rather than the rows.
     fn selected_points(&self, closing: &RawSeriesChunk) -> usize {
         let spec = self.selection.output_grid.spec();
+        if self.selection.at_ms.is_some() {
+            return usize::try_from(spec.len).unwrap_or(usize::MAX);
+        }
         // The selection refuses these itself, before it can decide anything.
         if spec.step_ms <= 0 || self.selection.lookback_ms < 0 {
             return 0;
@@ -968,6 +973,59 @@ impl InstantRuntime {
         let spec = grid.spec();
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
+        if let Some(at_ms) = self.selection.at_ms {
+            let Some(index) = select_instant_at(
+                &time,
+                &fields,
+                at_ms,
+                self.selection.lookback_ms,
+                self.selection.offset_ms,
+            )?
+            else {
+                let metric = if self.selection.timestamp {
+                    drop_metric_name(&metric)?
+                } else {
+                    metric
+                };
+                return no_row_chunk(&self.schema, metric);
+            };
+            let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
+            if self.selection.timestamp {
+                let indices = vec![index; grid_len];
+                let timestamps = grid
+                    .timestamps()
+                    .map_err(crate::grid_series::external)?
+                    .to_vec();
+                return match timestamp_of_selection(
+                    &self.schema,
+                    &metric,
+                    &time,
+                    &fields,
+                    &indices,
+                    &timestamps,
+                )? {
+                    Some(series) => EvaluatedChunk::try_new(series, true),
+                    None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
+                };
+            }
+            self.output.begin_series();
+            let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
+            let mut row = Vec::with_capacity(fields.len());
+            for cursor in &mut cursors {
+                row.push(owned(
+                    cursor
+                        .at(index as usize)
+                        .ok_or_else(|| missing_row(index as usize))?,
+                )?);
+            }
+            for position in 0..grid_len {
+                self.output.push_samples(position, &row)?;
+            }
+            return match self.output.finish(metric.clone())? {
+                Some(series) => EvaluatedChunk::try_new(series, true),
+                None => no_row_chunk(&self.schema, metric),
+            };
+        }
         let (indices, timestamps) = select_instants(
             &time,
             &fields,
@@ -976,6 +1034,19 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
+        if self.selection.timestamp {
+            return match timestamp_of_selection(
+                &self.schema,
+                &metric,
+                &time,
+                &fields,
+                &indices,
+                &timestamps,
+            )? {
+                Some(series) => EvaluatedChunk::try_new(series, true),
+                None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
+            };
+        }
         self.output.begin_series();
         // One cursor per field, so a row is read as the field holds it rather than by walking the
         // chunks of a field from its start once per row.
@@ -2038,6 +2109,11 @@ enum RuntimeOp {
         map: Option<MapRuntime>,
         state: NodeState,
     },
+    Timestamp {
+        input: Box<RuntimeNode>,
+        schema: Option<Arc<SeriesSchema>>,
+        state: NodeState,
+    },
     Binary {
         left: Box<RuntimeNode>,
         right: Box<RuntimeNode>,
@@ -2140,9 +2216,16 @@ impl RuntimeNode {
                     RuntimeOp::Instant {
                         input: Box::new(child),
                         instant: Some(InstantRuntime::try_new(&input_schema, op)?),
-                        state: NodeState::new("native.instant", Arc::clone(&metrics), pool),
+                        state: {
+                            let mut state =
+                                NodeState::new("native.instant", Arc::clone(&metrics), pool);
+                            if op.timestamp {
+                                state.emitted = Some(Emitted::default());
+                            }
+                            state
+                        },
                     },
-                    shared,
+                    shared || op.timestamp,
                 )
             }
             NativeExpr::Window { input, op } => {
@@ -2183,6 +2266,22 @@ impl RuntimeNode {
                             ops: Arc::clone(&op.ops),
                             schema,
                         }),
+                        state,
+                    },
+                    true,
+                )
+            }
+            NativeExpr::Timestamp { input } => {
+                let (child, _) = Self::build(input, pool, inputs)?;
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("timestamp does not produce samples".to_string())
+                })?;
+                let mut state = NodeState::new("native.timestamp", Arc::clone(&metrics), pool);
+                state.emitted = Some(Emitted::default());
+                (
+                    RuntimeOp::Timestamp {
+                        input: Box::new(child),
+                        schema: Some(schema),
                         state,
                     },
                     true,
@@ -2325,6 +2424,7 @@ impl RuntimeNode {
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. } => {
                 input.register_metrics(&format!("{name}.input"), set, partition)
@@ -2342,6 +2442,7 @@ impl RuntimeNode {
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }
             | RuntimeOp::Map { input, state, .. }
+            | RuntimeOp::Timestamp { input, state, .. }
             | RuntimeOp::Aggregate { input, state, .. }
             | RuntimeOp::Vector { input, state, .. } => state
                 .buffer
@@ -2457,6 +2558,28 @@ impl RuntimeNode {
                         ));
                     };
                     if let Some(output) = state.map(operation, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
+            RuntimeOp::Timestamp {
+                input,
+                schema,
+                state,
+            } => {
+                let schema = schema.as_ref().ok_or_else(|| {
+                    DataFusionError::Execution("timestamp schema was released".into())
+                })?;
+                loop {
+                    let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
+                    };
+                    let NativeChunk::Evaluated(chunk) = chunk else {
+                        return Err(DataFusionError::Execution(
+                            "timestamp consumes evaluated samples, not raw samples".into(),
+                        ));
+                    };
+                    if let Some(output) = state.timestamp(schema, chunk)? {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2582,7 +2705,9 @@ impl RuntimeNode {
             RuntimeOp::Scalar => true,
             // These report as they are handed chunks, so a child with nothing left is all it takes
             // for them to have nothing left either.
-            RuntimeOp::Instant { input, state, .. } | RuntimeOp::Map { input, state, .. } => {
+            RuntimeOp::Instant { input, state, .. }
+            | RuntimeOp::Map { input, state, .. }
+            | RuntimeOp::Timestamp { input, state, .. } => {
                 state.queued.is_empty() && input.settled(inputs)
             }
             // A window that collects its input has not answered until it has flushed it, so a merge
@@ -2658,6 +2783,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(false),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. } => input.flush_ready_merges(inputs),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
@@ -2694,6 +2820,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => false,
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. } => input.any_merge_pending(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
@@ -2715,6 +2842,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Aggregate { input, .. } => input.unclosed(),
             RuntimeOp::Binary {
@@ -2753,6 +2881,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
+            | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. } => input.finish_windows(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
@@ -2803,6 +2932,15 @@ impl RuntimeNode {
             }
             RuntimeOp::Map { input, map, state } => {
                 *map = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Timestamp {
+                input,
+                schema,
+                state,
+            } => {
+                *schema = None;
                 state.release();
                 input.release();
             }
@@ -3118,6 +3256,57 @@ impl NodeState {
         // The chunk is gone and the label sets this node has handed out are what is left.
         let emitted = self.emitted_bytes();
         self.buffer.resize(emitted)?;
+        Ok(output)
+    }
+
+    /// Projects evaluation timestamps from one evaluated chunk, preserving its closing.
+    fn timestamp(
+        &mut self,
+        schema: &Arc<SeriesSchema>,
+        chunk: EvaluatedChunk,
+    ) -> Result<Option<EvaluatedChunk>> {
+        let positions = chunk.series.time.len();
+        let closing = chunk.is_last;
+        let grid_points = schema.eval_grid.as_ref().map_or(0, |grid| {
+            usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
+        });
+        let scratch = grid_points
+            .saturating_mul(std::mem::size_of::<i64>())
+            .saturating_add(
+                positions
+                    .saturating_mul(
+                        std::mem::size_of::<usize>().saturating_add(
+                            schema
+                                .fields
+                                .len()
+                                .saturating_mul(std::mem::size_of::<f64>() + 1),
+                        ),
+                    )
+                    .saturating_mul(2),
+            );
+        self.buffer
+            .grow(evaluated_bytes(&chunk).saturating_add(scratch))?;
+        let labels = drop_metric_name(&chunk.series.metric)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let result = {
+            let _timer = metrics.timer();
+            timestamp_of_evaluated(schema, &chunk.series)
+        };
+        metrics.record_input(1, positions);
+        if closing {
+            metrics.record_completed_series(1);
+        }
+        let output = match result? {
+            Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
+            None if closing => Some(no_row_chunk(schema, labels)?),
+            None => None,
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+            self.track(output)?;
+        }
+        self.buffer.resize(self.emitted_bytes())?;
         Ok(output)
     }
 
@@ -3521,6 +3710,9 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
+            if instant.selection.timestamp {
+                self.track(output)?;
+            }
         }
         // What this node still holds is the chunks of the series it is selecting: a whole series is
         // held until it ends, so the reservation is what those chunks hold rather than a figure
@@ -3535,7 +3727,11 @@ impl NodeState {
     /// The chunk the node just consumed and the workspace of a gather it closed are not part of it:
     /// the first has left the buffer and the second has been handed to the output.
     fn settle_buffered(&mut self, instant: &InstantRuntime) -> Result<()> {
-        self.buffer.resize(instant.buffered_bytes())
+        self.buffer.resize(
+            instant
+                .buffered_bytes()
+                .saturating_add(self.emitted_bytes()),
+        )
     }
 
     /// Keeps one fragment of this node's collected input, charged for as it arrives.
