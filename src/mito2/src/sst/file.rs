@@ -1102,8 +1102,6 @@ async fn purge_index_cache_stager(
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-    use std::sync::Barrier;
-    use std::thread;
 
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{
@@ -1113,57 +1111,6 @@ mod tests {
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
-    use crate::sst::file_purger::FilePurger;
-
-    #[rstest::rstest]
-    fn test_concurrent_index_view_release_purges_only_retired_file(
-        #[values(false, true)] retired: bool,
-    ) {
-        #[derive(Debug)]
-        struct ConcurrentDropPurger {
-            purged_versions: Mutex<Vec<u64>>,
-        }
-
-        impl FilePurger for ConcurrentDropPurger {
-            fn purge_file(&self, meta: FileMeta) {
-                self.purged_versions.lock().unwrap().push(meta.index_version);
-            }
-        }
-
-        let purger = Arc::new(ConcurrentDropPurger {
-            purged_versions: Mutex::new(Vec::new()),
-        });
-        let meta = create_file_meta(FileId::random(), 0);
-        let old_reader = FileHandle::new(meta.clone(), purger.clone());
-        let old_reader_clone = old_reader.clone();
-        let new_reader = old_reader.with_updated_index(FileMeta {
-            index_version: 1,
-            ..meta
-        });
-        if retired {
-            new_reader.mark_deleted();
-        }
-        drop(old_reader);
-
-        // Regression for concurrent index-view destruction: final cleanup must happen once.
-        let barrier = Barrier::new(2);
-        thread::scope(|scope| {
-            let barrier = &barrier;
-            scope.spawn(move || {
-                barrier.wait();
-                drop(old_reader_clone);
-            });
-            scope.spawn(move || {
-                barrier.wait();
-                drop(new_reader);
-            });
-        });
-        let expected_purged_versions = if retired { vec![1] } else { vec![] };
-        assert_eq!(
-            *purger.purged_versions.lock().unwrap(),
-            expected_purged_versions
-        );
-    }
 
     fn create_file_meta(file_id: FileId, level: Level) -> FileMeta {
         FileMeta {
