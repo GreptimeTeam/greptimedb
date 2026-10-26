@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
-use store_api::storage::{ConcreteDataType, RegionId};
+use store_api::storage::{ConcreteDataType, RegionId, TableId};
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
