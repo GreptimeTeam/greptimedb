@@ -346,12 +346,13 @@ struct Split {
 
 /// Splits the innermost aggregate out of `node`.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. Only a map, an aggregate and a binary operation with
-/// a constant on one side may sit above the cut: a map is point-wise and so is the same operation over
-/// merged values, an aggregate runs over the complete merge, and a constant is broadcast over whatever
-/// the other side answers - while an instant selection, a window, a vector-wide operation or a binary
-/// operation between two vectors would read evaluated values, the whole vector or a matched pair,
-/// shapes the merge does not produce.
+/// `Ok(None)` is a subtree holding no aggregate. Only a map, an aggregate, topk/bottomk and a binary
+/// operation with a constant on one side may sit above the cut. TopK/BottomK is safe because it runs
+/// once in the suffix over the fully merged aggregate series, per evaluation timestamp, and never in
+/// the partition-local producer. A map is point-wise and an aggregate runs over the complete merge,
+/// while an instant selection, a window, other vector-wide operations or a binary operation between
+/// two vectors would read evaluated values, the whole vector or a matched pair, shapes the merge does
+/// not produce.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => Ok(None),
@@ -411,6 +412,22 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
                     }))
                 }
             }
+        }
+        NativeExpr::Vector {
+            input,
+            op: op @ crate::native::plan::BoundVectorOp::TopK { .. },
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Vector {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }

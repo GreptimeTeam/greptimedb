@@ -24,6 +24,7 @@ use datafusion::common::DFSchema;
 use datatypes::series::samples::FieldSpec;
 use datatypes::series::time::{EvalGrid, GridSpec};
 
+use crate::native::plan::BoundVectorOp;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The statement's grid, which every evaluated chunk is addressed on.
@@ -343,6 +344,86 @@ fn a_constant_operand_keeps_the_cut_below_it() {
             node.suffix
         );
     }
+}
+
+fn vector_over(input: NativeNode, op: BoundVectorOp) -> NativeNode {
+    let output = input.output.clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(input),
+            op,
+        },
+        output,
+    }
+}
+
+#[test]
+fn topk_and_bottomk_run_after_the_aggregate_cut() {
+    for top in [true, false] {
+        let aggregate = complete(AggregateKind::Sum, by(&["k0"]))(window());
+        let root = vector_over(
+            aggregate,
+            BoundVectorOp::TopK {
+                k: 10.0,
+                top,
+                group: by(&[]),
+            },
+        );
+        let tree = NativeTree::try_new(root).unwrap();
+        assert!(AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
+        let node = finalize(tree.root().clone(), output_schema(&["sum(v0)"], &["k0"])).unwrap();
+        let NativeExpr::Vector {
+            input,
+            op: BoundVectorOp::TopK {
+                top: actual_top, ..
+            },
+        } = &node.suffix.root().expr
+        else {
+            panic!("{}", node.suffix);
+        };
+        assert_eq!(top, *actual_top);
+        assert!(
+            matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0 && bound.output.samples().is_some_and(|schema| schema.fields.len() == 1 && schema.fields[0].name.as_ref() == "v0" && schema.eval_grid.as_ref().is_some_and(|actual| actual.spec() == grid().spec())))
+        );
+        assert!(!node.suffix.to_string().contains("Window"));
+    }
+}
+
+#[test]
+fn other_vector_operations_above_the_cut_are_declined() {
+    let aggregate = || complete(AggregateKind::Sum, by(&["k0"]))(window());
+    for op in [
+        BoundVectorOp::Sort(crate::select::SortOrder::Asc),
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: by(&[]),
+        },
+    ] {
+        let error = finalize(
+            vector_over(aggregate(), op),
+            output_schema(&["sum(v0)"], &["k0"]),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, DataFusionError::NotImplemented(_)),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn topk_without_aggregate_is_not_split() {
+    let tree = NativeTree::try_new(vector_over(
+        window(),
+        BoundVectorOp::TopK {
+            k: 10.0,
+            top: true,
+            group: by(&[]),
+        },
+    ))
+    .unwrap();
+    assert!(!AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
+    assert!(split(tree.root(), &raw_fields(), "ts").unwrap().is_none());
 }
 
 /// A binary operation above the cut is only the operation over merged values when its other side is a
