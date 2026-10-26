@@ -47,6 +47,14 @@ init_regions_in_background = false
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
+## The maximum concurrent region-read streams. Zero means unlimited.
+## A single query can consume multiple permits.
+max_concurrent_queries = 0
+
+## Timeout to acquire a permit when `max_concurrent_queries` is reached.
+## Only effective when the limiter is enabled.
+concurrent_query_limiter_timeout = "100ms"
+
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
 

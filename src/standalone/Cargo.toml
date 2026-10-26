@@ -33,6 +33,7 @@ file-engine.workspace = true
 flow.workspace = true
 frontend.workspace = true
 hostname.workspace = true
+humantime-serde.workspace = true
 log-store.workspace = true
 mito2.workspace = true
 pipeline.workspace = true
