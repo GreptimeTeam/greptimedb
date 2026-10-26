@@ -44,7 +44,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::{ensure_frame_matches_label_source, unpack_raw_series};
+use common_query::series_frame::{
+    ensure_frame_matches_label_source, pack_evaluated_series, unpack_raw_series,
+};
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
@@ -64,6 +66,7 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{FrameLabelMode, SeriesFrameBuilder, SeriesFrameCursor};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
@@ -164,6 +167,48 @@ impl PartialOrd for FusedSeriesBinding {
     }
 }
 
+/// The output representation fixed when a fused plan is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FusedOutputFormat {
+    /// The existing tabular query result.
+    PlainRows,
+    /// A self-describing evaluated SeriesFrame.
+    SeriesFrame,
+}
+
+impl FusedOutputFormat {
+    const fn as_str(self) -> Option<&'static str> {
+        match self {
+            Self::PlainRows => None,
+            Self::SeriesFrame => Some("series_frame"),
+        }
+    }
+}
+
+fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
+    match &tree.root().output {
+        NativeType::Samples(schema) if schema.eval_grid.is_some() => Ok(Arc::clone(schema)),
+        NativeType::Samples(_) => Err(DataFusionError::Plan(
+            "FusedSeries frame output requires evaluated samples with a grid".into(),
+        )),
+        NativeType::AggregateState(_) => Err(DataFusionError::Plan(
+            "FusedSeries frame output does not support an aggregate-state root".into(),
+        )),
+        NativeType::Scalar(_) => Err(DataFusionError::Plan(
+            "FusedSeries frame output does not support a scalar root".into(),
+        )),
+    }
+}
+
+fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
+    let stream =
+        pack_evaluated_series(Box::pin(futures::stream::empty()), Arc::new(schema.clone()))
+            .map_err(|error| {
+                DataFusionError::Plan(format!("FusedSeries cannot declare frame schema: {error}"))
+            })?;
+    Ok(stream.schema())
+}
+
 /// The logical plan of one node that runs a compiled native tree.
 ///
 /// The node adds nothing to the tree: it records the query the tree was compiled from, so
@@ -186,6 +231,8 @@ pub struct FusedSeries {
     /// This row-state bridge is temporary: native final aggregation will consume series frames
     /// directly, removing state-row encoding and reconstruction.
     partial_fold: Option<BoundAggregate>,
+    /// Fixed output representation; partial state export always remains PlainRows.
+    format: FusedOutputFormat,
 }
 
 impl FusedSeries {
@@ -202,7 +249,38 @@ impl FusedSeries {
         children: Vec<LogicalPlan>,
         output_schema: DFSchemaRef,
     ) -> DataFusionResult<Self> {
+        Self::try_new_with_format(
+            promql,
+            tree,
+            binding,
+            children,
+            output_schema,
+            FusedOutputFormat::PlainRows,
+        )
+    }
+
+    /// Creates a node with an explicitly selected output format.
+    pub fn try_new_with_format(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+        output_schema: DFSchemaRef,
+        format: FusedOutputFormat,
+    ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
+        if format == FusedOutputFormat::SeriesFrame && children.len() > 1 {
+            return Err(DataFusionError::Plan(
+                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
+            ));
+        }
+        let output_schema = if format == FusedOutputFormat::SeriesFrame {
+            Arc::new(datafusion::common::DFSchema::try_from(
+                series_frame_output_schema(evaluated_output(&tree)?.as_ref())?,
+            )?)
+        } else {
+            output_schema
+        };
         Ok(Self {
             promql,
             tree,
@@ -210,6 +288,7 @@ impl FusedSeries {
             children,
             output_schema,
             partial_fold: None,
+            format,
         })
     }
 
@@ -243,6 +322,7 @@ impl FusedSeries {
             children,
             output_schema,
             partial_fold: Some(op),
+            format: FusedOutputFormat::PlainRows,
         })
     }
 
@@ -296,6 +376,7 @@ impl FusedSeries {
             self.binding.time_index.clone(),
             self.binding.tags.clone(),
             self.partial_fold.clone(),
+            self.format,
         )?))
     }
 }
@@ -327,6 +408,9 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 self.promql,
                 render_partial_fold(op)
             ),
+            None if self.format.as_str().is_some() => {
+                write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
+            }
             None => write!(f, "FusedSeries: {}", self.promql),
         }
     }
@@ -344,6 +428,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
             children: inputs,
             output_schema: Arc::clone(&self.output_schema),
             partial_fold: self.partial_fold.clone(),
+            format: self.format,
         })
     }
 }
@@ -361,6 +446,7 @@ impl PartialEq for FusedSeries {
             && self.children == other.children
             && self.output_schema == other.output_schema
             && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
+            && self.format == other.format
     }
 }
 
@@ -373,6 +459,7 @@ impl Hash for FusedSeries {
         self.children.hash(state);
         self.output_schema.hash(state);
         partial_key(self.partial_fold.as_ref()).hash(state);
+        self.format.hash(state);
     }
 }
 
@@ -399,6 +486,10 @@ impl PartialOrd for FusedSeries {
         {
             Some(Ordering::Equal) => {}
             ord => return ord,
+        }
+        match self.format.cmp(&other.format) {
+            Ordering::Equal => {}
+            ord => return Some(ord),
         }
         match tree_input_fields(&self.tree).cmp(&tree_input_fields(&other.tree)) {
             Ordering::Equal => {}
@@ -783,6 +874,7 @@ pub struct FusedSeriesExec {
     metric: ExecutionPlanMetricsSet,
     /// Aggregate state exported by each partition, when this is the partial mode.
     partial_fold: Option<BoundAggregate>,
+    format: FusedOutputFormat,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -807,9 +899,19 @@ impl FusedSeriesExec {
         time_column: String,
         tags: Vec<String>,
     ) -> DataFusionResult<Self> {
-        Self::build(promql, inputs, tree, output_schema, time_column, tags, None)
+        Self::build(
+            promql,
+            inputs,
+            tree,
+            output_schema,
+            time_column,
+            tags,
+            None,
+            FusedOutputFormat::PlainRows,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build(
         promql: Arc<str>,
         inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
@@ -818,7 +920,13 @@ impl FusedSeriesExec {
         time_column: String,
         tags: Vec<String>,
         partial_fold: Option<BoundAggregate>,
+        format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
+        if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame && inputs.len() > 1 {
+            return Err(DataFusionError::Plan(
+                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
+            ));
+        }
         let raw_schemas = validate_physical_tree(&tree)?;
         if inputs.len() != raw_schemas.len() {
             return Err(DataFusionError::Plan(format!(
@@ -853,7 +961,29 @@ impl FusedSeriesExec {
                 }
             }
         }
-        let classification = if partial_fold.is_some() {
+        // A scalar root answers one value per grid point and names no series, so it is not something
+        // a frame of evaluated samples can carry. Refusing it here names the shape the caller asked
+        // for; `evaluated_output` would reach the same verdict later with a narrower message.
+        if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame && scalar_root {
+            return Err(DataFusionError::Plan(
+                "FusedSeries frame output requires evaluated samples, but this tree has a scalar \
+                 root and no raw source"
+                    .into(),
+            ));
+        }
+        let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
+            let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+            if declared != output_schema {
+                return Err(DataFusionError::Plan(
+                    "FusedSeriesExec output schema does not match the evaluated frame layout"
+                        .into(),
+                ));
+            }
+            true
+        } else {
+            false
+        };
+        let classification = if partial_fold.is_some() || frame_schema {
             Vec::new()
         } else if scalar_root {
             let scalar_fields = scalar_root_fields(&output_schema, &output_tags, &time_column)?;
@@ -931,6 +1061,7 @@ impl FusedSeriesExec {
             metric: ExecutionPlanMetricsSet::new(),
             properties,
             partial_fold,
+            format,
         })
     }
 
@@ -953,6 +1084,8 @@ impl DisplayAs for FusedSeriesExec {
         write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
         if let Some(op) = &self.partial_fold {
             write!(f, "\npartial state: {}", render_partial_fold(op))?;
+        } else if self.format.as_str().is_some() {
+            write!(f, "\noutput: series_frame")?;
         }
         Ok(())
     }
@@ -1028,6 +1161,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.time_column.clone(),
             self.tags.to_vec(),
             self.partial_fold.clone(),
+            self.format,
         )?))
     }
 
@@ -1098,6 +1232,30 @@ impl ExecutionPlan for FusedSeriesExec {
         if streams.is_empty() {
             executor.end_of_input()?;
         }
+        // A frame is encoded from the tree's own evaluated output, and only when the node answers
+        // values rather than state: partial state is a third output the format does not reach.
+        let frame_mode =
+            self.partial_fold.is_none() && self.format == FusedOutputFormat::SeriesFrame;
+        let eval_schema = if frame_mode {
+            Some(evaluated_output(&self.tree)?)
+        } else {
+            None
+        };
+        let frame_builder = eval_schema
+            .as_ref()
+            .map(|schema| {
+                SeriesFrameBuilder::try_new(
+                    schema,
+                    FrameLabelMode::Explicit,
+                    None,
+                    SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+                    SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+                )
+                .map_err(|error| {
+                    DataFusionError::Plan(format!("cannot create evaluated frame builder: {error}"))
+                })
+            })
+            .transpose()?;
         Ok(Box::pin(FusedSeriesStream {
             inputs: streams,
             executor: Some(executor),
@@ -1106,6 +1264,8 @@ impl ExecutionPlan for FusedSeriesExec {
             tags: Arc::clone(&self.tags),
             output_schema: self.output_schema.clone(),
             partial_fold,
+            frame_builder,
+            eval_schema,
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
             done: false,
@@ -1226,6 +1386,8 @@ pub struct FusedSeriesStream {
     output_schema: SchemaRef,
     /// Per-partition aggregate state fold, if this stream exports a partial result.
     partial_fold: Option<PartialFold>,
+    frame_builder: Option<SeriesFrameBuilder>,
+    eval_schema: Option<Arc<SeriesSchema>>,
     /// Keeps exported state batches charged for as long as this stream holds them.
     _export_budget: Arc<Mutex<Option<MemoryReservation>>>,
     /// The batches the executor settled since the last poll of the input.
@@ -1300,6 +1462,7 @@ impl FusedSeriesStream {
         self.done = true;
         self.executor = None;
         self.partial_fold = None;
+        self.frame_builder = None;
         self.inputs.clear();
         // This reservation belongs only to this execution. Release it even if the consumer keeps
         // the failed stream and the plan alive.
@@ -1320,13 +1483,44 @@ impl FusedSeriesStream {
             return Ok(());
         }
         for chunk in &chunks {
-            let batch = series_to_record_batch(
-                &self.classification,
-                &self.tags,
-                &self.output_schema,
-                chunk,
-            )?;
-            self.ready.push_back(batch);
+            if let (Some(schema), Some(builder)) =
+                (self.eval_schema.as_ref(), self.frame_builder.as_mut())
+            {
+                let mut cursor = SeriesFrameCursor::try_new_evaluated(
+                    schema,
+                    chunk.series.clone(),
+                    chunk.is_last,
+                )
+                .map_err(|error| {
+                    DataFusionError::Execution(format!("cannot frame evaluated chunk: {error}"))
+                })?;
+                while let Some(batch) = cursor.append_to(builder).map_err(|error| {
+                    DataFusionError::Execution(format!("cannot append evaluated frame: {error}"))
+                })? {
+                    self.ready
+                        .push_back(batch.with_schema(self.output_schema.clone())?);
+                }
+            } else {
+                let batch = series_to_record_batch(
+                    &self.classification,
+                    &self.tags,
+                    &self.output_schema,
+                    chunk,
+                )?;
+                self.ready.push_back(batch);
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_frames(&mut self) -> DataFusionResult<()> {
+        if let Some(builder) = self.frame_builder.as_mut()
+            && let Some(batch) = builder.flush().map_err(|error| {
+                DataFusionError::Execution(format!("cannot flush evaluated frame: {error}"))
+            })?
+        {
+            self.ready
+                .push_back(batch.with_schema(self.output_schema.clone())?);
         }
         Ok(())
     }
@@ -1372,7 +1566,7 @@ impl Stream for FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
-                        if let Err(error) = this.finish_fold() {
+                        if let Err(error) = this.finish_fold().and_then(|()| this.flush_frames()) {
                             this.fail();
                             return Poll::Ready(Some(Err(error)));
                         }
@@ -1388,7 +1582,16 @@ impl Stream for FusedSeriesStream {
             };
             let (source, polled) = (*source, input.as_mut().poll_next(cx));
             match polled {
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if let Err(error) = this.flush_frames() {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    if let Some(batch) = this.ready.pop_front() {
+                        return Poll::Ready(Some(Ok(batch)));
+                    }
+                    return Poll::Pending;
+                }
                 Poll::Ready(None) => {
                     this.inputs.pop_front();
                     if this.inputs.is_empty()
