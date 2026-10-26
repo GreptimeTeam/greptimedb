@@ -2668,6 +2668,98 @@ async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
     assert!(find_fused_series(&plan).is_none(), "{plan}");
 }
 
+/// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
+/// `tag_0` and `field_0`: the second is the name of `some_metric`'s value field.
+async fn native_colliding_tag_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let tables = [
+        ("some_metric", vec!["tag_0"], "timestamp", "field_0"),
+        ("other_metric", vec!["tag_0", "field_0"], "ts", "value"),
+    ];
+    for (table_id, (name, tags, time_index, field)) in (1024..).zip(tables) {
+        let mut columns = tags
+            .iter()
+            .map(|tag| {
+                ColumnSchema::new(tag.to_string(), ConcreteDataType::string_datatype(), false)
+            })
+            .collect::<Vec<_>>();
+        columns.push(
+            ColumnSchema::new(
+                time_index.to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            field.to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(Arc::new(Schema::new(columns)))
+            .engine(NATIVE_ENGINE.to_string())
+            .primary_key_indices((0..tags.len()).collect())
+            .value_indices(vec![tags.len() + 1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name(name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id,
+                    table: EmptyTable::from_table_info(&table_info),
+                })
+                .is_ok()
+        );
+    }
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// An `or` whose right table has a tag named like the left side's value field would report two
+/// columns of one name, so it keeps the existing plan, which refuses that union with its own error;
+/// a match that drops the tag stays native.
+#[tokio::test]
+async fn native_fused_cross_table_union_with_a_colliding_column_falls_back() {
+    let eval_stmt = build_eval_stmt("some_metric or other_metric");
+    let mut errors = Vec::new();
+    for native_fused in [true, false] {
+        let error = PromPlanner::stmt_to_plan_with_annotations(
+            native_colliding_tag_provider().await,
+            &eval_stmt,
+            &build_query_engine_state(),
+            None,
+            native_fused,
+        )
+        .await
+        .expect_err("the existing plan refuses a non-string union label");
+        errors.push(error.to_string());
+    }
+    assert_eq!(errors[0], errors[1]);
+
+    let plan = build_native_fused_plan_with_provider(
+        "some_metric / on(tag_0) other_metric",
+        true,
+        native_colliding_tag_provider().await,
+    )
+    .await;
+    assert!(find_fused_series(&plan).is_some(), "{plan}");
+}
+
 /// A function of each value or an operation with a constant around a pair keeps the pair native,
 /// on one table with both scans under the node.
 #[tokio::test]

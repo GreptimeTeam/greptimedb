@@ -559,7 +559,20 @@ impl PromPlanner {
         }) {
             return Ok(None);
         }
-        let output_tags = fused_output_tags(tree.root(), &source_tags);
+        let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
+            return Ok(None);
+        };
+        // Under `or` the right table's tags join the left table's columns, and one of them can
+        // share a name with the left side's field or time index. The output names each column
+        // once, so such a union is left to the existing plan.
+        let mut column_names = std::collections::HashSet::new();
+        if !std::iter::once(&time)
+            .chain(&root_fields)
+            .chain(&output_tags)
+            .all(|name| column_names.insert(name.as_str()))
+        {
+            return Ok(None);
+        }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
         // Over two tables the region scans are bound by their `RawSeriesSource` children.
         let (tags, metric) = if cross_table {
@@ -728,20 +741,18 @@ pub(crate) fn same_table_scan(left: &LogicalPlan, right: &LogicalPlan) -> bool {
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; an operation with a constant or a function of each value keeps its operand's.
-fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Vec<String> {
+/// side's; an operation with a constant or a function of each value keeps its operand's. `None` for
+/// a node whose labels this walk does not derive - an aggregate's groups, or a whole-vector
+/// operation - so a tree holding one is declined rather than given its input's labels.
+fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
-        NativeExpr::Input(input) => source_tags
-            .get(input.source_index)
-            .cloned()
-            .unwrap_or_default(),
-        NativeExpr::Scalar(_) => Vec::new(),
+        NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
+        NativeExpr::Scalar(_) => Some(Vec::new()),
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => fused_output_tags(input, source_tags),
+        | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -750,11 +761,11 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Vec<Stri
             (NativeExpr::Scalar(_), _) => fused_output_tags(right, source_tags),
             (_, NativeExpr::Scalar(_)) => fused_output_tags(left, source_tags),
             _ => {
-                let tags = fused_output_tags(left, source_tags);
+                let tags = fused_output_tags(left, source_tags)?;
                 if matching.cardinality != Cardinality::OneToOne {
-                    return tags;
+                    return None;
                 }
-                match &matching.labels {
+                Some(match &matching.labels {
                     MatchingLabels::On(names) if !names.is_empty() => tags
                         .into_iter()
                         .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
@@ -764,19 +775,19 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Vec<Stri
                         .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
                         .collect(),
                     MatchingLabels::On(_) => tags,
-                }
+                })
             }
         },
         NativeExpr::Set { left, right, op } => {
-            let mut tags = fused_output_tags(left, source_tags);
+            let mut tags = fused_output_tags(left, source_tags)?;
             if op.op == SetOp::Or {
-                for tag in fused_output_tags(right, source_tags) {
+                for tag in fused_output_tags(right, source_tags)? {
                     if !tags.contains(&tag) {
                         tags.push(tag);
                     }
                 }
             }
-            tags
+            Some(tags)
         }
     }
 }
@@ -1071,11 +1082,20 @@ mod tests {
         let tags = vec!["host".to_string(), "kind".to_string()];
         let sources = [tags.clone(), tags.clone()];
         let on = compiled_test_tree("x + on(host) x");
-        assert_eq!(vec!["host"], fused_output_tags(on.root(), &sources));
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(on.root(), &sources)
+        );
         let ignoring = compiled_test_tree("x + x");
-        assert_eq!(tags, fused_output_tags(ignoring.root(), &sources));
+        assert_eq!(
+            Some(tags.clone()),
+            fused_output_tags(ignoring.root(), &sources)
+        );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(tags, fused_output_tags(empty_on.root(), &sources));
+        assert_eq!(
+            Some(tags.clone()),
+            fused_output_tags(empty_on.root(), &sources)
+        );
 
         // Two tables with different tags: the left side's labels pass through a wrapper and a
         // match, and `or` adds the labels only the right side carries.
@@ -1083,15 +1103,28 @@ mod tests {
             vec!["host".to_string(), "kind".to_string()],
             vec!["host".to_string(), "zone".to_string()],
         ];
-        let wrapped = compiled_test_tree("100 * (1 - x / ignoring(kind) y)");
-        assert_eq!(vec!["host"], fused_output_tags(wrapped.root(), &sources));
+        let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(wrapped.root(), &sources)
+        );
         let and = compiled_test_tree("x and on(host) y");
-        assert_eq!(sources[0], fused_output_tags(and.root(), &sources));
+        assert_eq!(
+            Some(sources[0].clone()),
+            fused_output_tags(and.root(), &sources)
+        );
         let or = compiled_test_tree("x or y");
         assert_eq!(
-            vec!["host", "kind", "zone"],
+            Some(vec![
+                "host".to_string(),
+                "kind".to_string(),
+                "zone".to_string()
+            ]),
             fused_output_tags(or.root(), &sources)
         );
+        // An aggregate's labels are its groups, which this walk does not derive.
+        let aggregate = compiled_test_tree("sum by (host) (x)");
+        assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
     }
 
     #[test]
