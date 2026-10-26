@@ -1376,7 +1376,6 @@ mod tests {
             created_time: chrono::Utc::now(),
             updated_time: chrono::Utc::now(),
             eval_schedule: Some(FlowScheduleConfig::default_with_start(
-                0,
                 ((chrono::Utc::now().timestamp() + 7200) / 3600) * 3600,
                 3600,
             )),
