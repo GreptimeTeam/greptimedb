@@ -973,12 +973,36 @@ impl InstantRuntime {
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
         if let Some(at_ms) = self.selection.at_ms {
+            let timestamp_window = if self.selection.timestamp && self.selection.lookback_ms >= 0 {
+                let anchor = at_ms as i128;
+                let shifted = anchor - self.selection.offset_ms as i128;
+                let lower = anchor.max(shifted) - self.selection.lookback_ms as i128;
+                let upper = anchor.min(shifted);
+                if lower > upper || (lower == upper && self.selection.lookback_ms != 0) {
+                    None
+                } else {
+                    let effective_lookback = i64::try_from(upper - lower).ok();
+                    effective_lookback.and_then(|lookback| {
+                        i64::try_from(upper).ok().map(|upper| (upper, lookback))
+                    })
+                }
+            } else {
+                Some((at_ms, self.selection.lookback_ms))
+            };
+            let Some((selection_at, selection_lookback)) = timestamp_window else {
+                let metric = drop_metric_name(&metric)?;
+                return no_row_chunk(&self.schema, metric);
+            };
             let Some(index) = select_instant_at(
                 &time,
                 &fields,
-                at_ms,
-                self.selection.lookback_ms,
-                self.selection.offset_ms,
+                selection_at,
+                selection_lookback,
+                if self.selection.timestamp {
+                    0
+                } else {
+                    self.selection.offset_ms
+                },
             )?
             else {
                 let metric = if self.selection.timestamp {

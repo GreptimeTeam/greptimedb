@@ -179,6 +179,33 @@ fn native_instant_at_timestamp_values_and_labels() {
         run("timestamp(abs(a @ 1))", 0, 4000, 3000, &values, &times, 1)[0].0,
         [0.0, 1.0, 2.0, 3.0, 4.0]
     );
+    // The raw source axis is deliberately unpruned: timestamp selection must enforce both
+    // windows itself. At @11s offset -2s with 5s lookback, 10.5s is eligible but 11.5s is not.
+    assert_eq!(
+        run(
+            "timestamp(a @ 11 offset -2s)",
+            11_000,
+            11_000,
+            5_000,
+            &[Some(10_500.0), Some(11_500.0)],
+            &[10_500, 11_500],
+            1,
+        )[0]
+        .0,
+        [10.5]
+    );
+    assert!(
+        run(
+            "timestamp(a @ 50 offset 60s)",
+            50_000,
+            50_000,
+            30_000,
+            &[Some(10_000.0)],
+            &[10_000],
+            1,
+        )
+        .is_empty()
+    );
     assert_eq!(
         run("a @ -1.5", 2000, 6000, 1000, &values, &times, 1)[0].0,
         [7.0; 5]
@@ -202,6 +229,107 @@ fn native_instant_at_timestamp_values_and_labels() {
         )
         .is_empty()
     );
+}
+
+#[test]
+fn native_anchored_timestamp_selection_boundaries() {
+    let stale = f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS);
+    let all_times = [-1500, 500, 1500, 3500];
+    let all_values = [Some(7.0), Some(1.0), Some(2.0), Some(3.0)];
+    let cases: &[(&str, u64, &[i64], &[Option<f64>], &[f64])] = &[
+        (
+            "timestamp(a @ 2 offset 1s)",
+            5_000,
+            &all_times,
+            &all_values,
+            &[0.5],
+        ),
+        (
+            "timestamp(a @ 2 offset -1s)",
+            5_000,
+            &all_times,
+            &all_values,
+            &[1.5],
+        ),
+        (
+            "timestamp(a @ 2 offset 2s)",
+            750,
+            &all_times,
+            &all_values,
+            &[],
+        ),
+        ("timestamp(a @ 0.5)", 0, &all_times, &all_values, &[0.5]),
+        ("timestamp(a @ 1)", 0, &all_times, &all_values, &[]),
+        (
+            "timestamp(a @ 2 offset 1s)",
+            1_000,
+            &all_times,
+            &all_values,
+            &[],
+        ),
+        // The lower endpoint is exclusive for either sign of offset.
+        (
+            "timestamp(a @ 2 offset 1s)",
+            1_500,
+            &[500],
+            &[Some(1.0)],
+            &[],
+        ),
+        (
+            "timestamp(a @ 2 offset -1s)",
+            1_500,
+            &[1500],
+            &[Some(2.0)],
+            &[],
+        ),
+        // The upper endpoint is inclusive.
+        (
+            "timestamp(a @ 2 offset 1s)",
+            5_000,
+            &[1000],
+            &[Some(4.0)],
+            &[1.0],
+        ),
+        (
+            "timestamp(a @ 2 offset -1s)",
+            5_000,
+            &[2000, 3000],
+            &[Some(2.0), Some(3.0)],
+            &[2.0],
+        ),
+        // A stale marker at the eligible upper endpoint suppresses the preceding value.
+        (
+            "timestamp(a @ 2 offset 1s)",
+            5_000,
+            &[500, 1000],
+            &[Some(1.0), Some(stale)],
+            &[],
+        ),
+        // A stale marker above the intersection's upper endpoint is ignored.
+        (
+            "timestamp(a @ 2 offset 1s)",
+            5_000,
+            &[1000, 1500],
+            &[Some(4.0), Some(stale)],
+            &[1.0],
+        ),
+        // A stale marker inside the eligible window prevents fallback to an older finite sample.
+        (
+            "timestamp(a @ 2 offset -1s)",
+            5_000,
+            &[500, 1500],
+            &[Some(1.0), Some(stale)],
+            &[],
+        ),
+    ];
+
+    for (query, lookback, times, values, expected) in cases {
+        let actual = run(query, 2_000, 2_000, *lookback, values, times, 1)
+            .into_iter()
+            .flat_map(|series| series.0)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, *expected, "{query} with lookback {lookback}");
+    }
 }
 
 /// Two source series that differ only by a metadata label `timestamp()` drops must not be emitted

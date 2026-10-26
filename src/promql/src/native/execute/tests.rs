@@ -273,6 +273,35 @@ fn instant(
     }
 }
 
+#[test]
+fn timestamp_instant_rejects_negative_lookback() {
+    let output_grid = grid(500, 1_000, 1);
+    let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
+    let NativeExpr::Instant { op, .. } = &mut root.expr else {
+        unreachable!();
+    };
+    op.timestamp = true;
+    op.at_ms = Some(500);
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[500], &[1.0], true),
+        )
+        .unwrap();
+
+    let error = execution
+        .finish()
+        .expect_err("negative lookback was accepted");
+    assert!(
+        error.to_string().contains("lookback must be non-negative"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
 fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
     map_ops(inner, ops.into_iter().map(MapOp::Math).collect())
 }
@@ -7415,7 +7444,7 @@ fn an_oversized_set_workspace_is_refused_by_the_pool() {
     }
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
         "the set workspace was not refused by the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);

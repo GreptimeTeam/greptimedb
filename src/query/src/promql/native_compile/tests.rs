@@ -4647,13 +4647,13 @@ fn timestamp_multi_field_input_is_not_supported_natively() {
 }
 
 #[test]
-fn timestamp_anchored_selector_ignores_offset_but_ordinary_selection_keeps_it() {
+fn timestamp_anchored_selector_retains_offset_and_ordinary_selection_keeps_it() {
     for (query, expected_offset, expected_anchor, expected_bounds) in [
         (
             "timestamp(x @ 50 offset 60s)",
-            0,
+            60_000,
             Some(50_000),
-            (45_000, 50_000),
+            (-15_000, -10_000),
         ),
         ("timestamp(x offset 2s)", 2_000, None, (-7_000, 98_000)),
         (
@@ -4678,7 +4678,7 @@ fn timestamp_anchored_selector_ignores_offset_but_ordinary_selection_keeps_it() 
             let NativeExpr::Instant { op, .. } = &compiled.tree.root().expr else {
                 panic!("{query} did not compile as instant timestamp");
             };
-            assert_eq!(op.offset_ms, 0, "{query}");
+            assert_eq!(op.offset_ms, expected_offset, "{query}");
             assert_eq!(op.at_ms, expected_anchor, "{query}");
         }
     }

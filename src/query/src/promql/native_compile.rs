@@ -1364,13 +1364,8 @@ fn instant_selection_timestamp(
     timestamp: bool,
 ) -> Result<NativeNode> {
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
-    let mut offset_ms = selector_offset_ms(&selector.offset)?;
+    let offset_ms = selector_offset_ms(&selector.offset)?;
     let at_ms = selector_anchor_ms(&selector.at, context.stmt)?;
-    // Prometheus timestamp(selector @ anchor offset d) selects at the anchor, ignoring the
-    // offset; timestamp() then reports that selected sample's timestamp.
-    if timestamp && at_ms.is_some() {
-        offset_ms = 0;
-    }
     let output_grid = Arc::clone(&context.grid);
     let (grid_start_ms, grid_end_ms) = grid_endpoints(&output_grid)?;
     let (source_index, schema) = bind_selector(

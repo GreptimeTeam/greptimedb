@@ -180,9 +180,9 @@ pub fn select_instants(
 ///
 /// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row. This
 /// kernel reports the sample the caller selected and does not decide the selector's time
-/// modifiers: the native Instant caller passes its offset into the selection. For
-/// `timestamp(x @ t offset d)`, it selects at `t` as Prometheus does, ignoring the offset;
-/// `info()` retains ordinary selector offset behavior.
+/// modifiers: the native Instant caller selects the sample under the intersection of the ordinary
+/// anchored selector window and the timestamp function's unshifted window. `info()` retains ordinary
+/// selector offset behavior.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &SeriesLabels,

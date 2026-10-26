@@ -2207,7 +2207,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
-        "CREATE TABLE native_at (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_at (host, ts, val) VALUES ('a', -1500, 1), ('a', 500, 2), ('a', 1500, 3), ('a', 3500, 4), ('b', -1500, 9), ('missing', 500, 8), ('missing', 1500, NULL), ('stale', 500, 7)",
+        "CREATE TABLE native_at (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_at (host, ts, val) VALUES ('a', -1500, 1), ('a', 500, 2), ('a', 1500, 3), ('a', 3500, 4), ('neg', 10500, 10), ('neg', 11500, 11), ('b', -1500, 9), ('missing', 500, 8), ('missing', 1500, NULL), ('stale', 500, 7)",
         QueryContext::arc(),
     )
     .await;
@@ -2409,7 +2409,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
             2_000,
             5_000,
             "a",
-            vec![1.5],
+            vec![0.5],
         ),
         (
             "timestamp(native_at{host=\"a\"} @ 2 offset -1s)",
@@ -2419,16 +2419,23 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
             "a",
             vec![1.5],
         ),
-        // The explicit anchor fixes the selected instant, even when the offset exceeds lookback.
+        (
+            "timestamp(native_at{host=\"neg\"} @ 11 offset -2s)",
+            11_000,
+            11_000,
+            5_000,
+            "neg",
+            vec![10.5],
+        ),
+        // The anchored and offset-adjusted selector windows are disjoint here.
         (
             "timestamp(native_at{host=\"a\"} @ 2 offset 2s)",
             2_000,
             2_000,
             750,
             "a",
-            vec![1.5],
+            vec![],
         ),
-        // Without an anchor, timestamp retains the ordinary selector offset.
         (
             "timestamp((native_at{host=\"a\"} @ 2 offset -1s))",
             2_000,
@@ -2459,7 +2466,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
             2_000,
             5_000,
             "a",
-            vec![3.5],
+            vec![2.5],
         ),
         (
             "timestamp(native_at{host=\"a\"} offset 1s)",
@@ -2566,15 +2573,15 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
                 assert_eq!(timestamps.value(0), 2_000);
                 assert_eq!(hosts.value(0), "missing");
             }
-        } else if !matches!(
-            expr,
-            "timestamp(native_at{host=\"a\"} @ 2 offset 1s)"
-                | "timestamp(native_at{host=\"a\"} @ 2 offset 2s)"
-                | "timestamp((native_at{host=\"a\"} @ 2 offset -1s))"
-                | "abs(timestamp(native_at{host=\"a\"} @ 2 offset -1s))"
-                | "timestamp(native_at{host=\"a\"} @ end() offset -1s)"
-                | "timestamp(native_at{host=\"a\"} @ 2 offset 1s) + native_at{host=\"a\"} @ 2 offset 1s"
-        ) {
+        } else if expr == "timestamp(native_at{host=\"neg\"} @ 11 offset -2s)" {
+            // Legacy uses the shifted instant for its lookback window and selects 11.5s; the
+            // anchored native selection intersects that window with the unshifted anchor.
+            assert_eq!(
+                native_result_rows(legacy).await,
+                expected_rows(11_000, "neg", &[11.5]),
+                "legacy known mismatch: {expr}"
+            );
+        } else {
             assert_eq!(
                 native_rows,
                 native_result_rows(legacy).await,
