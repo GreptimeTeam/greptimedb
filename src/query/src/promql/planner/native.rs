@@ -36,6 +36,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use catalog::kvbackend::KvBackendCatalogManager;
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
@@ -46,8 +47,10 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
-use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
+use promql::extension_plan::{
+    AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource, VectorSelect,
+};
+use promql::native::plan::{BoundVectorOp, NativeExpr, NativeNode, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
@@ -583,8 +586,88 @@ impl PromPlanner {
         // several, are answered per partition. Aggregate splits are restricted to one raw scan
         // child.
         let root = compiled.tree.root();
+        let ranked = matches!(
+            &root.expr,
+            NativeExpr::Vector {
+                op: BoundVectorOp::TopK { .. },
+                ..
+            }
+        );
+        let ranked_fields = series_schema
+            .fields
+            .iter()
+            .map(|field| field.name.to_string())
+            .collect::<Vec<_>>();
+        if ranked {
+            let Some(scan) = children.first() else {
+                return Ok(None);
+            };
+            let LogicalPlan::TableScan(scan) = scan else {
+                return Ok(None);
+            };
+            let table = self.table_from_source(&scan.source)?;
+            if selectors.len() != 1
+                || !matches!(&root.expr, NativeExpr::Vector { op: BoundVectorOp::TopK { .. }, input } if !reads_across_series(input))
+                || series_schema.fields.len() != 1
+                || Self::field_column_type(
+                    children[0].schema(),
+                    ranked_fields
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or_default(),
+                ) != Some(&ArrowDataType::Float64)
+            {
+                return Ok(None);
+            }
+            let (table_id, Some(manager)) = (
+                table.table_info().table_id(),
+                query_engine_state
+                    .catalog_manager()
+                    .as_any()
+                    .downcast_ref::<KvBackendCatalogManager>(),
+            ) else {
+                return Ok(None);
+            };
+            let route = match manager
+                .partition_manager()
+                .find_physical_table_route_with_id(table_id)
+                .await
+            {
+                Ok((_, route)) if route.region_routes.len() == 1 => route,
+                _ => return Ok(None),
+            };
+            let _ = route;
+        }
         let per_partition =
-            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
+            !ranked && (!reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root));
+        if ranked {
+            let output_schema = fused_output_schema(&ranked_fields, &tags, &time)?;
+            let Some(raw_input) = children.into_iter().next() else {
+                return Ok(None);
+            };
+            let node = match VectorSelect::try_new(
+                Arc::from(prom_expr.to_string()),
+                compiled.tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index: time,
+                    tags,
+                    metric_name: metric,
+                },
+                raw_input,
+                output_schema,
+            ) {
+                Ok(node) => node,
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            return Ok(Some((
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                }),
+                single_input_context,
+            )));
+        }
         if !per_partition {
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)

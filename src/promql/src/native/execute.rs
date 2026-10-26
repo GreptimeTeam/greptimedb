@@ -508,7 +508,7 @@ impl NodeBuffer {
 /// the node below kept, so a label set costs its bytes again in every node that keeps a table, and
 /// what is deduplicated here is one node's history rather than a plan's.
 #[derive(Default)]
-struct Emitted {
+pub(crate) struct Emitted {
     sets: HashMap<LabelSet, History>,
     /// How many run vectors, runs and label payload bytes every entry holds, counted as the entries
     /// change rather than by walking them.
@@ -563,6 +563,16 @@ fn metric_bytes(metric: &SeriesLabels) -> usize {
 }
 
 impl Emitted {
+    /// Creates a label-set occupancy table for global vector results.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Checks and records occupancy for one output chunk.
+    pub(crate) fn check_and_occupy(&mut self, chunk: &EvaluatedChunk) -> Result<()> {
+        self.occupy(chunk)
+    }
+
     /// Records what `chunk` occupies, rejecting it against what this node already handed out.
     ///
     /// A second series onto a label set is legal when it holds its values where the first one held
@@ -630,7 +640,7 @@ impl Emitted {
     /// running total, so the figure is read in constant time however many series the node has
     /// handed out; it leaves out the map's buckets, the slack of a vector's capacity and the `Arc`
     /// headers of the strings it shares, so it is an approximation rather than a measurement.
-    fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         let slots =
             self.sets.len() * (std::mem::size_of::<LabelSet>() + std::mem::size_of::<History>());
         slots

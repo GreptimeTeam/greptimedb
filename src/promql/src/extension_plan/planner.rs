@@ -31,7 +31,7 @@ use table::table::scan::{RegionScanExec, SeriesScanExec};
 use crate::extension_plan::{
     Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
     RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
-    UnionDistinctOn,
+    UnionDistinctOn, VectorSelect,
 };
 
 pub struct PromExtensionPlanner;
@@ -85,6 +85,14 @@ impl ExtensionPlanner for PromExtensionPlanner {
                 session.config_options().execution.target_partitions,
             )
             .map(Some)
+        } else if let Some(node) = node.as_any().downcast_ref::<VectorSelect>() {
+            let [input] = physical_inputs else {
+                return Err(DataFusionError::Plan(format!(
+                    "the VectorSelect node takes exactly one input, but {} were planned",
+                    physical_inputs.len()
+                )));
+            };
+            node.to_execution_plan(Arc::clone(input)).map(Some)
         } else if let Some(node) = node.as_any().downcast_ref::<AggregateFinalize>() {
             // The merge runs where every partition's state arrives, so its own input is the plan
             // that exports them.

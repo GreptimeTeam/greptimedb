@@ -17,6 +17,7 @@ use std::fmt;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, RwLock};
 
+use crate::dist_plan::MergeScanExec;
 use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_base::Plugins;
@@ -42,6 +43,9 @@ use datafusion::physical_optimizer::PhysicalOptimizerRule;
 use datafusion::physical_optimizer::optimizer::PhysicalOptimizer;
 use datafusion::physical_optimizer::sanity_checker::SanityCheckPlan;
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::coop::CooperativeExec;
+use datafusion::physical_plan::sorts::sort::SortExec;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
 use datafusion_expr::{AggregateUDF, LogicalPlan as DfLogicalPlan, WindowUDF};
 use datafusion_optimizer::Analyzer;
@@ -49,6 +53,7 @@ use datafusion_optimizer::analyzer::function_rewrite::ApplyFunctionRewrites;
 use datafusion_optimizer::optimizer::Optimizer;
 use partition::manager::PartitionRuleManagerRef;
 use promql::extension_plan::PromExtensionPlanner;
+use promql::extension_plan::VectorSelectExec;
 use session::context::QueryContextRef;
 use table::TableRef;
 use table::table::adapter::DfTableProviderAdapter;
@@ -562,10 +567,66 @@ impl QueryPlanner for DfQueryPlanner {
         logical_plan: &DfLogicalPlan,
         session: &dyn Session,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        self.physical_planner
+        let plan = self
+            .physical_planner
             .create_physical_plan(logical_plan, session)
-            .await
+            .await?;
+        validate_vector_select_regions(&plan)?;
+        Ok(plan)
     }
+}
+
+fn validate_vector_select_regions(plan: &Arc<dyn ExecutionPlan>) -> DfResult<()> {
+    if let Some(select) = plan.as_ref().downcast_ref::<VectorSelectExec>() {
+        let select_children = select.children();
+        let [input] = select_children.as_slice() else {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "VectorSelectExec has unexpected children".into(),
+            ));
+        };
+        let mut child = *input;
+        if let Some(sort) = child.as_ref().downcast_ref::<SortExec>() {
+            let sort_children = sort.children();
+            let [next] = sort_children.as_slice() else {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "VectorSelect sort has unexpected children".into(),
+                ));
+            };
+            child = *next;
+        }
+        if let Some(coalesce) = child.as_ref().downcast_ref::<CoalescePartitionsExec>() {
+            let coalesce_children = coalesce.children();
+            let [next] = coalesce_children.as_slice() else {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "VectorSelect coalesce has unexpected children".into(),
+                ));
+            };
+            child = *next;
+        }
+        if let Some(cooperative) = child.as_ref().downcast_ref::<CooperativeExec>() {
+            child = cooperative.input();
+        }
+        let merge = child
+            .as_ref()
+            .downcast_ref::<MergeScanExec>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "VectorSelect expected a one-region MergeScanExec, found child {}. Physical subtree:\\n{}",
+                    child.name(),
+                    datafusion::physical_plan::displayable(select).indent(true)
+                ))
+            })?;
+        if merge.region_count() != 1 {
+            return Err(datafusion::error::DataFusionError::Plan(format!(
+                "native global topk requires one physical region, got {}",
+                merge.region_count()
+            )));
+        }
+    }
+    for child in plan.children() {
+        validate_vector_select_regions(child)?;
+    }
+    Ok(())
 }
 
 /// MySQL-compatible scalar function aliases: (target_name, alias)
@@ -740,14 +801,37 @@ impl MemoryPool for MetricsMemoryPool {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use crate::dist_plan::MergeScanExec;
+    use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
+    use api::v1::region::{RemoteDynFilterUnregister, RemoteDynFilterUpdate};
+    use async_trait::async_trait;
     use common_base::Plugins;
     use common_base::memory_limit::MemoryLimit;
     use common_base::readable_size::ReadableSize;
+    use common_query::request::QueryRequest;
+    use common_query::series_frame::pack_evaluated_series;
+    use common_recordbatch::SendableRecordBatchStream;
+    use datafusion::arrow::datatypes::{
+        DataType as ArrowDataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit,
+    };
     use datafusion::error::DataFusionError;
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryLimit as DfMemoryLimit};
     use datafusion::execution::runtime_env::{RuntimeEnv, RuntimeEnvBuilder};
+    use datafusion::logical_expr::LogicalPlanBuilder;
+    use datafusion::physical_plan::ExecutionPlan;
+    use datafusion::prelude::SessionContext;
     use datafusion_common::config::SpillCompression;
+    use datatypes::series::SeriesOrdering;
+    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datatypes::series::time::{EvalGrid, GridSpec};
+    use promql::extension_plan::VectorSelectExec;
+    use promql::native::plan::{
+        BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    };
+    use session::ReadPreference;
     use session::context::QueryContext;
+    use store_api::storage::RegionId;
+    use table::table_name::TableName;
 
     use super::*;
     use crate::options::{QueryOptions, QuerySpillCompression, QuerySpillMode};
@@ -755,6 +839,199 @@ mod tests {
         DefaultQueryRuntimeProvider, QueryRuntimeContext, QueryRuntimeProvider,
         QueryRuntimeProviderRef,
     };
+
+    struct UnusedRegionQueryHandler;
+    #[async_trait]
+    impl RegionQueryHandler for UnusedRegionQueryHandler {
+        async fn select_target(
+            &self,
+            _: ReadPreference,
+            _: RegionId,
+        ) -> crate::error::Result<RegionQueryTarget> {
+            unreachable!("region guard test does not execute")
+        }
+        async fn do_get(
+            &self,
+            _: &RegionQueryTarget,
+            _: QueryRequest,
+        ) -> crate::error::Result<SendableRecordBatchStream> {
+            unreachable!("region guard test does not execute")
+        }
+        async fn handle_remote_dyn_filter_update(
+            &self,
+            _: &RegionQueryTarget,
+            _: String,
+            _: RemoteDynFilterUpdate,
+        ) -> crate::error::Result<()> {
+            unreachable!("region guard test does not execute")
+        }
+        async fn handle_remote_dyn_filter_unregister(
+            &self,
+            _: &RegionQueryTarget,
+            _: String,
+            _: RemoteDynFilterUnregister,
+        ) -> crate::error::Result<()> {
+            unreachable!("region guard test does not execute")
+        }
+    }
+
+    fn vector_select_for_region_count(region_count: u32) -> Arc<dyn ExecutionPlan> {
+        let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 2).unwrap()).unwrap());
+        let series_schema = Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: Arc::from("value"),
+            }]),
+            eval_grid: Some(Arc::clone(&grid)),
+        });
+        let input_type = NativeType::Samples(Arc::clone(&series_schema));
+        let suffix = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Vector {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        output: input_type.clone(),
+                        ordering: SeriesOrdering::Contiguous,
+                    }),
+                    output: input_type.clone(),
+                }),
+                op: BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: Grouping::By(Arc::from([])),
+                },
+            },
+            output: input_type,
+        })
+        .unwrap();
+        let packed = pack_evaluated_series(
+            Box::pin(futures::stream::empty()),
+            Arc::clone(&series_schema),
+        )
+        .unwrap();
+        let payload_schema = packed.schema();
+        let tagged_schema = Arc::new(ArrowSchema::new_with_metadata(
+            payload_schema
+                .fields()
+                .iter()
+                .cloned()
+                .chain([
+                    Arc::new(ArrowField::new(
+                        "__greptime_native_producer",
+                        ArrowDataType::UInt64,
+                        false,
+                    )),
+                    Arc::new(ArrowField::new(
+                        "__greptime_native_frame_ordinal",
+                        ArrowDataType::UInt64,
+                        false,
+                    )),
+                ])
+                .collect::<Vec<_>>(),
+            payload_schema.metadata().clone(),
+        ));
+        let raw_plan = LogicalPlanBuilder::empty(true)
+            .project(
+                tagged_schema
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        let null = match field.data_type() {
+                            ArrowDataType::Boolean => datafusion::logical_expr::lit(
+                                datafusion::scalar::ScalarValue::Boolean(None),
+                            ),
+                            ArrowDataType::UInt64 => datafusion::logical_expr::lit(
+                                datafusion::scalar::ScalarValue::UInt64(Some(0)),
+                            ),
+                            ArrowDataType::Float64 => datafusion::logical_expr::lit(
+                                datafusion::scalar::ScalarValue::Float64(None),
+                            ),
+                            ArrowDataType::Utf8 => datafusion::logical_expr::lit(
+                                datafusion::scalar::ScalarValue::Utf8(None),
+                            ),
+                            ArrowDataType::Binary => datafusion::logical_expr::lit(
+                                datafusion::scalar::ScalarValue::Binary(None),
+                            ),
+                            ArrowDataType::Struct(_) | ArrowDataType::List(_) => {
+                                datafusion::logical_expr::Expr::Cast(
+                                    datafusion::logical_expr::Cast::new(
+                                        Box::new(datafusion::logical_expr::lit(
+                                            datafusion::scalar::ScalarValue::Null,
+                                        )),
+                                        field.data_type().clone(),
+                                    ),
+                                )
+                            }
+                            ArrowDataType::Timestamp(TimeUnit::Millisecond, timezone) => {
+                                datafusion::logical_expr::lit(
+                                    datafusion::scalar::ScalarValue::TimestampMillisecond(
+                                        None,
+                                        timezone.clone(),
+                                    ),
+                                )
+                            }
+                            _ => unreachable!(
+                                "unexpected evaluated-frame schema field {:?}",
+                                field.data_type()
+                            ),
+                        };
+                        null.alias(field.name())
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let session_state = datafusion::execution::SessionStateBuilder::new().build();
+        let regions = (0..region_count).map(|i| RegionId::new(1024, i)).collect();
+        let merge = MergeScanExec::new(
+            &session_state,
+            TableName::new("catalog", "schema", "table"),
+            regions,
+            raw_plan,
+            tagged_schema.as_ref(),
+            Arc::new(UnusedRegionQueryHandler),
+            QueryContext::arc(),
+            1,
+            None,
+            false,
+        )
+        .unwrap();
+        Arc::new(
+            VectorSelectExec::try_new(
+                Arc::from("topk(1, metric)"),
+                Arc::new(merge),
+                Arc::new(suffix),
+                series_schema,
+                Arc::new(ArrowSchema::new(vec![
+                    ArrowField::new("value", ArrowDataType::Float64, true),
+                    ArrowField::new("host", ArrowDataType::Utf8, true),
+                    ArrowField::new("__name__", ArrowDataType::Utf8, true),
+                    ArrowField::new(
+                        "time",
+                        ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                        false,
+                    ),
+                ])),
+                "time".into(),
+                vec!["host".into(), "__name__".into()],
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn vector_select_region_guard_accepts_one_region_and_rejects_two() {
+        let one = vector_select_for_region_count(1);
+        assert!(validate_vector_select_regions(&one).is_ok());
+        let two = vector_select_for_region_count(2);
+        let error = validate_vector_select_regions(&two).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("native global topk requires one physical region, got 2"),
+            "{error}"
+        );
+    }
 
     fn new_query_engine_state() -> QueryEngineState {
         new_query_engine_state_with(Plugins::default(), QueryOptions::default())

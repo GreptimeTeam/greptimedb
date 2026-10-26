@@ -37,7 +37,7 @@ use datafusion_optimizer::push_down_filter::PushDownFilter;
 use datafusion_optimizer::rewrite_set_comparison::RewriteSetComparison;
 use datafusion_optimizer::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use datafusion_optimizer::simplify_expressions::SimplifyExpressions;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, SeriesDivide};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, SeriesDivide, VectorSelect};
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -589,6 +589,11 @@ fn is_fused_series_plan(plan: &LogicalPlan) -> bool {
 fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     if is_fused_series_plan(plan) {
         return true;
+    }
+    if let LogicalPlan::Extension(extension) = plan
+        && extension.node.as_any().is::<VectorSelect>()
+    {
+        return matches!(extension.node.inputs().as_slice(), [LogicalPlan::Extension(prefix)] if prefix.node.as_any().downcast_ref::<FusedSeries>().is_some_and(FusedSeries::has_frame_provenance) && matches!(prefix.node.inputs().as_slice(), [LogicalPlan::TableScan(_)]));
     }
     let LogicalPlan::Extension(extension) = plan else {
         return false;

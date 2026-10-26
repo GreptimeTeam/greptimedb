@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -25,14 +26,22 @@ use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORA
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::error::{DataFusionError, Result as DataFusionResult};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::coop::CooperativeExec;
-use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
+    SendableRecordBatchStream,
+};
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
+use futures::{StreamExt, TryStreamExt};
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
@@ -1776,6 +1785,13 @@ struct NativePlanObserver(
     Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
     Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
 );
+#[derive(Default)]
+struct GlobalTopkObserver {
+    fused: Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    select: Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    gate_enabled: std::sync::atomic::AtomicBool,
+    gate: Mutex<Option<Arc<PartitionGate>>>,
+}
 
 impl NativePlanObserver {
     fn clear(&self) {
@@ -1798,6 +1814,215 @@ impl NativePlanObserver {
     /// The fused node the last wrapped plan contained, if any; `take` requires one instead.
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
         self.0.lock().unwrap().clone()
+    }
+}
+
+impl GlobalTopkObserver {
+    fn gate_next_fused_execution(&self) {
+        self.gate_enabled.store(true, AtomicOrdering::SeqCst);
+    }
+
+    fn take_gate(&self) -> Arc<PartitionGate> {
+        self.gate
+            .lock()
+            .unwrap()
+            .take()
+            .expect("fused gate installed")
+    }
+
+    fn clear(&self) {
+        *self.fused.lock().unwrap() = None;
+        *self.select.lock().unwrap() = None;
+    }
+    fn take_fused(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.fused.lock().unwrap().take().unwrap()
+    }
+    fn take_select(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.select.lock().unwrap().take().unwrap()
+    }
+}
+
+impl PhysicalPlanWrapper for GlobalTopkObserver {
+    fn wrap(
+        &self,
+        origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        // Wrapper callbacks can see outer plans before the region's fused node exists. Keep the
+        // request armed until a callback actually installs the gate around that node.
+        let gate_fused = self.gate_enabled.load(AtomicOrdering::SeqCst);
+        let gate = Arc::new(PartitionGate::new(4));
+        let (plan, installed) = if gate_fused {
+            gate_native_fused(origin, Arc::clone(&gate))
+        } else {
+            (origin, false)
+        };
+        if installed {
+            self.gate_enabled.store(false, AtomicOrdering::SeqCst);
+            *self.gate.lock().unwrap() = Some(gate);
+        }
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            match node.name() {
+                "FusedSeriesExec" => *self.fused.lock().unwrap() = Some(node.clone()),
+                "VectorSelectExec" => *self.select.lock().unwrap() = Some(node.clone()),
+                _ => {}
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        plan
+    }
+}
+
+/// Each partition must compute a non-empty first batch before any partition can continue.
+struct PartitionGate {
+    barrier: tokio::sync::Barrier,
+    arrived: AtomicUsize,
+}
+
+impl PartitionGate {
+    fn new(partitions: usize) -> Self {
+        Self {
+            barrier: tokio::sync::Barrier::new(partitions),
+            arrived: AtomicUsize::new(0),
+        }
+    }
+
+    async fn wait(&self) -> DataFusionResult<()> {
+        self.arrived.fetch_add(1, AtomicOrdering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), self.barrier.wait())
+            .await
+            .map(|_| ())
+            .map_err(|_| {
+                DataFusionError::Execution(format!(
+                    "only {} of 4 native fused partitions produced a first batch concurrently",
+                    self.arrived.load(AtomicOrdering::SeqCst)
+                ))
+            })
+    }
+
+    fn arrived(&self) -> usize {
+        self.arrived.load(AtomicOrdering::SeqCst)
+    }
+}
+
+fn gate_native_fused(
+    plan: Arc<dyn ExecutionPlan>,
+    gate: Arc<PartitionGate>,
+) -> (Arc<dyn ExecutionPlan>, bool) {
+    if plan.name() == "FusedSeriesExec" {
+        return (Arc::new(NativeFusedGateExec { child: plan, gate }), true);
+    }
+    let children = plan.children().into_iter().cloned().collect::<Vec<_>>();
+    if children.is_empty() {
+        return (plan, false);
+    }
+    let mut installed = false;
+    let rewritten = children
+        .iter()
+        .map(|child| {
+            let (child, child_installed) = gate_native_fused(Arc::clone(child), Arc::clone(&gate));
+            installed |= child_installed;
+            child
+        })
+        .collect::<Vec<_>>();
+    if !installed {
+        return (plan, false);
+    }
+    (
+        plan.with_new_children(rewritten)
+            .expect("test gate rebuilds plan above fused node"),
+        true,
+    )
+}
+
+struct NativeFusedGateExec {
+    child: Arc<dyn ExecutionPlan>,
+    gate: Arc<PartitionGate>,
+}
+
+impl std::fmt::Debug for NativeFusedGateExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFusedGateExec").finish()
+    }
+}
+
+impl DisplayAs for NativeFusedGateExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "NativeFusedGateExec")
+    }
+}
+
+impl ExecutionPlan for NativeFusedGateExec {
+    fn name(&self) -> &str {
+        "NativeFusedGateExec"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        self.child.properties()
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.child]
+    }
+
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        self.child.apply_expressions(f)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        let [child] = <[Arc<dyn ExecutionPlan>; 1]>::try_from(children).map_err(|children| {
+            DataFusionError::Plan(format!(
+                "NativeFusedGateExec requires one child, got {}",
+                children.len()
+            ))
+        })?;
+        Ok(Arc::new(Self {
+            child,
+            gate: Arc::clone(&self.gate),
+        }))
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<datafusion::execution::TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let child = Arc::clone(&self.child);
+        let gate = Arc::clone(&self.gate);
+        let schema = self.child.schema();
+        let first_then_rest = futures::stream::once(async move {
+            let mut input = child.execute(partition, context)?;
+            let first = match input.next().await {
+                Some(Ok(batch)) => batch,
+                Some(Err(error)) => return Err(error),
+                None => {
+                    return Err(DataFusionError::Execution(format!(
+                        "fused partition {partition} produced no first batch for test barrier"
+                    )));
+                }
+            };
+            if first.num_rows() == 0 {
+                return Err(DataFusionError::Execution(format!(
+                    "fused partition {partition} produced an empty first batch for test barrier"
+                )));
+            }
+            gate.wait().await?;
+            Ok::<_, DataFusionError>(
+                futures::stream::iter([Ok::<_, DataFusionError>(first)]).chain(input),
+            )
+        })
+        .try_flatten();
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            first_then_rest,
+        )))
     }
 }
 
@@ -2212,6 +2437,172 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
             );
         }
     }
+}
+
+/// Global native topk spans the four real producer partitions and the region coalesce.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_global_topk_preserves_four_real_prefix_partitions() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let observer = Arc::new(GlobalTopkObserver::default());
+    let plugins = Plugins::new();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_global_topk")
+        .with_mito_config(config)
+        .with_plugin(plugins)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(&instance,
+        "CREATE TABLE native_topk_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH (\"physical_metric_table\" = \"true\"); CREATE TABLE native_topk (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=metric WITH (\"on_physical_table\" = 'native_topk_phy'); INSERT INTO native_topk (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4), ('c', 0, 6), ('d', 0, 8), ('e', 0, 10), ('f', 0, 12), ('g', 0, 14), ('h', 0, 16), ('i', 0, 18), ('j', 0, 20), ('k', 0, 22), ('l', 0, 24), ('m', 0, 26), ('n', 0, 28), ('o', 0, 30), ('p', 0, 32)", QueryContext::arc()).await;
+    let query = PromQuery {
+        query: "topk(3, native_topk)".into(),
+        start: "0".into(),
+        end: "0".into(),
+        step: "1s".into(),
+        ..PromQuery::default()
+    };
+    // Run the native prefix without ranking as the reference for the global top-k result.
+    // Derive the expected winners from actual producer output rather than fixture assumptions.
+    let reference = PromQuery {
+        query: "native_topk".into(),
+        ..query.clone()
+    };
+    observer.clear();
+    let reference_rows = native_result_rows(
+        instance
+            .do_promql_query(&reference, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    let mut ranked_reference = reference_rows;
+    ranked_reference.sort_by(|left, right| {
+        right
+            .2
+            .total_cmp(&left.2)
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    ranked_reference.truncate(3);
+    ranked_reference.sort_by(|left, right| left.1.cmp(&right.1));
+
+    observer.clear();
+    observer.gate_next_fused_execution();
+    let rows = native_result_rows(
+        instance
+            .do_promql_query(&query, native_query_context(true, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    let prefix = observer.take_fused();
+    let select = observer.take_select();
+    assert_eq!(
+        select.name(),
+        "VectorSelectExec",
+        "query must execute the global native ranker"
+    );
+    assert_eq!(
+        prefix.output_partitioning().partition_count(),
+        4,
+        "all four prefix producers must reach the global coalesce"
+    );
+    // The region MergeScan is owned by VectorSelect's raw-input side; the fused prefix is
+    // instantiated inside that region and therefore consumes its physical SeriesScan child.
+    let select_children = select.children();
+    let [input] = select_children.as_slice() else {
+        panic!("VectorSelectExec must have one raw-input child: {select:?}");
+    };
+    let mut raw_input = Arc::clone(input);
+    if let Some(sort) = raw_input
+        .as_ref()
+        .downcast_ref::<datafusion::physical_plan::sorts::sort::SortExec>()
+    {
+        let children = sort.children();
+        let [child] = children.as_slice() else {
+            panic!("VectorSelect sort must have one child");
+        };
+        raw_input = Arc::clone(child);
+    }
+    if let Some(coalesce) = raw_input
+        .as_ref()
+        .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+    ) {
+        let children = coalesce.children();
+        let [child] = children.as_slice() else {
+            panic!("VectorSelect coalesce must have one child");
+        };
+        raw_input = Arc::clone(child);
+    }
+    if let Some(cooperative) = raw_input.as_ref().downcast_ref::<CooperativeExec>() {
+        raw_input = Arc::clone(cooperative.input());
+    }
+    let merge = raw_input
+        .as_ref()
+        .downcast_ref::<query::dist_plan::MergeScanExec>()
+        .expect("VectorSelect raw input is a real MergeScanExec");
+    assert_eq!(
+        merge.region_count(),
+        1,
+        "logical metric resolves to one physical region"
+    );
+    let prefix_children = prefix.children();
+    let [region_scan] = prefix_children.as_slice() else {
+        panic!("region fused prefix must have one scan child: {prefix:?}");
+    };
+    let physical_scan = region_scan
+        .as_ref()
+        .downcast_ref::<CooperativeExec>()
+        .map_or(*region_scan, |cooperative| cooperative.input());
+    assert_eq!(
+        physical_scan.name(),
+        "SeriesScanExec",
+        "region fused child is actual SeriesScanExec, optionally under CooperativeExec"
+    );
+    use datafusion::physical_plan::metrics::MetricValue;
+    let mut nonempty = [false; 4];
+    for metric in prefix.metrics().unwrap().iter() {
+        if let MetricValue::Count { count, .. } = metric.value()
+            && metric.value().name() == "native.root.output_values"
+            && let Some(partition) = metric.partition()
+            && let Some(slot) = nonempty.get_mut(partition)
+        {
+            *slot |= count.value() > 0;
+        }
+    }
+    assert!(
+        nonempty.iter().all(|value| *value),
+        "all four real fused partitions must produce: {nonempty:?}"
+    );
+    let gate = observer.take_gate();
+    assert_eq!(
+        gate.arrived(),
+        4,
+        "all four fused partitions computed a first batch before any continued"
+    );
+    assert_eq!(
+        rows, ranked_reference,
+        "global topk must match ranking the unranked native prefix"
+    );
+    let legacy = native_result_rows(
+        instance
+            .do_promql_query(&query, native_query_context(false, 4))
+            .await
+            .remove(0)
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(rows, legacy);
 }
 
 /// Native instant selectors preserve anchored evaluation and sample timestamps in standalone.

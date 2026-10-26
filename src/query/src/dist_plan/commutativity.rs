@@ -22,7 +22,7 @@ use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate,
-    RawSeriesSource, SeriesDivide, SeriesNormalize,
+    RawSeriesSource, SeriesDivide, SeriesNormalize, VectorSelect,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -282,7 +282,9 @@ impl Categorizer {
             }
             // The merge reads every partition's state, so it cannot run in one of them: a region
             // would merge the state its own scan produced and report that as the whole group.
-            name if name == AggregateFinalize::name() => Commutativity::NonCommutative,
+            name if name == AggregateFinalize::name() || name == VectorSelect::name() => {
+                Commutativity::NonCommutative
+            }
             name if name == SeriesNormalize::name()
                 || name == InstantManipulate::name()
                 || name == RangeManipulate::name() =>

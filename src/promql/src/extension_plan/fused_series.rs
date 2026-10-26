@@ -50,7 +50,7 @@ use common_query::series_frame::{
 };
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
-use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
@@ -179,6 +179,15 @@ pub enum FusedOutputFormat {
     PlainRows,
     /// A self-describing evaluated SeriesFrame.
     SeriesFrame,
+    /// An evaluated SeriesFrame with local producer and frame-row provenance.
+    SeriesFrameWithProvenance,
+}
+
+impl FusedOutputFormat {
+    /// Whether this format emits the evaluated frame layout, with or without provenance.
+    fn is_frame(self) -> bool {
+        matches!(self, Self::SeriesFrame | Self::SeriesFrameWithProvenance)
+    }
 }
 
 fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
@@ -196,13 +205,35 @@ fn evaluated_output(tree: &NativeTree) -> DataFusionResult<Arc<SeriesSchema>> {
     }
 }
 
-fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
+pub(crate) const NATIVE_PRODUCER_COLUMN: &str = "__greptime_native_producer";
+pub(crate) const NATIVE_FRAME_ORDINAL_COLUMN: &str = "__greptime_native_frame_ordinal";
+
+pub(crate) fn series_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
     let stream =
         pack_evaluated_series(Box::pin(futures::stream::empty()), Arc::new(schema.clone()))
             .map_err(|error| {
                 DataFusionError::Plan(format!("FusedSeries cannot declare frame schema: {error}"))
             })?;
     Ok(stream.schema())
+}
+
+pub(crate) fn provenance_frame_output_schema(schema: &SeriesSchema) -> DataFusionResult<SchemaRef> {
+    let frame = series_frame_output_schema(schema)?;
+    let mut fields = frame.fields().to_vec();
+    fields.push(Arc::new(datafusion::arrow::datatypes::Field::new(
+        NATIVE_PRODUCER_COLUMN,
+        datafusion::arrow::datatypes::DataType::UInt64,
+        false,
+    )));
+    fields.push(Arc::new(datafusion::arrow::datatypes::Field::new(
+        NATIVE_FRAME_ORDINAL_COLUMN,
+        datafusion::arrow::datatypes::DataType::UInt64,
+        false,
+    )));
+    Ok(Arc::new(Schema::new_with_metadata(
+        fields,
+        frame.metadata().clone(),
+    )))
 }
 
 /// The logical plan of one node that runs a compiled native tree.
@@ -265,13 +296,18 @@ impl FusedSeries {
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
-        if format == FusedOutputFormat::SeriesFrame && children.len() > 1 {
+        if format.is_frame() && children.len() > 1 {
             return Err(DataFusionError::Plan(
                 "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
             ));
         }
-        if format == FusedOutputFormat::SeriesFrame {
-            let expected = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+        if format.is_frame() {
+            let evaluated = evaluated_output(&tree)?;
+            let expected = if format == FusedOutputFormat::SeriesFrameWithProvenance {
+                provenance_frame_output_schema(evaluated.as_ref())?
+            } else {
+                series_frame_output_schema(evaluated.as_ref())?
+            };
             if output_schema.as_arrow() != expected.as_ref() {
                 return Err(DataFusionError::Plan(
                     "FusedSeries SeriesFrame output schema does not match the evaluated frame layout"
@@ -327,6 +363,11 @@ impl FusedSeries {
     /// The aggregate whose partition-local state this node exports.
     pub fn partial_fold(&self) -> Option<&BoundAggregate> {
         self.partial_fold.as_ref()
+    }
+
+    /// Whether the node emits evaluated frames with producer provenance.
+    pub fn has_frame_provenance(&self) -> bool {
+        self.format == FusedOutputFormat::SeriesFrameWithProvenance
     }
 
     /// The PromQL text this node was compiled from.
@@ -435,7 +476,8 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 self.promql,
                 render_partial_fold(op)
             ),
-            None if self.format == FusedOutputFormat::SeriesFrame => {
+            None if self.format.is_frame() =>
+            {
                 write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
             }
             None => write!(f, "FusedSeries: {}", self.promql),
@@ -956,7 +998,10 @@ impl FusedSeriesExec {
         partial_fold: Option<BoundAggregate>,
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
-        if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame && inputs.len() > 1 {
+        if partial_fold.is_none()
+            && format.is_frame()
+            && inputs.len() > 1
+        {
             return Err(DataFusionError::Plan(
                 "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
             ));
@@ -981,8 +1026,13 @@ impl FusedSeriesExec {
                 "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
             ));
         }
-        let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
-            let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+        let frame_schema = if partial_fold.is_none() && format.is_frame() {
+            let evaluated = evaluated_output(&tree)?;
+            let declared = if format == FusedOutputFormat::SeriesFrameWithProvenance {
+                provenance_frame_output_schema(evaluated.as_ref())?
+            } else {
+                series_frame_output_schema(evaluated.as_ref())?
+            };
             if declared != output_schema {
                 return Err(DataFusionError::Plan(
                     "FusedSeriesExec output schema does not match the evaluated frame layout"
@@ -1099,7 +1149,7 @@ impl DisplayAs for FusedSeriesExec {
         write!(f, "FusedSeriesExec: {}\n{}", self.promql, self.tree)?;
         if let Some(op) = &self.partial_fold {
             write!(f, "\npartial state: {}", render_partial_fold(op))?;
-        } else if self.format == FusedOutputFormat::SeriesFrame {
+        } else if self.format.is_frame() {
             write!(f, "\noutput: series_frame")?;
         }
         Ok(())
@@ -1257,8 +1307,12 @@ impl ExecutionPlan for FusedSeriesExec {
         };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
-        let frame_mode =
-            self.partial_fold.is_none() && self.format == FusedOutputFormat::SeriesFrame;
+        let frame_mode = self.partial_fold.is_none() && self.format.is_frame();
+        let producer = (self.format == FusedOutputFormat::SeriesFrameWithProvenance).then_some(
+            u64::try_from(partition).map_err(|_| {
+                DataFusionError::Execution("FusedSeries producer partition exceeds UInt64".into())
+            })?,
+        );
         let stream = FusedSeriesStream {
             inputs,
             executor: Some(executor),
@@ -1276,7 +1330,20 @@ impl ExecutionPlan for FusedSeriesExec {
             let schema = evaluated_output(&self.tree)?;
             let source: SendableEvaluatedSeriesStream =
                 Box::pin(FusedEvaluatedStream { source: stream });
-            Ok(pack_evaluated_series(source, schema)?)
+            let packed = pack_evaluated_series(source, schema)?;
+            match producer {
+                // Provenance rides after the packed frame, not inside the evaluator: each
+                // partition numbers the frame rows it hands on, before any downstream gather can
+                // interleave two producers.
+                Some(producer) => Ok(Box::pin(ProvenanceStream {
+                    input: packed,
+                    producer,
+                    next_ordinal: 0,
+                    schema: self.output_schema.clone(),
+                    done: false,
+                })),
+                None => Ok(packed),
+            }
         } else {
             Ok(Box::pin(stream))
         }
@@ -1619,6 +1686,85 @@ impl Stream for FusedSeriesStream {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+/// Adds the local producer and a continuous frame-row ordinal after the shared frame packer.
+///
+/// The frame payload itself is untouched: the two helper columns exist only on this process-local
+/// execution edge, so a producer's rows can be restored after downstream gathering interleaves
+/// several producers. Ordinals count actual emitted frame rows and continue across batches.
+struct ProvenanceStream {
+    input: SendableRecordBatchStream,
+    producer: u64,
+    next_ordinal: u64,
+    schema: SchemaRef,
+    done: bool,
+}
+
+impl Stream for ProvenanceStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.done {
+            return Poll::Ready(None);
+        }
+        match self.input.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(batch))) => {
+                let rows = batch.num_rows();
+                let count = match u64::try_from(rows) {
+                    Ok(count) => count,
+                    Err(_) => {
+                        self.done = true;
+                        return Poll::Ready(Some(Err(DataFusionError::Execution(
+                            "frame row count exceeds UInt64".into(),
+                        ))));
+                    }
+                };
+                let end = match self.next_ordinal.checked_add(count) {
+                    Some(end) => end,
+                    None => {
+                        self.done = true;
+                        return Poll::Ready(Some(Err(DataFusionError::Execution(
+                            "frame ordinal overflow".into(),
+                        ))));
+                    }
+                };
+                let mut columns = batch.columns().to_vec();
+                columns.push(Arc::new(datafusion::arrow::array::UInt64Array::from(vec![
+                    self.producer;
+                    rows
+                ])) as ArrayRef);
+                columns.push(Arc::new(
+                    datafusion::arrow::array::UInt64Array::from_iter_values(
+                        self.next_ordinal..end,
+                    ),
+                ) as ArrayRef);
+                self.next_ordinal = end;
+                match RecordBatch::try_new(self.schema.clone(), columns) {
+                    Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                    Err(error) => {
+                        self.done = true;
+                        Poll::Ready(Some(Err(DataFusionError::from(error))))
+                    }
+                }
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.done = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                self.done = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl RecordBatchStream for ProvenanceStream {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 }
 
