@@ -43,10 +43,10 @@ pub(crate) trait InspectSource: std::fmt::Debug + Send + Sync {
 /// plan, after residual filters, rather than by individual sources.
 #[derive(Debug, Clone)]
 pub(crate) struct InspectScan {
-    pub(crate) schema: SchemaRef,
-    pub(crate) projection: Option<Vec<usize>>,
-    pub(crate) filters: Vec<Expr>,
-    pub(crate) batch_size: usize,
+    schema: SchemaRef,
+    projection: Option<Vec<usize>>,
+    filters: Vec<Expr>,
+    batch_size: usize,
 }
 
 /// Adapts a lazy inspection source to DataFusion's streaming execution plan.

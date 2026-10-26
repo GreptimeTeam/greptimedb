@@ -768,11 +768,16 @@ mod tests {
             .unwrap();
 
         let region = env.mito().find_region(data_region_id).unwrap();
-        let entry = region
-            .manifest_sst_entries()
+        let entry = env
+            .mito()
+            .all_ssts_from_manifest()
             .await
             .into_iter()
-            .find(|entry| entry.visible && entry.file_path.ends_with(".parquet"))
+            .find(|entry| {
+                entry.region_id == data_region_id
+                    && entry.visible
+                    && entry.file_path.ends_with(".parquet")
+            })
             .unwrap();
         let mut cache_metrics = MetadataCacheMetrics::default();
         let footer = MetadataLoader::new(

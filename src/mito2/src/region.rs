@@ -828,7 +828,7 @@ impl MitoRegion {
     }
 
     /// Returns the SST entries of the region.
-    pub async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
+    pub(crate) async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
         self.manifest_sst_stream(MetadataFilter::default(), ManifestSstProjection::new(None))
             .collect()
             .await

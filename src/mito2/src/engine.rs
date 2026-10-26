@@ -590,7 +590,7 @@ impl MitoEngine {
     /// Lazily emits bounded batches of manifest entries, pruning regions before
     /// opening their manifest snapshots and files before constructing entries.
     /// Filters are conservative; callers must retain their residual predicates.
-    pub fn scan_ssts_from_manifest(
+    pub(crate) fn scan_ssts_from_manifest(
         &self,
         filters: &[Expr],
         batch_size: usize,

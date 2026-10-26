@@ -170,7 +170,7 @@ impl ManifestSstEntry {
     }
 
     /// Builds only the requested columns, including empty and repeated projections.
-    pub fn to_projected_record_batch(
+    fn to_projected_record_batch(
         entries: &[Self],
         projection: Option<&[usize]>,
     ) -> std::result::Result<DfRecordBatch, ArrowError> {

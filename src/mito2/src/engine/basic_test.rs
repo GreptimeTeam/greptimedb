@@ -2150,16 +2150,14 @@ async fn test_manifest_scan_region_filter() {
         projected_entries.extend(batch);
     }
     projected_entries.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
-    let expected = store_api::sst_entry::ManifestSstEntry::to_projected_record_batch(
-        &reference.unwrap(),
-        Some(&projection),
-    )
-    .unwrap();
-    let actual = store_api::sst_entry::ManifestSstEntry::to_projected_record_batch(
-        &projected_entries,
-        Some(&projection),
-    )
-    .unwrap();
+    let builder = store_api::sst_entry::ManifestSstBatchBuilder::new(Arc::new(
+        store_api::sst_entry::ManifestSstEntry::schema()
+            .arrow_schema()
+            .project(&projection)
+            .unwrap(),
+    ));
+    let expected = builder.build(&reference.unwrap()).unwrap();
+    let actual = builder.build(&projected_entries).unwrap();
     assert_eq!(actual, expected);
     assert!(
         engine
@@ -2281,9 +2279,15 @@ async fn test_manifest_scan_table_filter() {
     .expect("hidden table predicate must prune unrelated manifests");
     let mut actual = batches.into_iter().flatten().collect::<Vec<_>>();
     actual.sort_unstable_by_key(|entry| (entry.region_id, entry.file_id.clone()));
+    let builder = store_api::sst_entry::ManifestSstBatchBuilder::new(Arc::new(
+        ManifestSstEntry::schema()
+            .arrow_schema()
+            .project(&projection)
+            .unwrap(),
+    ));
     assert_eq!(
-        ManifestSstEntry::to_projected_record_batch(&actual, Some(&projection)).unwrap(),
-        ManifestSstEntry::to_projected_record_batch(&expected, Some(&projection)).unwrap(),
+        builder.build(&actual).unwrap(),
+        builder.build(&expected).unwrap()
     );
     drop(guard);
 }

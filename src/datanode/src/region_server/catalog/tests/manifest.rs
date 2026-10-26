@@ -213,7 +213,7 @@ async fn test_manifest_referring_region_and_origin_path() {
         (col("node_id").is_not_null(), 0),
     ] {
         let batches = engine
-            .scan_ssts_from_manifest(std::slice::from_ref(&predicate), 2)
+            .scan_ssts_from_manifest_projected(std::slice::from_ref(&predicate), 2, None)
             .collect::<Vec<_>>()
             .await;
         assert_eq!(
