@@ -159,6 +159,10 @@ pub struct BoundInstant {
     pub lookback_ms: i64,
     /// Selector offset; positive reads earlier samples.
     pub offset_ms: i64,
+    /// Anchored selection instant; samples are selected at this time for every grid point.
+    pub at_ms: Option<i64>,
+    /// Emit the selected sample timestamp in seconds rather than its value.
+    pub timestamp: bool,
     /// The grid the selection produces values on.
     pub output_grid: Arc<EvalGrid>,
 }
@@ -326,6 +330,8 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundMap,
     },
+    /// The timestamp of an evaluated input, in seconds.
+    Timestamp { input: Box<NativeNode> },
     /// An aggregate over its input.
     Aggregate {
         input: Box<NativeNode>,
@@ -372,7 +378,8 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. } => reads_across_series(input),
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => reads_across_series(input),
         NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
             // Two constants answer the same value for every series there is, so the operation reads
             // none of them; one constant is broadcast over the other side's series unchanged, so what
@@ -522,6 +529,15 @@ impl NativeNode {
                 ensure_samples(&self.output, "a vector operation")?;
                 ensure_same_fields(&input.output, &self.output, "a vector operation")?;
                 ensure_grid(&self.output, input_grid, "a vector operation")?;
+            }
+            NativeExpr::Timestamp { input } => {
+                input.validate()?;
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("timestamp consumes an evaluated vector"));
+                };
+                ensure_samples(&self.output, "timestamp")?;
+                ensure_same_fields(&input.output, &self.output, "timestamp")?;
+                ensure_grid(&self.output, input_grid, "timestamp")?;
             }
             NativeExpr::Aggregate { input, op } => {
                 input.validate()?;

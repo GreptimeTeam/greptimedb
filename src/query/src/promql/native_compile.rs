@@ -69,8 +69,8 @@
 //! of its own, as in `rate(rate(x[5m:1m])[10m:30s])`; a `<step>` left out means Prometheus's default
 //! evaluation interval, one minute. Its `offset` and its `@` anchor are its own, not the inner
 //! expression's, so `rate(x[5m:1m] @ end() offset 1m)` reads one fixed interval. A `<selector>`
-//! outside a `<matrix>` takes an `offset` and no anchor: the instant shape has no field for one, so
-//! `x @ 100` is refused and `rate(x[5m] @ 100)` is not.
+//! outside a `<matrix>` takes an `offset` and an optional `@` anchor; `x @ 100` selects at one
+//! fixed instant across the evaluation grid, as does `rate(x[5m] @ 100)` for its window.
 //!
 //! Those shapes become `Input` (raw samples) → `Instant` (the last sample within the statement's
 //! lookback), `Input` (raw samples) → `Window` (the range function over the statement's grid),
@@ -365,6 +365,7 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. } => {
@@ -813,14 +814,47 @@ fn grouping(modifier: Option<&LabelModifier>) -> Grouping {
     }
 }
 
-/// Compiles a call: a range function opens a window over the selector it is given, and a math,
-/// native histogram or label function maps the value of its first argument.
+/// Compiles `timestamp`, projecting selected source times for a selector and evaluation times for
+/// an already evaluated vector.
+fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNode> {
+    if args.len() != 1 {
+        return Err(not_implemented("timestamp expects one argument"));
+    }
+    let argument = unparen(&args[0]);
+    if argument.value_type() != ValueType::Vector {
+        return Err(not_implemented("timestamp argument is not a vector"));
+    }
+    if let PromExpr::VectorSelector(selector) = argument {
+        return instant_selection_timestamp(context, selector, true);
+    }
+    let input = compile_expr(context, argument)?;
+    let NativeType::Samples(schema) = &input.output else {
+        return Err(not_implemented("timestamp argument is not a vector"));
+    };
+    if schema.fields.len() != 1 {
+        return Err(not_implemented(
+            "timestamp() over a multi-value input is not supported natively",
+        ));
+    }
+    let output = input.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(input),
+        },
+        output,
+    })
+}
+
+/// Compiles a range, pointwise, histogram or label function call.
 ///
 /// The name lists are disjoint, and a range function is decided first because it binds its own
 /// window rather than its argument's value. A name in neither list is refused here, which is where
 /// the difference between "this compiler cannot fold this function" and "this name means nothing"
 /// is still visible.
 fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
+    if call.func.name == "timestamp" {
+        return timestamp_call(context, &call.args.args);
+    }
     let Call { func, args } = call;
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
@@ -1263,18 +1297,17 @@ fn subquery_window(
 /// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
 /// sample at or before each grid point, within the statement's lookback.
 fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<NativeNode> {
-    // An `@` anchor is bound on a range window, which carries `anchor_ms`; an instant selection has
-    // no such field, so the anchor has nowhere to go. Refusing it is the only alternative to
-    // dropping it, which would silently select around every grid point instead of one anchor.
-    if selector.at.is_some() {
-        return Err(not_implemented(&format!(
-            "the `@`-anchored selector `{selector}`, whose anchor the instant selection node has \
-             no field for: an instant selection binds a lookback, an offset and a grid, while \
-             anchoring is bound on a range window, as in `rate(x[5m] @ 1234)`"
-        )));
-    }
+    instant_selection_timestamp(context, selector, false)
+}
+
+fn instant_selection_timestamp(
+    context: &Context,
+    selector: &VectorSelector,
+    timestamp: bool,
+) -> Result<NativeNode> {
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
     let offset_ms = selector_offset_ms(&selector.offset)?;
+    let at_ms = selector_anchor_ms(&selector.at, context.stmt)?;
     let output_grid = Arc::clone(&context.grid);
     let (grid_start_ms, grid_end_ms) = grid_endpoints(&output_grid)?;
     let (source_index, schema) = bind_selector(
@@ -1283,18 +1316,22 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
             metric: selector.name.clone(),
             matchers: selector.matchers.clone(),
             offset_ms,
-            at_ms: None,
+            at_ms,
             grid_start_ms,
             grid_end_ms,
             timing: SelectorTiming::Instant { lookback_ms },
         },
     )?;
+    if timestamp && schema.fields.len() != 1 {
+        return Err(not_implemented(
+            "timestamp() over a multi-value input is not supported natively",
+        ));
+    }
     let output = NativeType::Samples(Arc::new(SeriesSchema {
         fields: Arc::clone(&schema.fields),
         eval_grid: Some(Arc::clone(&output_grid)),
     }));
     let raw = NativeType::Samples(Arc::clone(&schema));
-
     Ok(NativeNode {
         expr: NativeExpr::Instant {
             input: Box::new(NativeNode {
@@ -1308,6 +1345,8 @@ fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<Nat
             op: BoundInstant {
                 lookback_ms,
                 offset_ms,
+                at_ms,
+                timestamp,
                 output_grid,
             },
         },

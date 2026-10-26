@@ -654,25 +654,48 @@ fn an_offset_on_a_bare_selector_keeps_its_sign() {
     }
 }
 
-/// An `@`-anchored bare selector is refused because the instant node has no anchor field, not
-/// because anchoring is unsupported: the window shape binds an anchor.
+/// An `@`-anchored bare selector records its anchor on the instant node.
 #[test]
-fn an_anchored_instant_selector_is_refused_for_the_missing_anchor_field() {
-    let error = compile(
+fn an_anchored_instant_selector_binds_its_anchor() {
+    let tree = compile(
         &eval_stmt("x @ 100"),
         raw_schema(),
         SeriesOrdering::KeyThenTime,
     )
-    .expect_err("`x @ 100` compiled, and it should not have");
-    assert!(
-        matches!(error, DataFusionError::NotImplemented(_)),
-        "`x @ 100` did not report NotImplemented: {error}"
-    );
-    let message = error.to_string();
-    assert!(
-        message.contains("whose anchor the instant selection node has no field for"),
-        "`x @ 100` did not say why its anchor cannot be bound: {message}"
-    );
+    .unwrap();
+    let (_, op) = root_instant(&tree);
+    assert_eq!(op.at_ms, Some(100_000));
+    assert_eq!(op.offset_ms, 0);
+}
+
+/// Anchored instant selectors bind both the runtime anchor and the scan hull, including offsets.
+#[test]
+fn anchored_instant_selector_binds_scan_bounds() {
+    for (query, at_ms, offset_ms, bounds) in [
+        (
+            "x @ 1234 offset 1m",
+            Some(1_234_000),
+            60_000,
+            (1_169_000, 1_174_000, false),
+        ),
+        ("x @ start()", Some(0), 0, (-5_000, 0, false)),
+        ("x @ end()", Some(100_000), 0, (95_000, 100_000, false)),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap();
+        let (_, op) = root_instant(&compiled.tree);
+        assert_eq!(op.at_ms, at_ms, "{query}");
+        assert_eq!(op.offset_ms, offset_ms, "{query}");
+        assert_eq!(
+            compiled.inputs[0].requirement.raw_scan_bounds().unwrap(),
+            bounds,
+            "{query}"
+        );
+    }
 }
 
 /// A window's `@` anchor is bound as an absolute millisecond timestamp: `start()` and `end()` are
@@ -959,13 +982,6 @@ fn an_unsupported_shape_is_rejected_and_names_what_it_found() {
             }),
             "rate(x)",
             "whose matrix is `x`",
-        ),
-        // A function with no kernel. `predict_linear` used to stand here as the parameterised case
-        // and is now bound, so what is left is a name this compiler has no kernel for at all.
-        (
-            eval_stmt("timestamp(x)"),
-            "timestamp(x)",
-            "a call to `timestamp`, which has no native kernel",
         ),
     ];
 
@@ -4716,6 +4732,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. } => set_input_source(input, source),
             NativeExpr::Binary { left, right, .. } => {

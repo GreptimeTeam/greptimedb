@@ -1859,6 +1859,56 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     plan.inputs().into_iter().find_map(find_fused_series)
 }
 
+/// Timestamp over raw and evaluated vectors both use native execution, with anchors and offsets retained.
+#[tokio::test]
+async fn native_fused_timestamp_admits_raw_and_evaluated_vectors() {
+    for (query, raw_selector) in [
+        ("timestamp(some_metric @ 300 offset 1m)", true),
+        ("timestamp(some_metric @ 300 offset -1m)", true),
+        ("timestamp(abs(some_metric @ 300 offset 1m))", false),
+        ("timestamp(abs(some_metric @ 300 offset -1m))", false),
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("timestamp should use the native route");
+        if raw_selector {
+            assert!(matches!(
+                &fused.tree().root().expr,
+                NativeExpr::Instant { op, .. } if op.timestamp
+            ));
+        } else {
+            assert!(matches!(
+                &fused.tree().root().expr,
+                NativeExpr::Timestamp { .. }
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_fused_timestamp_with_multiple_fields_keeps_legacy_plan() {
+    for query in ["timestamp(some_metric)", "timestamp(abs(some_metric))"] {
+        let provider = build_test_table_provider_with_options(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            2,
+            vec![],
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+            ConcreteDataType::float64_datatype(),
+            NATIVE_ENGINE,
+        )
+        .await;
+        let plan = build_native_fused_plan_with_provider(query, true, provider).await;
+        assert!(find_fused_series(&plan).is_none(), "{query}");
+        assert!(
+            plan.display_indent()
+                .to_string()
+                .contains("PromInstantManipulate"),
+            "{query}"
+        );
+    }
+}
+
 /// Literal roots need no raw scan, while a literal beside a selector broadcasts over that input.
 #[tokio::test]
 async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
@@ -2461,7 +2511,8 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 NativeExpr::Input(input) => out.push(input.source_index),
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
-                | NativeExpr::Map { input, .. } => sources(input, out),
+                | NativeExpr::Map { input, .. }
+                | NativeExpr::Timestamp { input } => sources(input, out),
                 NativeExpr::Binary { left, right, .. } => {
                     sources(left, out);
                     sources(right, out);
@@ -2687,6 +2738,8 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
+        "timestamp(sum(some_metric))",
+        "sum(timestamp(abs(some_metric)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2875,6 +2928,23 @@ async fn native_fused_anchored_rate_scan_uses_anchor_bounds() {
         display.contains("timestamp > TimestampMillisecond(0, None)")
             && display.contains("timestamp <= TimestampMillisecond(300000, None)"),
         "native scan should cover the five-minute window ending at the anchor: {display}"
+    );
+}
+
+#[tokio::test]
+async fn native_fused_instant_anchor_reaches_scan_and_runtime() {
+    let plan = build_native_fused_plan("some_metric @ 300000 offset 1m", true).await;
+    let fused = find_fused_series(&plan).expect("the plan holds a native node");
+    let promql::native::plan::NativeExpr::Instant { op, .. } = &fused.tree().root().expr else {
+        panic!("anchored selector did not compile to an instant node");
+    };
+    assert_eq!(op.at_ms, Some(300_000_000));
+    assert_eq!(op.offset_ms, 60_000);
+    let display = plan.display_indent().to_string();
+    assert!(
+        display.contains("timestamp > TimestampMillisecond(299939000, None)")
+            && display.contains("timestamp <= TimestampMillisecond(299940000, None)"),
+        "native scan should cover the anchored instant and lookback outside the statement range: {display}"
     );
 }
 

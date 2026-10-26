@@ -414,6 +414,7 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
+        | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. } => match split(input, fields, time_index)? {
             Some(_) => Err(declined(
                 "an aggregate under an operation that reads evaluated values",
@@ -487,6 +488,7 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => raw_fields(input),
             NativeExpr::Binary { left, right, .. } => {

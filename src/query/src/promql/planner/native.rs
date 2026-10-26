@@ -720,7 +720,7 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         NativeExpr::Instant { input, .. } | NativeExpr::Window { input, .. } => {
             matches!(input.expr, NativeExpr::Input(_))
         }
-        NativeExpr::Map { input, .. } => pointwise_operand(input),
+        NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => pointwise_operand(input),
         // A constant on one side is broadcast over the vector side's positions. Two vectors are a
         // match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
@@ -771,7 +771,7 @@ fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
         PromExpr::Call(call)
             if matches!(
                 call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs"
+                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
             ) && call.args.args.len() == 1 =>
         {
             admitted_selector(&call.args.args[0])
@@ -926,7 +926,8 @@ mod tests {
                 NativeExpr::Input(input) => sources.push(input.source_index),
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
-                | NativeExpr::Map { input, .. } => collect(input, sources),
+                | NativeExpr::Map { input, .. }
+                | NativeExpr::Timestamp { input } => collect(input, sources),
                 NativeExpr::Binary { left, right, .. } => {
                     collect(left, sources);
                     collect(right, sources);
@@ -1008,7 +1009,14 @@ mod tests {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_none(), "{query}");
         }
-        for query in ["x", "rate(x[5s])", "sum_over_time(x[5s])", "abs(x)"] {
+        for query in [
+            "x",
+            "rate(x[5s])",
+            "sum_over_time(x[5s])",
+            "abs(x)",
+            "timestamp(x)",
+            "timestamp(abs(x))",
+        ] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_some(), "{query}");
         }
