@@ -70,12 +70,25 @@ pub(crate) async fn decompress_remote_write_body(
     is_zstd: bool,
     body: &[u8],
     limiter: &ServerMemoryLimiter,
+    body_reserved_bytes: u64,
 ) -> crate::error::Result<ChargedBuffer> {
     let decompress = |is_zstd: bool| async move {
         if is_zstd {
-            zstd_decompress_limited(body, MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await
+            zstd_decompress_limited(
+                body,
+                MAX_DECOMPRESSED_REQUEST_SIZE,
+                limiter,
+                body_reserved_bytes,
+            )
+            .await
         } else {
-            snappy_decompress_limited(body, MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await
+            snappy_decompress_limited(
+                body,
+                MAX_DECOMPRESSED_REQUEST_SIZE,
+                limiter,
+                body_reserved_bytes,
+            )
+            .await
         }
     };
 
@@ -112,7 +125,7 @@ pub async fn decode_remote_write_request(
     // Holds the memory permits for the decompressed bytes; the caller must
     // keep them alive as long as the returned `TablesBuilder`, which retains
     // the decompressed buffer as its raw data.
-    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
+    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter, 0).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
     let (data, guards) = buf.into_parts();

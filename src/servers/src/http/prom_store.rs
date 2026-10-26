@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::http::{Extensions, HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::TypedHeader;
 use common_catalog::consts::DEFAULT_SCHEMA_NAME;
@@ -46,6 +46,7 @@ use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
     CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
 };
+use crate::http::memory_limit::BodyMemoryAccounting;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -109,7 +110,7 @@ impl Default for RemoteWriteQuery {
 pub async fn remote_write(
     State(state): State<PromStoreState>,
     Query(params): Query<RemoteWriteQuery>,
-    Extension(query_ctx): Extension<QueryContext>,
+    (Extension(query_ctx), extensions): (Extension<QueryContext>, Extensions),
     content_type: Option<TypedHeader<headers::ContentType>>,
     pipeline_info: PipelineInfo,
     content_encoding: TypedHeader<headers::ContentEncoding>,
@@ -126,7 +127,20 @@ pub async fn remote_write(
             {
                 return Ok(response);
             }
-            remote_write_v2(state, params, query_ctx, pipeline_info, is_zstd, body).await
+            // Read after Bytes has collected every frame, including chunked-body reservations.
+            let body_reserved_bytes = extensions
+                .get::<BodyMemoryAccounting>()
+                .map_or(0, BodyMemoryAccounting::reserved_bytes);
+            remote_write_v2(
+                state,
+                params,
+                query_ctx,
+                pipeline_info,
+                is_zstd,
+                body,
+                body_reserved_bytes,
+            )
+            .await
         }
         RemoteWriteProto::Unsupported(content_type) => Ok((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -235,6 +249,7 @@ async fn remote_write_v2(
     pipeline_info: PipelineInfo,
     is_zstd: bool,
     body: Bytes,
+    body_reserved_bytes: u64,
 ) -> Result<axum::response::Response> {
     let PromStoreState {
         prom_store_handler,
@@ -256,10 +271,11 @@ async fn remote_write_v2(
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let req = match decode_remote_write_v2(is_zstd, body, &memory_limiter).await {
-        Ok(req) => req,
-        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
-    };
+    let req =
+        match decode_remote_write_v2(is_zstd, body, &memory_limiter, body_reserved_bytes).await {
+            Ok(req) => req,
+            Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
+        };
     // The v2 per-series metadata upgrades the written tables' semantic options
     // (metric type/unit, declared quality) at auto-create time.
     if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
@@ -309,9 +325,6 @@ async fn remote_write_v2(
     debug_assert!(outcome.samples_written <= sample_count);
     debug_assert!(outcome.histograms_written <= histogram_count);
     let mut headers = write_cost_header_map(outcome.write_cost);
-    if outcome.accepted {
-        return Ok((StatusCode::ACCEPTED, headers).into_response());
-    }
     append_remote_write_v2_written_headers(
         &mut headers,
         outcome.samples_written,
@@ -319,7 +332,12 @@ async fn remote_write_v2(
         0,
     );
 
-    Ok((StatusCode::NO_CONTENT, headers).into_response())
+    let status = if outcome.accepted {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::NO_CONTENT
+    };
+    Ok((status, headers).into_response())
 }
 
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
@@ -600,6 +618,8 @@ async fn write_batched_prometheus_v2_rows_with_progress(
         (samples, histograms)
     };
     let mut write_cost = 0;
+    let mut samples_accepted = 0;
+    let mut histograms_accepted = 0;
     for (index, (ctx, requests)) in batches.into_iter().enumerate() {
         let result = if index < sample_batch_count
             && let Some(batcher) = batcher
@@ -621,6 +641,11 @@ async fn write_batched_prometheus_v2_rows_with_progress(
         match result {
             Ok((rows, cost, pending)) => {
                 write_cost += cost;
+                if index < sample_batch_count {
+                    samples_accepted += rows;
+                } else {
+                    histograms_accepted += rows;
+                }
                 if pending {
                     progress[index].mark_accepted();
                 }
@@ -641,11 +666,11 @@ async fn write_batched_prometheus_v2_rows_with_progress(
             }
         }
     }
-    let (samples_written, histograms_written) = counts();
     Ok(PromWriteV2Outcome {
         write_cost,
-        samples_written,
-        histograms_written,
+        // PRW counts accepted rows on success; errors above report confirmed storage writes.
+        samples_written: samples_accepted,
+        histograms_written: histograms_accepted,
         accepted: progress.iter().any(|p| p.accepted()),
     })
 }
@@ -805,7 +830,8 @@ async fn decode_remote_read_request(
 ) -> Result<ReadRequest> {
     // Holds the memory permits for the decompressed bytes until the protobuf
     // decoding is finished.
-    let buf = snappy_decompress_limited(&body[..], MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await?;
+    let buf =
+        snappy_decompress_limited(&body[..], MAX_DECOMPRESSED_REQUEST_SIZE, limiter, 0).await?;
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
 }
@@ -813,15 +839,22 @@ async fn decode_remote_read_request(
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
+    use std::time::Duration;
 
     use api::prom_store::remote::ReadRequest;
     use api::v1::{Row, RowInsertRequest, Rows};
     use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::{Router, middleware, routing};
+    use common_memory_manager::OnExhaustedPolicy;
     use common_query::Output;
     use pipeline::GreptimePipelineParams;
     use session::context::{QueryContext, QueryContextRef};
+    use tower::ServiceExt;
 
     use super::*;
+    use crate::http::memory_limit::memory_limit_middleware;
     use crate::prom_remote_write::validation::PromValidationMode;
     use crate::query_handler::PromStoreProtocolHandler;
 
@@ -957,6 +990,37 @@ mod tests {
                 }],
             },
         )
+    }
+
+    #[tokio::test]
+    async fn test_async_v2_counts_acceptance_without_confirming_storage() {
+        let handler: PromStoreProtocolHandlerRef = Arc::new(RecordingPromStoreHandler {
+            events: Default::default(),
+        });
+        let mut batches = vec![
+            test_prom_write_batch("queued"),
+            test_prom_write_batch("queued"),
+        ];
+        let mut progress = Vec::new();
+        for (ctx, _) in &mut batches {
+            let tracker = Arc::new(session::write_progress::WriteProgress::default());
+            Arc::get_mut(ctx)
+                .unwrap()
+                .set_write_progress(tracker.clone());
+            progress.push(tracker);
+        }
+        preflight_prometheus_rows(&handler, &mut batches)
+            .await
+            .unwrap();
+        let Ok(outcome) =
+            write_batched_prometheus_v2_rows_with_progress(handler, None, true, 1, batches).await
+        else {
+            panic!("queued writes should be accepted")
+        };
+        assert!(outcome.accepted);
+        assert_eq!(outcome.samples_written, 1);
+        assert_eq!(outcome.histograms_written, 1);
+        assert!(progress.iter().all(|tracker| tracker.written() == 0));
     }
 
     fn record_write_event(events: &Mutex<Vec<String>>, phase: &str, request: &RowInsertRequests) {
@@ -1101,9 +1165,9 @@ mod tests {
     #[tokio::test]
     async fn test_remote_write_v2_reports_confirmed_partial_and_queued_writes() {
         for (name, expected_status, expected_count) in [
-            ("confirmed", StatusCode::NO_CONTENT, Some("2")),
-            ("partial", StatusCode::INTERNAL_SERVER_ERROR, Some("1")),
-            ("queued", StatusCode::ACCEPTED, None),
+            ("confirmed", StatusCode::NO_CONTENT, "2"),
+            ("partial", StatusCode::INTERNAL_SERVER_ERROR, "1"),
+            ("queued", StatusCode::ACCEPTED, "2"),
         ] {
             let request = crate::prom_remote_write::v2::test_util::request_with_labels_and_samples(
                 vec![("__name__", name)],
@@ -1122,28 +1186,118 @@ mod tests {
                 pipeline_info(None),
                 false,
                 body,
+                0,
             )
             .await
             .unwrap();
             assert_eq!(response.status(), expected_status);
             assert_eq!(
-                response
-                    .headers()
-                    .get(REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER)
-                    .map(|value| value.to_str().unwrap()),
+                response.headers()[REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER],
                 expected_count
             );
-            if expected_count.is_none() {
-                assert!(
-                    !response
-                        .headers()
-                        .contains_key(REMOTE_WRITE_V2_HISTOGRAMS_WRITTEN_HEADER)
-                );
-                assert!(
-                    !response
-                        .headers()
-                        .contains_key(REMOTE_WRITE_V2_EXEMPLARS_WRITTEN_HEADER)
-                );
+            assert_eq!(
+                response.headers()[REMOTE_WRITE_V2_HISTOGRAMS_WRITTEN_HEADER],
+                "0"
+            );
+            assert_eq!(
+                response.headers()[REMOTE_WRITE_V2_EXEMPLARS_WRITTEN_HEADER],
+                "0"
+            );
+        }
+    }
+
+    fn memory_limited_prom_write_app(limiter: ServerMemoryLimiter) -> Router {
+        let mut state = test_state();
+        state.memory_limiter = limiter.clone();
+        Router::new()
+            .route("/write", routing::post(remote_write))
+            .with_state(state)
+            .layer(Extension(QueryContext::with("greptime", "public")))
+            .layer(middleware::from_fn_with_state(
+                limiter,
+                memory_limit_middleware,
+            ))
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_remote_write_v2_accounts_for_body_when_rejecting_or_waiting() {
+        let wire = api::greptime_proto::io::prometheus::write::v2::Request {
+            symbols: vec![
+                String::new(),
+                format!("{:?}", (0..2048).collect::<Vec<_>>()),
+            ],
+            timeseries: Vec::new(),
+        }
+        .encode_to_vec();
+        let decoded_bytes = wire.len().div_ceil(1024) * 1024;
+
+        for encoding in [DEFAULT_ENCODING, VM_ENCODING] {
+            let body = Bytes::from(if encoding == DEFAULT_ENCODING {
+                crate::prom_store::snappy_compress(&wire).unwrap()
+            } else {
+                zstd::stream::encode_all(wire.as_slice(), 3).unwrap()
+            });
+            for chunked in [false, true] {
+                // Small frames make their rounded permits exceed the rounded total body length.
+                let chunk_size = if chunked { 513 } else { body.len() };
+                let frames = body
+                    .chunks(chunk_size)
+                    .map(Bytes::copy_from_slice)
+                    .collect::<Vec<_>>();
+                let body_reserved: usize =
+                    frames.iter().map(|f| f.len().div_ceil(1024) * 1024).sum();
+                if chunked {
+                    assert!(body_reserved > body.len().div_ceil(1024) * 1024);
+                }
+                // Reject during decompression or scratch allocation; otherwise wait for contention.
+                for decoder_quota in [decoded_bytes - 1024, decoded_bytes, decoded_bytes + 1024] {
+                    let limit = (body_reserved + decoder_quota) as u64;
+                    let limiter = ServerMemoryLimiter::new(limit, OnExhaustedPolicy::default());
+                    let fits = decoder_quota > decoded_bytes;
+                    let occupied = fits.then(|| limiter.try_acquire(1024).unwrap());
+                    let app = memory_limited_prom_write_app(limiter.clone());
+                    let mut request = Request::builder()
+                        .uri("/write")
+                        .method("POST")
+                        .header(
+                            header::CONTENT_TYPE,
+                            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                        )
+                        .header(header::CONTENT_ENCODING, encoding);
+                    let request_body = if chunked {
+                        Body::from_stream(futures::stream::iter(
+                            frames.clone().into_iter().map(Ok::<_, std::io::Error>),
+                        ))
+                    } else {
+                        request = request.header(header::CONTENT_LENGTH, body.len().to_string());
+                        Body::from(body.clone())
+                    };
+                    let started = tokio::time::Instant::now();
+                    let response = app.oneshot(request.body(request_body).unwrap());
+                    tokio::pin!(response);
+                    if let Some(occupied) = occupied {
+                        assert!(futures::poll!(response.as_mut()).is_pending());
+                        // A failed attempt releases decoder permits, retaining only the HTTP body.
+                        assert_eq!(limiter.used_bytes(), body_reserved as u64 + 1024);
+                        drop(occupied);
+                    }
+                    let response = response.await.unwrap();
+                    assert_eq!(
+                        response.status(),
+                        if fits {
+                            StatusCode::NO_CONTENT
+                        } else {
+                            StatusCode::TOO_MANY_REQUESTS
+                        },
+                        "encoding={encoding}, chunked={chunked}, decoder_quota={decoder_quota}"
+                    );
+                    assert_eq!(started.elapsed(), Duration::ZERO);
+                    assert_eq!(
+                        response.headers()[REMOTE_WRITE_V2_SAMPLES_WRITTEN_HEADER],
+                        "0"
+                    );
+                    assert_eq!(limiter.used_bytes(), 0);
+                }
             }
         }
     }
@@ -1164,6 +1318,7 @@ mod tests {
             pipeline_info(Some("pipeline")),
             false,
             body,
+            0,
         )
         .await
         .unwrap();

@@ -382,6 +382,7 @@ impl RegionWriteCtx {
         }
 
         self.has_skip_wal_writes |= bulk.num_rows() > 0 && self.is_skip_wal_write(skip_wal);
+        // WriteAttribution requires the input count on success, before any deduplication.
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
 

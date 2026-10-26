@@ -716,6 +716,10 @@ impl std::fmt::Debug for ChargedBuffer {
 }
 
 impl ChargedBuffer {
+    pub(crate) fn reserved_bytes(&self) -> u64 {
+        self.guards.iter().map(MemoryGuard::granted_bytes).sum()
+    }
+
     /// Creates a buffer with the permits charged for it.
     pub(crate) fn new(data: Vec<u8>, guards: Vec<MemoryGuard<RequestMemoryMetrics>>) -> Self {
         Self { data, guards }
@@ -738,6 +742,7 @@ pub(crate) async fn snappy_decompress_limited(
     buf: &[u8],
     max_decompressed: usize,
     limiter: &ServerMemoryLimiter,
+    held_bytes: u64,
 ) -> Result<ChargedBuffer> {
     let decoded_len =
         snap::raw::decompress_len(buf).context(error::DecompressSnappyPromRemoteRequestSnafu)?;
@@ -750,6 +755,7 @@ pub(crate) async fn snappy_decompress_limited(
     );
     // Reserve the declared size before the allocation happens so concurrent
     // decompressions cannot exceed the aggregate quota.
+    limiter.check_request_fits(decoded_len as u64, held_bytes)?;
     let guard = limiter.acquire(decoded_len as u64).await?;
     let mut decoder = Decoder::new();
     let data = decoder
@@ -768,6 +774,7 @@ pub(crate) async fn zstd_decompress_limited(
     buf: &[u8],
     max_decompressed: usize,
     limiter: &ServerMemoryLimiter,
+    mut held_bytes: u64,
 ) -> Result<ChargedBuffer> {
     use std::io::Read;
 
@@ -795,7 +802,10 @@ pub(crate) async fn zstd_decompress_limited(
         );
         // Charge each chunk before it is appended so the aggregate quota
         // bounds the memory while it is being materialized.
-        guards.push(limiter.acquire(n as u64).await?);
+        limiter.check_request_fits(n as u64, held_bytes)?;
+        let guard = limiter.acquire(n as u64).await?;
+        held_bytes += guard.granted_bytes();
+        guards.push(guard);
         data.extend_from_slice(&chunk[..n]);
     }
     Ok(ChargedBuffer { data, guards })
@@ -1963,7 +1973,7 @@ mod tests {
         let bomb = [0xffu8, 0xff, 0xff, 0xff, 0x0f];
         let limiter = ServerMemoryLimiter::default();
 
-        let err = snappy_decompress_limited(&bomb, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+        let err = snappy_decompress_limited(&bomb, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -1981,7 +1991,7 @@ mod tests {
         let limiter = ServerMemoryLimiter::default();
 
         let decoded =
-            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
                 .await
                 .unwrap();
         assert_eq!(&decoded[..], &raw[..]);
@@ -1995,7 +2005,7 @@ mod tests {
         let limiter = ServerMemoryLimiter::new(128 * 1024, OnExhaustedPolicy::Fail);
 
         let decoded =
-            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
+            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
                 .await
                 .unwrap();
         // Rounding to the 1 KiB permit granularity.
@@ -2013,9 +2023,10 @@ mod tests {
         // Quota smaller than the decoded size.
         let limiter = ServerMemoryLimiter::new(1024, OnExhaustedPolicy::Fail);
 
-        let err = snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
-            .await
-            .unwrap_err();
+        let err =
+            snappy_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
+                .await
+                .unwrap_err();
         assert!(matches!(
             err,
             crate::error::Error::MemoryLimitExceeded { .. }
@@ -2031,7 +2042,7 @@ mod tests {
         // Exactly at the cap: accepted.
         let raw = vec![0u8; small_cap];
         let compressed = zstd::stream::encode_all(&raw[..], 3).unwrap();
-        let decoded = zstd_decompress_limited(&compressed, small_cap, &limiter)
+        let decoded = zstd_decompress_limited(&compressed, small_cap, &limiter, 0)
             .await
             .unwrap();
         assert_eq!(decoded.len(), small_cap);
@@ -2039,7 +2050,7 @@ mod tests {
         // One byte past the cap: rejected.
         let raw = vec![0u8; small_cap + 1];
         let compressed = zstd::stream::encode_all(&raw[..], 3).unwrap();
-        let err = zstd_decompress_limited(&compressed, small_cap, &limiter)
+        let err = zstd_decompress_limited(&compressed, small_cap, &limiter, 0)
             .await
             .unwrap_err();
         assert!(matches!(
@@ -2048,7 +2059,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_zstd_charges_incrementally() {
         // 64 KiB wire that expands to 2 MiB must be charged chunk by chunk
         // against a quota that only fits the expanded size.
@@ -2057,13 +2068,27 @@ mod tests {
         assert!(compressed.len() < 16 * 1024);
         let limiter = ServerMemoryLimiter::new(4 * 1024 * 1024, OnExhaustedPolicy::Fail);
 
-        let decoded = zstd_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter)
-            .await
-            .unwrap();
+        let decoded =
+            zstd_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
+                .await
+                .unwrap();
         assert_eq!(decoded.len(), raw.len());
         assert!(limiter.used_bytes() >= raw.len() as u64);
         drop(decoded);
         assert_eq!(0, limiter.used_bytes());
+        // The next chunk cannot fit alongside this request's earlier chunks.
+        let limiter = ServerMemoryLimiter::new(
+            (2 * ZSTD_DECOMPRESS_CHUNK) as u64,
+            OnExhaustedPolicy::default(),
+        );
+        let started = tokio::time::Instant::now();
+        let error =
+            zstd_decompress_limited(&compressed, MAX_DECOMPRESSED_REQUEST_SIZE, &limiter, 0)
+                .await
+                .unwrap_err();
+        assert!(matches!(error, error::Error::MemoryLimitExceeded { .. }));
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(limiter.used_bytes(), 0);
     }
 
     #[test]

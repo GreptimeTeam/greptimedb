@@ -30,7 +30,8 @@ use api::v1::ColumnSchema;
 use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequest, Rows, SemanticType, Value};
 use bytes::{Buf, Bytes};
-use common_memory_manager::MemoryGuard;
+use common_error::ext::BoxedError;
+use common_memory_manager::{MemoryGuard, OnExhaustedPolicy};
 #[cfg(test)]
 use common_query::native_histogram::*;
 use common_query::native_histogram::{
@@ -134,20 +135,19 @@ struct ConversionBudget<'a> {
     limiter: &'a ServerMemoryLimiter,
     guard: MemoryGuard<RequestMemoryMetrics>,
     used_bytes: u64,
+    held_bytes: u64,
 }
 
 impl<'a> ConversionBudget<'a> {
-    fn new(limiter: &'a ServerMemoryLimiter, wire_bytes: usize) -> Result<Self> {
-        let mut budget = Self {
+    fn new(limiter: &'a ServerMemoryLimiter, held_bytes: u64) -> Result<Self> {
+        Ok(Self {
             limiter,
             used_bytes: 0,
+            held_bytes,
             guard: limiter.try_acquire(0).context(error::InternalSnafu {
                 err_msg: "cannot create an empty memory reservation",
             })?,
-        };
-        // Borrowed symbol/series vectors and protobuf scratch can exceed the wire size.
-        budget.reserve(wire_bytes.checked_mul(16))?;
-        Ok(budget)
+        })
     }
 
     fn reserve(&mut self, bytes: Option<usize>) -> Result<()> {
@@ -179,10 +179,12 @@ impl<'a> ConversionBudget<'a> {
                 return Ok(());
             }
         }
-        // Never wait while retaining the decompressed body or earlier rows.
+        // The caller drops this attempt before waiting for its entire required quota.
         Err(error::MemoryLimitExceededSnafu.into_error(
             common_memory_manager::Error::MemoryLimitExceeded {
-                requested_bytes: required.unwrap_or(u64::MAX),
+                requested_bytes: required
+                    .and_then(|bytes| self.held_bytes.checked_add(bytes))
+                    .unwrap_or(u64::MAX),
                 limit_bytes: self.limiter.limit_bytes(),
             },
         ))
@@ -193,6 +195,65 @@ pub(crate) async fn decode_remote_write_v2(
     is_zstd: bool,
     body: Bytes,
     limiter: &ServerMemoryLimiter,
+    body_reserved_bytes: u64,
+) -> Result<RemoteWriteV2WriteRequests> {
+    let mut requested_bytes = 0;
+    let decode = async {
+        loop {
+            match decode_remote_write_v2_once(is_zstd, &body, limiter, body_reserved_bytes).await {
+                Err(error::Error::MemoryLimitExceeded {
+                    source:
+                        common_memory_manager::Error::MemoryLimitExceeded {
+                            requested_bytes: required,
+                            limit_bytes,
+                        },
+                    ..
+                }) if matches!(limiter.policy(), OnExhaustedPolicy::Wait { .. })
+                    && required <= limit_bytes =>
+                {
+                    limiter.check_request_fits(required, body_reserved_bytes)?;
+                    requested_bytes = required;
+                    // The attempt is gone; HTTP body permits remain held until the handler returns.
+                    tokio::task::yield_now().await;
+                    drop(limiter.acquire(required).await?);
+                }
+                result => return result,
+            }
+        }
+    };
+    let result = match limiter.policy() {
+        OnExhaustedPolicy::Wait { timeout } => {
+            // Another request can take the released permits before our next attempt.
+            tokio::time::timeout(timeout, decode)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(error::MemoryLimitExceededSnafu.into_error(
+                        common_memory_manager::Error::MemoryAcquireTimeout {
+                            requested_bytes,
+                            waited: timeout,
+                        },
+                    ))
+                })
+        }
+        OnExhaustedPolicy::Fail => decode.await,
+    };
+    result.map_err(|error| match error {
+        error::Error::MemoryLimitExceeded {
+            source: source @ common_memory_manager::Error::MemoryAcquireTimeout { .. },
+            ..
+        } => {
+            // Prometheus retries 5xx; 429 may discard a request delayed by other writes.
+            error::OtherSnafu.into_error(BoxedError::new(source))
+        }
+        error => error,
+    })
+}
+
+async fn decode_remote_write_v2_once(
+    is_zstd: bool,
+    body: &[u8],
+    limiter: &ServerMemoryLimiter,
+    body_reserved_bytes: u64,
 ) -> Result<RemoteWriteV2WriteRequests> {
     let decode_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["decode", REMOTE_WRITE_V2_VERSION])
@@ -200,10 +261,15 @@ pub(crate) async fn decode_remote_write_v2(
 
     // Holds the memory permits for the decompressed bytes until the protobuf
     // decoding and conversion below are finished.
-    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
-    // Decompression copied the payload out, so the compressed body is no longer needed.
-    drop(body);
-    let budget = ConversionBudget::new(limiter, buf.len())?;
+    let buf = decompress_remote_write_body(is_zstd, body, limiter, body_reserved_bytes).await?;
+    let mut scratch = ConversionBudget::new(limiter, buf.reserved_bytes())?;
+    scratch.reserve(Some(
+        conversion_scratch_bytes(&buf).context(error::DecodePromRemoteRequestSnafu)?,
+    ))?;
+    let budget = ConversionBudget::new(
+        limiter,
+        buf.reserved_bytes() + scratch.guard.granted_bytes(),
+    )?;
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
     drop(decode_timer);
 
@@ -211,6 +277,46 @@ pub(crate) async fn decode_remote_write_v2(
         .with_label_values(&["convert", REMOTE_WRITE_V2_VERSION])
         .start_timer();
     convert_remote_write_v2(request, budget)
+}
+
+/// Bounds borrowed-vector capacity and protobuf scratch without charging symbol contents or samples.
+fn conversion_scratch_bytes(mut buf: &[u8]) -> std::result::Result<usize, DecodeError> {
+    // A one-byte varint can become an i64; Vec growth can double its capacity.
+    const PROTOBUF_SCRATCH_EXPANSION: usize = 2 * std::mem::size_of::<i64>();
+    // Cover the minimum capacities of the two borrowed vectors.
+    let mut bytes = Some(8 * std::mem::size_of::<&[u8]>());
+    while buf.has_remaining() {
+        let (tag, wire_type) = decode_key(&mut buf)?;
+        match tag {
+            4 | 5 => {
+                let value = take_length_delimited(wire_type, &mut buf)?;
+                bytes = bytes.and_then(|n| n.checked_add(2 * std::mem::size_of::<&[u8]>()));
+                if tag == 5 {
+                    let mut series = value;
+                    while series.has_remaining() {
+                        let before = series.len();
+                        let (tag, wire_type) = decode_key(&mut series)?;
+                        skip_field(wire_type, tag, &mut series, DecodeContext::default())?;
+                        if matches!(
+                            tag,
+                            TIME_SERIES_LABELS_REFS_TAG
+                                | TIME_SERIES_HISTOGRAMS_TAG
+                                | TIME_SERIES_EXEMPLARS_TAG
+                        ) {
+                            bytes = bytes.and_then(|n| {
+                                n.checked_add(
+                                    (before - series.len())
+                                        .checked_mul(PROTOBUF_SCRATCH_EXPANSION)?,
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+            _ => skip_field(wire_type, tag, &mut buf, DecodeContext::default())?,
+        }
+    }
+    bytes.ok_or_else(|| DecodeError::new("remote write v2 scratch size overflows usize"))
 }
 
 fn convert_remote_write_v2(
@@ -944,7 +1050,7 @@ pub mod test_util {
             .build()
             .unwrap()
             .block_on(async move {
-                decompress_remote_write_body(is_zstd, &body[..], &ServerMemoryLimiter::default())
+                decompress_remote_write_body(is_zstd, &body[..], &ServerMemoryLimiter::default(), 0)
                     .await
                     .map(|buf| buf.to_vec())
             })
@@ -969,6 +1075,7 @@ pub mod test_util {
                 is_zstd,
                 body,
                 &ServerMemoryLimiter::default(),
+                0,
             ))?;
         Ok((
             requests.samples.all_req().collect(),
@@ -982,7 +1089,11 @@ pub mod test_util {
         body: &[u8],
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
         let limiter = ServerMemoryLimiter::default();
-        let budget = super::ConversionBudget::new(&limiter, body.len())?;
+        let mut scratch = super::ConversionBudget::new(&limiter, 0)?;
+        scratch.reserve(Some(
+            super::conversion_scratch_bytes(body).context(error::DecodePromRemoteRequestSnafu)?,
+        ))?;
+        let budget = super::ConversionBudget::new(&limiter, scratch.guard.granted_bytes())?;
         let request =
             super::BorrowedRequest::decode(body).context(error::DecodePromRemoteRequestSnafu)?;
         let requests = super::convert_remote_write_v2(request, budget)?;
@@ -1499,7 +1610,7 @@ mod tests {
         let limiter = ServerMemoryLimiter::new(8 * 1024 * 1024, OnExhaustedPolicy::Fail);
         let body =
             Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
-        let error = match decode_remote_write_v2(false, body, &limiter).await {
+        let error = match decode_remote_write_v2(false, body, &limiter, 0).await {
             Ok(_) => panic!("interned labels must not expand past the quota"),
             Err(error) => error,
         };
@@ -1509,7 +1620,9 @@ mod tests {
         request.timeseries[0].samples.truncate(1);
         let body =
             Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
-        let decoded = decode_remote_write_v2(false, body, &limiter).await.unwrap();
+        let decoded = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .unwrap();
         assert!(limiter.used_bytes() >= label.len() as u64);
         let progress =
             session::write_progress::WriteProgress::with_reservation(decoded.memory_guard.clone());
@@ -1519,6 +1632,69 @@ mod tests {
         assert_eq!(limiter.used_bytes(), 0);
         let mut budget = ConversionBudget::new(&limiter, 0).unwrap();
         assert!(budget.reserve(usize::MAX.checked_mul(2)).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_large_symbols_do_not_reserve_body_multiples_or_retain_scratch() {
+        let limiter = ServerMemoryLimiter::new(64 * 1024 * 1024, OnExhaustedPolicy::Fail);
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let decoded = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .unwrap();
+        let row_bytes = limiter.used_bytes();
+        drop(decoded);
+
+        request
+            .symbols
+            .extend((0..4096).map(|i| format!("unused_{i}")));
+        let help_ref = request.symbols.len() as u32;
+        request.symbols.push("x".repeat(4 * 1024 * 1024));
+        request.timeseries[0].metadata = Some(Metadata {
+            help_ref,
+            ..Default::default()
+        });
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let decoded = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .unwrap();
+        assert_eq!(decoded.sample_count, 1);
+        assert_eq!(limiter.used_bytes(), row_bytes);
+        drop(decoded);
+        assert_eq!(limiter.used_bytes(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_conversion_wait_timeout_is_retryable_but_oversized_requests_do_not_wait() {
+        use common_error::ext::{ErrorExt, RetryHint};
+
+        let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::default());
+        let occupied = limiter.try_acquire(60 * 1024).unwrap();
+        let mut request = request_with_sample(vec![(METRIC_NAME_LABEL, "metric")]);
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let error = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.retry_hint(), RetryHint::Retryable);
+        assert!(crate::error::status_code_to_http_status(&error.status_code()).is_server_error());
+        assert_eq!(limiter.used_bytes(), occupied.granted_bytes());
+        drop(occupied);
+
+        request.timeseries[0].samples = vec![Sample::default(); 10_000];
+        let body =
+            Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
+        let started = tokio::time::Instant::now();
+        let error = decode_remote_write_v2(false, body, &limiter, 0)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, error::Error::MemoryLimitExceeded { .. }));
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
+        assert_eq!(limiter.used_bytes(), 0);
     }
 
     #[test]
@@ -1553,7 +1729,7 @@ mod tests {
         }
         let body = request.encode_to_vec();
         let limiter = ServerMemoryLimiter::default();
-        let budget = ConversionBudget::new(&limiter, body.len()).unwrap();
+        let budget = ConversionBudget::new(&limiter, 0).unwrap();
         let decoded =
             convert_remote_write_v2(BorrowedRequest::decode(&body).unwrap(), budget).unwrap();
         let minimum = 200 * 202 * std::mem::size_of::<Value>();
@@ -1568,7 +1744,7 @@ mod tests {
             minimum as u64 / 2,
             common_memory_manager::OnExhaustedPolicy::Fail,
         );
-        let budget = ConversionBudget::new(&limiter, body.len()).unwrap();
+        let budget = ConversionBudget::new(&limiter, 0).unwrap();
         assert!(convert_remote_write_v2(BorrowedRequest::decode(&body).unwrap(), budget).is_err());
         assert_eq!(limiter.used_bytes(), 0);
     }
@@ -2300,6 +2476,7 @@ mod tests {
                 is_zstd,
                 body,
                 &ServerMemoryLimiter::default(),
+                0,
             ))
     }
 

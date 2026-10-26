@@ -67,6 +67,8 @@ impl WriteAttribution {
         Ok(selected)
     }
 
+    /// Successful writes must acknowledge every input row, including duplicates, as
+    /// Mito's `RegionWriteCtx::push_bulk` does. A partial count cannot identify owners.
     pub(crate) fn record(&self, affected_rows: usize) -> Result<()> {
         if !self.is_tracked() {
             return Ok(());
