@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
@@ -582,10 +582,12 @@ impl FileHandle {
         let primary_key_range = meta
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
+        let lifetime = self.inner.lifetime.clone();
+        *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
                 meta,
-                self.inner.lifetime.clone(),
+                lifetime,
                 primary_key_range,
             )),
         }
@@ -647,6 +649,16 @@ impl FileHandle {
             .compacting
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
+    }
+
+    pub fn index_outdated(&self) -> bool {
+        self.inner.index_outdated.load(Ordering::Relaxed)
+    }
+
+    pub fn set_index_outdated(&self, index_outdated: bool) {
+        self.inner
+            .index_outdated
+            .store(index_outdated, Ordering::Relaxed);
     }
 
     /// Returns a reference to the [FileMeta].
@@ -781,21 +793,17 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
+    index_outdated: AtomicBool,
     primary_key_range: RwLock<PrimaryKeyRange>,
     lifetime: Arc<SstLifetime>,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        // Arc fields are released only after this destructor returns, so concurrent
-        // destructors can both observe a strong count greater than one. Decrement the
-        // view count atomically to elect exactly one final releaser. AcqRel also makes
-        // retirement by a previously released view visible to that final releaser.
-        let is_last_view = self.lifetime.view_count.fetch_sub(1, Ordering::AcqRel) == 1;
-        let is_delete = is_last_view && self.lifetime.deleted.load(Ordering::Acquire);
-        self.lifetime
-            .file_purger
-            .remove_file(self.meta.clone(), is_delete);
+        self.lifetime.file_purger.release_file_ref(
+            self.meta.clone(),
+            self.index_outdated.load(Ordering::Acquire),
+        );
     }
 }
 
@@ -806,7 +814,7 @@ impl FileHandleInner {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         let lifetime = Arc::new(SstLifetime {
-            view_count: AtomicUsize::new(0),
+            meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
             file_purger,
         });
@@ -819,10 +827,10 @@ impl FileHandleInner {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         lifetime.file_purger.new_file(&meta);
-        lifetime.view_count.fetch_add(1, Ordering::Relaxed);
         Self {
             meta,
             compacting: AtomicBool::new(false),
+            index_outdated: AtomicBool::new(false),
             primary_key_range: RwLock::new(
                 primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
             ),
@@ -831,13 +839,22 @@ impl FileHandleInner {
     }
 }
 
-/// Retirement and final purge are shared by every index metadata view of the same SST.
+/// Physical deletion must wait for readers of every index metadata version.
 /// Independent logical references (for example, copied regions) do not share this guard.
 struct SstLifetime {
-    /// Counts metadata views until their destructor starts, not individual FileHandle clones.
-    view_count: AtomicUsize,
+    /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
+    meta: Mutex<FileMeta>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
+}
+
+impl Drop for SstLifetime {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Acquire) {
+            self.file_purger
+                .purge_file(self.meta.get_mut().unwrap().clone());
+        }
+    }
 }
 
 /// Delete files for a region.
@@ -893,44 +910,6 @@ pub async fn delete_files(
         )
         .await;
     }
-    Ok(())
-}
-
-/// Deletes a SST file and all its index files (of every index version) from storage and cache.
-///
-/// Index files are discovered by listing, so the caller does not need to know which index
-/// versions exist. Used by the final purge of a retired SST, whose last live view may carry
-/// stale index metadata.
-pub async fn delete_file_and_all_indexes(
-    region_id: RegionId,
-    file_id: FileId,
-    access_layer: &AccessLayerRef,
-    cache_manager: &Option<CacheManagerRef>,
-) -> crate::error::Result<()> {
-    if let Some(cache) = cache_manager {
-        cache.remove_parquet_meta_data(RegionFileId::new(region_id, file_id));
-    }
-    // List index files before deleting anything, so a listing failure leaves
-    // the file untouched.
-    let index_ids = access_layer
-        .list_index_files(RegionFileId::new(region_id, file_id))
-        .await?;
-    access_layer.delete_ssts(region_id, &[file_id]).await?;
-    access_layer.delete_indexes(&index_ids).await?;
-
-    // Purges caches and the stager of every found index version (and the SST itself).
-    if index_ids.is_empty() {
-        purge_index_cache_stager(region_id, false, access_layer, cache_manager, file_id, 0).await;
-    } else {
-        purge_indexes(&index_ids, access_layer, cache_manager).await;
-    }
-
-    debug!(
-        "Deleted SST file and {} index files for region {}: {:?}",
-        index_ids.len(),
-        region_id,
-        file_id
-    );
     Ok(())
 }
 
@@ -1151,24 +1130,30 @@ mod tests {
         #[derive(Debug)]
         struct ConcurrentDropPurger {
             barrier: Barrier,
-            releases: Mutex<Vec<(u64, bool)>>,
+            released_versions: Mutex<Vec<u64>>,
+            purged_versions: Mutex<Vec<u64>>,
         }
 
         impl FilePurger for ConcurrentDropPurger {
-            fn remove_file(&self, meta: FileMeta, is_delete: bool) {
-                // Concurrent-drop regression: keep both destructors inside remove_file so neither
-                // drops its lifetime Arc before the other decides whether to purge.
+            fn release_file_ref(&self, meta: FileMeta, _index_outdated: bool) {
+                // Concurrent-drop regression: neither destructor releases its lifetime Arc
+                // until both have reached the purger. A strong_count check would miss purge.
                 self.barrier.wait();
-                self.releases
+                self.released_versions
                     .lock()
                     .unwrap()
-                    .push((meta.index_version, is_delete));
+                    .push(meta.index_version);
+            }
+
+            fn purge_file(&self, meta: FileMeta) {
+                self.purged_versions.lock().unwrap().push(meta.index_version);
             }
         }
 
         let purger = Arc::new(ConcurrentDropPurger {
             barrier: Barrier::new(2),
-            releases: Mutex::new(Vec::new()),
+            released_versions: Mutex::new(Vec::new()),
+            purged_versions: Mutex::new(Vec::new()),
         });
         let meta = create_file_meta(FileId::random(), 0);
         let old_reader = FileHandle::new(meta.clone(), purger.clone());
@@ -1187,13 +1172,13 @@ mod tests {
             scope.spawn(move || drop(new_reader));
         });
 
-        let releases = purger.releases.lock().unwrap();
-        let mut versions: Vec<_> = releases.iter().map(|(version, _)| *version).collect();
-        versions.sort_unstable();
-        assert_eq!(versions, vec![0, 1]);
+        let mut released_versions = purger.released_versions.lock().unwrap();
+        released_versions.sort_unstable();
+        assert_eq!(*released_versions, vec![0, 1]);
+        let expected_purged_versions = if retired { vec![1] } else { vec![] };
         assert_eq!(
-            releases.iter().filter(|(_, is_delete)| *is_delete).count(),
-            usize::from(retired)
+            *purger.purged_versions.lock().unwrap(),
+            expected_purged_versions
         );
     }
 
