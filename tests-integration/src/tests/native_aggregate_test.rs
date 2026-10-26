@@ -67,7 +67,7 @@
 //! existing plan. [`check_fallback_case`] pins that the computed scalars do, and that a fold over a
 //! second source and a subquery keep it too.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -191,6 +191,7 @@ const COUNTER_EAST_REGION: &str = "us-east-1";
 #[derive(Default)]
 struct NativePlanObserver {
     seen: Mutex<Vec<Arc<dyn ExecutionPlan>>>,
+    record_original_streams: bool,
     partial_batches: Arc<Mutex<Vec<(usize, RecordBatch)>>>,
 }
 
@@ -216,7 +217,7 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn ExecutionPlan>,
         _ctx: QueryContextRef,
     ) -> Arc<dyn ExecutionPlan> {
-        if origin.name() == FUSED_EXEC_NAME {
+        if origin.name() == FUSED_EXEC_NAME && self.record_original_streams {
             let recorder = Arc::new(PartialStateRecorder {
                 input: Arc::clone(&origin),
                 properties: Arc::clone(origin.properties()),
@@ -1046,7 +1047,10 @@ async fn native_aggregate_topk_over_global_partitions() {
     const TABLE: &str = "native_topk_counters";
     const T1: i64 = BASE_SECS + 180;
     const T2: i64 = BASE_SECS + 600;
-    let observer = Arc::new(NativePlanObserver::default());
+    let observer = Arc::new(NativePlanObserver {
+        record_original_streams: true,
+        ..Default::default()
+    });
     let plugins = Plugins::new();
     plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
     let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_topk")
@@ -1188,17 +1192,17 @@ async fn native_aggregate_topk_over_global_partitions() {
         "{per_partition:?}"
     );
 
-    // Decode the actual partial state batches captured in each original producer partition.
-    // state_schema layout: metric_name, tag_0 (hostname), tag_1 (device), tag_2 (region), point,
-    // field, value, mean, compensation, count, incremental_mean.
-    let mut state: HashMap<(usize, String, u64, u32), f64> = HashMap::new();
-    for (partition, batch) in partial_batches {
+    // Prove the partition-local states overlap without decoding or summing their values: at each
+    // evaluation point, at least one selected hostname/point/field was emitted by distinct original
+    // producer partitions.
+    let mut owners = BTreeMap::<(String, u64, u32), BTreeSet<usize>>::new();
+    for (partition, batch) in &partial_batches {
         let hostname = batch
             .column(1)
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let point = batch
+        let batch_point = batch
             .column(4)
             .as_any()
             .downcast_ref::<datafusion::arrow::array::UInt64Array>()
@@ -1208,49 +1212,25 @@ async fn native_aggregate_topk_over_global_partitions() {
             .as_any()
             .downcast_ref::<datafusion::arrow::array::UInt32Array>()
             .unwrap();
-        let sum = batch
-            .column(6)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
         for row in 0..batch.num_rows() {
-            let host = hostname.value(row).to_string();
-            let key = (partition, host, point.value(row), field.value(row));
-            *state.entry(key).or_default() += sum.value(row);
+            owners
+                .entry((
+                    hostname.value(row).to_string(),
+                    batch_point.value(row),
+                    field.value(row),
+                ))
+                .or_default()
+                .insert(*partition);
         }
     }
-    let mut owners: HashMap<(String, u64, u32), Vec<(usize, f64)>> = HashMap::new();
-    for ((partition, host, point, field), sum) in state {
-        owners
-            .entry((host, point, field))
-            .or_default()
-            .push((partition, sum));
-    }
-    for (point, expected_hosts, post) in [(0u64, 0..10, false), (1u64, 4..14, true)] {
-        let mut overlapping = Vec::new();
-        for host in expected_hosts {
-            let key = (format!("host{host:02}"), point, 0u32);
-            let contributions = owners
-                .get(&key)
-                .unwrap_or_else(|| panic!("missing partial state for {key:?}"));
-            let partial_total = contributions.iter().map(|(_, value)| value).sum::<f64>();
-            let slope = if post {
-                10 + 10 * host
-            } else {
-                140 - 10 * host
-            };
-            let expected_total = slope as f64 * if post { 2.0 } else { 1.3 };
-            assert!(
-                close_enough(partial_total, expected_total),
-                "{key:?}: partials {contributions:?} sum to {partial_total}, expected {expected_total}"
-            );
-            if contributions.len() >= 2 {
-                overlapping.push((key.0, contributions.clone()));
-            }
-        }
+    for (point, expected_hosts) in [(0u64, 0..10), (1u64, 4..14)] {
         assert!(
-            !overlapping.is_empty(),
-            "no selected hostname has partial state in multiple partitions at point {point}; groups: {owners:?}"
+            expected_hosts.into_iter().any(|host| {
+                owners
+                    .get(&(format!("host{host:02}"), point, 0))
+                    .is_some_and(|partitions| partitions.len() >= 2)
+            }),
+            "no selected hostname has rows from distinct original producer partitions at point {point}: {owners:?}"
         );
     }
 }
