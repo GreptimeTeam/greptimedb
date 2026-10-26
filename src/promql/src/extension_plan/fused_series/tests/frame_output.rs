@@ -236,11 +236,11 @@ async fn abs_rate_frame_matches_plain_rows_with_exact_values_and_labels() {
         .collect::<Vec<_>>();
     expected.sort();
     let mut exact = Vec::new();
-    for (host, scale) in [("web-1", 1.0), ("web-2", 2.0)] {
+    for (host, scale) in [("web-1", 1.0_f64), ("web-2", 2.0)] {
         for position in 0..GRID_LEN {
             exact.push((
                 GRID_START + position as i64 * GRID_STEP,
-                Some((scale as f64).to_bits()),
+                Some(scale.to_bits()),
                 Some(host.to_string()),
                 None,
             ));

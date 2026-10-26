@@ -1972,10 +1972,6 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
         .unwrap()
         .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
         .unwrap();
-        println!(
-            "{}",
-            datafusion::physical_plan::displayable(exec.as_ref()).indent(true)
-        );
         let context = "standalone raw SeriesScanExec replay";
         let mut actual = Vec::new();
         let mut closed = 0;
@@ -2065,7 +2061,6 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
         }
         actual.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
         assert_rows_eq(&actual, &expected, context);
-        println!("{context}: {format:?} partition output counts: {partition_counts:?}");
         assert_native_partition_output(&exec, Some(4), 24, context);
     }
 }
