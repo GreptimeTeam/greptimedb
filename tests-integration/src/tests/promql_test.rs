@@ -2649,6 +2649,50 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     assert_eq!(native_rows, legacy_rows);
 }
 
+/// `(ts, host, kind, value)` of every row, sorted, since a set result keeps `kind`.
+async fn native_kind_rows(output: Output) -> Vec<(i64, String, String, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let timestamps = batch
+            .column_by_name("ts")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let text = |name: &str| {
+            cast(
+                batch.column_by_name(name).unwrap().as_ref(),
+                &DataType::Utf8,
+            )
+            .unwrap()
+        };
+        let (hosts, kinds) = (text("host"), text("kind"));
+        let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+        let kinds = kinds.as_any().downcast_ref::<StringArray>().unwrap();
+        let values = batch
+            .column_by_name("val")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            rows.push((
+                timestamps.value(row),
+                hosts.value(row).to_string(),
+                kinds.value(row).to_string(),
+                values.value(row),
+            ));
+        }
+    }
+    rows.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
+    rows
+}
+
 /// Set operators run over both whole scans in one execution (#9896 gathers every partition of each
 /// source). A right side of one series sits in one scan partition while the left side spans
 /// several, so a per-partition answer would differ for `and on()` and `unless on()`.
@@ -2668,50 +2712,6 @@ async fn native_promql_set_operators_read_both_scans_whole() {
                 }),
             }],
         }
-    }
-
-    /// `(ts, host, kind, value)` of every row, sorted, since a set result keeps `kind`.
-    async fn rows(output: Output) -> Vec<(i64, String, String, f64)> {
-        let batches = match output.data {
-            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
-        let mut rows = Vec::new();
-        for batch in batches.iter() {
-            let timestamps = batch
-                .column_by_name("ts")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap();
-            let text = |name: &str| {
-                cast(
-                    batch.column_by_name(name).unwrap().as_ref(),
-                    &DataType::Utf8,
-                )
-                .unwrap()
-            };
-            let (hosts, kinds) = (text("host"), text("kind"));
-            let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
-            let kinds = kinds.as_any().downcast_ref::<StringArray>().unwrap();
-            let values = batch
-                .column_by_name("val")
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            for row in 0..batch.num_rows() {
-                rows.push((
-                    timestamps.value(row),
-                    hosts.value(row).to_string(),
-                    kinds.value(row).to_string(),
-                    values.value(row),
-                ));
-            }
-        }
-        rows.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
-        rows
     }
 
     common_telemetry::init_default_ut_logging();
@@ -2842,7 +2842,7 @@ async fn native_promql_set_operators_read_both_scans_whole() {
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
-        let native = rows(native_tql_output(&instance, &sql, true).await).await;
+        let native = native_kind_rows(native_tql_output(&instance, &sql, true).await).await;
         let plan = observer.take();
         assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
         assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
@@ -2871,9 +2871,71 @@ async fn native_promql_set_operators_read_both_scans_whole() {
             "the left scan of `{query}` must spread over partitions: {nonempty:?}"
         );
         assert_eq!(native, expected, "native: {query}");
-        let legacy = rows(native_tql_output(&instance, &sql, false).await).await;
+        let legacy = native_kind_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "legacy: {query}");
     }
+}
+
+/// `or` decides per step: where the left side of a host is present only its sample is kept, and
+/// the right side's sample of that host fills exactly the steps where the left side is absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_or_fills_the_steps_the_left_side_misses() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_or_per_step",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_or_steps";
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {table} (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+             PRIMARY KEY(host, kind))"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    // `h0` has a left sample only at 3s..6s; every other series has one at every second.
+    let mut values = Vec::new();
+    for second in 0..10 {
+        if (3..=6).contains(&second) {
+            values.push(format!("('h0', 'a', {}, {})", second * 1_000, 10 + second));
+        }
+        values.push(format!("('h0', 'b', {}, {})", second * 1_000, 100 + second));
+        values.push(format!("('h1', 'a', {}, {})", second * 1_000, 20 + second));
+        values.push(format!("('h1', 'b', {}, {})", second * 1_000, 200 + second));
+    }
+    execute_all(
+        &instance,
+        &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+        QueryContext::arc(),
+    )
+    .await;
+
+    // A one-second lookback selects only the sample at each step.
+    let sql = format!(
+        "TQL EVAL (0, 9, '1s', '1s') {table}{{kind=\"a\"}} or on(host) {table}{{kind=\"b\"}}"
+    );
+    observer.clear();
+    let native = native_kind_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 2);
+
+    let mut expected = Vec::new();
+    for second in 0..10_i64 {
+        let ts = second * 1_000;
+        let h0 = if (3..=6).contains(&second) {
+            ("a", 10.0)
+        } else {
+            ("b", 100.0)
+        };
+        expected.push((ts, "h0".to_string(), h0.0.to_string(), h0.1 + second as f64));
+        expected.push((ts, "h1".to_string(), "a".to_string(), 20.0 + second as f64));
+    }
+    assert_eq!(native, expected);
+    let legacy = native_kind_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native, legacy);
 }
 
 /// A two-selector query over a table split into regions keeps the existing plan: the two-scan
