@@ -7358,6 +7358,69 @@ fn an_oversized_set_workspace_is_refused_by_the_pool() {
     assert!(!root_holds(&execution, holds_binary));
 }
 
+/// The results a set node queues are held with their labels until each is handed on: a result's
+/// label set is owned by the queued chunk, so a queue of long-labelled one-point results is mostly
+/// labels, and the reservation drops to zero once the queue is drained or the execution dropped.
+#[test]
+fn queued_set_results_hold_their_labels_until_handed_on() {
+    const SERIES: usize = 64;
+    const LABEL: usize = 4_096;
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(set_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        SetOp::And,
+        MatchingLabels::On(Vec::new()),
+    ))
+    .unwrap();
+    let start = |pool: &Arc<dyn MemoryPool>| {
+        let mut execution = executor(&tree, Arc::clone(pool));
+        let (left, right) = (
+            execution.state().input_ids(0).next().unwrap(),
+            execution.state().input_ids(1).next().unwrap(),
+        );
+        for index in 0..SERIES {
+            let metric = pod_metric("l", &format!("{index:0>LABEL$}"), "x");
+            execution
+                .push_evaluated(
+                    left,
+                    evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0)], true),
+                )
+                .unwrap();
+        }
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, pod_metric("r", "a", "y"), 0, vec![Some(2.0)], true),
+            )
+            .unwrap();
+        execution.end_of_input().unwrap();
+        // The first pull runs the kernel and hands one result on; the rest stay queued.
+        assert!(execution.next_chunk().unwrap().is_some());
+        execution
+    };
+
+    let drained = pool();
+    let mut execution = start(&drained);
+    assert!(
+        drained.reserved() >= (SERIES - 1) * LABEL,
+        "{} bytes held for {} queued results of {LABEL}-byte labels",
+        drained.reserved(),
+        SERIES - 1
+    );
+    let mut handed_on = 1;
+    while execution.next_chunk().unwrap().is_some() {
+        handed_on += 1;
+    }
+    assert_eq!(handed_on, SERIES);
+    assert_eq!(drained.reserved(), 0);
+
+    let dropped = pool();
+    drop(start(&dropped));
+    assert_eq!(dropped.reserved(), 0);
+}
+
 // ---------------------------------------------------------------------------
 // Scalar broadcasts, driven through `NativeExecutor`.
 // ---------------------------------------------------------------------------

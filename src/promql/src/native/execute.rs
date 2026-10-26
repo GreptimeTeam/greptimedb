@@ -3604,16 +3604,18 @@ impl NodeState {
         for series in output {
             // The kernel decided every point of a result series at once, so the one chunk it is
             // handed over as closes it.
-            let shared = shares_input.then(|| {
+            // The result is already admitted, within the workspace reserved for the kernel. What the
+            // queue keeps is the result as it is owned: its samples and its labels, which the chunk
+            // keeps alive until it is handed on.
+            let bytes = if shares_input {
                 let (fresh, table_bytes) = unbilled_tables(&series, &tables);
                 tables.extend(fresh);
                 self.queued_tables = self.queued_tables.saturating_add(table_bytes);
                 operand_chunk_bytes(&series)
-            });
+            } else {
+                series_bytes(&series)
+            };
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
-            // The result is already admitted, within the workspace reserved for the kernel. What the
-            // queue keeps is the estimate of the chunk that holds it.
-            let bytes = shared.unwrap_or_else(|| chunk.bytes());
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
