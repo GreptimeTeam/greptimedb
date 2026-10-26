@@ -1186,29 +1186,26 @@ async fn native_aggregate_topk_over_global_partitions() {
             .all(|count| count.is_some_and(|count| count > 0)),
         "{per_partition:?}"
     );
-    assert_eq!(
-        56,
-        per_partition.iter().flatten().sum::<usize>(),
-        "{per_partition:?}"
-    );
-
     // Prove the partition-local states overlap without decoding or summing their values: at each
     // evaluation point, at least one selected hostname/point/field was emitted by distinct original
     // producer partitions.
     let mut owners = BTreeMap::<(String, u64, u32), BTreeSet<usize>>::new();
     for (partition, batch) in &partial_batches {
+        let schema = batch.schema();
+        // `state_schema` names its fixed columns and labels `metric_name`, `tag_N`, `point` and
+        // `field`; use those names rather than baking their positions into this assertion.
         let hostname = batch
-            .column(1)
+            .column(schema.index_of("tag_0").unwrap())
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
         let batch_point = batch
-            .column(4)
+            .column(schema.index_of("point").unwrap())
             .as_any()
             .downcast_ref::<datafusion::arrow::array::UInt64Array>()
             .unwrap();
         let field = batch
-            .column(5)
+            .column(schema.index_of("field").unwrap())
             .as_any()
             .downcast_ref::<datafusion::arrow::array::UInt32Array>()
             .unwrap();

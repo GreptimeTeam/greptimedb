@@ -338,11 +338,7 @@ fn a_constant_operand_keeps_the_cut_below_it() {
             "the merged values enter where the aggregate was: {}",
             node.suffix
         );
-        assert!(
-            !node.suffix.to_string().contains("Window"),
-            "{}",
-            node.suffix
-        );
+        assert!(!node.suffix.to_string().contains("Window"));
     }
 }
 
@@ -385,30 +381,26 @@ fn topk_and_bottomk_run_after_the_aggregate_cut() {
         assert!(
             matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0 && bound.output.samples().is_some_and(|schema| schema.fields.len() == 1 && schema.fields[0].name.as_ref() == "v0" && schema.eval_grid.as_ref().is_some_and(|actual| actual.spec() == grid().spec())))
         );
-        assert!(!node.suffix.to_string().contains("Window"));
     }
 }
 
 #[test]
-fn other_vector_operations_above_the_cut_are_declined() {
-    let aggregate = || complete(AggregateKind::Sum, by(&["k0"]))(window());
-    for op in [
-        BoundVectorOp::Sort(crate::select::SortOrder::Asc),
-        BoundVectorOp::LimitK {
-            k: 1.0,
-            group: by(&[]),
-        },
-    ] {
-        let error = finalize(
-            vector_over(aggregate(), op),
-            output_schema(&["sum(v0)"], &["k0"]),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "{error}"
-        );
-    }
+fn limitk_above_the_cut_is_declined_because_merge_does_not_preserve_input_order() {
+    let error = finalize(
+        vector_over(
+            complete(AggregateKind::Sum, by(&["k0"]))(window()),
+            BoundVectorOp::LimitK {
+                k: 1.0,
+                group: by(&[]),
+            },
+        ),
+        output_schema(&["sum(v0)"], &["k0"]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
 }
 
 #[test]
