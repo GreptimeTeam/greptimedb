@@ -23,25 +23,20 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files, delete_index};
-use crate::sst::file_ref::FileReferenceManagerRef;
+use crate::sst::file::{FileMeta, delete_files};
+use crate::sst::file_ref::{FileReferenceGuard, FileReferenceManagerRef};
 use crate::sst::range_index::RangeIndexDeleter;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
-    /// Releases one metadata version's reference, deleting its index if outdated.
-    /// This never deletes the SST itself.
-    fn release_file_ref(&self, file_meta: FileMeta, index_outdated: bool);
-
-    /// Purges a retired SST after all metadata versions release their readers.
-    /// This does not release a reference; each version already did so on drop.
+    /// Purges a retired SST and its indexes after all metadata views release their readers.
+    /// The lifetime's reference guard has already been released.
     fn purge_file(&self, file_meta: FileMeta);
 
-    /// Notify the purger of a new file created.
-    /// This is useful for object store based storage, where we need to track the file references
-    /// The default implementation is a no-op.
-    fn new_file(&self, _: &FileMeta) {
-        // noop
+    /// Registers one logical SST lifetime for object-store GC, regardless of index version.
+    /// The returned guard releases the reference even if the file is not retired.
+    fn new_file(&self, _: &FileMeta) -> Option<FileReferenceGuard> {
+        None
     }
 }
 
@@ -52,8 +47,6 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn release_file_ref(&self, _file_meta: FileMeta, _index_outdated: bool) {}
-
     fn purge_file(&self, _file_meta: FileMeta) {}
 }
 
@@ -184,28 +177,9 @@ impl LocalFilePurger {
             error!(e; "Failed to schedule the file purge request");
         }
     }
-
-    fn delete_index(&self, file_meta: FileMeta) {
-        let sst_layer = self.sst_layer.clone();
-        let cache_manager = self.cache_manager.clone();
-        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            let index_id = file_meta.index_id();
-            if let Err(e) = delete_index(index_id, &sst_layer, &cache_manager).await {
-                error!(e; "Failed to delete index for file {:?} from storage", file_meta);
-            }
-        })) {
-            error!(e; "Failed to schedule the index purge request");
-        }
-    }
 }
 
 impl FilePurger for LocalFilePurger {
-    fn release_file_ref(&self, file_meta: FileMeta, index_outdated: bool) {
-        if index_outdated {
-            self.delete_index(file_meta);
-        }
-    }
-
     fn purge_file(&self, file_meta: FileMeta) {
         schedule_range_index_deletion(
             &self.scheduler,
@@ -250,11 +224,6 @@ fn schedule_range_index_deletion(
 }
 
 impl FilePurger for ObjectStoreFilePurger {
-    fn release_file_ref(&self, file_meta: FileMeta, _index_outdated: bool) {
-        // GC handles physical SST and index deletion after references are released.
-        self.file_ref_manager.remove_file(&file_meta);
-    }
-
     fn purge_file(&self, file_meta: FileMeta) {
         schedule_range_index_deletion(
             &self.scheduler,
@@ -263,8 +232,8 @@ impl FilePurger for ObjectStoreFilePurger {
         );
     }
 
-    fn new_file(&self, file_meta: &FileMeta) {
-        self.file_ref_manager.add_file(file_meta);
+    fn new_file(&self, file_meta: &FileMeta) -> Option<FileReferenceGuard> {
+        Some(self.file_ref_manager.register_file(file_meta))
     }
 }
 

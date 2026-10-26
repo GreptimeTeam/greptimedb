@@ -147,8 +147,6 @@ async fn test_gc_keeps_sst_across_index_versions(
     } else {
         (old, new)
     };
-    let released_version = first.index_id().version;
-    let live_version = last.index_id().version;
     let mut handles = [Some(first), Some(last)];
     for released in 0..=2 {
         if released > 0 {
@@ -159,16 +157,17 @@ async fn test_gc_keeps_sst_across_index_versions(
             .await
             .unwrap();
         let refs = refs.file_refs.get(&region_id).cloned().unwrap_or_default();
-        let expected_versions = match released {
-            0 => vec![0, 2],
-            1 => vec![live_version],
-            _ => vec![],
+        let expected_versions = if released < 2 {
+            // Preserve the existing snapshot format for version-aware GC workers.
+            vec![None, Some(0), Some(1), Some(2)]
+        } else {
+            vec![]
         };
         assert_eq!(
             refs,
             expected_versions
                 .into_iter()
-                .map(|v| FileRef::new(region_id, meta.file_id, Some(v)))
+                .map(|v| FileRef::new(region_id, meta.file_id, v))
                 .collect()
         );
         let tmp_refs = refs
@@ -189,8 +188,7 @@ async fn test_gc_keeps_sst_across_index_versions(
             .into_iter()
             .collect();
         let expected = match released {
-            0 => HashSet::new(),
-            1 => HashSet::from([RemovedFile::Index(meta.file_id, released_version)]),
+            0 | 1 => HashSet::new(),
             _ => HashSet::from([
                 RemovedFile::File(meta.file_id, if full_file_listing { None } else { Some(2) }),
                 RemovedFile::Index(meta.file_id, 0),
@@ -199,7 +197,22 @@ async fn test_gc_keeps_sst_across_index_versions(
         };
         assert_eq!(deleted, expected);
     }
-    // A manifest reference also protects Parquet regardless of its index version.
+    // Even a single legacy reference must protect every index generation.
+    for index_version in [None, Some(0), Some(3)] {
+        let deleted = worker
+            .list_to_be_deleted_files(
+                region_id,
+                false,
+                &HashMap::new(),
+                &HashSet::from([(meta.file_id, index_version)]),
+                removed.clone(),
+                entries.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(deleted.is_empty());
+    }
+    // A manifest reference protects both Parquet and all index generations.
     let deleted = worker
         .list_to_be_deleted_files(
             region_id,
@@ -211,7 +224,7 @@ async fn test_gc_keeps_sst_across_index_versions(
         )
         .await
         .unwrap();
-    assert!(deleted.iter().all(|f| matches!(f, RemovedFile::Index(..))));
+    assert!(deleted.is_empty());
 }
 
 #[tokio::test]

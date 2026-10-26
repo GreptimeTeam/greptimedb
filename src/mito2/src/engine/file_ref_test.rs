@@ -55,7 +55,79 @@ async fn get_snapshot_of_file_refs_skips_missing_file_handle_region() {
 }
 
 #[tokio::test]
-async fn get_snapshot_preserves_old_index_readers_until_release() {
+async fn get_snapshot_protects_all_shared_file_indexes_from_related_manifest() {
+    use store_api::region_engine::{RegionEngine, RegionRole};
+    use store_api::region_request::RegionRequest;
+    use store_api::storage::{FileId, FileRef};
+
+    use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
+    use crate::region::RegionLeaderState;
+    use crate::sst::file::{FileMeta, IndexType};
+    use crate::test_util::CreateRequestBuilder;
+
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let source_region = RegionId::new(1, 1);
+    let target_region = RegionId::new(1, 2);
+    engine
+        .handle_request(
+            target_region,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    engine
+        .set_region_role(target_region, RegionRole::Leader)
+        .unwrap();
+    let meta = FileMeta {
+        region_id: source_region,
+        file_id: FileId::random(),
+        index_version: 2,
+        available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+        ..Default::default()
+    };
+    let target = engine.get_region(target_region).unwrap();
+    target
+        .manifest_ctx
+        .update_manifest(
+            RegionLeaderState::Writable,
+            RegionMetaActionList::with_action(RegionMetaAction::Edit(RegionEdit {
+                files_to_add: vec![meta.clone()],
+                files_to_remove: vec![],
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            })),
+            false,
+        )
+        .await
+        .unwrap();
+
+    // The source region need not be open: the destination manifest owns the shared SST.
+    let snapshot = engine
+        .get_snapshot_of_file_refs(
+            [],
+            HashMap::from([(source_region, HashSet::from([target_region]))]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.file_refs[&source_region],
+        [None, Some(0), Some(1), Some(2)]
+            .into_iter()
+            .map(|version| FileRef::new(source_region, meta.file_id, version))
+            .collect()
+    );
+    assert_eq!(
+        snapshot.cross_region_refs[&source_region],
+        HashSet::from([target_region])
+    );
+}
+
+#[tokio::test]
+async fn get_snapshot_keeps_all_index_versions_until_sst_lifetime_ends() {
     use store_api::region_engine::{RegionEngine, RegionRole};
     use store_api::region_request::RegionRequest;
     use store_api::storage::{FileId, FileRef};
@@ -126,17 +198,21 @@ async fn get_snapshot_preserves_old_index_readers_until_release() {
         .get_snapshot_of_file_refs([region_id], HashMap::new())
         .await
         .unwrap();
-    assert_eq!(
-        snapshot.file_refs[&region_id],
-        HashSet::from([FileRef::new(region_id, meta.file_id, Some(0))])
-    );
-    drop(old_reader);
+    // The current manifest covers v1; the snapshot protects no-index and v0 readers
+    // even when consumed by a GC worker that still matches exact index versions.
+    let expected = HashSet::from([
+        FileRef::new(region_id, meta.file_id, None),
+        FileRef::new(region_id, meta.file_id, Some(0)),
+    ]);
+    assert_eq!(snapshot.file_refs[&region_id], expected);
+    // Closing the current view without retirement must keep the old reader protected.
+    drop(version);
     let snapshot = engine
         .get_snapshot_of_file_refs([region_id], HashMap::new())
         .await
         .unwrap();
-    assert!(snapshot.file_refs[&region_id].is_empty());
-    drop(version);
+    assert_eq!(snapshot.file_refs[&region_id], expected);
+    drop(old_reader);
     let snapshot = engine
         .get_snapshot_of_file_refs([region_id], HashMap::new())
         .await
