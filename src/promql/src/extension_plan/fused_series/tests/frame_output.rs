@@ -157,21 +157,14 @@ async fn sparse_instant_frame_preserves_positions_nulls_and_nan_across_formats()
     let batches = vec![frame_of(&schema, &chunk)];
     let binding = binding_of(&tree, Arc::clone(&schema), vec![HOST.into(), NAME.into()]);
     let make_node = |format| {
-        match format {
-            FusedOutputFormat::PlainRows => FusedSeries::try_new(
-                Arc::from("instant(x)"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema_of(&schema))],
-                two_field_output_schema().to_dfschema_ref().unwrap(),
-            ),
-            FusedOutputFormat::SeriesFrame => FusedSeries::try_new_series_frame(
-                Arc::from("instant(x)"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema_of(&schema))],
-            ),
-        }
+        FusedSeries::try_new_with_format(
+            Arc::from("instant(x)"),
+            tree.clone(),
+            binding.clone(),
+            vec![input_plan(frame_schema_of(&schema))],
+            two_field_output_schema().to_dfschema_ref().unwrap(),
+            format,
+        )
         .expect("instant tree has the declared frame output")
     };
 
@@ -219,21 +212,14 @@ async fn abs_rate_frame_matches_plain_rows_with_exact_values_and_labels() {
     let batches = two_series_frames();
     let binding = binding(&tree);
     let make_node = |format| {
-        match format {
-            FusedOutputFormat::PlainRows => FusedSeries::try_new(
-                Arc::from("abs(rate(x[5m]))"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema())],
-                output_schema().to_dfschema_ref().unwrap(),
-            ),
-            FusedOutputFormat::SeriesFrame => FusedSeries::try_new_series_frame(
-                Arc::from("abs(rate(x[5m]))"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema())],
-            ),
-        }
+        FusedSeries::try_new_with_format(
+            Arc::from("abs(rate(x[5m]))"),
+            tree.clone(),
+            binding.clone(),
+            vec![input_plan(frame_schema())],
+            output_schema().to_dfschema_ref().unwrap(),
+            format,
+        )
         .unwrap()
     };
     let plain_exec = plan_of(
@@ -326,21 +312,14 @@ async fn rewritten_identical_labels_keep_disjoint_chains_in_one_encoder() {
     let batches = frames_of(&schema, &chunks);
     let binding = binding_of(&tree, Arc::clone(&schema), vec![HOST.into(), NAME.into()]);
     let make_node = |format| {
-        match format {
-            FusedOutputFormat::PlainRows => FusedSeries::try_new(
-                Arc::from("rewritten instant"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema())],
-                output_schema().to_dfschema_ref().unwrap(),
-            ),
-            FusedOutputFormat::SeriesFrame => FusedSeries::try_new_series_frame(
-                Arc::from("rewritten instant"),
-                tree.clone(),
-                binding.clone(),
-                vec![input_plan(frame_schema())],
-            ),
-        }
+        FusedSeries::try_new_with_format(
+            Arc::from("rewritten instant"),
+            tree.clone(),
+            binding.clone(),
+            vec![input_plan(frame_schema())],
+            output_schema().to_dfschema_ref().unwrap(),
+            format,
+        )
         .unwrap()
     };
 

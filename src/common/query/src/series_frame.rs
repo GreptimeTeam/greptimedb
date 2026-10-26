@@ -576,18 +576,17 @@ impl SequenceValidator {
 /// them closes itself, so a closed chain may be followed by another chain whose labels happen to be
 /// equal. Only the still-open chain is remembered, which is what keeps such a contribution from being
 /// refused as a re-opened series while still refusing a chain that changes identity before it closes.
-#[derive(Default)]
-pub struct EvaluatedSequenceValidator {
+struct EvaluatedSequenceValidator {
     /// The labels of the open chain and the last grid position it carried.
     open: Option<(SeriesLabels, usize)>,
 }
 
 impl EvaluatedSequenceValidator {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self { open: None }
     }
 
-    pub fn finish(&self) -> datafusion_common::Result<()> {
+    fn finish(&self) -> datafusion_common::Result<()> {
         if self.open.is_some() {
             return Err(invalid(
                 "evaluated series stream ended before a chain closed",
@@ -596,7 +595,7 @@ impl EvaluatedSequenceValidator {
         Ok(())
     }
 
-    pub fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
+    fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
         let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
         else {
             // No carried position: only a closing chunk may be empty, and it closes the chain it
