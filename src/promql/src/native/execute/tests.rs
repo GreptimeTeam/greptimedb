@@ -3087,6 +3087,51 @@ fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
 }
 
 #[test]
+fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
+    const SERIES: usize = 64;
+    const LABEL_BYTES: usize = 4 * 1024;
+
+    let grid = grid(0, 1, 1);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for index in 0..SERIES {
+        let metric = SeriesLabels::try_new(
+            Some("same".into()),
+            vec![Label {
+                name: "large".into(),
+                value: format!("{index:04}{}", "x".repeat(LABEL_BYTES - 4)).into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(index as f64)], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() >= (SERIES - 1) * LABEL_BYTES,
+        "remaining canonical outputs' labels are not fully reserved: {} bytes",
+        pool.reserved()
+    );
+    for _ in 1..SERIES {
+        assert!(execution.next_chunk().unwrap().is_some());
+    }
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "draining outputs must release reservations"
+    );
+}
+
+#[test]
 fn standalone_merge_accepts_empty_closing_chunk_and_canonical_empty_input() {
     let grid = grid(0, 1, 2);
     let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
@@ -3137,7 +3182,10 @@ fn standalone_merge_rejects_malformed_grid_and_field_shapes() {
             ),
         )
         .unwrap();
-    assert!(wrong_grid.next_chunk().is_err());
+    assert_eq!(
+        wrong_grid.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
 
     let mut wrong_fields = executor(&tree, pool());
     let series = Series {
@@ -3155,7 +3203,10 @@ fn standalone_merge_rejects_malformed_grid_and_field_shapes() {
             EvaluatedChunk::try_new(series, true).unwrap(),
         )
         .unwrap();
-    assert!(wrong_fields.next_chunk().is_err());
+    assert_eq!(
+        wrong_fields.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
 
     let mut open_at_eof = executor(&tree, pool());
     open_at_eof

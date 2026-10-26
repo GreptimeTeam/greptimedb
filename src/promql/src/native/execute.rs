@@ -349,13 +349,10 @@ impl MergeInput {
 
     /// Checks one received chunk against the contract a series keeps, and follows the open series.
     ///
-    /// The checks are the ones a streaming window makes on every delivery it reads: the chunk is
-    /// addressed on this window's input grid, carries one sample per row in every field, holds a
-    /// position unless it closes its series, continues the identity of the series it belongs to, and
-    /// only ever moves forward within it. They cost a constant number of reads of the chunk's own
-    /// axis -- its first and last positions, not its rows, which the merge then copies nothing of --
-    /// and they are what keeps the sort below honest: a stream that broke one of them is refused
-    /// here, on the chunk that broke it, rather than merged into an answer.
+    /// The checks ensure each chunk matches the input grid and schema, contains positions as
+    /// required, continues the same series identity, and only moves forward within that series.
+    /// They inspect only the chunk's first and last positions and prevent invalid streams from being
+    /// sorted into a plausible merged answer.
     ///
     /// A chunk carrying `is_last` closes the open series, whether it holds rows or none at all, and
     /// nothing is remembered of it: the next chunk starts a series whose identity is its own.
@@ -372,25 +369,20 @@ impl MergeInput {
                 .any(|field| field.len() != series.time.len())
         {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that does not match its input schema"
-                    .to_string(),
+                "merge input does not match its input schema".to_string(),
             ));
         }
         let (first, last) = (series.time.first_position(), series.time.last_position());
         if !is_last && first.is_none() {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that holds no position before the last \
-                 run of its series"
-                    .to_string(),
+                "merge input has no position before the last run of its series".to_string(),
             ));
         }
         if let Some(open) = &self.open
             && open.metric != series.metric
         {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that changed identity before its last \
-                 run"
-                .to_string(),
+                "merge input changed identity before its last run".to_string(),
             ));
         }
         if let Some(previous) = self.open.as_ref().and_then(|open| open.last_position)
@@ -398,8 +390,7 @@ impl MergeInput {
             && first <= previous
         {
             return Err(DataFusionError::Execution(format!(
-                "the window was handed evaluated series runs that are not increasing: {first} after \
-                 {previous}"
+                "merge input runs are not increasing: {first} after {previous}"
             )));
         }
         self.open = if is_last {
@@ -2958,11 +2949,7 @@ impl RuntimeNode {
             }
             // Only a window that collects its input keeps collected input to merge.
             RuntimeOp::Window { input, merge, .. } => merge.is_some() || input.any_merge_pending(),
-            RuntimeOp::Merge {
-                input,
-                merge,
-                state,
-            } => merge.is_some() || !state.queued.is_empty() || input.any_merge_pending(),
+            RuntimeOp::Merge { input, merge, .. } => merge.is_some() || input.any_merge_pending(),
         }
     }
 
@@ -3905,7 +3892,7 @@ impl NodeState {
         if is_last {
             self.buffer.metrics.record_completed_series(1);
         }
-        self.buffer.resize(merge.bytes)
+        Ok(())
     }
 
     /// Canonicalizes all fragments before exposing any output.
@@ -3913,11 +3900,6 @@ impl NodeState {
         let Some(merge) = merge.take() else {
             return Ok(());
         };
-        if merge.open.is_some() {
-            return Err(DataFusionError::Execution(
-                "merge input ended inside a series".into(),
-            ));
-        }
         if merge.fragments.is_empty() {
             return self.buffer.shrink(merge.bytes);
         }
@@ -3931,7 +3913,10 @@ impl NodeState {
                 .metrics
                 .record_grid_points(chunk.series.time.len());
             self.buffer.metrics.record_output(1, valid_values(&chunk));
-            self.enqueue_output(chunk)?;
+            let bytes = series_bytes(&chunk.series);
+            self.buffer.grow(bytes)?;
+            self.queued
+                .push_back((NativeChunk::Evaluated(chunk), bytes));
         }
         self.buffer.shrink(held)
     }
