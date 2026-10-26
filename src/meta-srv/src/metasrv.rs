@@ -67,6 +67,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::cluster::MetaPeerClientRef;
 use crate::discovery;
+use crate::discovery::node_info::NodeInfoAccessor;
 use crate::error::{
     self, InitMetadataSnafu, KvBackendSnafu, Result, StartProcedureManagerSnafu,
     StartTelemetryTaskSnafu, StopProcedureManagerSnafu,
@@ -515,9 +516,13 @@ pub trait SelectorFactory: Send + Sync {
     fn build(&self, ctx: SelectorFactoryContext) -> SelectorRef;
 
     /// Builds the resolver shared by allocation and failover callers.
+    ///
+    /// The accessor includes last-known records of inactive source nodes; discovery
+    /// is the shared scheduling-aware view of active nodes.
     fn build_affinity_resolver(
         &self,
-        _meta_peer_client: MetaPeerClientRef,
+        _node_info_accessor: Arc<dyn NodeInfoAccessor>,
+        _peer_discovery: PeerDiscoveryRef,
     ) -> Option<AffinityResolverRef> {
         None
     }

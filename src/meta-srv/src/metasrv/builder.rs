@@ -39,6 +39,7 @@ use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManage
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::PeerDiscoveryRef;
 use common_meta::reconciliation::manager::ReconciliationManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
@@ -412,7 +413,12 @@ impl MetasrvBuilder {
         let affinity_resolver = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<SelectorFactoryRef>())
-            .and_then(|factory| factory.build_affinity_resolver(meta_peer_client.clone()));
+            .and_then(|factory| {
+                factory.build_affinity_resolver(
+                    meta_peer_client.clone(),
+                    selector_ctx.peer_discovery.clone(),
+                )
+            });
         let region_supervisor_selector = plugins
             .as_ref()
             .and_then(|plugins| plugins.get::<RegionStatAwareSelectorRef>());
@@ -497,7 +503,7 @@ impl MetasrvBuilder {
         {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
-                meta_peer_client: meta_peer_client.clone(),
+                peer_discovery: selector_ctx.peer_discovery.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
@@ -759,7 +765,7 @@ impl Default for MetasrvBuilder {
 /// The context for [`DdlManagerConfiguratorRef`].
 pub struct DdlManagerConfigureContext {
     pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 #[cfg(test)]
@@ -854,6 +860,9 @@ mod tests {
         use common_meta::cluster::NodeInfo;
         use common_meta::error::Result as MetaResult;
 
+        use common_meta::ddl_manager::DdlManagerConfigurator;
+
+        use crate::discovery::node_info::NodeInfoAccessor;
         use crate::metasrv::{SelectorFactory, SelectorFactoryContext};
 
         struct TestAffinity;
@@ -879,10 +888,32 @@ mod tests {
         struct RecordingFactory {
             calls: Arc<AtomicUsize>,
             resolver: AffinityResolverRef,
+            discovery: Arc<std::sync::Mutex<Option<PeerDiscoveryRef>>>,
+        }
+
+        struct RecordingConfigurator {
+            discovery: Arc<std::sync::Mutex<Option<PeerDiscoveryRef>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl DdlManagerConfigurator<DdlManagerConfigureContext> for RecordingConfigurator {
+            async fn configure(
+                &self,
+                ddl_manager: DdlManager,
+                ctx: DdlManagerConfigureContext,
+            ) -> std::result::Result<DdlManager, common_error::ext::BoxedError> {
+                *self.discovery.lock().unwrap() = Some(ctx.peer_discovery);
+                Ok(ddl_manager)
+            }
         }
 
         impl SelectorFactory for RecordingFactory {
-            fn build_affinity_resolver(&self, _: MetaPeerClientRef) -> Option<AffinityResolverRef> {
+            fn build_affinity_resolver(
+                &self,
+                _: Arc<dyn NodeInfoAccessor>,
+                peer_discovery: PeerDiscoveryRef,
+            ) -> Option<AffinityResolverRef> {
+                *self.discovery.lock().unwrap() = Some(peer_discovery);
                 self.calls.fetch_add(1, Ordering::Relaxed);
                 Some(self.resolver.clone())
             }
@@ -892,6 +923,8 @@ mod tests {
             }
         }
 
+        let factory_discovery = Arc::new(std::sync::Mutex::new(None));
+        let configurator_discovery = Arc::new(std::sync::Mutex::new(None));
         let calls = Arc::new(AtomicUsize::new(0));
         let resolver: AffinityResolverRef = Arc::new(TestResolver);
         let affinity: AffinityRef = Arc::new(TestAffinity);
@@ -901,7 +934,12 @@ mod tests {
         plugins.insert(Arc::new(RecordingFactory {
             calls: calls.clone(),
             resolver: resolver.clone(),
+            discovery: factory_discovery.clone(),
         }) as SelectorFactoryRef);
+        plugins.insert(Arc::new(RecordingConfigurator {
+            discovery: configurator_discovery.clone(),
+        })
+            as DdlManagerConfiguratorRef<DdlManagerConfigureContext>);
         let metasrv = MetasrvBuilder::new()
             .options(MetasrvOptions {
                 enable_telemetry: false,
@@ -921,6 +959,12 @@ mod tests {
             AffinityFallback::Unconstrained
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        for discovery in [factory_discovery, configurator_discovery] {
+            assert!(Arc::ptr_eq(
+                discovery.lock().unwrap().as_ref().unwrap(),
+                &metasrv.selector_ctx().peer_discovery,
+            ));
+        }
         assert!(Arc::ptr_eq(&metasrv.selector_ctx().affinity, &affinity));
         assert!(Arc::ptr_eq(
             metasrv
