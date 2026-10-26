@@ -1570,6 +1570,16 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
                 path: hint.path,
                 data_type,
                 inverted_index: hint.inverted_index,
+                skipping_index: hint
+                    .skipping_index
+                    .map(api::v1::column_def::json_skipping_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidRawRegionRequestSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2458,6 +2468,7 @@ mod tests {
                             path: path.iter().map(|part| (*part).to_string()).collect(),
                             data_type: ColumnDataType::String as i32,
                             inverted_index,
+                            skipping_index: None,
                             ..Default::default()
                         }],
                         max_auto_expanded_paths: Some(0),
@@ -2543,6 +2554,11 @@ mod tests {
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
                         inverted_index: true,
+                        skipping_index: Some(v1::JsonSkippingIndexOptions {
+                            granularity: 8,
+                            index_type: 0,
+                            false_positive_rate: 0.05,
+                        }),
                     }],
                     max_auto_expanded_paths: Some(10),
                 }),
@@ -2561,6 +2577,14 @@ mod tests {
         assert_eq!(Some(10), settings.max_auto_expanded_paths());
         assert_eq!(1, settings.type_hints().len());
         assert!(settings.type_hints()[0].inverted_index);
+        assert_eq!(
+            settings.type_hints()[0]
+                .skipping_index
+                .as_ref()
+                .unwrap()
+                .granularity,
+            8
+        );
     }
 
     #[test]

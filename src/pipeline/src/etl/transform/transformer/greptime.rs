@@ -1190,6 +1190,7 @@ transform:
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )
@@ -1205,6 +1206,7 @@ transform:
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )

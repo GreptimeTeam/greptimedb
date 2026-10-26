@@ -17,9 +17,10 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 use api::v1::SemanticType;
+use arrow_schema::extension::ExtensionType;
 use common_telemetry::{debug, warn};
 use datatypes::arrow::record_batch::RecordBatch;
-use datatypes::schema::SkippingIndexType;
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::vectors::Helper;
 use index::bloom_filter::creator::BloomFilterCreator;
 use index::target::IndexTarget;
@@ -28,7 +29,7 @@ use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use mito_codec::row_converter::{SortField, SparseOffsetsCache};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
 use smallvec::SmallVec;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId};
@@ -41,7 +42,7 @@ use crate::error::{
 use crate::read::Batch;
 use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
-use crate::sst::index::column::column_index_rows;
+use crate::sst::index::column::{column_index_rows, extract_json_type_hint_values};
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
@@ -55,7 +56,7 @@ const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
 /// The indexer for the bloom filter index.
 pub struct BloomFilterIndexer {
     /// The bloom filter creators.
-    creators: HashMap<ColumnId, BloomFilterCreator>,
+    creators: HashMap<IndexTarget, BloomFilterCreator>,
 
     /// The provider for intermediate files.
     temp_file_provider: Arc<TempFileProvider>,
@@ -82,11 +83,13 @@ pub struct BloomFilterIndexer {
 
 impl BloomFilterIndexer {
     /// Creates a new bloom filter indexer.
+    /// JSON paths are included only for flush and compaction builds.
     pub fn new(
         sst_file_id: FileId,
         metadata: &RegionMetadataRef,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
+        include_json_paths: bool,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
 
@@ -105,19 +108,40 @@ impl BloomFilterIndexer {
                         column_name: &column.column_schema.name,
                     })?;
 
-            let options = match options {
-                Some(options) if options.index_type == SkippingIndexType::BloomFilter => options,
-                _ => continue,
-            };
-
-            let creator = BloomFilterCreator::new(
-                options.granularity as _,
-                options.false_positive_rate(),
-                temp_file_provider.clone(),
-                global_memory_usage.clone(),
-                memory_usage_threshold,
-            );
-            creators.insert(column.column_id, creator);
+            let mut targets = Vec::new();
+            if let Some(options) = options {
+                targets.push((IndexTarget::ColumnId(column.column_id), options));
+            }
+            if include_json_paths && column.column_schema.data_type.is_json2() {
+                let extension = column
+                    .column_schema
+                    .extension_type::<Json2ExtensionType>()
+                    .context(IndexOptionsSnafu {
+                        column_name: &column.column_schema.name,
+                    })?;
+                if let Some(extension) = extension {
+                    for hint in extension.metadata().json_settings().type_hints() {
+                        let Some(options) = &hint.skipping_index else {
+                            continue;
+                        };
+                        if let Ok(target) =
+                            IndexTarget::new_json_path(column.column_id, hint.path.clone())
+                        {
+                            targets.push((target, options.clone()));
+                        }
+                    }
+                }
+            }
+            for (target, options) in targets {
+                let creator = BloomFilterCreator::new(
+                    options.granularity as _,
+                    options.false_positive_rate(),
+                    temp_file_provider.clone(),
+                    global_memory_usage.clone(),
+                    memory_usage_threshold,
+                );
+                creators.insert(target, creator);
+            }
         }
 
         if creators.is_empty() {
@@ -237,7 +261,37 @@ impl BloomFilterIndexer {
         let n = batch.num_rows();
         guard.inc_row_count(n);
 
-        for (col_id, creator) in &mut self.creators {
+        for (target, creator) in &mut self.creators {
+            let col_id = match target {
+                IndexTarget::ColumnId(id) => id,
+                IndexTarget::JsonPath(path) => {
+                    let root = batch
+                        .field_col_value(path.column_id())
+                        .with_context(|| crate::error::InvalidRecordBatchSnafu {
+                            reason: format!(
+                                "Missing JSON index column {} in batch",
+                                path.column_id()
+                            ),
+                        })?
+                        .data
+                        .to_arrow_array();
+                    let vector = extract_json_type_hint_values(&root, path.path())?;
+                    let field = SortField::new(vector.data_type());
+                    for row in 0..n {
+                        let value = IndexValueCodec::encode_value(
+                            vector.get_ref(row),
+                            &field,
+                            &mut self.value_buf,
+                        )
+                        .context(EncodeSnafu)?;
+                        creator
+                            .push_n_row_elem(1, value)
+                            .await
+                            .context(PushBloomFilterValueSnafu)?;
+                    }
+                    continue;
+                }
+            };
             match self.codec.pk_col_info(*col_id) {
                 // tags
                 Some(col_info) => {
@@ -305,14 +359,23 @@ impl BloomFilterIndexer {
         let mut sparse_columns: SmallVec<[(ColumnId, &mut BloomFilterCreator); 8]> =
             SmallVec::new();
 
-        for (col_id, creator) in &mut self.creators {
+        for (target, creator) in &mut self.creators {
+            let col_id = match target {
+                IndexTarget::ColumnId(id) => *id,
+                IndexTarget::JsonPath(path) => path.column_id(),
+            };
             // Safety: `creators` are created from the metadata so it won't be None.
-            let column_meta = self.metadata.column_by_id(*col_id).unwrap();
+            let column_meta = self.metadata.column_by_id(col_id).unwrap();
             let column_name = &column_meta.column_schema.name;
             if let Some(column_array) = batch.column_by_name(column_name) {
                 // Convert Arrow array to VectorRef
-                let vector = Helper::try_into_vector(column_array.clone())
-                    .context(crate::error::ConvertVectorSnafu)?;
+                let vector = match target {
+                    IndexTarget::ColumnId(_) => Helper::try_into_vector(column_array.clone())
+                        .context(crate::error::ConvertVectorSnafu)?,
+                    IndexTarget::JsonPath(path) => {
+                        extract_json_type_hint_values(column_array, path.path())?
+                    }
+                };
                 let sort_field = SortField::new(vector.data_type());
 
                 for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
@@ -328,9 +391,14 @@ impl BloomFilterIndexer {
                         .await
                         .context(PushBloomFilterValueSnafu)?;
                 }
+            } else if matches!(target, IndexTarget::JsonPath(_)) {
+                return crate::error::InvalidRecordBatchSnafu {
+                    reason: format!("Missing JSON index column {column_name} in batch"),
+                }
+                .fail();
             } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
-                if self.codec.pk_col_info(*col_id).is_some() {
-                    sparse_columns.push((*col_id, creator));
+                if self.codec.pk_col_info(col_id).is_some() {
+                    sparse_columns.push((col_id, creator));
                 }
             } else {
                 debug!(
@@ -402,13 +470,13 @@ impl BloomFilterIndexer {
     ///
     /// TODO(zhongzc): duplicate with `mito2::sst::index::inverted_index::creator::InvertedIndexCreator`
     async fn do_finish_single_creator(
-        col_id: &ColumnId,
+        target: &IndexTarget,
         creator: &mut BloomFilterCreator,
         puffin_writer: &mut SstPuffinWriter,
     ) -> Result<ByteCount> {
         let (tx, rx) = tokio::io::duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
 
-        let target_key = IndexTarget::ColumnId(*col_id).encode();
+        let target_key = target.encode();
         let blob_name = format!("{INDEX_BLOB_TYPE}-{target_key}");
         let (index_finish, puffin_add_blob) = futures::join!(
             creator.finish(tx.compat_write()),
@@ -446,9 +514,12 @@ impl BloomFilterIndexer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Returns the column ids to be indexed.
+    /// Returns ordinary indexed column IDs; JSON paths are not whole-column indexes.
     pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + use<'_> {
-        self.creators.keys().copied()
+        self.creators.keys().filter_map(|target| match target {
+            IndexTarget::ColumnId(id) => Some(*id),
+            IndexTarget::JsonPath(_) => None,
+        })
     }
 }
 
@@ -457,7 +528,7 @@ pub(crate) mod tests {
 
     use api::v1::SemanticType;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
+    use datatypes::schema::{ColumnSchema, SkippingIndexOptions, SkippingIndexType};
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
@@ -599,10 +670,15 @@ pub(crate) mod tests {
         let memory_usage_threshold = Some(1024);
 
         let file_id = FileId::random();
-        let mut indexer =
-            BloomFilterIndexer::new(file_id, &region_metadata, intm_mgr, memory_usage_threshold)
-                .unwrap()
-                .unwrap();
+        let mut indexer = BloomFilterIndexer::new(
+            file_id,
+            &region_metadata,
+            intm_mgr,
+            memory_usage_threshold,
+            true,
+        )
+        .unwrap()
+        .unwrap();
 
         // push 20 rows
         let mut batch = new_batch("tag1", 0..10);

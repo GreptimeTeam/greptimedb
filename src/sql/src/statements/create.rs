@@ -200,6 +200,15 @@ impl Display for Json2Options {
             }
             f.write_char(' ')?;
             write_data_type(f, &hint.data_type)?;
+            if let Some(options) = &hint.skipping_index {
+                write!(
+                    f,
+                    " SKIPPING INDEX WITH (granularity = '{}', false_positive_rate = '{}', type = '{}')",
+                    options.granularity,
+                    options.false_positive_rate(),
+                    options.index_type
+                )?;
+            }
             if hint.inverted_index {
                 f.write_str(" INVERTED INDEX")?;
             }
@@ -218,6 +227,7 @@ impl Json2Options {
                     path: hint.path.clone(),
                     data_type: sql_data_type_to_concrete_data_type(&hint.data_type)?,
                     inverted_index: hint.inverted_index,
+                    skipping_index: hint.skipping_index.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -233,6 +243,8 @@ pub struct JsonTypeHint {
     pub path: Vec<String>,
     pub data_type: DataType,
     pub inverted_index: bool,
+    /// Skipping index options for this hinted path.
+    pub skipping_index: Option<SkippingIndexOptions>,
 }
 
 impl Column {
@@ -353,6 +365,7 @@ impl ColumnExtensions {
                     path: hint.path,
                     data_type,
                     inverted_index: hint.inverted_index,
+                    skipping_index: hint.skipping_index,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -811,6 +824,7 @@ mod tests {
                 path: vec!["x".repeat(8192)],
                 data_type: DataType::Text,
                 inverted_index: true,
+                skipping_index: None,
             }],
         });
         assert!(!create.consume_sql_size_budget(&mut 4096));
@@ -831,6 +845,7 @@ mod tests {
                 path: vec![path.into()],
                 data_type: DataType::Text,
                 inverted_index: false,
+                skipping_index: None,
             }],
         };
         assert_eq!(
@@ -1156,26 +1171,31 @@ ENGINE=mito
                     path: vec!["i".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
                     data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
                     data_type: ConcreteDataType::uint64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["s".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["b".to_string()],
                     data_type: ConcreteDataType::boolean_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 },
             ],
             None,
@@ -1202,6 +1222,7 @@ ENGINE=mito
                 path: vec!["u".to_string()],
                 data_type: ConcreteDataType::date_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             None,
         )

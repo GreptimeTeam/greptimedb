@@ -249,8 +249,14 @@ fn bench_index_update(c: &mut Criterion) {
                             )
                         });
                         let mut bloom = if shape.bloom {
-                            BloomFilterIndexer::new(file_id, &metadata, intermediate.clone(), None)
-                                .unwrap()
+                            BloomFilterIndexer::new(
+                                file_id,
+                                &metadata,
+                                intermediate.clone(),
+                                None,
+                                true,
+                            )
+                            .unwrap()
                         } else {
                             None
                         };

@@ -2925,10 +2925,10 @@ mod tests {
         let bloom_key = (
             index_id.file_id(),
             index_id.version,
-            column_id,
+            Arc::new(::index::target::IndexTarget::ColumnId(column_id)),
             Tag::Skipping,
         );
-        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        bloom_cache.put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()));
         inverted_cache.put_metadata(
             (index_id.file_id(), index_id.version),
             Arc::new(InvertedIndexMetas::default()),
@@ -2943,7 +2943,7 @@ mod tests {
         });
         puffin_metadata_cache.put_metadata(file_id_str.clone(), metadata);
 
-        assert!(bloom_cache.get_metadata(bloom_key).is_some());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_some());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))
@@ -2954,7 +2954,7 @@ mod tests {
 
         cache.evict_puffin_cache(index_id).await;
 
-        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_none());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))
@@ -2964,7 +2964,7 @@ mod tests {
         assert!(puffin_metadata_cache.get_metadata(&file_id_str).is_none());
 
         // Refill caches and evict via CacheStrategy to ensure delegation works.
-        bloom_cache.put_metadata(bloom_key, Arc::new(BloomFilterMeta::default()));
+        bloom_cache.put_metadata(bloom_key.clone(), Arc::new(BloomFilterMeta::default()));
         inverted_cache.put_metadata(
             (index_id.file_id(), index_id.version),
             Arc::new(InvertedIndexMetas::default()),
@@ -2985,7 +2985,7 @@ mod tests {
         let strategy = CacheStrategy::EnableAll(cache.clone());
         strategy.evict_puffin_cache(index_id).await;
 
-        assert!(bloom_cache.get_metadata(bloom_key).is_none());
+        assert!(bloom_cache.get_metadata(bloom_key.clone()).is_none());
         assert!(
             inverted_cache
                 .get_metadata((index_id.file_id(), index_id.version))

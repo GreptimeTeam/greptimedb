@@ -128,7 +128,7 @@ impl PredicateKey {
     }
 
     /// Creates a new bloom filter key.
-    pub fn new_bloom(predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>) -> Self {
+    pub fn new_bloom(predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>) -> Self {
         Self::Bloom(BloomFilterKey::new(predicates))
     }
 
@@ -195,21 +195,33 @@ impl FulltextIndexKey {
 /// Key for bloom filter queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct BloomFilterKey {
-    predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>,
     mem_usage: usize,
 }
 
 impl BloomFilterKey {
     /// Creates a new bloom filter key with the given predicates.
     /// Calculates memory usage based on the size of predicate lists.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|predicates| {
-                predicates
-                    .iter()
-                    .map(|predicate| predicate.list.iter().map(|list| list.len()).sum::<usize>())
-                    .sum::<usize>()
+            .iter()
+            .map(|(target, predicates)| {
+                let target_size = size_of::<IndexTarget>()
+                    + match target {
+                        IndexTarget::ColumnId(_) => 0,
+                        IndexTarget::JsonPath(path) => path
+                            .path()
+                            .iter()
+                            .map(|p| size_of::<String>() + p.len())
+                            .sum(),
+                    };
+                target_size
+                    + predicates
+                        .iter()
+                        .map(|predicate| {
+                            predicate.list.iter().map(|list| list.len()).sum::<usize>()
+                        })
+                        .sum::<usize>()
             })
             .sum();
         Self {
@@ -485,7 +497,7 @@ mod tests {
         let predicate2 = BloomInListPredicate {
             list: BTreeSet::from([b"test1".to_vec(), b"test2".to_vec()]),
         };
-        predicates2.insert(1, vec![predicate2]);
+        predicates2.insert(IndexTarget::ColumnId(1), vec![predicate2]);
         let key2 = PredicateKey::new_bloom(Arc::new(predicates2));
         let selection2 = Arc::new(RowGroupSelection::from_row_ids(
             [1, 2, 3].into_iter().collect(),

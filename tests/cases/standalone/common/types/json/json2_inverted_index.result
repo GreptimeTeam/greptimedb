@@ -136,14 +136,7 @@ CREATE TABLE json2_inverted_invalid (
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64
 
--- JSON hints support only inverted indexes.
-CREATE TABLE json2_inverted_invalid (
-    ts TIMESTAMP TIME INDEX,
-    attrs JSON2 (message STRING SKIPPING INDEX)
-);
-
-Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 type hint SKIPPING INDEX is not supported yet
-
+-- JSON hints do not support fulltext indexes.
 CREATE TABLE json2_inverted_invalid (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2 (message STRING FULLTEXT INDEX)

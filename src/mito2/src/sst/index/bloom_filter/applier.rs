@@ -33,7 +33,6 @@ use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -134,10 +133,10 @@ pub struct BloomFilterIndexApplier {
 
     /// Bloom filter predicates.
     /// For each column, the value will be retained only if it contains __all__ predicates.
-    default_predicates: Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>,
+    default_predicates: Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>,
 
-    /// Expected predicate column types from the latest region metadata.
-    expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+    /// Expected predicate target types from the latest region metadata.
+    expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
 }
 
 impl BloomFilterIndexApplier {
@@ -149,8 +148,8 @@ impl BloomFilterIndexApplier {
         path_type: PathType,
         object_store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
-        expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+        predicates: BTreeMap<IndexTarget, Vec<InListPredicate>>,
+        expected_predicate_target_types: BTreeMap<IndexTarget, ConcreteDataType>,
     ) -> Self {
         let default_predicates = Arc::new(predicates);
         Self {
@@ -162,7 +161,7 @@ impl BloomFilterIndexApplier {
             puffin_metadata_cache: None,
             bloom_filter_index_cache: None,
             default_predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         }
     }
 
@@ -209,7 +208,7 @@ impl BloomFilterIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-        predicates: &BTreeMap<ColumnId, Vec<InListPredicate>>,
+        predicates: &BTreeMap<IndexTarget, Vec<InListPredicate>>,
         row_groups: impl Iterator<Item = (usize, bool)>,
         mut metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Vec<(usize, Vec<Range<usize>>)>> {
@@ -235,7 +234,7 @@ impl BloomFilterIndexApplier {
 
         for (column_id, predicates) in predicates {
             let blob = match self
-                .blob_reader(file_id, *column_id, file_size_hint, metrics.as_deref_mut())
+                .blob_reader(file_id, column_id, file_size_hint, metrics.as_deref_mut())
                 .await?
             {
                 Some(blob) => blob,
@@ -251,12 +250,16 @@ impl BloomFilterIndexApplier {
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id.file_id(),
                     file_id.version,
-                    *column_id,
+                    match column_id {
+                        IndexTarget::ColumnId(id) => *id,
+                        IndexTarget::JsonPath(path) => path.column_id(),
+                    },
                     Tag::Skipping,
                     blob_size,
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
-                );
+                )
+                .with_target(column_id.clone());
                 self.apply_predicates(reader, predicates, &mut output, metrics.as_deref_mut())
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
@@ -296,7 +299,7 @@ impl BloomFilterIndexApplier {
     async fn blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: ColumnId,
+        column_id: &IndexTarget,
         file_size_hint: Option<u64>,
         metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Option<BlobReader>> {
@@ -338,7 +341,7 @@ impl BloomFilterIndexApplier {
     async fn cached_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: ColumnId,
+        column_id: &IndexTarget,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
@@ -358,7 +361,7 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
-        let blob_name = Self::column_blob_name(column_id);
+        let blob_name = Self::target_blob_name(column_id);
 
         let reader = puffin_manager
             .reader(&file_id)
@@ -375,8 +378,8 @@ impl BloomFilterIndexApplier {
     }
 
     // TODO(ruihang): use the same util with the code in creator
-    fn column_blob_name(column_id: ColumnId) -> String {
-        let target_key = IndexTarget::ColumnId(column_id).encode();
+    fn target_blob_name(column_id: &IndexTarget) -> String {
+        let target_key = column_id.encode();
         format!("{INDEX_BLOB_TYPE}-{target_key}")
     }
 
@@ -384,7 +387,7 @@ impl BloomFilterIndexApplier {
     async fn remote_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: ColumnId,
+        column_id: &IndexTarget,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
@@ -403,7 +406,7 @@ impl BloomFilterIndexApplier {
             .build(self.object_store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let blob_name = Self::column_blob_name(column_id);
+        let blob_name = Self::target_blob_name(column_id);
 
         puffin_manager
             .reader(&file_id)
@@ -439,22 +442,18 @@ impl BloomFilterIndexApplier {
     pub fn compatible_predicate_for_sst(
         &self,
         sst_metadata: &RegionMetadataRef,
-    ) -> Option<Arc<BTreeMap<ColumnId, Vec<InListPredicate>>>> {
+    ) -> Option<Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>> {
         let mut has_type_mismatch = false;
         let mut compatible_col_ids = Vec::new();
 
-        for (col_id, expected) in &self.expected_predicate_col_types {
-            let Some(sst_col) = sst_metadata.column_by_id(*col_id) else {
-                has_type_mismatch = true;
-                continue;
-            };
-
-            if sst_col.column_schema.data_type != *expected {
+        for (col_id, expected) in &self.expected_predicate_target_types {
+            if crate::sst::index::column::skipping_target_data_type(sst_metadata, col_id).as_ref()
+                != Some(expected)
+            {
                 has_type_mismatch = true;
                 continue;
             }
-
-            compatible_col_ids.push(*col_id);
+            compatible_col_ids.push(col_id.clone());
         }
 
         if compatible_col_ids.is_empty() {
@@ -506,6 +505,190 @@ mod tests {
     };
 
     #[tokio::test]
+    async fn test_json_skipping_build_and_prune_both_formats() {
+        use crate::read::{Batch, BatchColumn};
+        use common_function::scalars::json::json_get::JsonGetWithType;
+        use common_function::scalars::udf::create_udf;
+        use datafusion_common::ScalarValue;
+        use datafusion_expr::expr::ScalarFunction;
+        use datatypes::arrow::array::{ArrayRef, Int64Array, StructArray};
+        use datatypes::arrow::buffer::NullBuffer;
+        use datatypes::arrow::datatypes::{Field, Schema};
+        use datatypes::arrow::record_batch::RecordBatch;
+        use datatypes::schema::SkippingIndexOptions;
+        use datatypes::vectors::{Helper, UInt8Vector, UInt64Vector};
+
+        for flat in [false, true] {
+            let (dir, factory) =
+                PuffinManagerFactory::new_for_test_async("json_skipping_index").await;
+            let mut metadata = (*mock_region_metadata()).clone();
+            let column = &mut metadata.column_metadatas[2].column_schema;
+            column.data_type =
+                ConcreteDataType::json2(datatypes::types::json_type::JsonNativeType::Object(
+                    datatypes::types::json_type::JsonObjectType::new(),
+                ));
+            column.with_extension_type(&datatypes::extension::json::Json2ExtensionType::new(
+                Arc::new(datatypes::extension::json::JsonMetadata::new(
+                    datatypes::json::JsonSettings::try_new(
+                        vec![datatypes::json::JsonTypeHint {
+                            path: vec!["value".into()],
+                            data_type: ConcreteDataType::int64_datatype(),
+                            inverted_index: false,
+                            skipping_index: Some(
+                                SkippingIndexOptions::new(2, 0.01, Default::default()).unwrap(),
+                            ),
+                        }],
+                        Some(0),
+                    )
+                    .unwrap(),
+                )),
+            ));
+            // Other ordinary indexed columns are absent in this synthetic batch.
+            for col in &mut metadata.column_metadatas {
+                col.column_schema.unset_skipping_options().unwrap();
+            }
+            let metadata = Arc::new(metadata);
+            let file_id = FileId::random();
+            let target = IndexTarget::new_json_path(3, vec!["value".into()]).unwrap();
+            let mut creator = BloomFilterIndexer::new(
+                file_id,
+                &metadata,
+                new_intm_mgr(dir.path().to_string_lossy()).await,
+                None,
+                true,
+            )
+            .unwrap()
+            .unwrap();
+            let values: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None, Some(1), None]));
+            let root: ArrayRef = Arc::new(StructArray::new(
+                vec![Field::new("value", values.data_type().clone(), true)].into(),
+                vec![values],
+                Some(NullBuffer::from(vec![true, false, true, true])),
+            ));
+            for start in [0, 2] {
+                let array = root.slice(start, 2);
+                if flat {
+                    let batch = RecordBatch::try_new(
+                        Arc::new(Schema::new(vec![Field::new(
+                            "field_u64",
+                            array.data_type().clone(),
+                            true,
+                        )])),
+                        vec![array],
+                    )
+                    .unwrap();
+                    creator.update_flat(&batch).await.unwrap();
+                } else {
+                    let mut batch = Batch::new(
+                        vec![],
+                        Arc::new(UInt64Vector::from_vec(vec![0, 1])),
+                        Arc::new(UInt64Vector::from_vec(vec![0, 0])),
+                        Arc::new(UInt8Vector::from_vec(vec![1, 1])),
+                        vec![BatchColumn {
+                            column_id: 3,
+                            data: Helper::try_into_vector(array).unwrap(),
+                        }],
+                    )
+                    .unwrap();
+                    creator.update(&mut batch).await.unwrap();
+                }
+            }
+
+            assert_eq!(creator.column_ids().count(), 0);
+            let object_store = mock_object_store();
+            let manager = factory.build(
+                object_store.clone(),
+                RegionFilePathFactory::new("json_test".into(), PathType::Bare),
+            );
+            let index_id = RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
+            let mut writer = manager.writer(&index_id).await.unwrap();
+            let (rows, bytes) = creator.finish(&mut writer).await.unwrap();
+            assert_eq!(rows, 4);
+            assert!(bytes > 0);
+            writer.finish().await.unwrap();
+            let json_expr = |path: &str, ty| {
+                Expr::ScalarFunction(ScalarFunction::new_udf(
+                    Arc::new(create_udf(Arc::new(JsonGetWithType::default()))),
+                    vec![col("field_u64"), lit(path), Expr::Literal(ty, None)],
+                ))
+            };
+            let cache = Arc::new(
+                crate::cache::index::bloom_filter_index::BloomFilterIndexCache::new(
+                    1024 * 1024,
+                    1024 * 1024,
+                    1024,
+                ),
+            );
+            for expr in [
+                json_expr("$.value", ScalarValue::Int64(None)).eq(lit(9_i64)),
+                json_expr("$.value", ScalarValue::Int64(None))
+                    .in_list(vec![lit(8_i64), lit(9_i64)], false),
+            ] {
+                let applier = BloomFilterIndexApplierBuilder::new(
+                    "json_test".into(),
+                    PathType::Bare,
+                    object_store.clone(),
+                    &metadata,
+                    factory.clone(),
+                )
+                .with_bloom_filter_index_cache(Some(cache.clone()))
+                .build(&[expr])
+                .unwrap()
+                .unwrap();
+                let predicates = applier.compatible_predicate_for_sst(&metadata).unwrap();
+                assert!(predicates.contains_key(&target));
+                // Run twice to cover cold reads and cached index reads.
+                for _ in 0..2 {
+                    let result = applier
+                        .apply(index_id, None, &predicates, [(4, true)].into_iter(), None)
+                        .await
+                        .unwrap();
+                    assert!(result[0].1.is_empty());
+                }
+                assert!(
+                    applier
+                        .compatible_predicate_for_sst(&mock_region_metadata())
+                        .is_none()
+                );
+            }
+            let applier = BloomFilterIndexApplierBuilder::new(
+                "json_test".into(),
+                PathType::Bare,
+                object_store.clone(),
+                &metadata,
+                factory.clone(),
+            )
+            .build(&[json_expr("$.value", ScalarValue::Int64(None)).eq(lit(1_i64))])
+            .unwrap()
+            .unwrap();
+            let predicates = applier.compatible_predicate_for_sst(&metadata).unwrap();
+            let result = applier
+                .apply(index_id, None, &predicates, [(4, true)].into_iter(), None)
+                .await
+                .unwrap();
+            assert_eq!(result[0].1.len(), 1);
+            assert_eq!(result[0].1[0], 0..4);
+            for expr in [
+                json_expr("$.value", ScalarValue::Float64(None)),
+                json_expr("$.missing", ScalarValue::Int64(None)),
+            ] {
+                assert!(
+                    BloomFilterIndexApplierBuilder::new(
+                        "json_test".into(),
+                        PathType::Bare,
+                        object_store.clone(),
+                        &metadata,
+                        factory.clone()
+                    )
+                    .build(&[expr.eq(lit(1_i64))])
+                    .unwrap()
+                    .is_none()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn test_compatible_predicate_for_sst() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
@@ -513,13 +696,15 @@ mod tests {
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
-            1,
+            IndexTarget::ColumnId(1),
             vec![InListPredicate {
                 list: BTreeSet::from_iter([Bytes::from("foo")]),
             }],
         )]);
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]);
+        let expected_predicate_target_types = BTreeMap::from_iter([(
+            IndexTarget::ColumnId(1),
+            ConcreteDataType::string_datatype(),
+        )]);
 
         let applier = BloomFilterIndexApplier::new(
             table_dir,
@@ -527,7 +712,7 @@ mod tests {
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         );
         let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
         assert!(predicates.is_some());
@@ -541,13 +726,13 @@ mod tests {
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
-            1,
+            IndexTarget::ColumnId(1),
             vec![InListPredicate {
                 list: BTreeSet::from_iter([Bytes::from("foo")]),
             }],
         )]);
-        let expected_predicate_col_types =
-            BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]);
+        let expected_predicate_target_types =
+            BTreeMap::from_iter([(IndexTarget::ColumnId(1), ConcreteDataType::int64_datatype())]);
 
         let applier = BloomFilterIndexApplier::new(
             table_dir,
@@ -555,7 +740,7 @@ mod tests {
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         );
         let predicates = applier.compatible_predicate_for_sst(&mock_region_metadata());
         assert!(predicates.is_none());
@@ -572,21 +757,24 @@ mod tests {
         // Column 3 (field_u64): expected int64 — SST has uint64 (mismatched).
         let predicates = BTreeMap::from_iter([
             (
-                1,
+                IndexTarget::ColumnId(1),
                 vec![InListPredicate {
                     list: BTreeSet::from_iter([Bytes::from("foo")]),
                 }],
             ),
             (
-                3,
+                IndexTarget::ColumnId(3),
                 vec![InListPredicate {
                     list: BTreeSet::from_iter([Bytes::from("bar")]),
                 }],
             ),
         ]);
-        let expected_predicate_col_types = BTreeMap::from_iter([
-            (1, ConcreteDataType::string_datatype()),
-            (3, ConcreteDataType::int64_datatype()), // intentional mismatch
+        let expected_predicate_target_types = BTreeMap::from_iter([
+            (
+                IndexTarget::ColumnId(1),
+                ConcreteDataType::string_datatype(),
+            ),
+            (IndexTarget::ColumnId(3), ConcreteDataType::int64_datatype()), // intentional mismatch
         ]);
 
         let applier = BloomFilterIndexApplier::new(
@@ -595,18 +783,18 @@ mod tests {
             object_store,
             puffin_manager_factory,
             predicates,
-            expected_predicate_col_types,
+            expected_predicate_target_types,
         );
         let result = applier.compatible_predicate_for_sst(&mock_region_metadata());
 
         // The subset containing only the compatible column must be returned.
         let result = result.expect("expected Some with compatible subset");
         assert!(
-            result.contains_key(&1),
+            result.contains_key(&IndexTarget::ColumnId(1)),
             "compatible column 1 must be present"
         );
         assert!(
-            !result.contains_key(&3),
+            !result.contains_key(&IndexTarget::ColumnId(3)),
             "mismatched column 3 must be absent"
         );
         assert_eq!(result.len(), 1, "only the compatible predicate must remain");
@@ -686,6 +874,7 @@ mod tests {
             &region_metadata,
             intm_mgr,
             memory_usage_threshold,
+            true,
         )
         .unwrap()
         .unwrap();

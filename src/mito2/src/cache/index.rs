@@ -151,7 +151,7 @@ where
 
 impl<K, M> IndexCache<K, M>
 where
-    K: Hash + Eq + Clone + Copy + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
     pub fn get_metadata(&self, key: K) -> Option<Arc<M>> {
@@ -195,7 +195,7 @@ where
         let last_index = page_keys.len() - 1;
         // TODO: Avoid copy as much as possible.
         for (i, page_key) in page_keys.iter().enumerate() {
-            match self.get_page(key, *page_key) {
+            match self.get_page(key.clone(), *page_key) {
                 Some(page) => {
                     CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                     metrics.cache_hit += 1;
@@ -222,7 +222,7 @@ where
                 let page_key = page_keys[i];
                 metrics.page_bytes += page.len() as u64;
                 data[i] = page.clone();
-                self.put_page(key, page_key, page.clone());
+                self.put_page(key.clone(), page_key, page.clone());
             }
         }
         let buffer = Buffer::from_iter(data);
@@ -260,7 +260,7 @@ where
                     continue;
                 }
                 metrics.num_pages += 1;
-                match self.get_page(key, page_key) {
+                match self.get_page(key.clone(), page_key) {
                     Some(page) => {
                         CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
                         metrics.cache_hit += 1;
@@ -289,7 +289,7 @@ where
             debug_assert_eq!(loaded.len(), missing.len());
             for (page_id, page) in missing.into_iter().zip(loaded) {
                 metrics.page_bytes += page.len() as u64;
-                self.put_page(key, PageKey { page_id }, page.clone());
+                self.put_page(key.clone(), PageKey { page_id }, page.clone());
                 pages.insert(page_id, page);
             }
         }
@@ -320,10 +320,11 @@ where
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
         // Clones the value to ensure it doesn't reference a larger buffer.
         let value = Bytes::from(value.to_vec());
+        let key = (key, page_key);
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
-            .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.index.insert((key, page_key), value);
+            .add((self.weight_of_content)(&key, &value).into());
+        self.index.insert(key, value);
     }
 
     /// Invalidates all cache entries whose keys satisfy `predicate`.

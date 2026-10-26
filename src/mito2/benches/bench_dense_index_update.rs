@@ -367,8 +367,14 @@ fn bench_dense_index_update(c: &mut Criterion) {
                             )
                         });
                         let bloom = if shape.bloom {
-                            BloomFilterIndexer::new(file_id, &metadata, intermediate.clone(), None)
-                                .unwrap()
+                            BloomFilterIndexer::new(
+                                file_id,
+                                &metadata,
+                                intermediate.clone(),
+                                None,
+                                true,
+                            )
+                            .unwrap()
                         } else {
                             None
                         };
