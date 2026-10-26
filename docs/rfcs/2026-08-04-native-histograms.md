@@ -16,8 +16,8 @@ Struct before persistence and are queried only as native histograms.
 Prometheus Remote Write 2.0 native histograms and cumulative OTLP/HTTP
 exponential histograms are enabled by default.
 Remote Write 1.0 histogram payloads are rejected instead of being acknowledged and dropped.
-Native-histogram Remote Read is deferred; the existing Remote Read path
-continues to return scalar samples only.
+Remote Read returns scalar samples and native histograms through `SAMPLES`,
+including exact stored integer counts. Streamed responses remain deferred.
 
 # Goals
 
@@ -25,13 +25,15 @@ continues to return scalar samples only.
 2. Keep one stable Prometheus-compatible persisted representation across
    Prometheus and OTLP ingestion.
 3. Match Prometheus query behavior where it is observable and practical.
-4. State intentional limitations explicitly so incomplete behavior is not
+4. Return stored native histograms through sampled Remote Read without rounding
+   integer counts or losing supported histogram fields.
+5. State intentional limitations explicitly so incomplete behavior is not
    mistaken for support.
 
 # Non-Goals
 
 - Supporting native histograms in Remote Write 1.0.
-- Returning native histograms through Prometheus Remote Read.
+- Streaming Remote Read responses (`STREAMED_XOR_CHUNKS`).
 - Persisting Remote Write metric metadata.
 - Persisting exemplars.
 - Converting OTLP delta values to cumulative values during ingestion. Supported
@@ -112,14 +114,42 @@ persisted by this feature.
 
 ## Remote Read
 
-Native-histogram Remote Read is deferred. GreptimeDB's existing Remote Read path
-continues to negotiate `SAMPLES` responses and serialize scalar samples only.
+`/v1/prometheus/read` returns scalar samples and integer or float native
+histograms through the existing Snappy-compressed `SAMPLES` protobuf response.
+Omitting accepted types, requesting `SAMPLES`, or requesting
+`[STREAMED_XOR_CHUNKS, SAMPLES]` selects this format. Streaming-only requests
+remain unsupported; the response is still buffered as a whole.
 
-A follow-up can map the stored Struct into `TimeSeries.histograms`. It must
-preserve integer counts without passing through `f64`, retain the stored
-histogram fields, and decide sampled versus streamed response coverage. The
-sampled protobuf has no start-timestamp field, so that omission must remain
-explicit if sampled responses are implemented.
+One request can query both scalar and histogram metrics. A histogram series
+can contain integer and float histogram samples, but the one-sample-kind-per-
+metric-table rule remains unchanged. The selected field must be `Float64` or
+the canonical native-histogram Struct, regardless of its stored column name.
+
+Integer counts remain exact within the existing nonnegative `i64` storage
+range, including above `2^53`. Stored absolute integer buckets become signed
+wire deltas, retaining their sequence across span boundaries. Float bucket
+counts remain absolute. Schema, spans, custom bounds, zero threshold, sum
+(including stale-NaN bits), reset hint, and millisecond timestamps are retained.
+The sampled protobuf has no `start_timestamp` field, so that value remains in
+storage but is omitted from the response. Raw-delta OTLP histograms retain
+their temporality labels and gauge hints; Remote Read does not accumulate them
+or reconstruct the original OTLP point.
+
+Malformed or wire-incompatible non-null stored histograms fail the entire
+`ReadRequest` with HTTP 500, including healthy queries in that request. This
+includes an initial exponential span offset of `i32::MIN` on either side,
+even for an empty span, and custom-span extents beyond `custom_values.len() + 1`.
+Empty custom spans may end at that one-past boundary. These read-specific
+restrictions do not tighten existing ingestion acceptance. Null histograms
+remain absent samples.
+
+Custom-bucket interoperability is exercised against Prometheus revision
+`e471c7708c6b0b13e2050222bbd5a907b36f4113`, including `AtHistogram` and
+`AtFloatHistogram` on integer custom buckets. This is a tested revision, not
+a minimum-release claim; older readers can lose custom bounds during integer-
+to-float conversion. Integer payloads are not downgraded for those readers.
+The [wire fixture and iterator check](../../tests/compatibility/wire/native_histogram_remote_read/README.md)
+record the independent expectations and reproduction commands.
 
 ## OTLP
 
@@ -340,16 +370,20 @@ partial-success behavior, kind exclusivity,
 stale-marker selector semantics, synthetic-zero rates, incompatible empty
 layouts, overflow-safe averages, layout-sensitive equality, infinite custom
 midpoints, and exponential overflow indices for schemas `-4`, `0`, and `8`.
-Behavioral coverage also verifies frontend PromQL warning and info responses.
+Behavioral coverage also verifies frontend PromQL warning and info responses,
+sampled Remote Read before and after flush in standalone and distributed
+setups, exact large integers, stale-marker bits, timestamp units, and OTLP
+normalization. Frozen upstream protobuf fixtures guard the wire encoder.
 
 This work does not change GreptimeDB's persisted Struct or protobuf
-dependencies. It adds the disabled-by-default public OTLP gate; existing
-native-histogram data remains readable.
+dependencies. Remote Read uses the existing endpoint and negotiation without
+a new configuration option; existing native-histogram data remains readable.
 
 # Future Work
 
-- Native-histogram Remote Read, including exact integer round-trips and streamed
-  chunks with start timestamps.
+- TODO: Add native histogram and float histogram chunks to
+  `STREAMED_XOR_CHUNKS`, with checksummed framing and bounded buffering. Decide
+  separately whether to include start-timestamp-bearing chunk encodings.
 - Raw-delta OTLP exponential-histogram storage and temporality-aware native
   histogram queries, as described above; no delta-to-cumulative conversion.
 - Persistent Remote Write metadata and accurate help/unit updates.

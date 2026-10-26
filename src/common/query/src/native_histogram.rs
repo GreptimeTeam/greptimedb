@@ -36,7 +36,10 @@ use datafusion::arrow::datatypes::{
 use datafusion_common::{DataFusionError, Result as DfResult};
 use datatypes::data_type::{ConcreteDataType, DataType};
 use datatypes::types::{StructField, StructType};
-pub use encoding::{NativeHistogramError, encode_native_histogram, native_histogram_column_schema};
+pub use encoding::{
+    NativeHistogramError, decode_native_histogram_for_remote_read, encode_native_histogram,
+    native_histogram_column_schema,
+};
 use once_cell::sync::Lazy;
 
 use crate::prelude::greptime_native_histogram;
@@ -134,6 +137,37 @@ pub fn is_native_histogram_value_type(data_type: &ConcreteDataType) -> bool {
 /// Returns whether a named column matches the configured native histogram contract.
 pub fn is_native_histogram_value_schema(name: &str, data_type: &ConcreteDataType) -> bool {
     name == greptime_native_histogram() && is_native_histogram_value_type(data_type)
+}
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use api::helper::pb_value_to_value_ref;
+    use api::v1::{Value, value::ValueData};
+    use datafusion::arrow::array::{AsArray, StructArray};
+    use datatypes::vectors::Helper;
+
+    use crate::native_histogram::{native_histogram_column_schema, native_histogram_value_type};
+
+    /// Builds stored arrays through the same protobuf-to-vector path as ingestion.
+    pub fn histogram_array(values: &[Option<ValueData>]) -> StructArray {
+        let schema = native_histogram_column_schema().unwrap();
+        let rows = values
+            .iter()
+            .map(|value_data| {
+                datatypes::value::Value::from(pb_value_to_value_ref(
+                    &Value {
+                        value_data: value_data.clone(),
+                    },
+                    schema.datatype_extension.as_ref(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        Helper::try_from_row_into_vector(&rows, native_histogram_value_type())
+            .unwrap()
+            .to_arrow_array()
+            .as_struct()
+            .clone()
+    }
 }
 
 /// Schema identifier for native histograms with explicit custom bucket bounds.

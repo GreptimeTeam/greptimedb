@@ -15,12 +15,15 @@
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
 use api::helper::ColumnDataTypeWrapper;
+use api::prom_store::remote;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, ListValue, SemanticType, Value};
+use datafusion::arrow::array::{Array, StructArray};
+use datafusion::arrow::datatypes::{Float64Type, Int32Type, Int64Type, TimestampMillisecondType};
 use snafu::{Snafu, ensure};
 
 use crate::native_histogram::{
-    CUSTOM_BUCKETS_SCHEMA, MAX_EXPONENTIAL_SCHEMA, NATIVE_HISTOGRAM_FIELD_NAMES,
+    self, CUSTOM_BUCKETS_SCHEMA, MAX_EXPONENTIAL_SCHEMA, NATIVE_HISTOGRAM_FIELD_NAMES,
     exponential_overflow_bucket_index, native_histogram_value_type,
 };
 use crate::prelude::greptime_native_histogram;
@@ -78,7 +81,6 @@ pub fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
     ]);
 
     if uses_float_counts {
-        validate_float_native_histogram_counts(histogram)?;
         let count = match histogram.count.as_ref() {
             Some(Count::CountFloat(count)) => *count,
             _ => 0.0,
@@ -87,6 +89,12 @@ pub fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
             Some(ZeroCount::ZeroCountFloat(zero_count)) => *zero_count,
             _ => 0.0,
         };
+        validate_float_native_histogram_counts(
+            count,
+            zero_count,
+            &histogram.positive_counts,
+            &histogram.negative_counts,
+        )?;
         items.extend([
             null_pb_value(),
             null_pb_value(),
@@ -108,7 +116,13 @@ pub fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
         };
         let positive_buckets = bucket_counts_from_deltas(&histogram.positive_deltas)?;
         let negative_buckets = bucket_counts_from_deltas(&histogram.negative_deltas)?;
-        validate_integer_native_histogram_counts(histogram, &positive_buckets, &negative_buckets)?;
+        validate_integer_native_histogram_counts(
+            count,
+            zero_count,
+            histogram.sum,
+            &positive_buckets,
+            &negative_buckets,
+        )?;
         let count = i64::try_from(count).map_err(|_| NativeHistogramError {
             message: format!("native histogram integer count {count} overflows i64"),
         })?;
@@ -130,27 +144,243 @@ pub fn encode_native_histogram(histogram: &Histogram) -> Result<ValueData> {
     Ok(ValueData::StructValue(api::v1::StructValue { items }))
 }
 
-fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> Result<()> {
-    let exponential_overflow_index = validate_native_histogram_schema(histogram.schema)?;
-    validate_native_histogram_custom_values(histogram)?;
+/// Decodes a stored histogram without rounding integer counts through `f64`.
+///
+/// Null structs are absent samples. Malformed or sampled-wire-incompatible
+/// values are errors. The sampled format has no field for `start_timestamp`.
+pub fn decode_native_histogram_for_remote_read(
+    array: &StructArray,
+    row: usize,
+    timestamp: i64,
+) -> Result<Option<remote::Histogram>> {
+    use crate::native_histogram::{
+        COUNT_F64_FIELD, COUNT_I64_FIELD, CUSTOM_VALUES_FIELD, NEGATIVE_BUCKETS_F64_FIELD,
+        NEGATIVE_BUCKETS_I64_FIELD, NEGATIVE_SPAN_LENGTHS_FIELD, NEGATIVE_SPAN_OFFSETS_FIELD,
+        POSITIVE_BUCKETS_F64_FIELD, POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_LENGTHS_FIELD,
+        POSITIVE_SPAN_OFFSETS_FIELD, RESET_HINT_FIELD, SCHEMA_FIELD, START_TIMESTAMP_FIELD,
+        SUM_FIELD, ZERO_COUNT_F64_FIELD, ZERO_COUNT_I64_FIELD, ZERO_THRESHOLD_FIELD,
+    };
 
-    if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
-        ensure!(
-            histogram.zero_threshold == 0.0 && native_histogram_zero_count_is_zero(histogram),
-            NativeHistogramSnafu {
-                message: "custom native histogram must not use a zero bucket"
-            }
-        );
-        ensure!(
-            histogram.negative_spans.is_empty()
-                && histogram.negative_deltas.is_empty()
-                && histogram.negative_counts.is_empty(),
-            NativeHistogramSnafu {
-                message: "custom native histogram must not use negative buckets"
-            }
-        );
+    ensure!(
+        row < array.len(),
+        NativeHistogramSnafu {
+            message: "native histogram row is out of bounds"
+        }
+    );
+    if array.is_null(row) {
+        return Ok(None);
     }
+    let invalid_field = |error| NativeHistogramError {
+        message: format!("invalid stored native histogram: {error}"),
+    };
+    let read_spans = |name, offsets, lengths| -> Result<Vec<remote::BucketSpan>> {
+        let offsets = native_histogram::list_values::<Int32Type>(array, offsets, row)
+            .map_err(invalid_field)?;
+        let lengths = native_histogram::list_values::<Int32Type>(array, lengths, row)
+            .map_err(invalid_field)?;
+        native_histogram::read_spans(offsets, lengths, name)
+            .map_err(invalid_field)?
+            .into_iter()
+            .map(|span| {
+                Ok(remote::BucketSpan {
+                    offset: span.offset,
+                    length: u32::try_from(span.length).map_err(|_| NativeHistogramError {
+                        message: format!("native histogram {name} span length is negative"),
+                    })?,
+                })
+            })
+            .collect()
+    };
+    let mut histogram = remote::Histogram {
+        schema: native_histogram::required_primitive::<Int32Type>(array, SCHEMA_FIELD, row)
+            .map_err(invalid_field)?,
+        zero_threshold: native_histogram::required_primitive::<Float64Type>(
+            array,
+            ZERO_THRESHOLD_FIELD,
+            row,
+        )
+        .map_err(invalid_field)?,
+        sum: native_histogram::required_primitive::<Float64Type>(array, SUM_FIELD, row)
+            .map_err(invalid_field)?,
+        reset_hint: native_histogram::required_primitive::<Int32Type>(array, RESET_HINT_FIELD, row)
+            .map_err(invalid_field)?,
+        custom_values: native_histogram::list_values::<Float64Type>(
+            array,
+            CUSTOM_VALUES_FIELD,
+            row,
+        )
+        .map_err(invalid_field)?,
+        positive_spans: read_spans(
+            "positive",
+            POSITIVE_SPAN_OFFSETS_FIELD,
+            POSITIVE_SPAN_LENGTHS_FIELD,
+        )?,
+        negative_spans: read_spans(
+            "negative",
+            NEGATIVE_SPAN_OFFSETS_FIELD,
+            NEGATIVE_SPAN_LENGTHS_FIELD,
+        )?,
+        timestamp,
+        ..Default::default()
+    };
+    // Validate the stored child even though the sampled wire format cannot carry it.
+    native_histogram::optional_primitive::<TimestampMillisecondType>(
+        array,
+        START_TIMESTAMP_FIELD,
+        row,
+    )
+    .map_err(invalid_field)?;
+    let count_i64 = native_histogram::optional_primitive::<Int64Type>(array, COUNT_I64_FIELD, row)
+        .map_err(invalid_field)?;
+    let count_f64 =
+        native_histogram::optional_primitive::<Float64Type>(array, COUNT_F64_FIELD, row)
+            .map_err(invalid_field)?;
+    let zero_i64 =
+        native_histogram::optional_primitive::<Int64Type>(array, ZERO_COUNT_I64_FIELD, row)
+            .map_err(invalid_field)?;
+    let zero_f64 =
+        native_histogram::optional_primitive::<Float64Type>(array, ZERO_COUNT_F64_FIELD, row)
+            .map_err(invalid_field)?;
+    let positive_i64 =
+        native_histogram::list_values::<Int64Type>(array, POSITIVE_BUCKETS_I64_FIELD, row)
+            .map_err(invalid_field)?;
+    let negative_i64 =
+        native_histogram::list_values::<Int64Type>(array, NEGATIVE_BUCKETS_I64_FIELD, row)
+            .map_err(invalid_field)?;
+    let positive_f64 =
+        native_histogram::list_values::<Float64Type>(array, POSITIVE_BUCKETS_F64_FIELD, row)
+            .map_err(invalid_field)?;
+    let negative_f64 =
+        native_histogram::list_values::<Float64Type>(array, NEGATIVE_BUCKETS_F64_FIELD, row)
+            .map_err(invalid_field)?;
 
+    let (zero_count_is_zero, positive_len, negative_len) = match (count_i64, count_f64) {
+        (Some(count), None) => {
+            ensure!(
+                zero_f64.is_none() && positive_f64.is_empty() && negative_f64.is_empty(),
+                NativeHistogramSnafu {
+                    message: "integer native histogram has populated float fields"
+                }
+            );
+            let count = u64::try_from(count).map_err(|_| NativeHistogramError {
+                message: "native histogram integer count is negative".to_string(),
+            })?;
+            let zero_count =
+                u64::try_from(zero_i64.unwrap_or_default()).map_err(|_| NativeHistogramError {
+                    message: "native histogram integer zero_count is negative".to_string(),
+                })?;
+            validate_integer_native_histogram_counts(
+                count,
+                zero_count,
+                histogram.sum,
+                &positive_i64,
+                &negative_i64,
+            )?;
+            histogram.count = Some(remote::histogram::Count::CountInt(count));
+            histogram.zero_count = Some(remote::histogram::ZeroCount::ZeroCountInt(zero_count));
+            histogram.positive_deltas = bucket_deltas_from_counts(&positive_i64)?;
+            histogram.negative_deltas = bucket_deltas_from_counts(&negative_i64)?;
+            (zero_count == 0, positive_i64.len(), negative_i64.len())
+        }
+        (None, Some(count)) => {
+            ensure!(
+                zero_i64.is_none() && positive_i64.is_empty() && negative_i64.is_empty(),
+                NativeHistogramSnafu {
+                    message: "float native histogram has populated integer fields"
+                }
+            );
+            let zero_count = zero_f64.unwrap_or_default();
+            validate_float_native_histogram_counts(
+                count,
+                zero_count,
+                &positive_f64,
+                &negative_f64,
+            )?;
+            histogram.count = Some(remote::histogram::Count::CountFloat(count));
+            histogram.zero_count = Some(remote::histogram::ZeroCount::ZeroCountFloat(zero_count));
+            histogram.positive_counts = positive_f64;
+            histogram.negative_counts = negative_f64;
+            (
+                zero_count == 0.0,
+                histogram.positive_counts.len(),
+                histogram.negative_counts.len(),
+            )
+        }
+        _ => {
+            return NativeHistogramSnafu {
+                message: "stored native histogram must have exactly one populated count family",
+            }
+            .fail();
+        }
+    };
+    let positive_extent = validate_native_histogram_layout(
+        histogram.schema,
+        histogram.zero_threshold,
+        zero_count_is_zero,
+        &histogram.custom_values,
+        (
+            histogram
+                .positive_spans
+                .iter()
+                .map(|s| (s.offset, s.length)),
+            positive_len,
+        ),
+        (
+            histogram
+                .negative_spans
+                .iter()
+                .map(|s| (s.offset, s.length)),
+            negative_len,
+        ),
+    )?;
+    if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
+        let max_extent = i32::try_from(histogram.custom_values.len())
+            .ok()
+            .and_then(|len| len.checked_add(1))
+            .ok_or_else(|| NativeHistogramError {
+                message: "custom native histogram extent overflows i32".to_string(),
+            })?;
+        ensure!(
+            positive_extent <= max_extent,
+            NativeHistogramSnafu {
+                message: "custom native histogram span extent exceeds custom_values plus the overflow bucket"
+            }
+        );
+    } else {
+        for (name, spans) in [
+            ("positive", &histogram.positive_spans),
+            ("negative", &histogram.negative_spans),
+        ] {
+            ensure!(
+                spans.first().is_none_or(|s| s.offset != i32::MIN),
+                NativeHistogramSnafu {
+                    message: format!(
+                        "native histogram {name} initial span offset i32::MIN is incompatible with Remote Read"
+                    )
+                }
+            );
+        }
+    }
+    Ok(Some(histogram))
+}
+
+fn bucket_deltas_from_counts(counts: &[i64]) -> Result<Vec<i64>> {
+    let mut previous = 0i64;
+    counts
+        .iter()
+        .map(|&count| {
+            let delta = count
+                .checked_sub(previous)
+                .ok_or_else(|| NativeHistogramError {
+                    message: "native histogram bucket delta overflows i64".to_string(),
+                })?;
+            previous = count;
+            Ok(delta)
+        })
+        .collect()
+}
+
+fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> Result<()> {
     let (positive_buckets, negative_buckets) = if uses_float_counts {
         (
             histogram.positive_counts.len(),
@@ -162,30 +392,69 @@ fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> 
             histogram.negative_deltas.len(),
         )
     };
+    validate_native_histogram_layout(
+        histogram.schema,
+        histogram.zero_threshold,
+        native_histogram_zero_count_is_zero(histogram),
+        &histogram.custom_values,
+        (
+            histogram
+                .positive_spans
+                .iter()
+                .map(|s| (s.offset, s.length)),
+            positive_buckets,
+        ),
+        (
+            histogram
+                .negative_spans
+                .iter()
+                .map(|s| (s.offset, s.length)),
+            negative_buckets,
+        ),
+    )?;
+    Ok(())
+}
+
+fn validate_native_histogram_layout(
+    schema: i32,
+    zero_threshold: f64,
+    zero_count_is_zero: bool,
+    custom_values: &[f64],
+    positive: (impl ExactSizeIterator<Item = (i32, u32)> + Clone, usize),
+    negative: (impl ExactSizeIterator<Item = (i32, u32)> + Clone, usize),
+) -> Result<i32> {
+    let exponential_overflow_index = validate_native_histogram_schema(schema)?;
+    validate_native_histogram_custom_values(schema, custom_values)?;
+    if schema == CUSTOM_BUCKETS_SCHEMA {
+        ensure!(
+            zero_threshold == 0.0 && zero_count_is_zero,
+            NativeHistogramSnafu {
+                message: "custom native histogram must not use a zero bucket"
+            }
+        );
+        ensure!(
+            negative.0.len() == 0 && negative.1 == 0,
+            NativeHistogramSnafu {
+                message: "custom native histogram must not use negative buckets"
+            }
+        );
+    }
+
     let bucket_index_range = if let Some(overflow_index) = exponential_overflow_index {
         (i32::MIN, overflow_index)
     } else {
         (
             0,
-            i32::try_from(histogram.custom_values.len()).map_err(|_| NativeHistogramError {
+            i32::try_from(custom_values.len()).map_err(|_| NativeHistogramError {
                 message: "custom native histogram has too many custom_values".to_string(),
             })?,
         )
     };
-    validate_native_histogram_spans(
-        "positive",
-        &histogram.positive_spans,
-        positive_buckets,
-        bucket_index_range,
-    )?;
-    validate_native_histogram_spans(
-        "negative",
-        &histogram.negative_spans,
-        negative_buckets,
-        bucket_index_range,
-    )?;
+    let positive_extent =
+        validate_native_histogram_spans("positive", positive.0, positive.1, bucket_index_range)?;
+    validate_native_histogram_spans("negative", negative.0, negative.1, bucket_index_range)?;
 
-    Ok(())
+    Ok(positive_extent)
 }
 
 fn validate_native_histogram_schema(schema: i32) -> Result<Option<i32>> {
@@ -208,10 +477,10 @@ fn validate_native_histogram_schema(schema: i32) -> Result<Option<i32>> {
     }
 }
 
-fn validate_native_histogram_custom_values(histogram: &Histogram) -> Result<()> {
-    if histogram.schema != CUSTOM_BUCKETS_SCHEMA {
+fn validate_native_histogram_custom_values(schema: i32, custom_values: &[f64]) -> Result<()> {
+    if schema != CUSTOM_BUCKETS_SCHEMA {
         ensure!(
-            histogram.custom_values.is_empty(),
+            custom_values.is_empty(),
             NativeHistogramSnafu {
                 message: "standard native histogram must not use custom_values"
             }
@@ -219,7 +488,7 @@ fn validate_native_histogram_custom_values(histogram: &Histogram) -> Result<()> 
         return Ok(());
     }
 
-    for value in &histogram.custom_values {
+    for value in custom_values {
         ensure!(
             !value.is_nan() && *value != f64::INFINITY,
             NativeHistogramSnafu {
@@ -227,7 +496,7 @@ fn validate_native_histogram_custom_values(histogram: &Histogram) -> Result<()> 
             }
         );
     }
-    for values in histogram.custom_values.windows(2) {
+    for values in custom_values.windows(2) {
         ensure!(
             values[0] < values[1],
             NativeHistogramSnafu {
@@ -241,12 +510,12 @@ fn validate_native_histogram_custom_values(histogram: &Histogram) -> Result<()> 
 
 fn validate_native_histogram_spans(
     name: &str,
-    spans: &[BucketSpan],
+    spans: impl Iterator<Item = (i32, u32)> + Clone,
     bucket_count: usize,
     bucket_index_range: (i32, i32),
-) -> Result<()> {
-    let span_len = spans.iter().try_fold(0usize, |sum, span| {
-        let length = usize::try_from(span.length).map_err(|_| NativeHistogramError {
+) -> Result<i32> {
+    let span_len = spans.clone().try_fold(0usize, |sum, (_, length)| {
+        let length = usize::try_from(length).map_err(|_| NativeHistogramError {
             message: format!("native histogram {name} span length exceeds usize"),
         })?;
         sum.checked_add(length).ok_or_else(|| NativeHistogramError {
@@ -263,28 +532,28 @@ fn validate_native_histogram_spans(
     );
 
     let mut current_index = 0i32;
-    for (span_index, span) in spans.iter().enumerate() {
+    for (span_index, (offset, length)) in spans.enumerate() {
         ensure!(
-            span.offset >= 0 || (span_index == 0 && bucket_index_range.0 == i32::MIN),
+            offset >= 0 || (span_index == 0 && bucket_index_range.0 == i32::MIN),
             NativeHistogramSnafu {
                 message: format!(
                     "native histogram {name} span {} has negative offset {}",
                     span_index + 1,
-                    span.offset
+                    offset
                 )
             }
         );
         current_index = if span_index == 0 {
-            span.offset
+            offset
         } else {
             current_index
-                .checked_add(span.offset)
+                .checked_add(offset)
                 .ok_or_else(|| NativeHistogramError {
                     message: format!("native histogram {name} span index overflows i32"),
                 })?
         };
 
-        for _ in 0..span.length {
+        for _ in 0..length {
             ensure!(
                 (bucket_index_range.0..=bucket_index_range.1).contains(&current_index),
                 NativeHistogramSnafu {
@@ -301,14 +570,15 @@ fn validate_native_histogram_spans(
         }
     }
 
-    Ok(())
+    Ok(current_index)
 }
 
-fn validate_float_native_histogram_counts(histogram: &Histogram) -> Result<()> {
-    let count = match histogram.count.as_ref() {
-        Some(Count::CountFloat(count)) => *count,
-        _ => 0.0,
-    };
+fn validate_float_native_histogram_counts(
+    count: f64,
+    zero_count: f64,
+    positive_buckets: &[f64],
+    negative_buckets: &[f64],
+) -> Result<()> {
     ensure!(
         count >= 0.0 || count.is_nan(),
         NativeHistogramSnafu {
@@ -316,10 +586,6 @@ fn validate_float_native_histogram_counts(histogram: &Histogram) -> Result<()> {
         }
     );
 
-    let zero_count = match histogram.zero_count.as_ref() {
-        Some(ZeroCount::ZeroCountFloat(zero_count)) => *zero_count,
-        _ => 0.0,
-    };
     ensure!(
         zero_count >= 0.0 || zero_count.is_nan(),
         NativeHistogramSnafu {
@@ -328,8 +594,8 @@ fn validate_float_native_histogram_counts(histogram: &Histogram) -> Result<()> {
     );
 
     for (name, counts) in [
-        ("positive", &histogram.positive_counts),
-        ("negative", &histogram.negative_counts),
+        ("positive", positive_buckets),
+        ("negative", negative_buckets),
     ] {
         for (index, count) in counts.iter().enumerate() {
             ensure!(
@@ -348,18 +614,12 @@ fn validate_float_native_histogram_counts(histogram: &Histogram) -> Result<()> {
 }
 
 fn validate_integer_native_histogram_counts(
-    histogram: &Histogram,
+    count: u64,
+    zero_count: u64,
+    sum: f64,
     positive_buckets: &[i64],
     negative_buckets: &[i64],
 ) -> Result<()> {
-    let count = match histogram.count.as_ref() {
-        Some(Count::CountInt(count)) => *count,
-        _ => 0,
-    };
-    let zero_count = match histogram.zero_count.as_ref() {
-        Some(ZeroCount::ZeroCountInt(zero_count)) => *zero_count,
-        _ => 0,
-    };
     let bucket_count =
         positive_buckets
             .iter()
@@ -375,7 +635,7 @@ fn validate_integer_native_histogram_counts(
                     })
             })?;
     ensure!(
-        if histogram.sum.is_nan() {
+        if sum.is_nan() {
             bucket_count <= count
         } else {
             bucket_count == count
@@ -509,6 +769,662 @@ fn bucket_counts_from_deltas(deltas: &[i64]) -> Result<Vec<i64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{ArrayRef, Float64Array, Int32Array};
+    use datafusion::arrow::datatypes::Field;
+
+    use crate::native_histogram::testing::histogram_array;
+    use crate::native_histogram::*;
+
+    fn empty_histogram(float: bool) -> Histogram {
+        Histogram {
+            count: Some(if float {
+                Count::CountFloat(0.0)
+            } else {
+                Count::CountInt(0)
+            }),
+            zero_count: Some(if float {
+                ZeroCount::ZeroCountFloat(0.0)
+            } else {
+                ZeroCount::ZeroCountInt(0)
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn stored(histogram: &Histogram) -> StructArray {
+        histogram_array(&[Some(encode_native_histogram(histogram).unwrap())])
+    }
+
+    fn modified(histogram: &Histogram, changes: &[(&str, Value)]) -> StructArray {
+        let ValueData::StructValue(mut value) = encode_native_histogram(histogram).unwrap() else {
+            unreachable!()
+        };
+        for (name, replacement) in changes {
+            let index = NATIVE_HISTOGRAM_FIELD_NAMES
+                .iter()
+                .position(|field| field == name)
+                .unwrap();
+            value.items[index] = replacement.clone();
+        }
+        histogram_array(&[Some(ValueData::StructValue(value))])
+    }
+
+    fn assert_invalid(array: &StructArray, message: &str) {
+        let error = decode_native_histogram_for_remote_read(array, 0, 123).unwrap_err();
+        assert!(
+            error.to_string().contains(message),
+            "{error}: expected {message}"
+        );
+    }
+
+    #[test]
+    fn native_histogram_remote_read_preserves_integer_counts_and_deltas() {
+        for count in [(1u64 << 53) + 1, i64::MAX as u64] {
+            let histogram = Histogram {
+                count: Some(Count::CountInt(count)),
+                zero_count: Some(ZeroCount::ZeroCountInt(count - 12)),
+                positive_spans: vec![
+                    BucketSpan {
+                        offset: -2,
+                        length: 2,
+                    },
+                    BucketSpan {
+                        offset: 3,
+                        length: 1,
+                    },
+                ],
+                negative_spans: vec![
+                    BucketSpan {
+                        offset: -3,
+                        length: 1,
+                    },
+                    BucketSpan {
+                        offset: 2,
+                        length: 2,
+                    },
+                ],
+                positive_deltas: vec![1, 2, -1],
+                negative_deltas: vec![1, 2, -1],
+                sum: 10.0,
+                reset_hint: 42,
+                start_timestamp: 123,
+                ..Default::default()
+            };
+            let array = stored(&histogram);
+            assert_eq!(
+                native_histogram::list_values::<Int64Type>(&array, POSITIVE_BUCKETS_I64_FIELD, 0)
+                    .unwrap(),
+                vec![1, 3, 2]
+            );
+            assert_eq!(
+                native_histogram::list_values::<Int64Type>(&array, NEGATIVE_BUCKETS_I64_FIELD, 0)
+                    .unwrap(),
+                vec![1, 3, 2]
+            );
+            let decoded = decode_native_histogram_for_remote_read(&array, 0, -2)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                decoded.count,
+                Some(remote::histogram::Count::CountInt(count))
+            );
+            assert_eq!(
+                decoded.zero_count,
+                Some(remote::histogram::ZeroCount::ZeroCountInt(count - 12))
+            );
+            assert_eq!(decoded.positive_deltas, vec![1, 2, -1]);
+            assert_eq!(decoded.negative_deltas, vec![1, 2, -1]);
+            assert_eq!(
+                decoded
+                    .positive_spans
+                    .iter()
+                    .map(|s| (s.offset, s.length))
+                    .collect::<Vec<_>>(),
+                vec![(-2, 2), (3, 1)]
+            );
+            assert_eq!(decoded.reset_hint, 42);
+            assert_eq!(decoded.timestamp, -2);
+        }
+        // A NaN sum permits unobserved NaNs; an incorrect [3, 2] delta vector
+        // would also pass a total check, so assert the deltas independently.
+        let histogram = Histogram {
+            count: Some(Count::CountInt(8)),
+            sum: f64::NAN,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_deltas: vec![3, -1],
+            ..Default::default()
+        };
+        let decoded = decode_native_histogram_for_remote_read(&stored(&histogram), 0, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.positive_deltas, vec![3, -1]);
+    }
+
+    #[test]
+    fn native_histogram_remote_read_zero_families_and_float_bits() {
+        for float in [false, true] {
+            let histogram = empty_histogram(float);
+            let array = modified(
+                &histogram,
+                &[
+                    (
+                        if float {
+                            ZERO_COUNT_F64_FIELD
+                        } else {
+                            ZERO_COUNT_I64_FIELD
+                        },
+                        null_pb_value(),
+                    ),
+                    (POSITIVE_BUCKETS_I64_FIELD, null_pb_value()),
+                    (POSITIVE_BUCKETS_F64_FIELD, null_pb_value()),
+                ],
+            );
+            let decoded = decode_native_histogram_for_remote_read(&array, 0, 1)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                matches!(
+                    decoded.count,
+                    Some(remote::histogram::Count::CountFloat(0.0))
+                ),
+                float
+            );
+            assert_eq!(
+                matches!(decoded.count, Some(remote::histogram::Count::CountInt(0))),
+                !float
+            );
+            assert_eq!(
+                matches!(
+                    decoded.zero_count,
+                    Some(remote::histogram::ZeroCount::ZeroCountFloat(0.0))
+                ),
+                float
+            );
+            assert_eq!(
+                matches!(
+                    decoded.zero_count,
+                    Some(remote::histogram::ZeroCount::ZeroCountInt(0))
+                ),
+                !float
+            );
+            for bits in [0x7ff8_0000_0000_0123, 0x7ff0_0000_0000_0002] {
+                let histogram = Histogram {
+                    sum: f64::from_bits(bits),
+                    ..histogram.clone()
+                };
+                let decoded = decode_native_histogram_for_remote_read(&stored(&histogram), 0, 1)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(decoded.sum.to_bits(), bits);
+            }
+        }
+        let histogram = Histogram {
+            count: Some(Count::CountFloat(0.3)),
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }],
+            positive_counts: vec![0.1, 0.2],
+            ..empty_histogram(true)
+        };
+        let decoded = decode_native_histogram_for_remote_read(&stored(&histogram), 0, 1)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.positive_counts, vec![0.1, 0.2]);
+        for value in [f64::INFINITY, f64::from_bits(0x7ff8_0000_0000_0123)] {
+            let histogram = Histogram {
+                count: Some(Count::CountFloat(value)),
+                zero_count: Some(ZeroCount::ZeroCountFloat(value)),
+                positive_counts: vec![value, value],
+                ..histogram.clone()
+            };
+            let decoded = decode_native_histogram_for_remote_read(&stored(&histogram), 0, 1)
+                .unwrap()
+                .unwrap();
+            let Some(remote::histogram::Count::CountFloat(count)) = decoded.count else {
+                panic!()
+            };
+            assert_eq!(count.to_bits(), value.to_bits());
+            assert_eq!(decoded.positive_counts[0].to_bits(), value.to_bits());
+        }
+        assert!(
+            decode_native_histogram_for_remote_read(&histogram_array(&[None]), 0, 0)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn native_histogram_remote_read_rejects_invalid_stored_children() {
+        let integer = empty_histogram(false);
+        let float = empty_histogram(true);
+        for field in [
+            SCHEMA_FIELD,
+            ZERO_THRESHOLD_FIELD,
+            SUM_FIELD,
+            RESET_HINT_FIELD,
+        ] {
+            assert_invalid(&modified(&integer, &[(field, null_pb_value())]), "is null");
+        }
+        for (histogram, changes, message) in [
+            (
+                &integer,
+                vec![(COUNT_I64_FIELD, null_pb_value())],
+                "exactly one",
+            ),
+            (
+                &integer,
+                vec![(COUNT_F64_FIELD, pb_value(ValueData::F64Value(0.0)))],
+                "exactly one",
+            ),
+            (
+                &integer,
+                vec![(ZERO_COUNT_F64_FIELD, pb_value(ValueData::F64Value(0.0)))],
+                "populated float",
+            ),
+            (
+                &integer,
+                vec![(POSITIVE_BUCKETS_F64_FIELD, f64_list_value([0.0]))],
+                "populated float",
+            ),
+            (
+                &integer,
+                vec![(NEGATIVE_BUCKETS_F64_FIELD, f64_list_value([0.0]))],
+                "populated float",
+            ),
+            (
+                &float,
+                vec![(ZERO_COUNT_I64_FIELD, pb_value(ValueData::I64Value(0)))],
+                "populated integer",
+            ),
+            (
+                &float,
+                vec![(POSITIVE_BUCKETS_I64_FIELD, i64_list_value([0]))],
+                "populated integer",
+            ),
+            (
+                &float,
+                vec![(NEGATIVE_BUCKETS_I64_FIELD, i64_list_value([0]))],
+                "populated integer",
+            ),
+            (
+                &integer,
+                vec![(COUNT_I64_FIELD, pb_value(ValueData::I64Value(-1)))],
+                "count is negative",
+            ),
+            (
+                &integer,
+                vec![(ZERO_COUNT_I64_FIELD, pb_value(ValueData::I64Value(-1)))],
+                "zero_count is negative",
+            ),
+            (
+                &integer,
+                vec![(POSITIVE_BUCKETS_I64_FIELD, i64_list_value([-1]))],
+                "count is negative",
+            ),
+            (
+                &integer,
+                vec![(NEGATIVE_BUCKETS_I64_FIELD, i64_list_value([-1]))],
+                "count is negative",
+            ),
+            (
+                &float,
+                vec![(COUNT_F64_FIELD, pb_value(ValueData::F64Value(-1.0)))],
+                "must not be negative",
+            ),
+            (
+                &float,
+                vec![(ZERO_COUNT_F64_FIELD, pb_value(ValueData::F64Value(-1.0)))],
+                "must not be negative",
+            ),
+            (
+                &float,
+                vec![(POSITIVE_BUCKETS_F64_FIELD, f64_list_value([-1.0]))],
+                "must not be negative",
+            ),
+            (
+                &float,
+                vec![(NEGATIVE_BUCKETS_F64_FIELD, f64_list_value([-1.0]))],
+                "must not be negative",
+            ),
+            (
+                &integer,
+                vec![
+                    (COUNT_I64_FIELD, pb_value(ValueData::I64Value(1))),
+                    (
+                        POSITIVE_BUCKETS_I64_FIELD,
+                        i64_list_value([i64::MAX, i64::MAX, 3]),
+                    ),
+                ],
+                "overflows u64",
+            ),
+            (
+                &integer,
+                vec![(COUNT_I64_FIELD, pb_value(ValueData::I64Value(1)))],
+                "observations",
+            ),
+            (
+                &integer,
+                vec![(SCHEMA_FIELD, pb_value(ValueData::I32Value(53)))],
+                "unsupported",
+            ),
+            (
+                &integer,
+                vec![(POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([0]))],
+                "offsets and lengths mismatch",
+            ),
+            (
+                &integer,
+                vec![
+                    (POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([0])),
+                    (POSITIVE_SPAN_LENGTHS_FIELD, i32_list_value([-1])),
+                ],
+                "negative length",
+            ),
+            (
+                &integer,
+                vec![
+                    (POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([0])),
+                    (POSITIVE_SPAN_LENGTHS_FIELD, i32_list_value([1])),
+                ],
+                "describe 1 buckets",
+            ),
+            (
+                &integer,
+                vec![
+                    (POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([i32::MAX, 1])),
+                    (POSITIVE_SPAN_LENGTHS_FIELD, i32_list_value([0, 0])),
+                ],
+                "overflows i32",
+            ),
+            (
+                &integer,
+                vec![(
+                    CUSTOM_VALUES_FIELD,
+                    pb_value(ValueData::ListValue(ListValue {
+                        items: vec![null_pb_value()],
+                    })),
+                )],
+                "contains null",
+            ),
+        ] {
+            assert_invalid(&modified(histogram, &changes), message);
+        }
+        let array = stored(&integer);
+        let mut fields = array.fields().to_vec();
+        let mut children = array.columns().to_vec();
+        fields.remove(0);
+        children.remove(0);
+        assert_invalid(
+            &StructArray::new(fields.into(), children, None),
+            "missing field schema",
+        );
+        let mut fields = array.fields().to_vec();
+        let mut children = array.columns().to_vec();
+        children[0] = Arc::new(Float64Array::from(vec![0.0])) as ArrayRef;
+        fields[0] = Arc::new(Field::new(
+            SCHEMA_FIELD,
+            children[0].data_type().clone(),
+            true,
+        ));
+        assert_invalid(
+            &StructArray::new(fields.into(), children, None),
+            "invalid type",
+        );
+        // Even inactive children have to retain their declared types.
+        let mut fields = array.fields().to_vec();
+        let mut children = array.columns().to_vec();
+        children[14] = Arc::new(Int32Array::from(vec![None])) as ArrayRef;
+        fields[14] = Arc::new(Field::new(
+            COUNT_F64_FIELD,
+            children[14].data_type().clone(),
+            true,
+        ));
+        assert_invalid(
+            &StructArray::new(fields.into(), children, None),
+            "invalid type",
+        );
+    }
+
+    #[test]
+    fn native_histogram_remote_read_schema_rules_match_ingestion() {
+        for float in [false, true] {
+            let base = empty_histogram(float);
+            for bounds in [
+                vec![f64::NAN],
+                vec![f64::INFINITY],
+                vec![1.0, 1.0],
+                vec![2.0, 1.0],
+            ] {
+                let invalid = Histogram {
+                    schema: CUSTOM_BUCKETS_SCHEMA,
+                    custom_values: bounds.clone(),
+                    ..base.clone()
+                };
+                assert!(encode_native_histogram(&invalid).is_err());
+                assert_invalid(
+                    &modified(
+                        &base,
+                        &[
+                            (
+                                SCHEMA_FIELD,
+                                pb_value(ValueData::I32Value(CUSTOM_BUCKETS_SCHEMA)),
+                            ),
+                            (CUSTOM_VALUES_FIELD, f64_list_value(bounds)),
+                        ],
+                    ),
+                    "custom_values",
+                );
+            }
+            let invalid = Histogram {
+                custom_values: vec![1.0],
+                ..base.clone()
+            };
+            assert!(encode_native_histogram(&invalid).is_err());
+            assert_invalid(
+                &modified(&base, &[(CUSTOM_VALUES_FIELD, f64_list_value([1.0]))]),
+                "must not use custom_values",
+            );
+            let custom = Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![-f64::INFINITY, 1.0],
+                ..base
+            };
+            let decoded = decode_native_histogram_for_remote_read(&stored(&custom), 0, 0)
+                .unwrap()
+                .unwrap();
+            assert_eq!(decoded.custom_values, vec![-f64::INFINITY, 1.0]);
+            let invalid = Histogram {
+                zero_threshold: 1.0,
+                ..custom.clone()
+            };
+            assert!(encode_native_histogram(&invalid).is_err());
+            assert_invalid(
+                &modified(
+                    &custom,
+                    &[(ZERO_THRESHOLD_FIELD, pb_value(ValueData::F64Value(1.0)))],
+                ),
+                "must not use a zero bucket",
+            );
+            let (count_field, zero_field, bucket_field, one, buckets) = if float {
+                (
+                    COUNT_F64_FIELD,
+                    ZERO_COUNT_F64_FIELD,
+                    NEGATIVE_BUCKETS_F64_FIELD,
+                    pb_value(ValueData::F64Value(1.0)),
+                    f64_list_value([1.0]),
+                )
+            } else {
+                (
+                    COUNT_I64_FIELD,
+                    ZERO_COUNT_I64_FIELD,
+                    NEGATIVE_BUCKETS_I64_FIELD,
+                    pb_value(ValueData::I64Value(1)),
+                    i64_list_value([1]),
+                )
+            };
+            let invalid = Histogram {
+                count: Some(if float {
+                    Count::CountFloat(1.0)
+                } else {
+                    Count::CountInt(1)
+                }),
+                zero_count: Some(if float {
+                    ZeroCount::ZeroCountFloat(1.0)
+                } else {
+                    ZeroCount::ZeroCountInt(1)
+                }),
+                ..custom.clone()
+            };
+            assert!(encode_native_histogram(&invalid).is_err());
+            assert_invalid(
+                &modified(
+                    &custom,
+                    &[(count_field, one.clone()), (zero_field, one.clone())],
+                ),
+                "must not use a zero bucket",
+            );
+            for length in [0, 1] {
+                let mut invalid = custom.clone();
+                invalid.negative_spans = vec![BucketSpan { offset: 1, length }];
+                let mut changes = vec![
+                    (NEGATIVE_SPAN_OFFSETS_FIELD, i32_list_value([1])),
+                    (NEGATIVE_SPAN_LENGTHS_FIELD, i32_list_value([length as i32])),
+                ];
+                if length == 1 {
+                    invalid.count = Some(if float {
+                        Count::CountFloat(1.0)
+                    } else {
+                        Count::CountInt(1)
+                    });
+                    if float {
+                        invalid.negative_counts = vec![1.0];
+                    } else {
+                        invalid.negative_deltas = vec![1];
+                    }
+                    changes.extend([(count_field, one.clone()), (bucket_field, buckets.clone())]);
+                }
+                assert!(encode_native_histogram(&invalid).is_err());
+                assert_invalid(
+                    &modified(&custom, &changes),
+                    "must not use negative buckets",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_histogram_remote_read_wire_only_span_restrictions() {
+        for float in [false, true] {
+            let custom = Histogram {
+                schema: CUSTOM_BUCKETS_SCHEMA,
+                custom_values: vec![1.0, 2.0],
+                ..empty_histogram(float)
+            };
+            for (offsets, accepted) in [
+                (vec![-1], false),
+                (vec![10], false),
+                (vec![2, 2], false),
+                (vec![3], true),
+                (vec![2, 1], true),
+            ] {
+                let lengths = vec![0; offsets.len()];
+                let write = Histogram {
+                    positive_spans: offsets
+                        .iter()
+                        .map(|&offset| BucketSpan { offset, length: 0 })
+                        .collect(),
+                    ..custom.clone()
+                };
+                assert_eq!(encode_native_histogram(&write).is_ok(), offsets[0] >= 0);
+                let array = modified(
+                    &custom,
+                    &[
+                        (POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value(offsets)),
+                        (POSITIVE_SPAN_LENGTHS_FIELD, i32_list_value(lengths)),
+                    ],
+                );
+                assert_eq!(
+                    decode_native_histogram_for_remote_read(&array, 0, 0).is_ok(),
+                    accepted
+                );
+            }
+            for negative in [false, true] {
+                for length in [0, 1] {
+                    let mut write = empty_histogram(float);
+                    let spans = vec![BucketSpan {
+                        offset: i32::MIN,
+                        length,
+                    }];
+                    if negative {
+                        write.negative_spans = spans;
+                    } else {
+                        write.positive_spans = spans;
+                    }
+                    if length == 1 {
+                        if float {
+                            if negative {
+                                write.negative_counts = vec![0.0];
+                            } else {
+                                write.positive_counts = vec![0.0];
+                            }
+                        } else if negative {
+                            write.negative_deltas = vec![0];
+                        } else {
+                            write.positive_deltas = vec![0];
+                        }
+                    }
+                    assert_invalid(&stored(&write), "initial span offset i32::MIN");
+                }
+            }
+            let base = empty_histogram(float);
+            // Out-of-range buckets are different from valid empty end cursors.
+            for offset in [-1, 3] {
+                let custom = Histogram {
+                    positive_spans: vec![BucketSpan {
+                        offset: 0,
+                        length: 1,
+                    }],
+                    positive_counts: if float { vec![0.0] } else { vec![] },
+                    positive_deltas: if float { vec![] } else { vec![0] },
+                    ..custom.clone()
+                };
+                assert_invalid(
+                    &modified(
+                        &custom,
+                        &[(POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([offset]))],
+                    ),
+                    if offset < 0 {
+                        "negative offset"
+                    } else {
+                        "out of range"
+                    },
+                );
+            }
+            let exponential = Histogram {
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 1,
+                }],
+                positive_counts: if float { vec![0.0] } else { vec![] },
+                positive_deltas: if float { vec![] } else { vec![0] },
+                ..base
+            };
+            assert_invalid(
+                &modified(
+                    &exponential,
+                    &[(POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value([i32::MAX]))],
+                ),
+                "out of range",
+            );
+        }
+    }
 
     #[test]
     fn shared_errors_are_protocol_neutral() {
