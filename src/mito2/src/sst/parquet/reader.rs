@@ -655,6 +655,14 @@ impl ParquetReaderBuilder {
         let json2_rewrite_targets = self
             .json2_rewrite_targets
             .iter()
+            // Global compaction targets may include JSON2 columns added after this SST was written.
+            // Rewrite only projected columns present in this SST; schema compatibility fills
+            // missing columns with NULL later, without looking them up in this SST's metadata.
+            .filter(|(column_id, _)| {
+                read_format
+                    .parquet_projected_index_by_id(**column_id)
+                    .is_some()
+            })
             .map(|(column_id, layout)| {
                 let column = region_meta
                     .column_by_id(*column_id)

@@ -46,8 +46,8 @@ use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
-    SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
-    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    SplitRecordBatchStream, compute_parallel_channel_size, prepare_flat_mem_stream,
+    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -725,7 +725,7 @@ pub(crate) async fn build_flat_sources(
                 *index,
                 range_meta.time_range,
             );
-            ordered_sources[position] = Some(Box::pin(stream) as _);
+            ordered_sources[position] = Some(prepare_flat_mem_stream(stream_ctx.clone(), stream));
         } else if stream_ctx.is_file_range_index(*index) {
             // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
             // Compaction should keep reading its selected input ranges completely.

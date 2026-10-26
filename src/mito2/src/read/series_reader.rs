@@ -36,7 +36,7 @@ use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
     PartitionMetrics, SplitRecordBatchStream, compute_average_batch_size,
     compute_parallel_channel_size, filter_flat_batch_by_sequence, new_filter_metrics,
-    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    prepare_flat_mem_stream, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::validate_metric_metadata;
@@ -411,12 +411,13 @@ async fn build_uncached_series_partition_range(
 
     for index in range_meta.row_group_indices.iter().copied() {
         if stream_ctx.is_mem_range_index(index) {
-            let stream = Box::pin(scan_flat_mem_ranges(
+            let stream = scan_flat_mem_ranges(
                 stream_ctx.clone(),
                 part_metrics.clone(),
                 index,
                 range_meta.time_range,
-            ));
+            );
+            let stream = prepare_flat_mem_stream(stream_ctx.clone(), stream);
             sources.push(filter_flat_stream_by_series(
                 stream,
                 codec.clone(),
