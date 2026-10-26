@@ -29,6 +29,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::flow::FlowMetadataManagerRef;
 use common_meta::key::flow::flow_state::FlowStat;
 use common_meta::key::table_info::{TableInfoManager, TableInfoValue};
+use common_meta::key::table_name::TableNameKey;
 use common_runtime::JoinHandle;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
@@ -1017,6 +1018,31 @@ impl BatchingEngine {
         self.runtime.read().await.tasks.contains_key(&flow_id)
     }
 
+    pub(crate) async fn source_table_ids(&self, flow_id: FlowId) -> Result<Vec<TableId>, Error> {
+        let source_table_names = {
+            let runtime = self.runtime.read().await;
+            let task = runtime
+                .tasks
+                .get(&flow_id)
+                .context(FlowNotFoundSnafu { id: flow_id })?;
+            task.config.source_table_names.clone()
+        };
+
+        futures::future::try_join_all(source_table_names.iter().map(|name| async move {
+            self.table_meta
+                .table_name_manager()
+                .get(TableNameKey::new(&name[0], &name[1], &name[2]))
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .with_context(|| UnexpectedSnafu {
+                    reason: format!("Failed to get table id for table: {}", name.join(".")),
+                })
+                .map(|value| value.table_id())
+        }))
+        .await
+    }
+
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
         let (removed_task, removed_shutdown_tx) = {
             let mut runtime = self.runtime.write().await;
@@ -1722,6 +1748,19 @@ GROUP BY l.number, time_window
         .unwrap();
 
         (task, tx)
+    }
+
+    #[tokio::test]
+    async fn test_source_table_ids_requires_registered_task_and_all_metadata() {
+        let engine = new_test_engine().await;
+        assert!(matches!(
+            engine.source_table_ids(9001).await,
+            Err(Error::FlowNotFound { .. })
+        ));
+
+        let (task, shutdown_tx) = new_test_task_for_source(9002, "missing_source", None).await;
+        engine.runtime.write().await.insert(9002, task, shutdown_tx);
+        assert!(engine.source_table_ids(9002).await.is_err());
     }
 
     #[tokio::test]
