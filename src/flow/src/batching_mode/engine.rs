@@ -1028,8 +1028,10 @@ impl BatchingEngine {
             task.config.source_table_names.clone()
         };
 
-        futures::future::try_join_all(source_table_names.iter().map(|name| async move {
-            self.table_meta
+        let mut source_table_ids = Vec::with_capacity(source_table_names.len());
+        for name in &source_table_names {
+            let table_id = self
+                .table_meta
                 .table_name_manager()
                 .get(TableNameKey::new(&name[0], &name[1], &name[2]))
                 .await
@@ -1037,10 +1039,11 @@ impl BatchingEngine {
                 .context(ExternalSnafu)?
                 .with_context(|| UnexpectedSnafu {
                     reason: format!("Failed to get table id for table: {}", name.join(".")),
-                })
-                .map(|value| value.table_id())
-        }))
-        .await
+                })?
+                .table_id();
+            source_table_ids.push(table_id);
+        }
+        Ok(source_table_ids)
     }
 
     async fn rollback_flow_runtime_if_current(&self, flow_id: FlowId, task: &BatchingTask) {
@@ -1758,7 +1761,25 @@ GROUP BY l.number, time_window
             Err(Error::FlowNotFound { .. })
         ));
 
-        let (task, shutdown_tx) = new_test_task_for_source(9002, "missing_source", None).await;
+        let mut table_info = new_test_table_info_with_name(1, "numbers_with_ts");
+        table_info.catalog_name = "greptime".to_string();
+        table_info.schema_name = "public".to_string();
+        engine
+            .table_meta
+            .create_table_metadata(
+                table_info,
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let (mut task, shutdown_tx) = new_test_task_for_source(9002, "numbers_with_ts", None).await;
+        Arc::make_mut(&mut task.config).source_table_names.insert([
+            "greptime".to_string(),
+            "public".to_string(),
+            "missing_source".to_string(),
+        ]);
         engine.runtime.write().await.insert(9002, task, shutdown_tx);
         assert!(engine.source_table_ids(9002).await.is_err());
     }
