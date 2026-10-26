@@ -1426,9 +1426,6 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     );
     let empty_schema =
         series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
-    let decoder =
-        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Key, Some(&dense_description()))
-            .unwrap();
     let empty = arrow::record_batch::RecordBatch::new_empty(empty_schema.clone());
     assert!(
         unpack_raw_series_frame(
