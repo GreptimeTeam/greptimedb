@@ -310,6 +310,7 @@ impl Env {
             MultiProtocolClient::connect(grpc_server_addr, pg_server_addr, mysql_server_addr).await;
         GreptimeDB {
             client: TokioMutex::new(client),
+            client_addrs: server_addr.clone(),
             server_processes: None,
             metasrv_process: None.into(),
             frontend_process: None.into(),
@@ -764,6 +765,7 @@ pub struct GreptimeDB {
     frontend_process: Mutex<Option<Child>>,
     flownode_process: Mutex<Option<Child>>,
     client: TokioMutex<MultiProtocolClient>,
+    client_addrs: ServerAddr,
     active_bins_dir: Mutex<Option<PathBuf>>,
     ctx: GreptimeDBContext,
     is_standalone: bool,
@@ -877,6 +879,16 @@ impl GreptimeDB {
 
 #[async_trait]
 impl Database for GreptimeDB {
+    async fn before_case(&self) {
+        let mut client = self.client.lock().await;
+        *client = MultiProtocolClient::connect(
+            self.client_addrs.server_addr.as_ref().unwrap(),
+            self.client_addrs.pg_server_addr.as_ref().unwrap(),
+            self.client_addrs.mysql_server_addr.as_ref().unwrap(),
+        )
+        .await;
+    }
+
     async fn query(&self, ctx: QueryContext, query: String) -> Box<dyn Display> {
         if ctx.context.contains_key("restart") && self.env.server_addrs.server_addr.is_none() {
             self.env.restart_server(self, false).await;
