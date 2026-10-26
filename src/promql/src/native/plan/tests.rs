@@ -276,7 +276,7 @@ fn adding_a_map_only_changes_the_tree() {
     );
 }
 
-/// A map is point-wise over values, so raw samples are not something it can consume.
+/// A merge is a whole-series barrier over the supported evaluated shape.
 #[test]
 fn merge_is_a_whole_series_barrier_over_supported_shapes() {
     let grid = grid(0, 60_000, 4);
@@ -294,6 +294,63 @@ fn merge_is_a_whole_series_barrier_over_supported_shapes() {
     assert!(reads_across_series(&merge));
 }
 
+#[test]
+fn merge_rejects_raw_and_mismatched_input_shapes() {
+    let raw_merge = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(input()),
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert!(raw_merge.validate().is_err());
+
+    let output_grid = grid(0, 60_000, 4);
+    let inner = window_over(
+        input_on(Arc::clone(&output_grid)),
+        Some(Arc::clone(&output_grid)),
+    );
+    assert!(
+        inner.validate().is_ok(),
+        "{}",
+        inner.validate().unwrap_err()
+    );
+    let wrong_grid = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner.clone()),
+        },
+        output: evaluated(Arc::new([]), grid(1, 60_000, 4)),
+    };
+    let grid_error = wrong_grid.validate().unwrap_err();
+    assert!(grid_error.to_string().contains("grid"), "{grid_error}");
+
+    let wrong_fields = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), output_grid),
+    };
+    let fields_error = wrong_fields.validate().unwrap_err();
+    assert!(fields_error.to_string().contains("field"), "{fields_error}");
+}
+
+#[test]
+fn merge_is_rejected_below_unsupported_wrappers_and_nonmerge_tree_is_unchanged() {
+    let grid = grid(0, 60_000, 4);
+    let merge = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map_over(input_on(Arc::clone(&grid)))),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&grid)),
+    };
+    let wrapped = partial_aggregate(merge);
+    assert!(wrapped.validate().is_ok());
+    assert!(NativeTree::try_new(wrapped).is_err());
+
+    let ordinary = map_over(input_on(grid));
+    assert!(NativeTree::try_new(ordinary).is_ok());
+}
+
+/// A map is point-wise over values, so raw samples are not something it can consume.
 #[test]
 fn a_map_cannot_consume_raw_samples() {
     let node = NativeNode {

@@ -3087,7 +3087,256 @@ fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
 }
 
 #[test]
-fn merge_rejects_overlapping_occupancy_and_raw_inputs() {
+fn standalone_merge_accepts_empty_closing_chunk_and_canonical_empty_input() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 2, Vec::new(), true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(1.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let mut empty = executor(&tree, pool());
+    empty.end_of_input().unwrap();
+    assert!(empty.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_malformed_grid_and_field_shapes() {
+    let merge_grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&merge_grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&merge_grid));
+
+    let mut wrong_grid = executor(&tree, pool());
+    wrong_grid
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &evaluated_schema(grid(1, 1, 2)),
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(wrong_grid.next_chunk().is_err());
+
+    let mut wrong_fields = executor(&tree, pool());
+    let series = Series {
+        metric: named_metric("same", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&merge_grid), 0, 1).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(2.0)])),
+        ])
+        .unwrap(),
+    };
+    wrong_fields
+        .push_evaluated(
+            InputId::new(0),
+            EvaluatedChunk::try_new(series, true).unwrap(),
+        )
+        .unwrap();
+    assert!(wrong_fields.next_chunk().is_err());
+
+    let mut open_at_eof = executor(&tree, pool());
+    open_at_eof
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    assert!(open_at_eof.next_chunk().unwrap().is_none());
+    assert!(open_at_eof.finish().is_err());
+    assert_eq!(open_at_eof.state().reserved_bytes(), 0);
+}
+
+#[test]
+fn standalone_merge_feeds_a_downstream_window_only_after_complete_canonicalization() {
+    let input_grid = grid(0, 1, 2);
+    let output_grid = grid(1, 1, 1);
+    let tree = NativeTree::try_new(window_with(
+        merge(evaluated_input(Arc::clone(&input_grid))),
+        RangeFunction::SumOverTime,
+        2,
+        Some(Arc::clone(&input_grid)),
+        output_grid,
+    ))
+    .unwrap();
+    let schema = evaluated_schema(input_grid);
+    let mut execution = executor(&tree, pool());
+    for (name, values) in [("a", vec![Some(1.0), None]), ("a", vec![None, Some(2.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(3.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_non_increasing_continuations() {
+    let grid = grid(0, 1, 3);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    let label = named_metric("same", "x");
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 1, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("not increasing"), "{error}");
+}
+
+#[test]
+fn standalone_merge_collection_budget_failure_releases_input_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // The input queue is drained before collection grows the merge buffer; this budget admits that
+    // queue entry but not the larger retained-fragment estimate made by the collector.
+    let pool = bounded_pool(evaluated_bytes(&chunk) + 1);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("input queue admits the incoming fragment");
+    let error = execution
+        .next_chunk()
+        .expect_err("collection requires its own reservation while the input is queued");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error")
+    );
+}
+
+#[test]
+fn standalone_merge_flush_budget_failure_releases_fragments_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    let bytes = evaluated_bytes(&chunk);
+    let pool = bounded_pool(bytes * 2);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("source queue admits the input fragment");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(pool.reserved() > 0, "collected fragment was not reserved");
+    execution.end_of_input().unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the merge flush must not exceed the pool");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+#[test]
+fn standalone_merge_partial_drain_and_drop_release_queued_output() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for name in ["a", "b"] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "x"),
+                    0,
+                    vec![Some(1.0), None],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() > 0,
+        "the undrained canonical output was not charged"
+    );
+    drop(execution);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn merge_rejects_overlapping_occupancy() {
     let grid = grid(0, 1, 2);
     let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
     let schema = evaluated_schema(Arc::clone(&grid));

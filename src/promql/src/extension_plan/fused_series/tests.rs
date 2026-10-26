@@ -1951,7 +1951,8 @@ async fn later_source_error_drops_all_gathered_inputs() {
     assert_eq!(0, pool.reserved());
 }
 
-/// A literal scalar runs as one schema-checked, one-partition output without scan children.
+/// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map
+/// to one rewritten label set.
 #[tokio::test]
 async fn hand_bound_fused_merge_canonicalizes_shared_labels() {
     let grid = grid();
@@ -2048,6 +2049,7 @@ async fn hand_bound_fused_merge_canonicalizes_shared_labels() {
     );
 }
 
+/// A scalar root needs no source child and can be evaluated directly on its bound grid.
 #[tokio::test]
 async fn physical_plan_accepts_scalar_root_without_sources() {
     let statement_grid = grid();

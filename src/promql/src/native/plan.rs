@@ -416,6 +416,7 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
     }
 }
 
+/// Whether `node` is a supported child of Merge: only an input with optional windows and maps.
 fn merge_shape_supported(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) => true,
@@ -423,6 +424,37 @@ fn merge_shape_supported(node: &NativeNode) -> bool {
             merge_shape_supported(input)
         }
         _ => false,
+    }
+}
+
+/// Whether this tree contains a merge anywhere.
+fn contains_merge(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Merge { .. } => true,
+        NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Instant { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => contains_merge(input),
+        NativeExpr::Binary { left, right, .. } => contains_merge(left) || contains_merge(right),
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+    }
+}
+
+/// Whether every operator in a tree containing a merge is in the supported whitelist.
+fn merge_tree_supported(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Merge { input } => merge_shape_supported(input),
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => true,
+        NativeExpr::Window { input, .. } | NativeExpr::Map { input, .. } => {
+            merge_tree_supported(input)
+        }
+        NativeExpr::Instant { .. }
+        | NativeExpr::Timestamp { .. }
+        | NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::Binary { .. } => false,
     }
 }
 
@@ -443,6 +475,11 @@ impl NativeTree {
     /// [`DataFusionError::Internal`] and not a statement the client wrote wrong.
     pub fn try_new(root: NativeNode) -> Result<Self> {
         root.validate()?;
+        if contains_merge(&root) && !merge_tree_supported(&root) {
+            return Err(invalid(
+                "a merge is only supported in input/window/map trees",
+            ));
+        }
         Ok(Self { root })
     }
 
@@ -502,15 +539,12 @@ impl NativeNode {
                         "a merge is only supported over input/window/map trees",
                     ));
                 }
-                let Some((input_schema, input_grid)) = evaluated_vector(&input.output) else {
+                let Some((_input_schema, input_grid)) = evaluated_vector(&input.output) else {
                     return Err(invalid("a merge consumes an evaluated vector"));
                 };
-                let output = ensure_samples(&self.output, "a merge")?;
+                ensure_samples(&self.output, "a merge")?;
                 ensure_same_fields(&input.output, &self.output, "a merge")?;
                 ensure_grid(&self.output, input_grid, "a merge")?;
-                if output.fields.len() != input_schema.fields.len() {
-                    return Err(invalid("a merge changes its input fields"));
-                }
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;

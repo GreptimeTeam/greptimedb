@@ -2281,8 +2281,7 @@ impl RuntimeNode {
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("merge does not produce samples".to_string())
                 })?;
-                let mut state = NodeState::new("native.merge", Arc::clone(&metrics), pool);
-                state.emitted = Some(Emitted::default());
+                let state = NodeState::new("native.merge", Arc::clone(&metrics), pool);
                 (
                     RuntimeOp::Merge {
                         input: Box::new(child),
@@ -3906,8 +3905,7 @@ impl NodeState {
         if is_last {
             self.buffer.metrics.record_completed_series(1);
         }
-        self.buffer
-            .resize(merge.bytes.saturating_add(self.emitted_bytes()))
+        self.buffer.resize(merge.bytes)
     }
 
     /// Canonicalizes all fragments before exposing any output.
@@ -3927,26 +3925,15 @@ impl NodeState {
         self.buffer.grow(workspace)?;
         let held = merge.bytes.saturating_add(workspace);
         let merged = merge_same_labelset(&merge.schema, merge.fragments)?;
-        let mut queued = 0usize;
         for series in merged {
             let chunk = EvaluatedChunk::try_new(series, true)?;
             self.buffer
                 .metrics
                 .record_grid_points(chunk.series.time.len());
             self.buffer.metrics.record_output(1, valid_values(&chunk));
-            self.track(&chunk)?;
-            // Label occupancy is retained alongside the held fragments/workspace before queuing.
-            self.buffer.resize(
-                held.saturating_add(self.emitted_bytes())
-                    .saturating_add(queued),
-            )?;
-            let bytes = evaluated_bytes(&chunk);
             self.enqueue_output(chunk)?;
-            queued = queued.saturating_add(bytes);
         }
-        self.buffer.shrink(held)?;
-        self.buffer
-            .resize(self.emitted_bytes().saturating_add(queued))
+        self.buffer.shrink(held)
     }
 
     /// Keeps one fragment of this node's collected input, charged for as it arrives.
