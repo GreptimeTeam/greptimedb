@@ -10274,3 +10274,49 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
 }
+
+/// Vector chunks that arrive before the scalar they are broadcast with are held with their label
+/// sets charged, and the charge is given back once they are answered.
+#[test]
+fn chunks_held_for_a_varying_scalar_hold_their_labels() {
+    const SERIES: usize = 64;
+    const LABEL: usize = 4_096;
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_binary(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
+        binary_matching(BinaryOp::Sub),
+    ))
+    .unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let (vector, scalar) = (
+        execution.state().input_ids(0).next().unwrap(),
+        execution.state().input_ids(1).next().unwrap(),
+    );
+    for index in 0..SERIES {
+        let metric = pod_metric("x", &format!("{index:0>LABEL$}"), "a");
+        execution
+            .push_evaluated(
+                vector,
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0)], true),
+            )
+            .unwrap();
+    }
+    // `scalar(y)` answers only once its input has ended, so every vector chunk is held.
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(
+        pool.reserved() >= SERIES * LABEL,
+        "{} bytes held for {SERIES} pending chunks of {LABEL}-byte labels",
+        pool.reserved()
+    );
+    execution
+        .push_evaluated(
+            scalar,
+            evaluated_chunk_of(&schema, named_metric("y", "b"), 0, vec![Some(1.0)], true),
+        )
+        .unwrap();
+    assert_eq!(execution.finish().unwrap().len(), SERIES);
+    assert_eq!(pool.reserved(), 0);
+}

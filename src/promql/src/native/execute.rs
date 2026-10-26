@@ -3709,7 +3709,9 @@ impl NodeState {
                 "the binary node broadcasts over an evaluated vector, not raw samples".to_string(),
             ));
         };
-        let bytes = evaluated_bytes(&chunk);
+        // A held chunk owns its label set as well as its samples, and holding it is what keeps
+        // both alive until the scalar arrives.
+        let bytes = series_bytes(&chunk.series);
         self.buffer.grow(bytes)?;
         broadcast.held = broadcast.held.saturating_add(bytes);
         broadcast.pending.push_back((chunk, bytes));
