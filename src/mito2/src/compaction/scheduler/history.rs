@@ -34,6 +34,15 @@ pub(crate) struct PickKey {
     pub(crate) class: PickClass,
 }
 
+impl From<&WindowCandidate> for PickKey {
+    fn from(candidate: &WindowCandidate) -> Self {
+        Self {
+            window: candidate.window,
+            class: candidate.pick.class,
+        }
+    }
+}
+
 /// Region-resident scheduling metadata. It owns no file handles or reservations.
 /// Planning works on a private snapshot; the accepted plan consumes one fairness
 /// turn per selected key. Execution success or failure does not rewrite ages.
@@ -77,29 +86,27 @@ impl PickHistory {
         self.waiting.insert(key, now);
     }
 
-    /// Applies region fairness to a complete discovery result. Planning uses a
-    /// private snapshot; the worker installs it only after validating the plan ID.
-    /// Each selected key consumes its fairness turn here, so a plan that never
-    /// completes cannot keep a promoted key at the front. Keeps at most one
-    /// alternative per window, then applies `max_outputs`.
-    pub(crate) fn select_candidates(
+    /// Observes all eligible work and ranks one alternative per window without
+    /// consuming a fairness turn. The caller acknowledges only attempted work
+    /// after applying its output budget and semantic closure policy.
+    pub(crate) fn rank_candidates(
         &mut self,
         mut candidates: Vec<WindowCandidate>,
-        max_outputs: Option<usize>,
         now: Instant,
     ) -> Vec<WindowCandidate> {
-        let key = |candidate: &WindowCandidate| PickKey {
-            window: candidate.window,
-            class: candidate.pick.class,
-        };
-        self.observe(candidates.iter().map(key), now);
-        candidates.sort_by_key(|candidate| self.priority(key(candidate), now));
+        self.observe(candidates.iter().map(PickKey::from), now);
+        candidates.sort_by_key(|candidate| self.priority(PickKey::from(candidate), now));
         // Alternatives may share files or semantic dependencies within a window.
         let mut windows = HashSet::new();
         candidates.retain(|candidate| windows.insert(candidate.window));
-        candidates.truncate(max_outputs.unwrap_or(usize::MAX));
-        for candidate in &candidates {
-            let key = key(candidate);
+        candidates
+    }
+
+    /// Consumes turns for attempted seeds, including absorbed or rejected closure
+    /// seeds, but not work left behind by the output budget. Only an accepted
+    /// plan installs this private snapshot; execution never updates waiting ages.
+    pub(crate) fn acknowledge(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
+        for key in keys {
             let priority = if self.priority(key, now).1.is_some() {
                 "promoted"
             } else {
@@ -110,7 +117,6 @@ impl PickHistory {
                 .inc();
             self.serve(key, now);
         }
-        candidates
     }
 }
 

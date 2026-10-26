@@ -33,7 +33,7 @@ use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::last_non_null;
 use crate::compaction::picker::{PickerOutput, new_picker, new_twcs_picker};
-use crate::compaction::scheduler::history::PickHistory;
+use crate::compaction::scheduler::history::{PickHistory, PickKey};
 use crate::compaction::scheduler::state::{
     CompactingFiles, CompactionExecution, CompactionPhase, CompactionTrigger,
 };
@@ -130,15 +130,29 @@ async fn pick_automatic(
     let picker = new_twcs_picker(&region.region_options, max_outputs, time_range, false);
     let (mut candidates, mut output) = picker.discover(region).await?;
     let last_non_null = region.region_options.merge_mode() == MergeMode::LastNonNull;
-    candidates.candidates = history.select_candidates(
-        candidates.candidates,
-        if last_non_null { None } else { max_outputs },
-        Instant::now(),
-    );
+    let now = Instant::now();
+    candidates.candidates = history.rank_candidates(candidates.candidates, now);
+    if !last_non_null {
+        candidates
+            .candidates
+            .truncate(max_outputs.unwrap_or(usize::MAX));
+    }
+    // finish() reverses candidates for the compactor's pop order. Keep seed
+    // identities in that same order without retaining them in execution state.
+    let keys: Vec<_> = candidates
+        .candidates
+        .iter()
+        .rev()
+        .map(PickKey::from)
+        .collect();
     output.outputs = candidates.finish().await?;
     if last_non_null {
-        last_non_null::close_outputs(region, output, max_outputs).await
+        let (output, attempted_seeds) =
+            last_non_null::close_outputs(region, output, max_outputs).await?;
+        history.acknowledge(attempted_seeds.into_iter().map(|index| keys[index]), now);
+        Ok(output)
     } else {
+        history.acknowledge(keys.into_iter(), now);
         Ok((!output.outputs.is_empty() || !output.expired_ssts.is_empty()).then_some(output))
     }
 }

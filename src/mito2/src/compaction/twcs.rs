@@ -1463,11 +1463,12 @@ mod tests {
                     },
                 )
                 .await?;
-            candidates.candidates = history.select_candidates(
-                candidates.candidates,
-                self.max_background_tasks,
-                Instant::now(),
-            );
+            let now = Instant::now();
+            candidates.candidates = history.rank_candidates(candidates.candidates, now);
+            candidates
+                .candidates
+                .truncate(self.max_background_tasks.unwrap_or(usize::MAX));
+            history.acknowledge(candidates.candidates.iter().map(PickKey::from), now);
             candidates.finish().await
         }
     }

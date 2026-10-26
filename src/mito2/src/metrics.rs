@@ -152,9 +152,10 @@ lazy_static! {
         "TWCS windows evaluated during candidate discovery",
         &["mode"],
     ).unwrap();
-    /// Automatic seeds selected after per-window deduplication and the output
-    /// limit, before closure expansion, memory admission or execution. Promoted
-    /// means the seed exceeded the waiting threshold, not that it completed.
+    /// Automatic seeds attempted within the output budget, including seeds
+    /// absorbed by or rejected with a LastNonNull closure. Excludes work left
+    /// behind by the budget; counts attempts, not admission or completion.
+    /// Promoted means the seed reached the waiting threshold at selection time.
     pub static ref TWCS_SELECTED_CANDIDATES: IntCounterVec = register_int_counter_vec!(
         "greptime_mito_twcs_selected_candidates_total",
         "Automatic TWCS seeds selected by class and normal or promoted priority",
