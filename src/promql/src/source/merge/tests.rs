@@ -24,7 +24,7 @@ use api::v1::SemanticType;
 use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
 use common_query::series_frame::{
-    label_decode_spec, pack_raw_series, raw_series_frame_ordering, unpack_raw_series,
+    label_decode_spec, pack_raw_series, series_frame_ordering, unpack_raw_series,
 };
 use datatypes::arrow::array::Float64Array;
 use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
@@ -458,7 +458,7 @@ async fn merges_two_unpacked_frames_through_the_frame_codec() {
         );
         let schema = Arc::clone(stream.schema());
         let packed = pack_raw_series(stream).unwrap();
-        let ordering = raw_series_frame_ordering(packed.schema().as_ref()).unwrap();
+        let ordering = series_frame_ordering(packed.schema().as_ref()).unwrap();
         assert_eq!(SeriesOrdering::KeyThenTime, ordering);
         unpack_raw_series(packed, Some(schema)).unwrap()
     };
@@ -1889,7 +1889,7 @@ async fn merge_rejects_inputs_that_describe_different_decode_layouts() {
 /// that its chunks are undecoded key chunks, which is what a consumer decodes from.
 #[tokio::test]
 async fn merge_without_a_bound_identity_still_advertises_the_decode_layout() {
-    use common_query::series_frame::raw_series_frame_ordering;
+    use common_query::series_frame::series_frame_ordering;
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
     use store_api::region_engine::NO_BOUND_LABEL_SOURCE;
 
@@ -1937,11 +1937,11 @@ async fn merge_without_a_bound_identity_still_advertises_the_decode_layout() {
     // Packing advertises that layout under the merge's ordering, so the frame states both.
     let framed = pack_raw_series(merged).unwrap();
     assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(framed.schema().as_ref()).unwrap(),
+        datatypes::series::frame::series_frame_label_decode(framed.schema().as_ref()).unwrap(),
         Some(carried.clone())
     );
     assert_eq!(
-        raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        series_frame_ordering(framed.schema().as_ref()).unwrap(),
         SeriesOrdering::KeyThenTime
     );
 
@@ -1970,7 +1970,7 @@ async fn merge_without_a_bound_identity_still_advertises_the_decode_layout() {
 #[tokio::test]
 async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys() {
     use common_query::series_frame::{pack_raw_series, unpack_raw_series};
-    use datatypes::series::frame::raw_series_frame_label_decode;
+    use datatypes::series::frame::series_frame_label_decode;
     use mito_codec::labels::{LabelProjection, PrimaryKeyLabelDecoder};
 
     let key = read_key("rack-a", "sensor-1");
@@ -1994,12 +1994,12 @@ async fn merged_frame_declares_a_label_decode_description_that_decodes_its_keys(
     let ordering = merged.ordering();
     let framed = pack_raw_series(merged).unwrap();
     assert_eq!(
-        common_query::series_frame::raw_series_frame_ordering(framed.schema().as_ref()).unwrap(),
+        common_query::series_frame::series_frame_ordering(framed.schema().as_ref()).unwrap(),
         ordering
     );
     let declared = framed.schema();
     assert_eq!(
-        raw_series_frame_label_decode(declared.as_ref()).unwrap(),
+        series_frame_label_decode(declared.as_ref()).unwrap(),
         Some(expected.clone())
     );
 

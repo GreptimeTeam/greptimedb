@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
 use common_query::request::RawSeriesRequest;
-use common_query::series_frame::raw_series_frame_ordering;
+use common_query::series_frame::series_frame_ordering;
 use common_recordbatch::{
     QueryMemoryTracker, RecordBatch, RecordBatches, SendableRecordBatchStream,
 };
@@ -36,7 +36,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode};
+use datatypes::series::frame::{FrameLabelMode, LabelDecodeSpec};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
 use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
@@ -311,8 +311,37 @@ fn named_fixture() -> (
     Arc<Mutex<State>>,
     store_api::metadata::RegionMetadataRef,
 ) {
-    let schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+    named_fixture_with_tag_count(false)
+}
+
+fn named_fixture_with_two_tags() -> (
+    Arc<RegionScanExec>,
+    Arc<Mutex<State>>,
+    store_api::metadata::RegionMetadataRef,
+) {
+    named_fixture_with_tag_count(true)
+}
+
+fn named_fixture_with_tag_count(
+    two_tags: bool,
+) -> (
+    Arc<RegionScanExec>,
+    Arc<Mutex<State>>,
+    store_api::metadata::RegionMetadataRef,
+) {
+    let mut columns = vec![ColumnSchema::new(
+        "host",
+        ConcreteDataType::string_datatype(),
+        false,
+    )];
+    if two_tags {
+        columns.push(ColumnSchema::new(
+            "rack",
+            ConcreteDataType::string_datatype(),
+            false,
+        ));
+    }
+    columns.extend([
         ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
         ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
         ColumnSchema::new(
@@ -320,25 +349,34 @@ fn named_fixture() -> (
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
-    ]));
-    let batch = RecordBatch::new(
-        schema.clone(),
-        vec![
-            Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
-            Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
-        ],
-    )
-    .unwrap();
+    ]);
+    let schema = Arc::new(Schema::new(columns));
+    let mut vectors: Vec<VectorRef> =
+        vec![Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef];
+    if two_tags {
+        vectors.push(Arc::new(datatypes::vectors::StringVector::from_slice(&["r1"])) as VectorRef);
+    }
+    vectors.extend([
+        Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
+        Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
+        Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
+    ]);
+    let batch = RecordBatch::new(schema.clone(), vectors).unwrap();
     let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-    builder
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        semantic_type: SemanticType::Tag,
+        column_id: 7,
+    });
+    if two_tags {
+        builder.push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("rack", ConcreteDataType::string_datatype(), false),
             semantic_type: SemanticType::Tag,
-            column_id: 7,
-        })
+            column_id: 8,
+        });
+    }
+    builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
@@ -357,8 +395,8 @@ fn named_fixture() -> (
             ),
             semantic_type: SemanticType::Timestamp,
             column_id: 13,
-        })
-        .primary_key(vec![7]);
+        });
+    builder.primary_key(if two_tags { vec![7, 8] } else { vec![7] });
     let metadata = Arc::new(builder.build().unwrap());
     let raw_schema = Arc::new(SeriesSchema {
         fields: vec![
@@ -673,7 +711,8 @@ async fn native_raw_frame_executes_and_decodes_bound_data() {
     assert_eq!(frames[0].schema(), plan.schema());
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema,
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &frames[0],
     )
     .unwrap();
@@ -765,10 +804,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
                 .unwrap()
                 .unwrap();
             let planned_schema = plan.schema();
-            assert_eq!(
-                ordering,
-                raw_series_frame_ordering(&planned_schema).unwrap()
-            );
+            assert_eq!(ordering, series_frame_ordering(&planned_schema).unwrap());
             {
                 let state = state.lock().unwrap();
                 assert_eq!(0, state.raw_calls);
@@ -783,7 +819,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
             );
             assert_eq!(
                 ordering,
-                raw_series_frame_ordering(stream.schema().as_ref()).unwrap()
+                series_frame_ordering(stream.schema().as_ref()).unwrap()
             );
             let frames = stream.try_collect::<Vec<_>>().await.unwrap();
             assert_eq!(usize::from(nonempty), frames.len());
@@ -791,7 +827,7 @@ async fn planned_ordering_is_preserved_for_empty_and_nonempty_frames() {
                 assert_eq!(planned_schema.as_ref(), frame.schema().as_ref());
                 assert_eq!(
                     ordering,
-                    raw_series_frame_ordering(frame.schema().as_ref()).unwrap()
+                    series_frame_ordering(frame.schema().as_ref()).unwrap()
                 );
             }
             let state = state.lock().unwrap();
@@ -839,7 +875,7 @@ async fn planned_and_stream_ordering_mismatches_fail_without_legacy_fallback() {
             .unwrap();
         assert_eq!(
             planned,
-            raw_series_frame_ordering(plan.schema().as_ref()).unwrap()
+            series_frame_ordering(plan.schema().as_ref()).unwrap()
         );
         state.lock().unwrap().stream_ordering = Some(actual);
         let error = plan
@@ -1032,18 +1068,17 @@ async fn malformed_returned_stream_binding_fails_before_poll_even_when_empty() {
 async fn primary_key_binding_mismatch_is_rejected_before_poll() {
     let logical_tags: Arc<[BoundTag]> = vec![
         BoundTag {
-            column_id: 1,
-            name: Arc::from("zone"),
+            column_id: 7,
+            name: Arc::from("host"),
         },
         BoundTag {
-            column_id: 2,
+            column_id: 8,
             name: Arc::from("rack"),
         },
     ]
     .into();
     for case in 0..6 {
-        let (scan, state) = fixture(Some(series_schema()), vec![]);
-        let metadata = scan.scanner.lock().unwrap().metadata();
+        let (scan, state, metadata) = named_fixture_with_two_tags();
         let bound = RawLabelSource::PrimaryKey {
             metric_name: Arc::from("cpu"),
             physical_metadata: metadata.clone(),
@@ -1080,18 +1115,17 @@ async fn primary_key_binding_mismatch_is_rejected_before_poll() {
 
 #[tokio::test]
 async fn unchanged_primary_key_binding_accepts_empty_stream() {
-    let (scan, state) = fixture(Some(series_schema()), vec![]);
-    let metadata = scan.scanner.lock().unwrap().metadata();
+    let (scan, state, metadata) = named_fixture_with_two_tags();
     let source = RawLabelSource::PrimaryKey {
         metric_name: Arc::from("cpu"),
         physical_metadata: metadata,
         logical_tags: Arc::from([
             BoundTag {
-                column_id: 1,
-                name: Arc::from("zone"),
+                column_id: 7,
+                name: Arc::from("host"),
             },
             BoundTag {
-                column_id: 2,
+                column_id: 8,
                 name: Arc::from("rack"),
             },
         ]),
@@ -1171,7 +1205,8 @@ async fn error_after_emitted_frame_is_not_replayed() {
     assert_eq!(frame.schema(), plan.schema());
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         plan.series_schema(),
-        RawLabelMode::Explicit,
+        FrameLabelMode::Explicit,
+        None,
         &frame,
     )
     .unwrap();
@@ -1354,7 +1389,8 @@ async fn tracked_native_frame_holds_and_releases_quota_on_cancel() {
     assert_eq!(
         datatypes::series::frame::unpack_raw_series_frame(
             plan.series_schema(),
-            RawLabelMode::Explicit,
+            FrameLabelMode::Explicit,
+            None,
             &frame,
         )
         .unwrap()[0]
@@ -1484,7 +1520,7 @@ async fn raw_series_admission_captures_scanner_ordering_before_execution() {
             .unwrap();
         assert_eq!(plan.raw_series_ordering(), ordering);
         assert_eq!(
-            raw_series_frame_ordering(plan.schema().as_ref()).unwrap(),
+            series_frame_ordering(plan.schema().as_ref()).unwrap(),
             ordering
         );
         {

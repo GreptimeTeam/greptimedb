@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod evaluated;
 mod lifecycle;
 
 use std::collections::{HashMap, VecDeque};
@@ -34,7 +35,9 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::Label;
 use datatypes::series::SeriesLabels;
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{LabelDecodeSpec, RawLabelMode, raw_series_frame_schema};
+use datatypes::series::frame::{
+    FrameLabelMode, LabelDecodeSpec, raw_series_frame_schema, series_frame_schema,
+};
 use datatypes::series::histogram::{BucketSideView, CounterResetHint, HistogramBatchBuilder};
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
@@ -46,8 +49,8 @@ use store_api::region_engine::{
 };
 
 use super::{
-    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series,
-    raw_series_frame_ordering, unpack_raw_series,
+    ensure_frame_matches_label_source, label_decode_spec, pack_raw_series, series_frame_ordering,
+    unpack_raw_series,
 };
 
 fn schema() -> Arc<SeriesSchema> {
@@ -57,6 +60,28 @@ fn schema() -> Arc<SeriesSchema> {
         }]
         .into(),
         eval_grid: None,
+    })
+}
+
+/// The one grid every evaluated fixture is addressed on: 512 positions, 1000 ms apart.
+fn evaluated_grid() -> Arc<datatypes::series::time::EvalGrid> {
+    Arc::new(
+        datatypes::series::time::EvalGrid::try_new(
+            datatypes::series::time::GridSpec::try_new(0, 1000, 512).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+/// A schema with one `value` field addressed on [`evaluated_grid`], which is what makes it an
+/// evaluated declaration.
+fn evaluated_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: vec![FieldSpec {
+            name: Arc::from("value"),
+        }]
+        .into(),
+        eval_grid: Some(evaluated_grid()),
     })
 }
 fn metric() -> SeriesLabels {
@@ -629,7 +654,8 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
             assert_eq!(batch.num_rows(), case.prefix.len(), "{}", case.name);
             let chunks = datatypes::series::frame::unpack_raw_series_frame(
                 &schema(),
-                datatypes::series::frame::RawLabelMode::Explicit,
+                datatypes::series::frame::FrameLabelMode::Explicit,
+                None,
                 &batch,
             )
             .unwrap();
@@ -656,7 +682,8 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
             frames.extend(
                 datatypes::series::frame::pack_raw_series_chunk(
                     &schema(),
-                    datatypes::series::frame::RawLabelMode::Explicit,
+                    datatypes::series::frame::FrameLabelMode::Explicit,
+                    None,
                     item,
                 )
                 .unwrap(),
@@ -672,7 +699,9 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
         .unwrap();
         let frames = frames
             .into_iter()
-            .map(|frame| frame.with_schema(frame_schema.clone()).unwrap())
+            .map(|frame| {
+                RecordBatch::try_new(frame_schema.clone(), frame.columns().to_vec()).unwrap()
+            })
             .collect();
         let (source, _, _) = df_source(frames, frame_schema);
         let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
@@ -692,7 +721,8 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
     // missing final key is reported once, at EOF.
     let frame = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"unfinished", &[7], false),
     )
     .unwrap();
@@ -923,7 +953,8 @@ async fn explicit_metric_must_remain_stable_within_key() {
     );
     let chunks = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &batch,
     )
     .unwrap();
@@ -975,7 +1006,7 @@ async fn empty_streams_keep_self_describing_schema() {
     assert_eq!(
         frame_schema.field(0).name(),
         "read_key",
-        "the v1 wire column name is unchanged"
+        "the wire column name is unchanged"
     );
     assert!(packed.next().await.is_none());
     // A declared-but-empty stream is still validated against the expected schema before any
@@ -1018,7 +1049,7 @@ async fn upstream_error_status_is_preserved_once_and_releases_source() {
         assert_eq!(drops.load(Ordering::SeqCst), 1);
         let batch_schema = datatypes::series::frame::raw_series_frame_schema(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
         )
         .unwrap();
         let plain = PlainError::new("upstream df".into(), status);
@@ -1062,7 +1093,8 @@ async fn dropping_adapter_releases_upstream_and_pending_item_is_resumed() {
     );
     let chunks = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &first,
     )
     .unwrap();
@@ -1076,7 +1108,8 @@ async fn dropping_adapter_releases_upstream_and_pending_item_is_resumed() {
     );
     let chunks = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &second,
     )
     .unwrap();
@@ -1094,18 +1127,25 @@ async fn unpack_rejects_mismatched_batch_schema_before_polling() {
     assert_eq!(drops.load(Ordering::SeqCst), 1);
 }
 
+/// A schema with an evaluation grid is a legal *evaluated* frame declaration, so it is no longer a
+/// reason to refuse a stream at construction; it is still no schema to carry *raw* chunks under, so
+/// the first raw chunk is rejected instead of the stream.
 #[tokio::test]
-async fn invalid_grid_schema_rejected_for_empty_raw_stream() {
-    let mut invalid = (*schema()).clone();
-    invalid.eval_grid = Some(Arc::new(
+async fn grid_schema_is_legal_but_cannot_carry_a_raw_chunk() {
+    let mut grid_schema = (*schema()).clone();
+    grid_schema.eval_grid = Some(Arc::new(
         datatypes::series::time::EvalGrid::try_new(
             datatypes::series::time::GridSpec::try_new(0, 10, 1).unwrap(),
         )
         .unwrap(),
     ));
+    let grid_schema = Arc::new(grid_schema);
+
+    // An empty stream under a grid schema constructs: the declaration is legal and no row disagrees
+    // with it.
     let polls = Arc::new(AtomicUsize::new(0));
     let source = Box::pin(RawMock {
-        schema: Arc::new(invalid),
+        schema: grid_schema.clone(),
         items: VecDeque::new(),
         binding: RawLabelSource::Explicit,
         label_decode_spec: None,
@@ -1117,8 +1157,33 @@ async fn invalid_grid_schema_rejected_for_empty_raw_stream() {
         panic_on_poll: false,
         emitted: 0,
     });
-    assert!(pack_raw_series(source).is_err());
-    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    let mut packed = pack_raw_series(source).unwrap();
+    assert!(packed.next().await.is_none());
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+
+    // A raw chunk cannot be addressed on a grid, so the chunk that arrives under this declaration is
+    // what fails.
+    let polls = Arc::new(AtomicUsize::new(0));
+    let source = Box::pin(RawMock {
+        schema: grid_schema,
+        items: VecDeque::from([Ok(chunk(b"a", &[1], true))]),
+        binding: RawLabelSource::Explicit,
+        label_decode_spec: None,
+        ordering: SeriesOrdering::Contiguous,
+        polls: polls.clone(),
+        drops: Arc::new(AtomicUsize::new(0)),
+        pending_after: None,
+        pending_reported: false,
+        panic_on_poll: false,
+        emitted: 0,
+    });
+    let mut packed = pack_raw_series(source).unwrap();
+    let error = packed.next().await.unwrap().unwrap_err();
+    assert_eq!(
+        crate::error::datafusion_status_code::<crate::error::Error>(&error, None),
+        StatusCode::InvalidArguments
+    );
+    assert!(packed.next().await.is_none());
 }
 
 #[tokio::test]
@@ -1150,19 +1215,21 @@ async fn unpack_batch_sequence_error_is_atomic_for_all_rows() {
 async fn unpack_rejects_late_invalid_frame_row_before_prefix() {
     let frame_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let first = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"a", &[1], true),
     )
     .unwrap()
     .remove(0);
     let mut second = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"b", &[2], true),
     )
     .unwrap()
@@ -1211,7 +1278,7 @@ async fn unpack_rejects_late_invalid_frame_row_before_prefix() {
 async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
     let base_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let mut application_metadata = base_schema.metadata().clone();
@@ -1223,7 +1290,8 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
     );
     let first = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"a", &[1], true),
     )
     .unwrap()
@@ -1232,7 +1300,8 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
     .unwrap();
     let stable_second = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"b", &[2], true),
     )
     .unwrap()
@@ -1267,7 +1336,8 @@ async fn frame_application_metadata_is_stable_and_schema_change_rejected() {
         let changed_schema = Arc::new((*base_schema).clone().with_metadata(changed));
         let bad_batch = datatypes::series::frame::pack_raw_series_chunk(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
+            None,
             &chunk(b"b", &[2], true),
         )
         .unwrap()
@@ -1380,7 +1450,7 @@ fn unpack_yields_at_empty_batch_budget_before_observing_eof() {
     const BUDGET: usize = 32;
     let frame_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let batches = vec![RecordBatch::new_empty(frame_schema.clone()); BUDGET];
@@ -1406,7 +1476,7 @@ fn unpack_yields_at_empty_batch_budget_before_observing_eof() {
 fn unpack_propagates_upstream_pending_without_extra_wake() {
     let frame_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let (source, polls, _) = df_pending(
@@ -1431,7 +1501,7 @@ fn unpack_reports_bad_batch_at_budget_boundary_before_yielding() {
     const BUDGET: usize = 32;
     let frame_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let mut batches = vec![RecordBatch::new_empty(frame_schema.clone()); BUDGET - 1];
@@ -1460,7 +1530,7 @@ fn unpack_surfaces_upstream_error_after_budget_yield_once() {
     const BUDGET: usize = 32;
     let frame_schema = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let error = datafusion_common::DataFusionError::External(Box::new(BoxedError::new(
@@ -1537,6 +1607,10 @@ async fn unpack_drains_decoded_rows_before_polling_another_batch() {
     assert!(unpacked.next().await.is_none());
 }
 
+/// An `expected` schema the raw frame does not declare is rejected before any poll, whether it names
+/// no field at all or carries an evaluation grid. A grid schema is a legal *evaluated* declaration
+/// now, so it is refused here because a raw frame carries no grid, not because the schema itself is
+/// impossible.
 #[tokio::test]
 async fn unpack_preflights_empty_and_grid_schemas_without_polling() {
     let invalid_schemas = [
@@ -1557,7 +1631,7 @@ async fn unpack_preflights_empty_and_grid_schemas_without_polling() {
     for expected in invalid_schemas {
         let frame_schema = datatypes::series::frame::raw_series_frame_schema(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
         )
         .unwrap();
         let (source, polls, drops) = df_source(vec![], frame_schema);
@@ -1749,7 +1823,8 @@ async fn pack_bounds_ready_rows_at_default_row_limit_before_eof() {
     for batch in [&first, &second] {
         let decoded = datatypes::series::frame::unpack_raw_series_frame(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
+            None,
             batch,
         )
         .unwrap();
@@ -1824,7 +1899,8 @@ async fn pack_splits_one_chunk_into_bounded_batches_without_repolling_the_source
     for batch in [&first, &second] {
         let decoded = datatypes::series::frame::unpack_raw_series_frame(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
+            None,
             batch,
         )
         .unwrap();
@@ -1877,7 +1953,8 @@ async fn dropping_pack_mid_chunk_keeps_last_batch_and_releases_source() {
     drop(owners);
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &batch,
     )
     .unwrap();
@@ -1926,7 +2003,8 @@ async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
     assert_eq!(wake.0.load(Ordering::SeqCst), 1, "upstream wakes the task");
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &first,
     )
     .unwrap();
@@ -1943,7 +2021,8 @@ async fn pack_flushes_ready_rows_at_pending_then_remainder_at_eof() {
     assert_eq!(drops.load(Ordering::SeqCst), 1);
     let decoded = datatypes::series::frame::unpack_raw_series_frame(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &second,
     )
     .unwrap();
@@ -1997,7 +2076,8 @@ async fn pack_emits_oversized_legal_rows_whole() {
     ] {
         let chunks = datatypes::series::frame::unpack_raw_series_frame(
             &schema(),
-            datatypes::series::frame::RawLabelMode::Explicit,
+            datatypes::series::frame::FrameLabelMode::Explicit,
+            None,
             batch,
         )
         .unwrap();
@@ -2095,7 +2175,7 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
     assert_eq!(
         reader.schema(),
         batches[0].schema(),
-        "IPC preserves the v1 layout, metadata, and field order"
+        "IPC preserves the layout, metadata, and field order"
     );
     let frame_schema = reader.schema();
     let ipc_batches = reader.map(Result::unwrap).collect::<Vec<_>>();
@@ -2285,8 +2365,8 @@ async fn public_chunk_with_empty_times_is_rejected_without_panic() {
 }
 
 /// `Interleaved` is rejected by the constructor before any source poll, for a pack source and for
-/// an empty unpack stream; the wire-schema helper rejects it before assembling a schema, since no
-/// v1 metadata value represents it. No adjacent-only fallback is installed.
+/// an empty unpack stream; the wire-schema helper rejects it before assembling a schema, since the
+/// wire carries only the two representable spellings. No adjacent-only fallback is installed.
 #[tokio::test]
 async fn interleaved_ordering_is_rejected_before_any_poll() {
     assert!(
@@ -2319,7 +2399,7 @@ async fn interleaved_ordering_is_rejected_before_any_poll() {
     // a frame that declares one; that spelling has no wire representation and is rejected.
     let frame = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let mut metadata = frame.metadata().clone();
@@ -2343,17 +2423,20 @@ async fn interleaved_ordering_is_rejected_before_any_poll() {
 
 /// The unpack stream rejects a batch whose schema differs from the stream's declared schema,
 /// including drift in metadata the codec itself does not interpret and an empty batch that
-/// carries the drift; the reserved layout metadata is rejected as well.
+/// carries the drift; the reserved layout metadata is rejected as well. Since the current layout is
+/// `v2`, the drift case rewrites the layout to `v1`: any value other than this revision's is refused,
+/// so a stale or a future spelling cannot be decoded under the current columns.
 #[tokio::test]
 async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
     let base = datatypes::series::frame::raw_series_frame_schema(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
     )
     .unwrap();
     let first = datatypes::series::frame::pack_raw_series_chunk(
         &schema(),
-        datatypes::series::frame::RawLabelMode::Explicit,
+        datatypes::series::frame::FrameLabelMode::Explicit,
+        None,
         &chunk(b"a", &[1], true),
     )
     .unwrap()
@@ -2361,8 +2444,9 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
 
     let mut unrelated = base.metadata().clone();
     unrelated.insert("app.unrelated".into(), "x".into());
+    // The current layout is `v2`, so a frame that still declares `v1` is the drift here.
     let mut reserved = base.metadata().clone();
-    reserved.insert("greptime.series.layout".into(), "v2".into());
+    reserved.insert("greptime.series.layout".into(), "v1".into());
     let mut renamed = base.metadata().clone();
     renamed.insert("app.renamed".into(), "y".into());
 
@@ -2408,6 +2492,9 @@ async fn unpack_rejects_unrelated_metadata_drift_and_empty_schema_changes() {
     }
 }
 
+/// The ordering and layout fixture: literal metadata maps are read the way a receiver reads them,
+/// so the same text pins both what `series_frame_ordering` answers and whether the declaration as a
+/// whole is accepted.
 #[test]
 fn raw_series_ordering_metadata_fixture() {
     #[derive(serde::Deserialize)]
@@ -2415,10 +2502,12 @@ fn raw_series_ordering_metadata_fixture() {
         name: String,
         metadata: HashMap<String, String>,
         ordering: Option<String>,
+        /// `accepted` or `rejected`: whether the whole declaration is one this revision reads.
+        declaration: String,
     }
 
     let cases: Vec<Case> = serde_json::from_str(include_str!(
-        "../../../../../tests/compatibility/wire/raw_series_ordering/v1_metadata.json"
+        "../../../../../tests/compatibility/wire/raw_series_ordering/v2_metadata.json"
     ))
     .unwrap();
     for case in cases {
@@ -2428,21 +2517,51 @@ fn raw_series_ordering_metadata_fixture() {
             Some(value) => panic!("{} has invalid fixture ordering {value}", case.name),
             None => None,
         };
-        let frame_schema = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+        // The columns have to match the content the case declares, so an evaluated case is built on
+        // an evaluated layout rather than read through a raw one.
+        let evaluated = case
+            .metadata
+            .get("greptime.series.content")
+            .is_some_and(|content| content == "evaluated");
+        let frame_schema = if evaluated {
+            series_frame_schema(&evaluated_schema(), FrameLabelMode::Explicit, None).unwrap()
+        } else {
+            raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap()
+        };
         let frame_schema = frame_schema.as_ref().clone().with_metadata(case.metadata);
         match literal_ordering {
             Some(expected) => assert_eq!(
-                raw_series_frame_ordering(&frame_schema)
+                series_frame_ordering(&frame_schema)
                     .unwrap_or_else(|error| panic!("{}: {error}", case.name)),
                 expected,
                 "{}",
                 case.name
             ),
             None => assert!(
-                raw_series_frame_ordering(&frame_schema).is_err(),
+                series_frame_ordering(&frame_schema).is_err(),
                 "{}",
                 case.name
             ),
+        }
+        let declared = datatypes::series::frame::SeriesFrameDeclaration::parse(&frame_schema);
+        match case.declaration.as_str() {
+            "accepted" => {
+                let declared = declared.unwrap_or_else(|error| panic!("{}: {error}", case.name));
+                if evaluated {
+                    assert_eq!(
+                        declared.content(),
+                        datatypes::series::frame::FrameContent::Evaluated,
+                        "{}",
+                        case.name
+                    );
+                }
+            }
+            "rejected" => assert!(
+                declared.is_err(),
+                "{}: the declaration must be refused",
+                case.name
+            ),
+            other => panic!("{} has invalid fixture declaration {other}", case.name),
         }
     }
 }
@@ -2463,14 +2582,14 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             // replaced single-row packing emitted one batch per chunk.
             let expected_batch_count = if is_empty { 0 } else { 1 };
             let canonical_schema =
-                raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+                raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
             let mut expected_metadata = canonical_schema.metadata().clone();
             expected_metadata.insert(
                 "greptime.series.ordering".to_string(),
                 match ordering {
                     SeriesOrdering::Contiguous => "contiguous",
                     SeriesOrdering::KeyThenTime => "read_key_then_time",
-                    // The v1 wire carries exactly these two spellings, so the loop above
+                    // The wire carries exactly these two spellings, so the loop above
                     // admits only the two representable modes; `Interleaved` is rejected
                     // before any poll (see `interleaved_ordering_is_rejected_before_any_poll`).
                     SeriesOrdering::Interleaved => {
@@ -2484,7 +2603,7 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             let declared = packed.schema();
             assert_eq!(declared.fields(), canonical_schema.fields());
             assert_eq!(declared.metadata(), &expected_metadata);
-            assert_eq!(raw_series_frame_ordering(&declared).unwrap(), ordering);
+            assert_eq!(series_frame_ordering(&declared).unwrap(), ordering);
             let mut batches = Vec::new();
             while let Some(batch) = packed.next().await {
                 let batch = batch.unwrap();
@@ -2502,10 +2621,7 @@ async fn pack_declares_ordering_on_every_batch_and_ipc_roundtrips_it() {
             }
             let reader = StreamReader::try_new(Cursor::new(ipc), None).unwrap();
             assert_eq!(reader.schema(), declared);
-            assert_eq!(
-                raw_series_frame_ordering(&reader.schema()).unwrap(),
-                ordering
-            );
+            assert_eq!(series_frame_ordering(&reader.schema()).unwrap(), ordering);
             let ipc_batches = reader.map(Result::unwrap).collect::<Vec<_>>();
             assert_eq!(ipc_batches.len(), batches.len());
             assert_eq!(ipc_batches.len(), expected_batch_count);
@@ -2621,15 +2737,31 @@ fn two_tag_binding(metric: &str) -> RawLabelSource {
     }
 }
 
-/// A key frame whose metadata carries exactly the supplied description and nothing else.
-fn key_frame_with(description: &datatypes::series::frame::LabelDecodeSpec) -> SchemaRef {
-    let layout = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+/// A raw key frame declaring the supplied description, as a producer with a primary-key binding
+/// writes it.
+fn key_layout() -> SchemaRef {
+    let description =
+        label_decode_spec(&key_binding("cpu")).expect("a primary-key binding describes its key");
+    series_frame_schema(&schema(), FrameLabelMode::Key, Some(&description)).unwrap()
+}
+
+/// A key frame whose metadata carries exactly the supplied description text and nothing else.
+///
+/// The text is written verbatim, not canonicalized, so a case can pin what a writer must have
+/// ordered and what a reader refuses to reorder.
+fn key_frame_with_encoded(encoded: &str) -> SchemaRef {
+    let layout = key_layout();
     let mut metadata = layout.metadata().clone();
     metadata.insert(
         "greptime.series.label_decode".to_string(),
-        serde_json::to_string(description).unwrap(),
+        encoded.to_string(),
     );
     Arc::new(Schema::new_with_metadata(layout.fields().clone(), metadata))
+}
+
+/// A key frame whose `greptime.series.label_decode` entry is the supplied description.
+fn key_frame_with(description: &datatypes::series::frame::LabelDecodeSpec) -> SchemaRef {
+    key_frame_with_encoded(&serde_json::to_string(description).unwrap())
 }
 
 /// Logical tag order is fixed by the writer, so the wire form has one spelling and the comparison
@@ -2720,7 +2852,7 @@ async fn frame_check_rejects_a_binding_the_frame_does_not_describe() {
         "an explicit identity expects a frame that carries complete labels"
     );
 
-    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let explicit = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
     assert!(
         ensure_frame_matches_label_source(explicit.as_ref(), &key_binding("cpu")).is_err(),
         "a frame declaring no layout cannot satisfy a primary-key identity"
@@ -2746,7 +2878,7 @@ async fn unpack_retains_the_declared_description_without_a_binding() {
         "no physical region key layout is invented for a frame that carries none"
     );
 
-    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let explicit = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
     let (source, _, _) = df_source(vec![], explicit);
     let unpacked = unpack_raw_series(source, None).unwrap();
     assert_eq!(
@@ -2754,17 +2886,6 @@ async fn unpack_retains_the_declared_description_without_a_binding() {
         None,
         "explicit labels are already complete and need no decoder"
     );
-}
-
-/// A key frame whose `greptime.series.label_decode` entry is exactly the supplied text.
-fn key_frame_with_encoded(encoded: &str) -> SchemaRef {
-    let layout = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
-    let mut metadata = layout.metadata().clone();
-    metadata.insert(
-        "greptime.series.label_decode".to_string(),
-        encoded.to_string(),
-    );
-    Arc::new(Schema::new_with_metadata(layout.fields().clone(), metadata))
 }
 
 /// The description is validated whether or not a binding is supplied, so trusting the frame never
@@ -2810,14 +2931,21 @@ async fn unpack_rejects_invalid_descriptions_without_a_binding() {
         );
     }
 
-    let key_without_description = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    // A key frame nobody can decode: the description is removed from the frame the producer wrote.
+    // Construction cannot express this, which is the point - the reader is what refuses it.
+    let mut without_description = key_layout().metadata().clone();
+    without_description.remove("greptime.series.label_decode");
+    let key_without_description = Arc::new(Schema::new_with_metadata(
+        key_layout().fields().clone(),
+        without_description,
+    ));
     let (source, _, _) = df_source(vec![], key_without_description);
     assert!(
         unpack_raw_series(source, None).is_err(),
         "a key frame nobody can decode is rejected instead of being trusted"
     );
 
-    let explicit = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let explicit = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
     let mut metadata = explicit.metadata().clone();
     metadata.insert(
         "greptime.series.label_decode".to_string(),
@@ -2850,14 +2978,15 @@ async fn pack_declares_the_label_decode_description_of_its_binding() {
     );
     let mut packed = pack_raw_series(input).unwrap();
     let declared = packed.schema();
-    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
+    // A key frame's canonical layout carries its description and explicit default ordering.
+    let canonical = key_layout();
     assert_eq!(
         declared.metadata().len(),
-        canonical.metadata().len() + 2,
-        "a key frame adds the producer ordering and the label decode description"
+        canonical.metadata().len(),
+        "the stream schema preserves the complete canonical declaration"
     );
     assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        datatypes::series::frame::series_frame_label_decode(&declared).unwrap(),
         label_decode_spec(&binding),
         "the declared description is derived from the binding, not from the first row"
     );
@@ -2872,11 +3001,16 @@ async fn pack_declares_the_label_decode_description_of_its_binding() {
     let packed = pack_raw_series(input).unwrap();
     let declared = packed.schema();
     assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(&declared).unwrap(),
+        datatypes::series::frame::series_frame_label_decode(&declared).unwrap(),
         None,
         "explicit labels are already complete"
     );
-    assert_eq!(declared.metadata().len(), canonical.metadata().len() + 1);
+    let canonical_explicit = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
+    assert_eq!(
+        declared.metadata().len(),
+        canonical_explicit.metadata().len(),
+        "an explicit frame preserves the complete canonical declaration"
+    );
 }
 
 /// A key frame that omits its description is not decodable, and unpacking says so instead of falling
@@ -2899,13 +3033,11 @@ async fn unpack_round_trips_a_key_frame_and_rejects_one_without_a_description() 
     let chunk = decoded.next().await.unwrap().unwrap();
     assert_eq!(chunk.primary_key.as_slice(), b"encoded-complete-key");
 
-    // A frame that omits the description is not decodable from the schema alone.
-    let canonical = raw_series_frame_schema(&schema(), RawLabelMode::Key).unwrap();
-    let mut metadata = canonical.metadata().clone();
-    metadata.insert(
-        "greptime.series.ordering".to_string(),
-        "contiguous".to_string(),
-    );
+    // A frame that omits the description is not decodable from the schema alone. The producer
+    // cannot write one, so the entry is dropped from the frame it did write: the reader is what has
+    // to refuse it.
+    let mut metadata = declared.metadata().clone();
+    metadata.remove("greptime.series.label_decode");
     let stripped = Arc::new(datatypes::arrow::datatypes::Schema::new_with_metadata(
         declared.fields().clone(),
         metadata,
@@ -2922,8 +3054,18 @@ async fn unpack_round_trips_a_key_frame_and_rejects_one_without_a_description() 
     );
 }
 
-/// The ordering a frame declares is the only ordering a consumer has: unpacking a `KeyThenTime`
-/// frame reports `KeyThenTime` although nobody passed it in.
+/// An evaluated stream with no ordering declaration is rejected before the empty source is polled.
+#[tokio::test]
+async fn unpack_rejects_missing_ordering_on_empty_evaluated_stream() {
+    let frame = series_frame_schema(&evaluated_schema(), FrameLabelMode::Explicit, None).unwrap();
+    let mut metadata = frame.metadata().clone();
+    metadata.remove("greptime.series.ordering");
+    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
+    let (source, polls, _) = df_source(vec![], frame);
+    assert!(super::unpack_evaluated_series(source, None).is_err());
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn unpack_reports_the_ordering_the_frame_declares() {
     let (input, _, _) = raw_custom(
@@ -2933,7 +3075,7 @@ async fn unpack_reports_the_ordering_the_frame_declares() {
     );
     let packed = pack_raw_series(input).unwrap();
     assert_eq!(
-        raw_series_frame_ordering(packed.schema().as_ref()).unwrap(),
+        series_frame_ordering(packed.schema().as_ref()).unwrap(),
         SeriesOrdering::KeyThenTime,
         "the producer declaration reaches the wire"
     );
@@ -2945,27 +3087,28 @@ async fn unpack_reports_the_ordering_the_frame_declares() {
         "unpacking derives the ordering from the frame, not from a caller"
     );
 
-    // A frame that declares no ordering is a legacy contiguous frame.
-    let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let frame = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
+    let mut metadata = frame.metadata().clone();
+    metadata.remove("greptime.series.ordering");
+    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
     let (source, _, _) = df_source(vec![], frame);
-    assert_eq!(
-        unpack_raw_series(source, None).unwrap().ordering(),
-        SeriesOrdering::Contiguous
-    );
+    assert!(unpack_raw_series(source, None).is_err());
 }
 
 /// Reserved layout metadata this revision does not write is rejected instead of being read as the
-/// current layout, so a frame cannot be decoded under a contract it did not declare.
+/// current layout, so a frame cannot be decoded under a contract it did not declare. The current
+/// layout is `v2`; a `v1` frame and every unknown value are refused alike.
 #[tokio::test]
 async fn unpack_rejects_unknown_layout_metadata() {
     let cases = [
-        ("greptime.series.layout", "v2"),
+        ("greptime.series.layout", "v1"),
+        ("greptime.series.layout", "v3"),
         ("greptime.series.content", "series"),
         ("greptime.series.time", "timestamps_v2"),
         ("greptime.series.ordering", "hash_then_time"),
     ];
     for (key, value) in cases {
-        let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+        let frame = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
         let mut metadata = frame.metadata().clone();
         metadata.insert(key.to_string(), value.to_string());
         let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
@@ -2982,7 +3125,7 @@ async fn unpack_rejects_unknown_layout_metadata() {
 /// same frame unpacks without it because the frame is the only source of decode information.
 #[tokio::test]
 async fn unpack_rejects_an_expected_schema_the_frame_does_not_declare() {
-    let frame = raw_series_frame_schema(&schema(), RawLabelMode::Explicit).unwrap();
+    let frame = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
 
     let other_field = Arc::new(SeriesSchema {
         fields: vec![FieldSpec {
@@ -3049,7 +3192,7 @@ async fn unpack_pack_unpack_preserves_the_description_and_the_ordering() {
     let (input, _, _) = raw_custom(vec![key_chunk()], SeriesOrdering::KeyThenTime, binding);
     let packed = pack_raw_series(input).unwrap();
     assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(packed.schema().as_ref()).unwrap(),
+        datatypes::series::frame::series_frame_label_decode(packed.schema().as_ref()).unwrap(),
         Some(description.clone())
     );
 
@@ -3059,13 +3202,12 @@ async fn unpack_pack_unpack_preserves_the_description_and_the_ordering() {
 
     let repacked = pack_raw_series(unpacked).unwrap();
     assert_eq!(
-        datatypes::series::frame::raw_series_frame_label_decode(repacked.schema().as_ref())
-            .unwrap(),
+        datatypes::series::frame::series_frame_label_decode(repacked.schema().as_ref()).unwrap(),
         Some(description.clone()),
         "the repacked frame declares what the unpacked stream declared"
     );
     assert_eq!(
-        raw_series_frame_ordering(repacked.schema().as_ref()).unwrap(),
+        series_frame_ordering(repacked.schema().as_ref()).unwrap(),
         SeriesOrdering::KeyThenTime,
         "the repacked frame keeps the ordering it was unpacked under"
     );
@@ -3077,4 +3219,43 @@ async fn unpack_pack_unpack_preserves_the_description_and_the_ordering() {
     assert_eq!(chunk.primary_key.as_slice(), b"encoded-complete-key");
     assert!(chunk.metric.is_none(), "key chunks stay undecoded");
     assert!(again.next().await.is_none());
+}
+
+/// Each typed schema entry point refuses the content it cannot describe.
+///
+/// The raw entry point is handed an evaluated series schema and the shared builder is handed an
+/// evaluated schema with a key-then-time ordering. Both would otherwise produce a frame whose
+/// declaration contradicts its own columns, and the reader would be the first to notice — after the
+/// producer had already published it.
+#[test]
+fn typed_schema_entry_points_refuse_the_content_they_cannot_describe() {
+    assert!(
+        super::raw_series_frame_schema_with_ordering(
+            &evaluated_schema(),
+            &RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        )
+        .is_err(),
+        "a raw frame cannot carry a schema with an evaluation grid"
+    );
+    assert!(
+        super::frame_schema_with(
+            &evaluated_schema(),
+            FrameLabelMode::Explicit,
+            None,
+            SeriesOrdering::KeyThenTime,
+        )
+        .is_err(),
+        "an evaluated frame has no storage key to be ordered by"
+    );
+    assert!(
+        super::frame_schema_with(
+            &evaluated_schema(),
+            FrameLabelMode::Explicit,
+            None,
+            SeriesOrdering::Contiguous,
+        )
+        .is_ok(),
+        "contiguous is the one ordering an evaluated frame can honour"
+    );
 }

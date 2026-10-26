@@ -27,8 +27,12 @@
 //! preserves
 //! scan candidates only; it is not a residual filter, authorization check, remote transport, or
 //! compaction boundary. Only
-//! [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] are accepted;
-//! `Interleaved` is rejected before any poll.
+//! [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] are accepted for raw frames and
+//! only `Contiguous` for evaluated ones; `Interleaved` is rejected before any poll.
+//!
+//! An evaluated frame is the same physical family: [`pack_evaluated_series`] and
+//! [`unpack_evaluated_series`] carry computed values under complete labels and grid positions, so a
+//! compute consumer needs neither a storage key nor a scan binding to read them.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -40,13 +44,12 @@ use datafusion_common::DataFusionError;
 use datatypes::arrow::datatypes::{Schema as ArrowSchema, SchemaRef as ArrowSchemaRef};
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::frame::{
-    LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding, LabelDecodeSpec, LabelDecodeTag,
-    RawLabelMode, RawSeriesChunkCursor, RawSeriesFrameBuilder, RawSeriesFrameDecoder,
-    raw_series_frame_label_decode, raw_series_frame_schema_with_label_decode,
-    raw_series_frame_series_schema,
+    FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
+    LabelDecodeSpec, LabelDecodeTag, SeriesFrameBuilder, SeriesFrameCursor, SeriesFrameDeclaration,
+    SeriesFrameDecoder, series_frame_label_decode, series_frame_schema,
 };
 use datatypes::series::raw::RawSeriesChunk;
-use datatypes::series::samples::SeriesSchema;
+use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use futures_util::Stream;
 use store_api::codec::PrimaryKeyEncoding;
@@ -63,10 +66,19 @@ mod tests;
 
 const ORDERING_KEY: &str = "greptime.series.ordering";
 
+/// A stream of evaluated series chunks and their finality.
+///
+/// The pair is what an evaluated producer has and an evaluated consumer needs: the values on their
+/// absolute grid positions, and whether this chunk closed the chain it belongs to. It is deliberately
+/// not a third runtime chunk type - `Series` is the runtime value, and finality is the one fact a
+/// chunk has to carry besides it.
+pub type SendableEvaluatedSeriesStream =
+    Pin<Box<dyn Stream<Item = Result<(Series, bool), BoxedError>> + Send>>;
+
 /// Builds the canonical raw frame schema with the producer's label binding and ordering.
 ///
 /// Ordering records a producer guarantee; it is not inferred from frame contents. `Interleaved`
-/// has no v1 wire representation and is rejected before the schema is assembled. The label binding
+/// has no wire representation and is rejected before the schema is assembled. The label binding
 /// determines both the label mode and, for a primary-key binding, the self-describing label decode
 /// description written into the schema, so a frame can never declare a label layout it does not
 /// describe.
@@ -75,6 +87,11 @@ pub fn raw_series_frame_schema_with_ordering(
     label_source: &RawLabelSource,
     ordering: SeriesOrdering,
 ) -> datafusion_common::Result<ArrowSchemaRef> {
+    if schema.eval_grid.is_some() {
+        return Err(invalid(
+            "a raw frame cannot carry a schema with an evaluation grid",
+        ));
+    }
     frame_schema_with(
         schema,
         label_mode(label_source),
@@ -85,26 +102,30 @@ pub fn raw_series_frame_schema_with_ordering(
 
 /// Assembles a declared frame schema from an explicit label mode and decode description.
 ///
-/// The mode and description pair is checked by
-/// [`raw_series_frame_schema_with_label_decode`], so a key mode without a description and an
-/// explicit mode with one are both rejected here instead of reaching the wire.
+/// The mode and description pair is checked by [`series_frame_schema`], so a key mode without a
+/// description and an explicit mode with one are both rejected here instead of reaching the wire.
 fn frame_schema_with(
     schema: &SeriesSchema,
-    mode: RawLabelMode,
+    mode: FrameLabelMode,
     decode: Option<&LabelDecodeSpec>,
     ordering: SeriesOrdering,
 ) -> datafusion_common::Result<ArrowSchemaRef> {
+    // An evaluated frame has no storage key to be ordered by, so the only claim it can honour is
+    // that each chain is contiguous. Writing a stronger one would produce a frame the reader refuses
+    // and a plan that fails where it could have been refused.
+    if schema.eval_grid.is_some() {
+        ensure_contiguous_ordering(ordering)?;
+    }
     let ordering = match ordering {
         SeriesOrdering::Contiguous => "contiguous",
         SeriesOrdering::KeyThenTime => "read_key_then_time",
         SeriesOrdering::Interleaved => {
             return Err(invalid(
-                "interleaved raw series ordering has no wire representation",
+                "interleaved series ordering has no wire representation",
             ));
         }
     };
-    let schema =
-        raw_series_frame_schema_with_label_decode(schema, mode, decode).map_err(codec_error)?;
+    let schema = series_frame_schema(schema, mode, decode).map_err(codec_error)?;
     let mut metadata = schema.metadata().clone();
     metadata.insert(ORDERING_KEY.to_string(), ordering.to_string());
     Ok(Arc::new(ArrowSchema::new_with_metadata(
@@ -163,28 +184,26 @@ pub fn label_decode_spec(source: &RawLabelSource) -> Option<LabelDecodeSpec> {
     Some(description)
 }
 
-/// Reads the declared producer ordering, conservatively treating legacy frames as contiguous.
+/// Reads the producer ordering declared by a complete v2 frame schema.
 ///
-/// Only the two orderings representable on the wire can be returned.
-pub fn raw_series_frame_ordering(
-    schema: &ArrowSchema,
-) -> datafusion_common::Result<SeriesOrdering> {
+/// Ordering is mandatory stream metadata; it is never inferred from frame contents.
+pub fn series_frame_ordering(schema: &ArrowSchema) -> datafusion_common::Result<SeriesOrdering> {
     match schema.metadata().get(ORDERING_KEY).map(String::as_str) {
-        None | Some("contiguous") => Ok(SeriesOrdering::Contiguous),
+        Some("contiguous") => Ok(SeriesOrdering::Contiguous),
         Some("read_key_then_time") => Ok(SeriesOrdering::KeyThenTime),
-        Some(_) => Err(invalid("unknown raw series ordering")),
+        None | Some(_) => Err(invalid("missing or unknown series ordering")),
     }
 }
 
 /// Packs a storage raw-series stream into DataFusion record batches incrementally.
 ///
-/// Only [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] streams are
-/// accepted; an `Interleaved` declaration is rejected before the first poll, including for an
-/// empty stream. Rows accumulate across chunks into batches bounded by the builder's row and
-/// estimated payload limits; one legal oversized row may be emitted alone, and these limits are a
-/// work bound, not a resident-memory cap. A ready batch is yielded without polling the source
-/// again. Producers must keep each series' chunks contiguous. Validation checks adjacent chunk
-/// conditions but does not certify nonadjacent recurrence for `Contiguous` ordering.
+/// Only [`SeriesOrdering::Contiguous`] and [`SeriesOrdering::KeyThenTime`] streams are accepted; an
+/// `Interleaved` declaration is rejected before the first poll, including for an empty stream. Rows
+/// accumulate across chunks into batches bounded by the builder's row and estimated payload limits;
+/// one legal oversized row may be emitted alone, and these limits are a work bound, not a
+/// resident-memory cap. A ready batch is yielded without polling the source again. Producers must
+/// keep each series' chunks contiguous. Validation checks adjacent chunk conditions but does not
+/// certify nonadjacent recurrence for `Contiguous` ordering.
 ///
 /// The stream's own declaration is the only decode input: a frame unpacked without a scan-bound
 /// [`RawLabelSource`] round trips unchanged instead of being re-declared from a binding it does not
@@ -197,27 +216,71 @@ pub fn pack_raw_series(
     ensure_supported_ordering(ordering)?;
     let schema = source.schema().clone();
     let decode = source.label_decode_spec().cloned();
-    let mode = declared_label_mode(&decode);
+    let labels = declared_label_mode(&decode);
     // The declared frame schema carries the producer ordering and the label decode description;
-    // the shared builder's schema intentionally omits both, so every ready batch is declared under
-    // this schema before it is yielded, including when no row is ever produced.
-    let frame_schema = frame_schema_with(&schema, mode, decode.as_ref(), ordering)?;
-    let builder = RawSeriesFrameBuilder::try_new(
+    // every ready batch is published under it, including when no row is ever produced.
+    let frame_schema = frame_schema_with(&schema, labels, decode.as_ref(), ordering)?;
+    let builder = SeriesFrameBuilder::try_new(
         &schema,
-        mode,
-        RawSeriesFrameBuilder::DEFAULT_MAX_ROWS,
-        RawSeriesFrameBuilder::DEFAULT_MAX_BYTES,
+        labels,
+        decode.as_ref(),
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
     .map_err(codec_error)?;
     Ok(Box::pin(PackStream {
         source: Some(source),
         schema,
-        mode,
-        frame_schema,
+        labels,
+        batches: PackBatches::new(builder, frame_schema),
         ordering,
         validator: SequenceValidator::new(ordering),
-        builder: Some(builder),
-        cursor: None,
+    }))
+}
+
+/// Packs a stream of evaluated chunks into DataFusion record batches incrementally.
+///
+/// An evaluated frame names its series by their complete labels and addresses time on the evaluation
+/// grid `schema` declares, so there is nothing to decode and no storage key to carry: the frame
+/// declares `explicit` identity and `grid_spans` time, and the grid is written once instead of
+/// repeating timestamps on every row.
+///
+/// Only [`SeriesOrdering::Contiguous`] is declared, because that is the one ordering this layer can
+/// promise and check: each chunk chain is contiguous with itself. A caller that has reason to claim
+/// [`SeriesOrdering::KeyThenTime`] about computed values would have to justify it, and a consumer
+/// must never infer it from the presence of labels.
+///
+/// Bounds, backpressure, and error handling are the raw path's: rows accumulate into batches bounded
+/// by the builder's row and estimated payload limits, a ready batch is yielded before the source is
+/// polled again, and a `Pending` source still delivers what is buffered.
+pub fn pack_evaluated_series(
+    source: SendableEvaluatedSeriesStream,
+    schema: Arc<SeriesSchema>,
+) -> datafusion_common::Result<DfSendableRecordBatchStream> {
+    if schema.eval_grid.is_none() {
+        return Err(invalid(
+            "an evaluated frame needs a schema with an evaluation grid",
+        ));
+    }
+    let frame_schema = frame_schema_with(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        SeriesOrdering::Contiguous,
+    )?;
+    let builder = SeriesFrameBuilder::try_new(
+        &schema,
+        FrameLabelMode::Explicit,
+        None,
+        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+    .map_err(codec_error)?;
+    Ok(Box::pin(PackEvaluatedStream {
+        source: Some(source),
+        schema,
+        batches: PackBatches::new(builder, frame_schema),
+        validator: EvaluatedSequenceValidator::new(),
     }))
 }
 
@@ -233,31 +296,40 @@ pub fn pack_raw_series(
 ///
 /// Every frame is validated here, unconditionally. The declared layout must be this revision's, the
 /// label decode description must parse, name a known version, and agree with the declared label
-/// mode — a key frame must declare one and an explicit frame must not, since explicit labels are
+/// mode - a key frame must declare one and an explicit frame must not, since explicit labels are
 /// already complete. The declared fields and the empty batch are then decoded once, so a stream that
 /// could not be decoded is rejected before it is returned.
 ///
-/// `expected` is a check, never an input. When it is given it must match the schema the frame
-/// declares — the same logical fields in the same order, and no evaluation grid — and a mismatch is
-/// an error. The decoder and the returned stream's schema are built from the frame either way, so a
-/// caller cannot supply a field layout the frame does not declare.
+/// A frame that declares evaluated content is refused here, before anything is read: a raw consumer
+/// reads timestamps rather than grid positions, so the two contents are not interchangeable.
+///
+/// `expected` is a check, never an input. When it is given it must name the same logical fields in
+/// the same order and the same evaluation grid as the frame declares - which for a raw frame is that
+/// both sides carry none - and a mismatch is an error. The decoder and the returned stream's schema
+/// are built from the frame either way, so a caller cannot supply a field layout the frame does not
+/// declare.
 pub fn unpack_raw_series(
     source: DfSendableRecordBatchStream,
     expected: Option<Arc<SeriesSchema>>,
 ) -> datafusion_common::Result<SendableRawSeriesStream> {
     let frame_schema = source.schema();
-    let declared = raw_series_frame_label_decode(frame_schema.as_ref()).map_err(codec_error)?;
-    let mode = declared_label_mode(&declared);
-    let schema =
-        Arc::new(raw_series_frame_series_schema(frame_schema.as_ref()).map_err(codec_error)?);
+    let declaration = SeriesFrameDeclaration::parse(frame_schema.as_ref()).map_err(codec_error)?;
+    if declaration.content() != FrameContent::Raw {
+        return Err(invalid("expected a raw frame, found an evaluated one"));
+    }
+    let labels = declaration.labels();
+    let declared = declaration.label_decode().cloned();
+    let schema = Arc::new(declaration.series().clone());
     if let Some(expected) = &expected {
         ensure_declared_schema(&schema, expected)?;
     }
-    let ordering = raw_series_frame_ordering(frame_schema.as_ref())?;
-    let decoder = RawSeriesFrameDecoder::try_new(&schema, mode).map_err(codec_error)?;
+    let ordering = series_frame_ordering(frame_schema.as_ref())?;
+    ensure_supported_ordering(ordering)?;
+    let decoder =
+        SeriesFrameDecoder::try_new(&schema, labels, declared.as_ref()).map_err(codec_error)?;
     // Validate even empty streams' declared schema and layout before returning the stream.
     let empty = DfRecordBatch::new_empty(frame_schema.clone());
-    decoder.decode(&empty).map_err(codec_error)?;
+    decoder.decode_raw(&empty).map_err(codec_error)?;
     Ok(Box::pin(UnpackStream {
         source: Some(source),
         schema,
@@ -270,20 +342,53 @@ pub fn unpack_raw_series(
     }))
 }
 
+/// Unpacks DataFusion batches declared by [`pack_evaluated_series`].
+///
+/// The frame declares its grid, its field list, and its label mode, so the returned stream carries
+/// the [`SeriesSchema`] the rows are addressed on and needs no planning-side copy of it. The grid is
+/// the frame's own declaration: the timestamps stay unmaterialized until a consumer asks for one.
+///
+/// A frame that declares raw samples, keyed identity, or an ordering other than `contiguous` is
+/// refused before the stream is returned, as is a grid the declaration check cannot make sense of.
+/// `expected` is a check and never an input, exactly as on the raw path: when given it must name the
+/// same fields and the same grid the frame declares.
+pub fn unpack_evaluated_series(
+    source: DfSendableRecordBatchStream,
+    expected: Option<Arc<SeriesSchema>>,
+) -> datafusion_common::Result<SendableEvaluatedSeriesStream> {
+    let frame_schema = source.schema();
+    let declaration = SeriesFrameDeclaration::parse(frame_schema.as_ref()).map_err(codec_error)?;
+    if declaration.content() != FrameContent::Evaluated {
+        return Err(invalid("expected an evaluated frame, found a raw one"));
+    }
+    ensure_contiguous_ordering(series_frame_ordering(frame_schema.as_ref())?)?;
+    let schema = Arc::new(declaration.series().clone());
+    if let Some(expected) = &expected {
+        ensure_declared_schema(&schema, expected)?;
+    }
+    let decoder = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+        .map_err(codec_error)?;
+    let empty = DfRecordBatch::new_empty(frame_schema.clone());
+    decoder.decode_evaluated(&empty).map_err(codec_error)?;
+    Ok(Box::pin(UnpackEvaluatedStream {
+        source: Some(source),
+        frame_schema,
+        validator: EvaluatedSequenceValidator::new(),
+        pending: Vec::new().into_iter(),
+        decoder,
+    }))
+}
+
 /// Rejects an `expected` series schema the frame does not declare.
 ///
 /// Only the two things a caller can get wrong are checked, because those are the only two things
-/// [`SeriesSchema`] holds: the logical fields and their order, and an evaluation grid a raw frame
-/// cannot carry.
+/// [`SeriesSchema`] holds: the logical fields and their order, and the evaluation grid. A raw frame
+/// carries no grid and an evaluated one carries exactly its own, so the grid comparison is also what
+/// keeps a raw expectation from decoding an evaluated frame.
 fn ensure_declared_schema(
     declared: &SeriesSchema,
     expected: &SeriesSchema,
 ) -> datafusion_common::Result<()> {
-    if expected.eval_grid.is_some() {
-        return Err(invalid(
-            "expected raw series schema declares an evaluation grid the frame cannot carry",
-        ));
-    }
     if expected.fields.len() != declared.fields.len()
         || expected
             .fields
@@ -292,10 +397,16 @@ fn ensure_declared_schema(
             .any(|(expected, declared)| expected.name != declared.name)
     {
         return Err(invalid(
-            "raw frame fields do not match the expected series schema",
+            "frame fields do not match the expected series schema",
         ));
     }
-    Ok(())
+    match (&expected.eval_grid, &declared.eval_grid) {
+        (None, None) => Ok(()),
+        (Some(expected), Some(declared)) if expected.spec() == declared.spec() => Ok(()),
+        _ => Err(invalid(
+            "frame evaluation grid does not match the expected series schema",
+        )),
+    }
 }
 
 /// Checks that a frame declares the label decode layout a scan-bound binding describes.
@@ -313,15 +424,14 @@ fn ensure_declared_schema(
 /// [`unpack_raw_series`] decodes it without a binding, and a caller that received the frame from a
 /// peer compares the declaration here instead of decoding under whichever side it trusts.
 ///
-/// The comparison is plain equality. It used to canonicalize logical tag order on both sides, which
-/// gave local comparisons one rule and the byte-exact remote comparison another; the writer now
-/// canonicalizes instead (see [`LabelDecodeSpec::canonicalize`]), so a description that reaches a
-/// reader already has one spelling and equality says everything there is to say about it.
+/// The comparison is plain equality. The writer canonicalizes the description (see
+/// [`LabelDecodeSpec::canonicalize`]), so a description that reaches a reader already has one
+/// spelling and equality says everything there is to say about it.
 pub fn ensure_frame_matches_label_source(
     frame: &ArrowSchema,
     label_source: &RawLabelSource,
 ) -> datafusion_common::Result<()> {
-    let declared = raw_series_frame_label_decode(frame).map_err(codec_error)?;
+    let declared = series_frame_label_decode(frame).map_err(codec_error)?;
     if declared != label_decode_spec(label_source) {
         return Err(invalid(
             "raw frame label decode description does not match the supplied binding",
@@ -330,19 +440,19 @@ pub fn ensure_frame_matches_label_source(
     Ok(())
 }
 
-fn label_mode(source: &RawLabelSource) -> RawLabelMode {
+fn label_mode(source: &RawLabelSource) -> FrameLabelMode {
     match source {
-        RawLabelSource::PrimaryKey { .. } => RawLabelMode::Key,
-        RawLabelSource::Explicit => RawLabelMode::Explicit,
+        RawLabelSource::PrimaryKey { .. } => FrameLabelMode::Key,
+        RawLabelSource::Explicit => FrameLabelMode::Explicit,
     }
 }
 
 /// Returns the label mode a frame declares: a key frame describes its key, an explicit frame
 /// carries complete labels and declares no description.
-fn declared_label_mode(declared: &Option<LabelDecodeSpec>) -> RawLabelMode {
+fn declared_label_mode(declared: &Option<LabelDecodeSpec>) -> FrameLabelMode {
     match declared {
-        Some(_) => RawLabelMode::Key,
-        None => RawLabelMode::Explicit,
+        Some(_) => FrameLabelMode::Key,
+        None => FrameLabelMode::Explicit,
     }
 }
 
@@ -353,6 +463,21 @@ fn ensure_supported_ordering(ordering: SeriesOrdering) -> datafusion_common::Res
         SeriesOrdering::Interleaved => {
             Err(invalid("interleaved raw series ordering is not supported"))
         }
+    }
+}
+
+/// Rejects an evaluated frame that claims more order than its producer promised.
+///
+/// Computed values have no storage key to be ordered by, so `read_key_then_time` is not a claim this
+/// layer can honour; `Interleaved` is not consumable at all. Treating either as `contiguous` would
+/// silently weaken a guarantee a consumer may rely on.
+fn ensure_contiguous_ordering(ordering: SeriesOrdering) -> datafusion_common::Result<()> {
+    match ordering {
+        SeriesOrdering::Contiguous => Ok(()),
+        SeriesOrdering::KeyThenTime => Err(invalid(
+            "an evaluated frame cannot claim key-then-time ordering",
+        )),
+        SeriesOrdering::Interleaved => Err(invalid("interleaved series ordering is not supported")),
     }
 }
 
@@ -373,9 +498,10 @@ fn invalid(reason: impl Into<String>) -> DataFusionError {
     )))
 }
 
-/// Cross-chunk validation state. The producer must keep each series' chunks contiguous; this
-/// validator checks adjacent chunks only and never sees `Interleaved` streams. It retains only
-/// the previous complete owned key (not an Arrow buffer), timestamp, metric, and finality.
+/// Cross-chunk validation state for raw chains. The producer must keep each series' chunks
+/// contiguous; this validator checks adjacent chunks only and never sees `Interleaved` streams. It
+/// retains only the previous complete owned key (not an Arrow buffer), timestamp, metric, and
+/// finality.
 struct SequenceValidator {
     ordering: SeriesOrdering,
     previous_key: Option<Vec<u8>>,
@@ -447,30 +573,95 @@ impl SequenceValidator {
     }
 }
 
-struct PackStream {
-    source: Option<SendableRawSeriesStream>,
-    schema: Arc<SeriesSchema>,
-    mode: RawLabelMode,
-    frame_schema: datatypes::arrow::datatypes::SchemaRef,
-    ordering: SeriesOrdering,
-    validator: SequenceValidator,
-    builder: Option<RawSeriesFrameBuilder>,
-    cursor: Option<RawSeriesChunkCursor>,
+/// Cross-chunk validation state for evaluated chains.
+///
+/// `is_last` closes one chunk chain and nothing more. It is not the end of a label set: a range
+/// function or a label rewrite can make two input series show the same complete labels, and each of
+/// them closes itself, so a closed chain may be followed by another chain whose labels happen to be
+/// equal. Only the still-open chain is remembered, which is what keeps such a contribution from being
+/// refused as a re-opened series while still refusing a chain that changes identity before it closes.
+struct EvaluatedSequenceValidator {
+    /// The labels of the open chain and the last grid position it carried.
+    open: Option<(SeriesLabels, usize)>,
 }
 
-impl PackStream {
-    /// Releases the source and drops every buffered owner, leaving the stream terminal; batches
-    /// already yielded are unaffected.
-    fn finish(&mut self) {
-        self.source = None;
-        self.cursor = None;
-        self.builder = None;
-        self.validator = SequenceValidator::new(self.ordering);
+impl EvaluatedSequenceValidator {
+    fn new() -> Self {
+        Self { open: None }
+    }
+
+    fn finish(&self) -> datafusion_common::Result<()> {
+        if self.open.is_some() {
+            return Err(invalid(
+                "evaluated series stream ended before a chain closed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
+        let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
+        else {
+            // No carried position: only a closing chunk may be empty, and it closes the chain it
+            // belongs to without advancing it.
+            if !is_last {
+                return Err(invalid(
+                    "an evaluated chunk without positions must close its series",
+                ));
+            }
+            match &self.open {
+                Some((labels, _)) if labels == &series.metric => self.open = None,
+                Some(_) => {
+                    return Err(invalid(
+                        "evaluated series identity changed before its chain closed",
+                    ));
+                }
+                None => {}
+            }
+            return Ok(());
+        };
+        if let Some((labels, previous)) = &self.open {
+            if labels != &series.metric {
+                return Err(invalid(
+                    "evaluated series identity changed before its chain closed",
+                ));
+            }
+            if first <= *previous {
+                return Err(invalid(
+                    "evaluated series positions are not increasing across chunks",
+                ));
+            }
+        }
+        self.open = (!is_last).then(|| (series.metric.clone(), last));
+        Ok(())
+    }
+}
+
+/// The batching half of a pack stream: the builder, the cursor installed in it, and the declared
+/// schema every ready batch is published under.
+struct PackBatches {
+    frame_schema: ArrowSchemaRef,
+    builder: Option<SeriesFrameBuilder>,
+    cursor: Option<SeriesFrameCursor>,
+}
+
+impl PackBatches {
+    fn new(builder: SeriesFrameBuilder, frame_schema: ArrowSchemaRef) -> Self {
+        Self {
+            frame_schema,
+            builder: Some(builder),
+            cursor: None,
+        }
+    }
+
+    /// Installs the cursor of the chunk just read, replacing whatever was left of the previous one.
+    fn install(&mut self, cursor: SeriesFrameCursor) {
+        self.cursor = Some(cursor);
     }
 
     /// Advances the installed cursor until it yields one ready batch or is exhausted, dropping an
     /// exhausted cursor. `None` means no batch is ready, so the source may be polled again.
-    fn advance_cursor(&mut self) -> datatypes::error::Result<Option<DfRecordBatch>> {
+    fn advance(&mut self) -> datatypes::error::Result<Option<DfRecordBatch>> {
         let ready = match (self.cursor.as_mut(), self.builder.as_mut()) {
             (Some(cursor), Some(builder)) => cursor.append_to(builder)?,
             _ => return Ok(None),
@@ -485,27 +676,52 @@ impl PackStream {
     }
 
     /// Flushes the rows buffered so far, if any, so a pending source can still deliver data.
-    fn flush_buffered(&mut self) -> datatypes::error::Result<Option<DfRecordBatch>> {
+    fn flush(&mut self) -> datatypes::error::Result<Option<DfRecordBatch>> {
         match self.builder.as_mut() {
             Some(builder) => builder.flush(),
             None => Ok(None),
         }
     }
 
-    /// Publishes one ready builder batch under the declared frame schema, which is the shared
-    /// builder's schema plus the producer's ordering metadata. A batch whose fields cannot be
-    /// declared releases the stream instead of yielding rows with an undeclared layout.
-    fn declare_batch(
+    /// Releases the buffered owners, leaving the stream terminal; batches already yielded are
+    /// unaffected.
+    fn release(&mut self) {
+        self.cursor = None;
+        self.builder = None;
+    }
+
+    /// Publishes one ready batch under the declared frame schema, which is the builder's own layout
+    /// plus the producer's ordering metadata. A batch whose fields cannot be declared releases the
+    /// stream instead of yielding rows with an undeclared layout.
+    fn declare(
         &mut self,
         batch: DfRecordBatch,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        match batch.with_schema(self.frame_schema.clone()) {
+        match DfRecordBatch::try_new(self.frame_schema.clone(), batch.columns().to_vec()) {
             Ok(batch) => Poll::Ready(Some(Ok(batch))),
             Err(error) => {
-                self.finish();
+                self.release();
                 Poll::Ready(Some(Err(DataFusionError::from(error))))
             }
         }
+    }
+}
+
+struct PackStream {
+    source: Option<SendableRawSeriesStream>,
+    schema: Arc<SeriesSchema>,
+    labels: FrameLabelMode,
+    batches: PackBatches,
+    ordering: SeriesOrdering,
+    validator: SequenceValidator,
+}
+
+impl PackStream {
+    /// Releases the source and drops every buffered owner, leaving the stream terminal.
+    fn finish(&mut self) {
+        self.source = None;
+        self.batches.release();
+        self.validator = SequenceValidator::new(self.ordering);
     }
 }
 
@@ -515,8 +731,8 @@ impl Stream for PackStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
         loop {
-            match this.advance_cursor() {
-                Ok(Some(batch)) => return this.declare_batch(batch),
+            match this.batches.advance() {
+                Ok(Some(batch)) => return this.batches.declare(batch),
                 Ok(None) => {}
                 Err(error) => {
                     this.finish();
@@ -529,9 +745,9 @@ impl Stream for PackStream {
             };
             match polled {
                 Poll::Pending => {
-                    let flushed = this.flush_buffered();
+                    let flushed = this.batches.flush();
                     return match flushed {
-                        Ok(Some(batch)) => this.declare_batch(batch),
+                        Ok(Some(batch)) => this.batches.declare(batch),
                         Ok(None) => Poll::Pending,
                         Err(error) => {
                             this.finish();
@@ -544,10 +760,18 @@ impl Stream for PackStream {
                         this.finish();
                         return Poll::Ready(Some(Err(error)));
                     }
-                    let flushed = this.flush_buffered();
+                    let flushed = this.batches.flush();
+                    // The declared schema is read before the release below, so the last batch is
+                    // published under the same schema as every batch before it.
+                    let declared = this.batches.frame_schema.clone();
                     this.finish();
                     return match flushed {
-                        Ok(Some(batch)) => this.declare_batch(batch),
+                        Ok(Some(batch)) => {
+                            match DfRecordBatch::try_new(declared, batch.columns().to_vec()) {
+                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                                Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
+                            }
+                        }
                         Ok(None) => Poll::Ready(None),
                         Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
                     };
@@ -561,8 +785,8 @@ impl Stream for PackStream {
                         this.finish();
                         return Poll::Ready(Some(Err(error)));
                     }
-                    match RawSeriesChunkCursor::try_new(&this.schema, this.mode, chunk) {
-                        Ok(cursor) => this.cursor = Some(cursor),
+                    match SeriesFrameCursor::try_new_raw(&this.schema, this.labels, chunk) {
+                        Ok(cursor) => this.batches.install(cursor),
                         Err(error) => {
                             this.finish();
                             return Poll::Ready(Some(Err(codec_error(error))));
@@ -575,21 +799,117 @@ impl Stream for PackStream {
 }
 
 impl datafusion::physical_plan::RecordBatchStream for PackStream {
-    fn schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
-        self.frame_schema.clone()
+    fn schema(&self) -> ArrowSchemaRef {
+        self.batches.frame_schema.clone()
+    }
+}
+
+/// The pack stream of [`pack_evaluated_series`].
+struct PackEvaluatedStream {
+    source: Option<SendableEvaluatedSeriesStream>,
+    schema: Arc<SeriesSchema>,
+    batches: PackBatches,
+    validator: EvaluatedSequenceValidator,
+}
+
+impl PackEvaluatedStream {
+    /// Releases the source and drops every buffered owner, leaving the stream terminal.
+    fn finish(&mut self) {
+        self.source = None;
+        self.batches.release();
+        self.validator = EvaluatedSequenceValidator::new();
+    }
+}
+
+impl Stream for PackEvaluatedStream {
+    type Item = datafusion_common::Result<DfRecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        loop {
+            match this.batches.advance() {
+                Ok(Some(batch)) => return this.batches.declare(batch),
+                Ok(None) => {}
+                Err(error) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(codec_error(error))));
+                }
+            }
+            let polled = match this.source.as_mut() {
+                Some(source) => source.as_mut().poll_next(cx),
+                None => return Poll::Ready(None),
+            };
+            match polled {
+                Poll::Pending => {
+                    let flushed = this.batches.flush();
+                    return match flushed {
+                        Ok(Some(batch)) => this.batches.declare(batch),
+                        Ok(None) => Poll::Pending,
+                        Err(error) => {
+                            this.finish();
+                            Poll::Ready(Some(Err(codec_error(error))))
+                        }
+                    };
+                }
+                Poll::Ready(None) => {
+                    if let Err(error) = this.validator.finish() {
+                        this.finish();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    let flushed = this.batches.flush();
+                    // The declared schema is read before the release below, so the last batch is
+                    // published under the same schema as every batch before it.
+                    let declared = this.batches.frame_schema.clone();
+                    this.finish();
+                    return match flushed {
+                        Ok(Some(batch)) => {
+                            match DfRecordBatch::try_new(declared, batch.columns().to_vec()) {
+                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                                Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
+                            }
+                        }
+                        Ok(None) => Poll::Ready(None),
+                        Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
+                    };
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(upstream_error(error))));
+                }
+                Poll::Ready(Some(Ok((series, is_last)))) => {
+                    if let Err(error) = this.validator.validate(&series, is_last) {
+                        this.finish();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    match SeriesFrameCursor::try_new_evaluated(&this.schema, series, is_last) {
+                        Ok(cursor) => this.batches.install(cursor),
+                        Err(error) => {
+                            this.finish();
+                            return Poll::Ready(Some(Err(codec_error(error))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl datafusion::physical_plan::RecordBatchStream for PackEvaluatedStream {
+    fn schema(&self) -> ArrowSchemaRef {
+        self.batches.frame_schema.clone()
     }
 }
 
 struct UnpackStream {
     source: Option<DfSendableRecordBatchStream>,
     schema: Arc<SeriesSchema>,
-    frame_schema: datatypes::arrow::datatypes::SchemaRef,
+    frame_schema: ArrowSchemaRef,
     /// The description parsed from the frame schema; the only input decoding needs.
     label_decode_spec: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
     validator: SequenceValidator,
     pending: std::vec::IntoIter<RawSeriesChunk>,
-    decoder: RawSeriesFrameDecoder,
+    decoder: SeriesFrameDecoder,
 }
 
 impl RawSeriesStream for UnpackStream {
@@ -628,7 +948,6 @@ impl Stream for UnpackStream {
     type Item = Result<RawSeriesChunk, BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        const MAX_EMPTY_BATCHES_PER_POLL: usize = 32;
         let this = &mut *self;
         let mut empty_batches = 0;
         loop {
@@ -644,12 +963,7 @@ impl Stream for UnpackStream {
                 Poll::Ready(None) => {
                     let result = this.validator.finish();
                     this.finish();
-                    return Poll::Ready(result.err().map(|error| {
-                        Err(BoxedError::new(crate::error::Error::GeneralDataFusion {
-                            error,
-                            location: snafu::Location::default(),
-                        }))
-                    }));
+                    return Poll::Ready(result.err().map(|error| Err(unpack_error(error))));
                 }
                 Poll::Ready(Some(Err(error))) => {
                     this.finish();
@@ -666,7 +980,7 @@ impl Stream for UnpackStream {
                             return Err(invalid("raw frame schema mismatch"));
                         }
                         this.decoder
-                            .decode(&batch)
+                            .decode_raw(&batch)
                             .map_err(codec_error)
                             .and_then(|chunks| {
                                 for chunk in &chunks {
@@ -689,16 +1003,107 @@ impl Stream for UnpackStream {
                         }
                         Err(error) => {
                             this.finish();
-                            return Poll::Ready(Some(Err(BoxedError::new(
-                                crate::error::Error::GeneralDataFusion {
-                                    error,
-                                    location: snafu::Location::default(),
-                                },
-                            ))));
+                            return Poll::Ready(Some(Err(unpack_error(error))));
                         }
                     }
                 }
             }
         }
     }
+}
+
+/// The unpack stream of [`unpack_evaluated_series`].
+struct UnpackEvaluatedStream {
+    source: Option<DfSendableRecordBatchStream>,
+    frame_schema: ArrowSchemaRef,
+    validator: EvaluatedSequenceValidator,
+    pending: std::vec::IntoIter<(Series, bool)>,
+    decoder: SeriesFrameDecoder,
+}
+
+impl UnpackEvaluatedStream {
+    fn finish(&mut self) {
+        self.source = None;
+        self.pending = Vec::new().into_iter();
+        self.validator = EvaluatedSequenceValidator::new();
+    }
+}
+
+impl Stream for UnpackEvaluatedStream {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        let mut empty_batches = 0;
+        loop {
+            if let Some(chunk) = this.pending.next() {
+                return Poll::Ready(Some(Ok(chunk)));
+            }
+            let polled = match this.source.as_mut() {
+                Some(source) => source.as_mut().poll_next(cx),
+                None => return Poll::Ready(None),
+            };
+            match polled {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => {
+                    let result = this.validator.finish();
+                    this.finish();
+                    return Poll::Ready(result.err().map(|error| Err(unpack_error(error))));
+                }
+                Poll::Ready(Some(Err(error))) => {
+                    this.finish();
+                    return Poll::Ready(Some(Err(BoxedError::new(
+                        crate::error::Error::GeneralDataFusion {
+                            error,
+                            location: snafu::Location::default(),
+                        },
+                    ))));
+                }
+                Poll::Ready(Some(Ok(batch))) => {
+                    let result = (|| {
+                        if batch.schema() != this.frame_schema {
+                            return Err(invalid("evaluated frame schema mismatch"));
+                        }
+                        this.decoder
+                            .decode_evaluated(&batch)
+                            .map_err(codec_error)
+                            .and_then(|chunks| {
+                                for (series, is_last) in &chunks {
+                                    this.validator.validate(series, *is_last)?;
+                                }
+                                Ok(chunks)
+                            })
+                    })();
+                    match result {
+                        Ok(chunks) => {
+                            if chunks.is_empty() {
+                                empty_batches += 1;
+                                if empty_batches == MAX_EMPTY_BATCHES_PER_POLL {
+                                    cx.waker().wake_by_ref();
+                                    return Poll::Pending;
+                                }
+                            } else {
+                                this.pending = chunks.into_iter();
+                            }
+                        }
+                        Err(error) => {
+                            this.finish();
+                            return Poll::Ready(Some(Err(unpack_error(error))));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How many empty batches one poll reads before yielding, so a stream of them cannot hold the task.
+const MAX_EMPTY_BATCHES_PER_POLL: usize = 32;
+
+/// Wraps a decode or validation error as the boxed error an unpack stream reports.
+fn unpack_error(error: DataFusionError) -> BoxedError {
+    BoxedError::new(crate::error::Error::GeneralDataFusion {
+        error,
+        location: snafu::Location::default(),
+    })
 }

@@ -629,13 +629,13 @@ fn frame_label_decode_description_decodes_like_the_bound_source() {
         );
         let description = common_query::series_frame::label_decode_spec(&bound)
             .expect("a primary-key binding describes its key layout");
-        let frame_schema = datatypes::series::frame::raw_series_frame_schema_with_label_decode(
+        let frame_schema = datatypes::series::frame::series_frame_schema(
             &frame_series_schema(),
-            datatypes::series::frame::RawLabelMode::Key,
+            datatypes::series::frame::FrameLabelMode::Key,
             Some(&description),
         )
         .unwrap();
-        let recovered = datatypes::series::frame::raw_series_frame_label_decode(&frame_schema)
+        let recovered = datatypes::series::frame::series_frame_label_decode(&frame_schema)
             .unwrap()
             .expect("the frame declares its decode description");
         assert_eq!(recovered, description);
