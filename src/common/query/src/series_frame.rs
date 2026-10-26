@@ -184,22 +184,14 @@ pub fn label_decode_spec(source: &RawLabelSource) -> Option<LabelDecodeSpec> {
     Some(description)
 }
 
-/// Reads the declared producer ordering, treating an absent declaration as `contiguous`.
+/// Reads the producer ordering declared by a complete v2 frame schema.
 ///
-/// The absent case is deliberately the weakest guarantee rather than an error, and it is safe for
-/// exactly that reason: `contiguous` says only that each series' chunks are not interleaved with
-/// another's, so adopting it for a frame that never said anything can lose an optimization but
-/// cannot accept a stream whose real ordering is weaker. A producer that does make a stronger claim
-/// has to state it, and a producer that cannot keep one is refused: `Interleaved` is not a
-/// representable value, and neither is anything this revision does not know.
-///
-/// This is also what the frame's own declaration has always meant, which is what keeps a reader of
-/// `v1` and `v2` text agreeing about the same bytes.
+/// Ordering is mandatory stream metadata; it is never inferred from frame contents.
 pub fn series_frame_ordering(schema: &ArrowSchema) -> datafusion_common::Result<SeriesOrdering> {
     match schema.metadata().get(ORDERING_KEY).map(String::as_str) {
-        None | Some("contiguous") => Ok(SeriesOrdering::Contiguous),
+        Some("contiguous") => Ok(SeriesOrdering::Contiguous),
         Some("read_key_then_time") => Ok(SeriesOrdering::KeyThenTime),
-        Some(_) => Err(invalid("unknown series ordering")),
+        None | Some(_) => Err(invalid("missing or unknown series ordering")),
     }
 }
 
@@ -705,7 +697,7 @@ impl PackBatches {
         &mut self,
         batch: DfRecordBatch,
     ) -> Poll<Option<datafusion_common::Result<DfRecordBatch>>> {
-        match batch.with_schema(self.frame_schema.clone()) {
+        match DfRecordBatch::try_new(self.frame_schema.clone(), batch.columns().to_vec()) {
             Ok(batch) => Poll::Ready(Some(Ok(batch))),
             Err(error) => {
                 self.release();
@@ -774,10 +766,12 @@ impl Stream for PackStream {
                     let declared = this.batches.frame_schema.clone();
                     this.finish();
                     return match flushed {
-                        Ok(Some(batch)) => match batch.with_schema(declared) {
-                            Ok(batch) => Poll::Ready(Some(Ok(batch))),
-                            Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
-                        },
+                        Ok(Some(batch)) => {
+                            match DfRecordBatch::try_new(declared, batch.columns().to_vec()) {
+                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                                Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
+                            }
+                        }
                         Ok(None) => Poll::Ready(None),
                         Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
                     };
@@ -868,10 +862,12 @@ impl Stream for PackEvaluatedStream {
                     let declared = this.batches.frame_schema.clone();
                     this.finish();
                     return match flushed {
-                        Ok(Some(batch)) => match batch.with_schema(declared) {
-                            Ok(batch) => Poll::Ready(Some(Ok(batch))),
-                            Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
-                        },
+                        Ok(Some(batch)) => {
+                            match DfRecordBatch::try_new(declared, batch.columns().to_vec()) {
+                                Ok(batch) => Poll::Ready(Some(Ok(batch))),
+                                Err(error) => Poll::Ready(Some(Err(DataFusionError::from(error)))),
+                            }
+                        }
                         Ok(None) => Poll::Ready(None),
                         Err(error) => Poll::Ready(Some(Err(codec_error(error)))),
                     };

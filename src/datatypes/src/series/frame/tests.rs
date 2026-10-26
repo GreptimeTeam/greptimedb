@@ -597,6 +597,7 @@ fn schema_and_key_explicit_round_trips_preserve_identity_and_bits() {
     expected_key_metadata.insert("greptime.series.content".to_string(), "raw".to_string());
     expected_key_metadata.insert("greptime.series.labels".to_string(), "key".to_string());
     expected_key_metadata.insert("greptime.series.time".to_string(), "timestamps".to_string());
+    expected_key_metadata.insert(ORDERING.to_string(), "contiguous".to_string());
     // A key frame also declares the description that decodes its labels. Its exact text is pinned by
     // the metadata fixture, so it is spelled here by the same serializer the writer uses.
     expected_key_metadata.insert(
@@ -1300,6 +1301,39 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     );
     let empty_schema =
         series_frame_schema(&schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let decoder =
+        SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Key, Some(&dense_description()))
+            .unwrap();
+    let mut missing_ordering = empty_schema.metadata().clone();
+    missing_ordering.remove(ORDERING);
+    let missing_schema = Arc::new(Schema::new_with_metadata(
+        empty_schema.fields().clone(),
+        missing_ordering,
+    ));
+    let missing = arrow::record_batch::RecordBatch::new_empty(missing_schema);
+    assert!(decoder.decode_raw(&missing).is_err());
+    let mut unknown_ordering = empty_schema.metadata().clone();
+    unknown_ordering.insert(ORDERING.to_string(), "future_value".to_string());
+    let unknown_schema = Arc::new(Schema::new_with_metadata(
+        empty_schema.fields().clone(),
+        unknown_ordering,
+    ));
+    let unknown = arrow::record_batch::RecordBatch::new_empty(unknown_schema);
+    assert!(decoder.decode_raw(&unknown).is_err());
+    let mut key_then_time = empty_schema.metadata().clone();
+    key_then_time.insert(ORDERING.to_string(), "read_key_then_time".to_string());
+    let key_then_time_schema = Arc::new(Schema::new_with_metadata(
+        empty_schema.fields().clone(),
+        key_then_time,
+    ));
+    assert!(
+        decoder
+            .decode_raw(&arrow::record_batch::RecordBatch::new_empty(
+                key_then_time_schema
+            ))
+            .unwrap()
+            .is_empty()
+    );
     let empty = arrow::record_batch::RecordBatch::new_empty(empty_schema.clone());
     assert!(
         unpack_raw_series_frame(
@@ -3675,11 +3709,13 @@ fn raw_series_label_decode_metadata_fixture() {
             Some(&dense_description()),
         )
         .unwrap();
-        let metadata = case
-            .metadata
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
+        let mut metadata = layout.metadata().clone();
+        metadata.extend(case.metadata.clone());
+        if case.encoding.is_none() {
+            if !case.metadata.contains_key(ORDERING) {
+                metadata.remove(ORDERING);
+            }
+        }
         let frame_schema = Schema::new_with_metadata(layout.fields().clone(), metadata);
         match case.encoding.as_deref() {
             None => assert!(

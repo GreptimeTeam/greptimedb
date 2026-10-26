@@ -388,6 +388,95 @@ fn named_fixture() -> (
     )
 }
 
+fn named_fixture_with_two_tags() -> (
+    Arc<RegionScanExec>,
+    Arc<Mutex<State>>,
+    store_api::metadata::RegionMetadataRef,
+) {
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("rack", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
+        ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        ),
+    ]));
+    let batch = RecordBatch::new(
+        schema.clone(),
+        vec![
+            Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef,
+            Arc::new(datatypes::vectors::StringVector::from_slice(&["r1"])) as VectorRef,
+            Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
+            Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
+            Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
+        ],
+    )
+    .unwrap();
+    let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
+    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+    builder
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 7,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("rack", ConcreteDataType::string_datatype(), false),
+            semantic_type: SemanticType::Tag,
+            column_id: 8,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 11,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+            semantic_type: SemanticType::Field,
+            column_id: 12,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 13,
+        })
+        .primary_key(vec![7, 8]);
+    let metadata = Arc::new(builder.build().unwrap());
+    let raw_schema = Arc::new(SeriesSchema {
+        fields: vec![
+            FieldSpec {
+                name: Arc::from("aux"),
+            },
+            FieldSpec {
+                name: Arc::from("value"),
+            },
+        ]
+        .into(),
+        eval_grid: None,
+    });
+    let state = Arc::new(Mutex::new(State::default()));
+    let scanner = TestScanner {
+        properties: ScannerProperties::default(),
+        metadata: metadata.clone(),
+        batches,
+        raw_schema: Some(raw_schema),
+        chunks: vec![],
+        state: state.clone(),
+    };
+    (
+        Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap()),
+        state,
+        metadata,
+    )
+}
+
 fn series_schema() -> Arc<SeriesSchema> {
     Arc::new(SeriesSchema {
         fields: vec![FieldSpec {
@@ -1030,18 +1119,17 @@ async fn malformed_returned_stream_binding_fails_before_poll_even_when_empty() {
 async fn primary_key_binding_mismatch_is_rejected_before_poll() {
     let logical_tags: Arc<[BoundTag]> = vec![
         BoundTag {
-            column_id: 1,
-            name: Arc::from("zone"),
+            column_id: 7,
+            name: Arc::from("host"),
         },
         BoundTag {
-            column_id: 2,
+            column_id: 8,
             name: Arc::from("rack"),
         },
     ]
     .into();
     for case in 0..6 {
-        let (scan, state) = fixture(Some(series_schema()), vec![]);
-        let metadata = scan.scanner.lock().unwrap().metadata();
+        let (scan, state, metadata) = named_fixture_with_two_tags();
         let bound = RawLabelSource::PrimaryKey {
             metric_name: Arc::from("cpu"),
             physical_metadata: metadata.clone(),
@@ -1078,18 +1166,17 @@ async fn primary_key_binding_mismatch_is_rejected_before_poll() {
 
 #[tokio::test]
 async fn unchanged_primary_key_binding_accepts_empty_stream() {
-    let (scan, state) = fixture(Some(series_schema()), vec![]);
-    let metadata = scan.scanner.lock().unwrap().metadata();
+    let (scan, state, metadata) = named_fixture_with_two_tags();
     let source = RawLabelSource::PrimaryKey {
         metric_name: Arc::from("cpu"),
         physical_metadata: metadata,
         logical_tags: Arc::from([
             BoundTag {
-                column_id: 1,
-                name: Arc::from("zone"),
+                column_id: 7,
+                name: Arc::from("host"),
             },
             BoundTag {
-                column_id: 2,
+                column_id: 8,
                 name: Arc::from("rack"),
             },
         ]),

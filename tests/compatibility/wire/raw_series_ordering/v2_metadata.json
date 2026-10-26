@@ -1,14 +1,14 @@
 [
   {
-    "name": "missing_defaults_to_contiguous",
+    "name": "missing_ordering_rejected",
     "metadata": {
       "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps"
     },
-    "ordering": "contiguous",
-    "declaration": "accepted"
+    "ordering": null,
+    "declaration": "rejected"
   },
   {
     "name": "known_contiguous",
@@ -44,7 +44,7 @@
       "greptime.series.ordering": "future_value"
     },
     "ordering": null,
-    "declaration": "accepted"
+    "declaration": "rejected"
   },
   {
     "name": "evaluated_contiguous",
@@ -60,7 +60,7 @@
     "declaration": "accepted"
   },
   {
-    "name": "evaluated_read_key_then_time_still_reads",
+    "name": "evaluated_read_key_then_time_rejected",
     "metadata": {
       "greptime.series.layout": "v2",
       "greptime.series.content": "evaluated",
@@ -70,7 +70,7 @@
       "greptime.series.ordering": "read_key_then_time"
     },
     "ordering": "read_key_then_time",
-    "declaration": "accepted"
+    "declaration": "rejected"
   },
   {
     "name": "wrong_layout_rejected",

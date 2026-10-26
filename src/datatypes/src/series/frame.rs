@@ -103,13 +103,13 @@ const TIME: &str = "greptime.series.time";
 const GRID: &str = "greptime.series.grid";
 /// Metadata key of the versioned label decode description carried by key-encoded frames.
 const LABEL_DECODE: &str = "greptime.series.label_decode";
-/// Metadata key of the producer ordering, written by the streaming layer rather than here.
+/// Metadata key of the producer ordering carried by a complete frame declaration.
 const ORDERING: &str = "greptime.series.ordering";
 
 /// Every `greptime.series.*` key a frame this revision writes may carry.
 ///
-/// [`ORDERING`] is a stream-level declaration this module neither writes nor reads; it is listed so
-/// that a reserved key nobody checks is refused here instead of travelling as dead metadata.
+/// Frame schemas carry an explicit `contiguous` default; streaming producers may replace it with
+/// their stronger guarantee.
 const RESERVED_KEYS: [&str; 7] = [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE, ORDERING];
 
 /// The only layout this revision writes and reads.
@@ -312,11 +312,9 @@ impl LabelDecodeSpec {
             .sort_unstable_by(|a, b| (a.column_id, &a.name).cmp(&(b.column_id, &b.name)));
     }
 
-    /// Checks the version and the structural invariants a decoder relies on.
+    /// Checks the version and structural invariants of the description.
     ///
-    /// Semantic binding checks (reserved names, internal columns, name equality against the bound
-    /// column) stay in the decoder so both a typed binding and a decoded description fail with the
-    /// same errors.
+    /// Storage-region binding semantics are deliberately outside this schema-level validation.
     pub fn validate(&self) -> Result<()> {
         if self.version != LABEL_DECODE_VERSION {
             return Err(err(format!(
@@ -487,6 +485,7 @@ pub fn series_frame_schema(
         (CONTENT.to_string(), content.as_str().to_string()),
         (LABELS.to_string(), labels.as_str().to_string()),
         (TIME.to_string(), content.time_text().to_string()),
+        (ORDERING.to_string(), "contiguous".to_string()),
     ];
     if let Some(grid) = &schema.eval_grid {
         metadata.push((GRID.to_string(), grid_text(grid.spec())?));
@@ -566,6 +565,18 @@ pub struct SeriesFrameDeclaration {
     label_decode: Option<LabelDecodeSpec>,
 }
 
+fn validate_ordering(schema: &Schema, content: FrameContent) -> Result<()> {
+    match schema.metadata().get(ORDERING).map(String::as_str) {
+        Some("contiguous") => Ok(()),
+        Some("read_key_then_time") if content == FrameContent::Raw => Ok(()),
+        Some("read_key_then_time") => Err(err(
+            "an evaluated frame cannot claim key-then-time ordering",
+        )),
+        None => Err(err(format!("frame declares no {ORDERING} value"))),
+        Some(_) => Err(err("unknown series ordering")),
+    }
+}
+
 impl SeriesFrameDeclaration {
     /// Parses and cross-checks one frame schema.
     pub fn parse(schema: &Schema) -> Result<Self> {
@@ -584,6 +595,7 @@ impl SeriesFrameDeclaration {
             .get(CONTENT)
             .and_then(|text| FrameContent::parse(text))
             .ok_or_else(|| err(format!("frame declares no known {CONTENT} value")))?;
+        validate_ordering(schema, content)?;
         let labels = schema
             .metadata()
             .get(LABELS)
@@ -1840,6 +1852,7 @@ impl SeriesFrameDecoder {
     /// Decodes all rows of one batch, checking its reserved metadata, declared fields, and rows.
     fn decode_rows(&self, batch: &RecordBatch) -> Result<Vec<FrameRow>> {
         let actual = batch.schema();
+        validate_ordering(actual.as_ref(), self.shape.content)?;
         for key in [LAYOUT, CONTENT, LABELS, TIME, GRID, LABEL_DECODE] {
             if actual.metadata().get(key) != self.expected.metadata().get(key) {
                 return invalid_series("frame metadata mismatch");

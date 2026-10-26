@@ -699,7 +699,9 @@ async fn invalid_sequence_reports_valid_prefix_then_one_terminal_error() {
         .unwrap();
         let frames = frames
             .into_iter()
-            .map(|frame| frame.with_schema(frame_schema.clone()).unwrap())
+            .map(|frame| {
+                RecordBatch::try_new(frame_schema.clone(), frame.columns().to_vec()).unwrap()
+            })
             .collect();
         let (source, _, _) = df_source(frames, frame_schema);
         let mut decoded = unpack_raw_series(source, Some(schema())).unwrap();
@@ -2526,7 +2528,12 @@ fn raw_series_ordering_metadata_fixture() {
         } else {
             raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap()
         };
-        let frame_schema = frame_schema.as_ref().clone().with_metadata(case.metadata);
+        let mut metadata = frame_schema.metadata().clone();
+        metadata.extend(case.metadata);
+        if literal_ordering.is_none() {
+            metadata.remove("greptime.series.ordering");
+        }
+        let frame_schema = frame_schema.as_ref().clone().with_metadata(metadata);
         match literal_ordering {
             Some(expected) => assert_eq!(
                 series_frame_ordering(&frame_schema)
@@ -2976,13 +2983,12 @@ async fn pack_declares_the_label_decode_description_of_its_binding() {
     );
     let mut packed = pack_raw_series(input).unwrap();
     let declared = packed.schema();
-    // A key frame's canonical layout already carries its description, so the producer adds only the
-    // ordering on top of it.
+    // A key frame's canonical layout carries its description and explicit default ordering.
     let canonical = key_layout();
     assert_eq!(
         declared.metadata().len(),
-        canonical.metadata().len() + 1,
-        "a key frame adds the producer ordering to the description it must declare"
+        canonical.metadata().len(),
+        "the stream schema preserves the complete canonical declaration"
     );
     assert_eq!(
         datatypes::series::frame::series_frame_label_decode(&declared).unwrap(),
@@ -3007,8 +3013,8 @@ async fn pack_declares_the_label_decode_description_of_its_binding() {
     let canonical_explicit = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
     assert_eq!(
         declared.metadata().len(),
-        canonical_explicit.metadata().len() + 1,
-        "an explicit frame adds only the producer ordering"
+        canonical_explicit.metadata().len(),
+        "an explicit frame preserves the complete canonical declaration"
     );
 }
 
@@ -3076,13 +3082,12 @@ async fn unpack_reports_the_ordering_the_frame_declares() {
         "unpacking derives the ordering from the frame, not from a caller"
     );
 
-    // A frame that declares no ordering is a legacy contiguous frame.
     let frame = raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap();
+    let mut metadata = frame.metadata().clone();
+    metadata.remove("greptime.series.ordering");
+    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
     let (source, _, _) = df_source(vec![], frame);
-    assert_eq!(
-        unpack_raw_series(source, None).unwrap().ordering(),
-        SeriesOrdering::Contiguous
-    );
+    assert!(unpack_raw_series(source, None).is_err());
 }
 
 /// Reserved layout metadata this revision does not write is rejected instead of being read as the
