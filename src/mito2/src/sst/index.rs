@@ -54,6 +54,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
+use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -84,7 +85,7 @@ use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
-use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, SstInfo};
+use crate::sst::parquet::SstInfo;
 use crate::worker::WorkerListener;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -473,13 +474,12 @@ pub(crate) async fn build_index_from_parquet_bytes(
     if indexer.is_empty() {
         return IndexOutput::default();
     }
+    // Follow the batch size the flush reads use, so wide rows are not decoded 8192 at a time.
+    let batch_size = estimate_batch_size(largest_row_group_statistic(reader_builder.metadata()));
 
     // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
     // primary key for tag indexes. This needs the indexer to stop locating columns by position.
-    let reader = match reader_builder
-        .with_batch_size(DEFAULT_READ_BATCH_SIZE)
-        .build()
-    {
+    let reader = match reader_builder.with_batch_size(batch_size).build() {
         Ok(reader) => reader,
         Err(e) => {
             warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
