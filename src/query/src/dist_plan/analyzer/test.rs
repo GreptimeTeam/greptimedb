@@ -413,23 +413,46 @@ fn hybrid_binary_join_rewrites_each_native_operand_boundary() {
     let LogicalPlan::Join(join) = &rewritten else {
         panic!("Join must remain frontend: {rewritten}");
     };
-    for side in [&join.left, &join.right] {
+    for (side, expected_table) in [(&join.left, "left_metric"), (&join.right, "right_metric")] {
         assert_eq!(1, count_merge_scans(side), "{rewritten}");
-        let text = side.to_string();
-        assert!(
-            text.contains("FusedSeries") && text.contains("MergeScan"),
-            "{text}"
-        );
+        assert_no_fused_series_outside_merge_scan(side);
+
+        let merge_scan = find_merge_scan(side).expect("each join operand has a MergeScan");
+        let LogicalPlan::Extension(extension) = merge_scan.input() else {
+            panic!("MergeScan remote input must be a FusedSeries root");
+        };
+        let fused = extension
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("MergeScan remote input must be a FusedSeries root");
+        assert_eq!(expected_table, fused.promql());
+        assert_eq!(1, fused.children().len());
+        let [LogicalPlan::TableScan(table_scan)] = fused.children() else {
+            panic!("FusedSeries operand must directly consume a TableScan: {fused:?}");
+        };
+        assert_eq!(expected_table, table_scan.table_name.to_string());
     }
     assert_eq!(
         2,
         count_merge_scans(&rewritten),
         "Join must be outside both MergeScans: {rewritten}"
     );
-    assert!(rewritten.to_string().contains("FusedSeries"));
-    assert!(
-        join.left.to_string().contains("TableScan") && join.right.to_string().contains("TableScan")
-    );
+}
+
+fn assert_no_fused_series_outside_merge_scan(plan: &LogicalPlan) {
+    if let LogicalPlan::Extension(extension) = plan {
+        if extension.node.as_any().is::<MergeScanLogicalPlan>() {
+            return;
+        }
+        assert!(
+            !extension.node.as_any().is::<FusedSeries>(),
+            "FusedSeries must be contained in a MergeScan remote input: {plan}"
+        );
+    }
+    for input in plan.inputs() {
+        assert_no_fused_series_outside_merge_scan(input);
+    }
 }
 
 fn find_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {

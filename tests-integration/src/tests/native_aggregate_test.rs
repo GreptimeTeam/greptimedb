@@ -119,6 +119,8 @@ const COUNTER_TABLE: &str = "native_agg_counter";
 const COUNTER_RHS_TABLE: &str = "native_agg_counter_rhs";
 /// The table the range-window smoke test reads.
 const RANGE_TABLE: &str = "native_agg_range";
+const HYBRID_MATCH_LEFT: &str = "native_hybrid_match_left";
+const HYBRID_MATCH_RIGHT: &str = "native_hybrid_match_right";
 /// The tolerance of the value comparisons: relative, with an absolute floor.
 const FLOAT_TOLERANCE: f64 = 1e-10;
 
@@ -451,6 +453,58 @@ async fn native_hybrid_binary_05_06_08() {
         .await;
     let instance = Arc::clone(standalone.fe_instance());
     setup_fixture(&instance).await;
+    execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_LEFT} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
+    execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_RIGHT} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
+    execute_sql(
+        &instance,
+        &format!("INSERT INTO {HYBRID_MATCH_LEFT} VALUES ({EVAL_MILLIS}, 'api', 'a1', 10)"),
+    )
+    .await;
+    execute_sql(&instance, &format!("INSERT INTO {HYBRID_MATCH_RIGHT} VALUES ({EVAL_MILLIS}, 'api', 'b1', 2), ({EVAL_MILLIS}, 'other', 'b2', 3), ({EVAL_MILLIS}, 'other', 'b3', 4)" )).await;
+    let propagated = format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT}");
+    let (legacy, _) = run_query(&instance, &propagated, false, &observer).await;
+    assert_eq!(
+        vec![5.0],
+        legacy
+            .rows
+            .iter()
+            .map(|row| row.value.unwrap())
+            .collect::<Vec<_>>()
+    );
+    let mark = observer.mark();
+    let (hybrid, capture) = run_query(&instance, &propagated, true, &observer).await;
+    assert_eq!(
+        vec![5.0],
+        hybrid
+            .rows
+            .iter()
+            .map(|row| row.value.unwrap())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        2,
+        capture.fused.len(),
+        "both binary operands use native execution"
+    );
+    let plans = observer.since(mark);
+    let frontend = plans
+        .iter()
+        .find(|plan| find_binary_join(plan).is_some())
+        .expect("frontend Join plan");
+    let join = find_binary_join(frontend).unwrap();
+    let uniqueness = join
+        .children()
+        .iter()
+        .map(|branch| uniqueness_operators_above_merge(branch))
+        .fold((false, false), |(window, filter), found| {
+            (window || found.0, filter || found.1)
+        });
+    assert!(
+        uniqueness.0 && uniqueness.1,
+        "on(job) FE uniqueness operators: {}",
+        displayable(frontend.as_ref()).indent(false)
+    );
+
     check_hybrid_binary_cases(&instance, &observer).await;
     let subquery = format!(
         "max_over_time((rate({COUNTER_TABLE}[5m]) / on(job, instance) rate({COUNTER_RHS_TABLE}[5m]))[2m:1m])"
@@ -640,12 +694,12 @@ async fn check_hybrid_binary_cases(instance: &Arc<Instance>, observer: &NativePl
             "{promql}: native timestamp column"
         );
         if index == 2 {
+            let expected = [0.5; 5];
             assert!(
-                native
-                    .rows
-                    .iter()
-                    .all(|row| row.value.is_some_and(|value| close_enough(value, 1.0))),
-                "{promql}: independent rates must have ratio 1: {:#?}",
+                native.rows.iter().zip(expected).all(|(row, expected)| row
+                    .value
+                    .is_some_and(|value| close_enough(value, expected))),
+                "{promql}: independently scaled RHS rates must have expected ratios: {:#?}",
                 native.rows
             );
         }
@@ -899,7 +953,8 @@ async fn setup_fixture(instance: &Arc<Instance>) {
             ),
         )
         .await;
-        execute_sql(instance, &format!("INSERT INTO {COUNTER_RHS_TABLE} (ts, job, instance, v) VALUES ({counter_first}, '{job}', '{host}', {COUNTER_FIRST_VALUE:?}), ({counter_second}, '{job}', '{host}', {second_value:?})")).await;
+        let rhs_second_value = COUNTER_FIRST_VALUE + 2.0 * increase;
+        execute_sql(instance, &format!("INSERT INTO {COUNTER_RHS_TABLE} (ts, job, instance, v) VALUES ({counter_first}, '{job}', '{host}', {COUNTER_FIRST_VALUE:?}), ({counter_second}, '{job}', '{host}', {rhs_second_value:?})")).await;
         if index + 1 < COUNTER_SERIES.len() {
             execute_sql(instance, &format!("ADMIN FLUSH_TABLE('{COUNTER_TABLE}')")).await;
             execute_sql(
@@ -1569,8 +1624,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     for case in &cases {
         check_case(&instance, &observer, case).await;
     }
-
-    check_hybrid_binary_cases(&instance, &observer).await;
 
     // The shapes the native compiler declines, each declined for its own reason, and each checked on
     // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
