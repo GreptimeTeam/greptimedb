@@ -139,6 +139,9 @@ async fn test_manifest_provider_matches_eager_scan() {
         format!(
             "SELECT file_id FROM manifest WHERE region_id = {region} AND length(file_path) > 0 ORDER BY min_ts, file_id LIMIT 7"
         ),
+        // Repeated path predicates reuse metadata while both path columns stay
+        // hidden from the output. The range selects only region 1's 64 files.
+        "SELECT file_id FROM manifest WHERE table_dir >= 'test' AND table_dir < 'tesu' AND file_path >= 'test/11_0000000001/' AND file_path < 'test/11_0000000002/' ORDER BY file_id LIMIT 7".to_string(),
         // Visibility snapshots are needed for residual predicates even when
         // the SELECT list does not include visible.
         format!(
@@ -210,7 +213,7 @@ async fn test_manifest_referring_region_and_origin_path() {
         (col("node_id").is_not_null(), 0),
     ] {
         let batches = engine
-            .scan_ssts_from_manifest(vec![predicate.clone()], 2)
+            .scan_ssts_from_manifest(std::slice::from_ref(&predicate), 2)
             .collect::<Vec<_>>()
             .await;
         assert_eq!(

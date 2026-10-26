@@ -19,10 +19,11 @@ mod predicate;
 mod tests;
 mod timestamp;
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use datafusion::error::Result as DfResult;
-use datafusion::logical_expr::{Expr, Literal, Operator};
+use datafusion::logical_expr::{Expr, Literal, Operator, utils};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::arrow::array::{ArrayRef, Datum};
 use datafusion_common::arrow::buffer::BooleanBuffer;
@@ -41,43 +42,37 @@ pub use self::timestamp::timestamp_scalar_value;
 use crate::error::{Result, ToArrowScalarSnafu};
 use crate::filter::predicate::SimplePredicate;
 
-/// Conservative pruning over partially known metadata. Each scan stage supplies
-/// only the columns it knows; missing columns and unsupported predicates cannot
-/// exclude a candidate. Complete SQL predicates must still run after pruning.
+/// Prunes candidates using known metadata columns. Missing columns and unsupported
+/// predicates cannot exclude a candidate. Complete SQL predicates must still run
+/// after pruning.
 #[derive(Debug, Clone, Default)]
-pub struct PruningFilter {
+pub struct MetadataFilter {
     filters: Arc<[SimpleFilterEvaluator]>,
 }
 
-impl PruningFilter {
+impl MetadataFilter {
     /// Compiles supported conjuncts once for reuse across scan stages. OR is
     /// never split: an unknown alternative might match the candidate.
     pub fn new(expressions: &[Expr]) -> Self {
-        fn compile(expr: &Expr, filters: &mut Vec<SimpleFilterEvaluator>) {
-            if let Expr::BinaryExpr(binary) = expr
-                && binary.op == Operator::And
-            {
-                compile(&binary.left, filters);
-                compile(&binary.right, filters);
-            } else if let Some(filter) = SimpleFilterEvaluator::try_new(expr) {
-                filters.push(filter);
-            }
-        }
-        let mut filters = Vec::new();
-        for expression in expressions {
-            compile(expression, &mut filters);
-        }
         Self {
-            filters: filters.into(),
+            filters: expressions
+                .iter()
+                .flat_map(utils::split_conjunction)
+                .filter_map(SimpleFilterEvaluator::try_new)
+                .collect(),
         }
     }
 
     /// Returns false only when known metadata proves a conjunct cannot match.
     /// `None` means unavailable metadata, distinct from a known SQL NULL scalar.
-    pub fn matches(&self, mut value: impl FnMut(&str) -> Option<ScalarValue>) -> bool {
+    /// Values may be borrowed so repeated predicates can reuse allocated strings.
+    pub fn matches<T: Borrow<ScalarValue>>(
+        &self,
+        mut value: impl FnMut(&str) -> Option<T>,
+    ) -> bool {
         self.filters.iter().all(|filter| {
             value(filter.column_name())
-                .is_none_or(|value| filter.evaluate_scalar(&value).unwrap_or(true))
+                .is_none_or(|value| filter.evaluate_scalar(value.borrow()).unwrap_or(true))
         })
     }
 }

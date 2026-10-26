@@ -20,6 +20,7 @@ pub mod options;
 pub mod utils;
 pub(crate) mod version;
 
+use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -27,7 +28,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
-use common_recordbatch::filter::PruningFilter;
+use common_recordbatch::filter::MetadataFilter;
 use common_telemetry::{error, info, warn};
 use common_time::timestamp::TimeUnit;
 use crossbeam_utils::atomic::AtomicCell;
@@ -828,7 +829,7 @@ impl MitoRegion {
 
     /// Returns the SST entries of the region.
     pub async fn manifest_sst_entries(&self) -> Vec<ManifestSstEntry> {
-        self.manifest_sst_stream(PruningFilter::default(), ManifestSstProjection::new(None))
+        self.manifest_sst_stream(MetadataFilter::default(), ManifestSstProjection::new(None))
             .collect()
             .await
     }
@@ -837,7 +838,7 @@ impl MitoRegion {
     /// overrides the normal manifest for the same file.
     pub(crate) fn manifest_sst_stream(
         &self,
-        filters: PruningFilter,
+        filters: MetadataFilter,
         projection: ManifestSstProjection,
     ) -> BoxStream<'_, ManifestSstEntry> {
         Box::pin(async_stream::stream! {
@@ -864,11 +865,11 @@ impl MitoRegion {
                 }
                 // Paths describe the creating region, not the referring region.
                 // Construct them only when a path predicate or projection needs them.
-                let mut file_path = None;
+                let file_path = OnceCell::new();
                 if !filters.matches(|column| match column {
-                    sst_entry::FILE_PATH => Some(ScalarValue::Utf8(Some(file_path.get_or_insert_with(|| {
-                        sst_file_path(table_dir, meta.file_id(), path_type)
-                    }).clone()))),
+                    sst_entry::FILE_PATH => Some(file_path.get_or_init(|| {
+                        ScalarValue::Utf8(Some(sst_file_path(table_dir, meta.file_id(), path_type)))
+                    })),
                     _ => None,
                 }) {
                     continue;
@@ -887,6 +888,14 @@ impl MitoRegion {
                     (0, None, None)
                 };
                 let visible = visible_files.as_ref().is_some_and(|files| files.contains(&meta.file_id));
+                let file_path = if projection.file_path {
+                    match file_path.into_inner() {
+                        Some(ScalarValue::Utf8(Some(path))) => path,
+                        _ => sst_file_path(table_dir, meta.file_id(), path_type),
+                    }
+                } else {
+                    String::new()
+                };
                 yield ManifestSstEntry {
                     table_dir: if projection.table_dir { table_dir.to_string() } else { String::new() },
                     region_id,
@@ -897,7 +906,7 @@ impl MitoRegion {
                     file_id: if projection.file_id { meta.file_id.to_string() } else { String::new() },
                     index_version,
                     level: meta.level,
-                    file_path: if projection.file_path { file_path.unwrap_or_else(|| sst_file_path(table_dir, meta.file_id(), path_type)) } else { String::new() },
+                    file_path,
                     file_size: meta.file_size,
                     max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
                     index_file_path,
@@ -2074,7 +2083,7 @@ impl ManifestSstProjection {
 
 /// Applies supported file predicates before allocating an inspection row. Unknown
 /// predicates and evaluation failures are left to the query's residual filter.
-fn manifest_file_matches(meta: &FileMeta, filters: &PruningFilter) -> bool {
+fn manifest_file_matches(meta: &FileMeta, filters: &MetadataFilter) -> bool {
     filters.matches(|column| {
         Some(match column {
             sst_entry::FILE_SIZE => ScalarValue::UInt64(Some(meta.file_size)),
@@ -2134,7 +2143,7 @@ mod tests {
 
     #[test]
     fn test_manifest_file_predicates() {
-        use common_recordbatch::filter::PruningFilter;
+        use common_recordbatch::filter::MetadataFilter;
         use common_time::Timestamp;
         use datafusion_common::ScalarValue;
         use datafusion_expr::{col, lit};
@@ -2165,7 +2174,7 @@ mod tests {
             ),
             (col("file_id").eq(lit("unknown")), true),
         ] {
-            let filter = PruningFilter::new(std::slice::from_ref(&expr));
+            let filter = MetadataFilter::new(std::slice::from_ref(&expr));
             assert_eq!(
                 super::manifest_file_matches(&meta, &filter),
                 expected,
@@ -2176,7 +2185,7 @@ mod tests {
 
     #[test]
     fn test_manifest_timestamp_overflow_is_null() {
-        use common_recordbatch::filter::PruningFilter;
+        use common_recordbatch::filter::MetadataFilter;
         use common_time::Timestamp;
         use datafusion_expr::col;
         let meta = super::FileMeta {
@@ -2186,9 +2195,9 @@ mod tests {
             ),
             ..Default::default()
         };
-        let filter = PruningFilter::new(&[col("min_ts").is_null()]);
+        let filter = MetadataFilter::new(&[col("min_ts").is_null()]);
         assert!(super::manifest_file_matches(&meta, &filter));
-        let filter = PruningFilter::new(&[col("max_ts").is_not_null()]);
+        let filter = MetadataFilter::new(&[col("max_ts").is_not_null()]);
         assert!(!super::manifest_file_matches(&meta, &filter));
     }
 
@@ -2264,7 +2273,7 @@ mod tests {
     async fn test_manifest_stream_does_not_pin_sst_handles() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        use common_recordbatch::filter::PruningFilter;
+        use common_recordbatch::filter::MetadataFilter;
         use datafusion_expr::{col, lit};
         use futures::StreamExt;
 
@@ -2335,7 +2344,7 @@ mod tests {
             }
             // A direct caller may omit a residual column. The source must not
             // interpret an unmaterialized visible value as grounds for pruning.
-            let filters = PruningFilter::new(&[col("visible").eq(lit(true))]);
+            let filters = MetadataFilter::new(&[col("visible").eq(lit(true))]);
             let mut stream = region.manifest_sst_stream(filters, projection);
             let first = stream.next().await.unwrap();
             if include_visible {

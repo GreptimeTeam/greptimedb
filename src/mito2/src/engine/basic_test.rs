@@ -2070,7 +2070,7 @@ async fn test_manifest_scan_region_filter() {
         } else {
             vec![]
         };
-        let mut stream = engine.scan_ssts_from_manifest(filters, batch_size);
+        let mut stream = engine.scan_ssts_from_manifest(&filters, batch_size);
         let mut examined_entries = 0;
         let mut selected = Vec::new();
         while let Some(batch) = stream.next().await {
@@ -2107,7 +2107,7 @@ async fn test_manifest_scan_region_filter() {
         let batches = tokio::time::timeout(
             Duration::from_secs(5),
             engine
-                .scan_ssts_from_manifest(vec![predicate], batch_size)
+                .scan_ssts_from_manifest(&[predicate], batch_size)
                 .collect::<Vec<_>>(),
         )
         .await
@@ -2115,7 +2115,7 @@ async fn test_manifest_scan_region_filter() {
         assert!(batches.is_empty());
     }
     let filtered =
-        engine.scan_ssts_from_manifest(vec![col("region_id").eq(lit(target.as_u64()))], batch_size);
+        engine.scan_ssts_from_manifest(&[col("region_id").eq(lit(target.as_u64()))], batch_size);
     let batches = tokio::time::timeout(Duration::from_secs(5), filtered.collect::<Vec<_>>())
         .await
         .expect("filtered scan must not acquire an unrelated manifest lock");
@@ -2136,9 +2136,9 @@ async fn test_manifest_scan_region_filter() {
         })
         .to_vec();
     let mut projected = engine.scan_ssts_from_manifest_projected(
-        vec![col("region_id").eq(lit(target.as_u64()))],
+        &[col("region_id").eq(lit(target.as_u64()))],
         batch_size,
-        Some(projection.clone()),
+        Some(&projection),
     );
     let mut projected_entries = Vec::new();
     while let Some(batch) = projected.next().await {
@@ -2163,7 +2163,7 @@ async fn test_manifest_scan_region_filter() {
     assert_eq!(actual, expected);
     assert!(
         engine
-            .scan_ssts_from_manifest(vec![col("region_id").eq(lit(0u64))], batch_size)
+            .scan_ssts_from_manifest(&[col("region_id").eq(lit(0u64))], batch_size)
             .next()
             .await
             .is_none()
@@ -2247,7 +2247,7 @@ async fn test_manifest_scan_table_filter() {
     let batches = tokio::time::timeout(
         Duration::from_secs(5),
         engine
-            .scan_ssts_from_manifest(vec![col("table_id").eq(lit(11u32))], 2)
+            .scan_ssts_from_manifest(&[col("table_id").eq(lit(11u32))], 2)
             .collect::<Vec<_>>(),
     )
     .await
@@ -2271,9 +2271,9 @@ async fn test_manifest_scan_table_filter() {
         Duration::from_secs(5),
         engine
             .scan_ssts_from_manifest_projected(
-                vec![col("table_id").eq(lit(11u32))],
+                &[col("table_id").eq(lit(11u32))],
                 2,
-                Some(projection.clone()),
+                Some(&projection),
             )
             .collect::<Vec<_>>(),
     )

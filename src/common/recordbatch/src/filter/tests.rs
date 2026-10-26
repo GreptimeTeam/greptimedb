@@ -72,14 +72,14 @@ fn test_nullable_boolean_predicate_becomes_scan_mask() {
 }
 
 #[test]
-fn test_pruning_filter_partial_metadata() {
+fn test_partial_metadata() {
     use datafusion_common::ScalarValue;
 
-    use crate::filter::PruningFilter;
+    use crate::filter::MetadataFilter;
 
     let node = col("node_id").eq(lit(7u64));
     let path = col("file_path").eq(lit("table/region/file.parquet"));
-    let filters = PruningFilter::new(&[node.clone().and(path.clone())]);
+    let filters = MetadataFilter::new(&[node.clone().and(path.clone())]);
     assert!(!filters.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(8)))));
     assert!(filters.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(7)))));
     assert!(!filters.matches(|name| {
@@ -89,21 +89,72 @@ fn test_pruning_filter_partial_metadata() {
         (name == "file_path").then(|| ScalarValue::Utf8(Some("table/region/file.parquet".into())))
     }));
     // Unknown alternatives cannot be discarded from OR, nor extracted from NOT.
-    let disjunction = PruningFilter::new(&[node.clone().or(path.clone())]);
+    let disjunction = MetadataFilter::new(&[node.clone().or(path.clone())]);
     assert!(
         disjunction.matches(|name| (name == "node_id").then_some(ScalarValue::UInt64(Some(8))))
     );
-    let negation = PruningFilter::new(&[datafusion::logical_expr::Expr::Not(Box::new(
+    let negation = MetadataFilter::new(&[datafusion::logical_expr::Expr::Not(Box::new(
         node.and(path),
     ))]);
-    assert!(negation.matches(|_| None));
+    assert!(negation.matches(|_| None::<ScalarValue>));
     // Unsupported LIKE remains a residual even when its column is available.
-    let residual = PruningFilter::new(&[col("file_path").like(lit("table/%"))]);
+    let residual = MetadataFilter::new(&[col("file_path").like(lit("table/%"))]);
     assert!(residual.matches(|_| Some(ScalarValue::Utf8(Some("other/file".into())))));
     // Missing metadata differs from known NULL; type errors conservatively pass.
-    let null_filter = PruningFilter::new(&[col("node_id").is_not_null()]);
-    assert!(null_filter.matches(|_| None));
+    let null_filter = MetadataFilter::new(&[col("node_id").is_not_null()]);
+    assert!(null_filter.matches(|_| None::<ScalarValue>));
     assert!(!null_filter.matches(|_| Some(ScalarValue::UInt64(None))));
-    let typed = PruningFilter::new(&[col("node_id").eq(lit(7u64))]);
+    let typed = MetadataFilter::new(&[col("node_id").eq(lit(7u64))]);
     assert!(typed.matches(|_| Some(ScalarValue::Utf8(Some("invalid".into())))));
+}
+
+#[test]
+fn test_borrowed_and_owned_values() {
+    use datafusion_common::ScalarValue;
+
+    use crate::filter::MetadataFilter;
+
+    let pruner = MetadataFilter::new(&[col("path").gt_eq(lit("a")).and(col("path").lt(lit("z")))]);
+    for (value, expected) in [
+        (ScalarValue::Utf8(Some("a".into())), true),
+        (ScalarValue::Utf8(Some("z".into())), false),
+        (ScalarValue::Utf8(None), false),
+        (ScalarValue::UInt64(Some(1)), true),
+    ] {
+        assert_eq!(pruner.matches(|_| Some(&value)), expected);
+        assert_eq!(pruner.matches(|_| Some(value.clone())), expected);
+    }
+}
+
+#[test]
+fn test_borrowed_lazy_metadata() {
+    use std::cell::OnceCell;
+
+    use datafusion_common::ScalarValue;
+
+    use crate::filter::MetadataFilter;
+
+    let pruner = MetadataFilter::new(&[col("path").gt(lit("a")).and(col("path").lt(lit("z")))]);
+    let path = OnceCell::new();
+    let mut builds = 0;
+    assert!(pruner.matches(|name| {
+        (name == "path").then(|| {
+            path.get_or_init(|| {
+                builds += 1;
+                ScalarValue::Utf8(Some("region/file.parquet".into()))
+            })
+        })
+    }));
+    assert_eq!(builds, 1);
+    assert_eq!(
+        path.into_inner(),
+        Some(ScalarValue::Utf8(Some("region/file.parquet".into())))
+    );
+
+    let path = OnceCell::new();
+    assert!(
+        MetadataFilter::default()
+            .matches(|_| { Some(path.get_or_init(|| ScalarValue::Utf8(Some("unused".into())))) })
+    );
+    assert!(path.get().is_none());
 }

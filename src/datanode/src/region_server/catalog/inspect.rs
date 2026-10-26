@@ -27,7 +27,7 @@ use datafusion_common::DataFusionError;
 use datafusion_expr::{Expr, TableProviderFilterPushDown, TableType};
 use futures::StreamExt;
 use mito2::engine::MitoEngine;
-use store_api::sst_entry::ManifestSstEntry;
+use store_api::sst_entry::{ManifestSstBatchBuilder, ManifestSstEntry};
 
 /// Supplies batches for an internal inspection table. Implementations may prune
 /// conservatively; DataFusion retains complete residual predicates.
@@ -140,18 +140,15 @@ impl InspectSource for ManifestSstSource {
     }
 
     fn scan(&self, request: &InspectScan, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        let projection = request.projection.clone();
+        let builder = ManifestSstBatchBuilder::new(request.schema.clone());
         let stream = self
             .engine
             .scan_ssts_from_manifest_projected(
-                request.filters.clone(),
+                &request.filters,
                 request.batch_size,
-                projection.clone(),
+                request.projection.as_deref(),
             )
-            .map(move |entries| {
-                ManifestSstEntry::to_projected_record_batch(&entries, projection.as_deref())
-                    .map_err(DataFusionError::from)
-            });
+            .map(move |entries| builder.build(&entries).map_err(DataFusionError::from));
         Box::pin(RecordBatchStreamAdapter::new(
             request.schema.clone(),
             stream,

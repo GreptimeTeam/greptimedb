@@ -848,7 +848,7 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         use futures::StreamExt;
 
         let mut batches = engine.scan_ssts_from_manifest(
-            vec![datafusion_expr::col("region_id").eq(datafusion_expr::lit(region_id.as_u64()))],
+            &[datafusion_expr::col("region_id").eq(datafusion_expr::lit(region_id.as_u64()))],
             1,
         );
         let mut actual = Vec::new();
@@ -922,11 +922,9 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
                 })
                 .to_vec();
             let mut stream = engine.scan_ssts_from_manifest_projected(
-                vec![
-                    datafusion_expr::col("file_size").eq(datafusion_expr::lit(metadata.file_size)),
-                ],
+                &[datafusion_expr::col("file_size").eq(datafusion_expr::lit(metadata.file_size))],
                 1,
-                Some(projection),
+                Some(&projection),
             );
             let mut filtered = Vec::new();
             while let Some(batch) = stream.next().await {

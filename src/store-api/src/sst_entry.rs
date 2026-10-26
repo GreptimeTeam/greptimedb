@@ -24,6 +24,7 @@ use datatypes::arrow::array::{
     ArrayRef, BinaryArray, BooleanArray, TimestampMillisecondArray, TimestampNanosecondArray,
     UInt8Array, UInt32Array, UInt64Array,
 };
+use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::arrow::error::ArrowError;
 use datatypes::arrow_array::StringArray;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
@@ -178,110 +179,7 @@ impl ManifestSstEntry {
             Some(projection) => Arc::new(schema.project(projection)?),
             None => schema,
         };
-        let columns = schema
-            .fields()
-            .iter()
-            .map(|field| {
-                let array: ArrayRef = match field.name().as_str() {
-                    TABLE_DIR => Arc::new(StringArray::from_iter_values(
-                        entries.iter().map(|e| e.table_dir.as_str()),
-                    )),
-                    REGION_ID => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.region_id.as_u64()),
-                    )),
-                    TABLE_ID => Arc::new(UInt32Array::from_iter_values(
-                        entries.iter().map(|e| e.table_id),
-                    )),
-                    REGION_NUMBER => Arc::new(UInt32Array::from_iter_values(
-                        entries.iter().map(|e| e.region_number),
-                    )),
-                    REGION_GROUP => Arc::new(UInt8Array::from_iter_values(
-                        entries.iter().map(|e| e.region_group),
-                    )),
-                    REGION_SEQUENCE => Arc::new(UInt32Array::from_iter_values(
-                        entries.iter().map(|e| e.region_sequence),
-                    )),
-                    FILE_ID => Arc::new(StringArray::from_iter_values(
-                        entries.iter().map(|e| e.file_id.as_str()),
-                    )),
-                    INDEX_VERSION => Arc::new(UInt64Array::from_iter(
-                        entries.iter().map(|e| e.index_version),
-                    )),
-                    LEVEL => Arc::new(UInt8Array::from_iter_values(
-                        entries.iter().map(|e| e.level),
-                    )),
-                    FILE_PATH => Arc::new(StringArray::from_iter_values(
-                        entries.iter().map(|e| e.file_path.as_str()),
-                    )),
-                    FILE_SIZE => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.file_size),
-                    )),
-                    INDEX_FILE_PATH => Arc::new(StringArray::from_iter(
-                        entries.iter().map(|e| e.index_file_path.as_ref()),
-                    )),
-                    INDEX_FILE_SIZE => Arc::new(UInt64Array::from_iter(
-                        entries.iter().map(|e| e.index_file_size),
-                    )),
-                    NUM_ROWS => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.num_rows),
-                    )),
-                    NUM_ROW_GROUPS => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.num_row_groups),
-                    )),
-                    NUM_SERIES => {
-                        Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.num_series)))
-                    }
-                    MIN_TS => Arc::new(TimestampNanosecondArray::from_iter(entries.iter().map(
-                        |e| {
-                            e.min_ts
-                                .convert_to(TimeUnit::Nanosecond)
-                                .map(|ts| ts.value())
-                        },
-                    ))),
-                    MAX_TS => Arc::new(TimestampNanosecondArray::from_iter(entries.iter().map(
-                        |e| {
-                            e.max_ts
-                                .convert_to(TimeUnit::Nanosecond)
-                                .map(|ts| ts.value())
-                        },
-                    ))),
-                    SEQUENCE => {
-                        Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.sequence)))
-                    }
-                    ORIGIN_REGION_ID => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.origin_region_id.as_u64()),
-                    )),
-                    NODE_ID => Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.node_id))),
-                    VISIBLE => Arc::new(BooleanArray::from_iter(
-                        entries.iter().map(|e| Some(e.visible)),
-                    )),
-                    PRIMARY_KEY_MIN => Arc::new(BinaryArray::from_iter(
-                        entries.iter().map(|e| e.primary_key_min.as_deref()),
-                    )),
-                    PRIMARY_KEY_MAX => Arc::new(BinaryArray::from_iter(
-                        entries.iter().map(|e| e.primary_key_max.as_deref()),
-                    )),
-                    MAX_ROW_GROUP_UNCOMPRESSED_SIZE => Arc::new(UInt64Array::from_iter_values(
-                        entries.iter().map(|e| e.max_row_group_uncompressed_size),
-                    )),
-                    PARTITION_EXPR => Arc::new(StringArray::from_iter(
-                        entries.iter().map(|e| e.partition_expr.as_ref()),
-                    )),
-                    name => {
-                        return Err(ArrowError::SchemaError(format!(
-                            "Unknown manifest SST column: {name}"
-                        )));
-                    }
-                };
-                Ok(array)
-            })
-            .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
-        DfRecordBatch::try_new_with_options(
-            schema,
-            columns,
-            &datatypes::arrow::record_batch::RecordBatchOptions::new()
-                .with_row_count(Some(entries.len())),
-        )
+        ManifestSstBatchBuilder::new(schema).build(entries)
     }
 
     /// Reserved internal inspect table name.
@@ -299,6 +197,140 @@ impl ManifestSstEntry {
             scan_request,
             Self::reserved_table_name_for_inspection(),
             Self::schema(),
+        )
+    }
+}
+
+/// Converts manifest SST batches using a schema prepared once per scan.
+/// Repeated projected columns share the same Arrow array.
+pub struct ManifestSstBatchBuilder {
+    schema: ArrowSchemaRef,
+    duplicates: Vec<Option<usize>>,
+}
+
+impl ManifestSstBatchBuilder {
+    /// Creates a builder for a projected manifest SST schema.
+    pub fn new(schema: ArrowSchemaRef) -> Self {
+        let duplicates = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .map(|(index, field)| {
+                schema.fields()[..index]
+                    .iter()
+                    .position(|previous| previous == field)
+            })
+            .collect();
+        Self { schema, duplicates }
+    }
+
+    /// Builds the projected columns, copying string contents only into Arrow buffers.
+    pub fn build(
+        &self,
+        entries: &[ManifestSstEntry],
+    ) -> std::result::Result<DfRecordBatch, ArrowError> {
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.schema.fields().len());
+        for (index, field) in self.schema.fields().iter().enumerate() {
+            if let Some(previous) = self.duplicates[index] {
+                columns.push(columns[previous].clone());
+                continue;
+            }
+            let array: ArrayRef = match field.name().as_str() {
+                TABLE_DIR => Arc::new(StringArray::from_iter_values(
+                    entries.iter().map(|e| e.table_dir.as_str()),
+                )),
+                REGION_ID => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.region_id.as_u64()),
+                )),
+                TABLE_ID => Arc::new(UInt32Array::from_iter_values(
+                    entries.iter().map(|e| e.table_id),
+                )),
+                REGION_NUMBER => Arc::new(UInt32Array::from_iter_values(
+                    entries.iter().map(|e| e.region_number),
+                )),
+                REGION_GROUP => Arc::new(UInt8Array::from_iter_values(
+                    entries.iter().map(|e| e.region_group),
+                )),
+                REGION_SEQUENCE => Arc::new(UInt32Array::from_iter_values(
+                    entries.iter().map(|e| e.region_sequence),
+                )),
+                FILE_ID => Arc::new(StringArray::from_iter_values(
+                    entries.iter().map(|e| e.file_id.as_str()),
+                )),
+                INDEX_VERSION => Arc::new(UInt64Array::from_iter(
+                    entries.iter().map(|e| e.index_version),
+                )),
+                LEVEL => Arc::new(UInt8Array::from_iter_values(
+                    entries.iter().map(|e| e.level),
+                )),
+                FILE_PATH => Arc::new(StringArray::from_iter_values(
+                    entries.iter().map(|e| e.file_path.as_str()),
+                )),
+                FILE_SIZE => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.file_size),
+                )),
+                INDEX_FILE_PATH => Arc::new(StringArray::from_iter(
+                    entries.iter().map(|e| e.index_file_path.as_ref()),
+                )),
+                INDEX_FILE_SIZE => Arc::new(UInt64Array::from_iter(
+                    entries.iter().map(|e| e.index_file_size),
+                )),
+                NUM_ROWS => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.num_rows),
+                )),
+                NUM_ROW_GROUPS => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.num_row_groups),
+                )),
+                NUM_SERIES => {
+                    Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.num_series)))
+                }
+                MIN_TS => Arc::new(TimestampNanosecondArray::from_iter(entries.iter().map(
+                    |e| {
+                        e.min_ts
+                            .convert_to(TimeUnit::Nanosecond)
+                            .map(|ts| ts.value())
+                    },
+                ))),
+                MAX_TS => Arc::new(TimestampNanosecondArray::from_iter(entries.iter().map(
+                    |e| {
+                        e.max_ts
+                            .convert_to(TimeUnit::Nanosecond)
+                            .map(|ts| ts.value())
+                    },
+                ))),
+                SEQUENCE => Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.sequence))),
+                ORIGIN_REGION_ID => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.origin_region_id.as_u64()),
+                )),
+                NODE_ID => Arc::new(UInt64Array::from_iter(entries.iter().map(|e| e.node_id))),
+                VISIBLE => Arc::new(BooleanArray::from_iter(
+                    entries.iter().map(|e| Some(e.visible)),
+                )),
+                PRIMARY_KEY_MIN => Arc::new(BinaryArray::from_iter(
+                    entries.iter().map(|e| e.primary_key_min.as_deref()),
+                )),
+                PRIMARY_KEY_MAX => Arc::new(BinaryArray::from_iter(
+                    entries.iter().map(|e| e.primary_key_max.as_deref()),
+                )),
+                MAX_ROW_GROUP_UNCOMPRESSED_SIZE => Arc::new(UInt64Array::from_iter_values(
+                    entries.iter().map(|e| e.max_row_group_uncompressed_size),
+                )),
+                PARTITION_EXPR => Arc::new(StringArray::from_iter(
+                    entries.iter().map(|e| e.partition_expr.as_ref()),
+                )),
+                name => {
+                    return Err(ArrowError::SchemaError(format!(
+                        "Unknown manifest SST column: {name}"
+                    )));
+                }
+            };
+            columns.push(array);
+        }
+        DfRecordBatch::try_new_with_options(
+            self.schema.clone(),
+            columns,
+            &datatypes::arrow::record_batch::RecordBatchOptions::new()
+                .with_row_count(Some(entries.len())),
         )
     }
 }
@@ -618,6 +650,22 @@ mod tests {
             assert_eq!(projected.num_rows(), entries.len());
         }
         assert!(ManifestSstEntry::to_projected_record_batch(&entries, Some(&[26])).is_err());
+
+        let projected_schema = Arc::new(batch.schema().project(&[6, 9, 6, 11, 25, 9]).unwrap());
+        let builder = ManifestSstBatchBuilder::new(projected_schema.clone());
+        for rows in [entries.as_slice(), &entries[..1], &entries[..0]] {
+            let projected = builder.build(rows).unwrap();
+            assert_eq!(
+                projected,
+                ManifestSstEntry::to_record_batch(rows)
+                    .unwrap()
+                    .project(&[6, 9, 6, 11, 25, 9])
+                    .unwrap()
+            );
+            assert!(Arc::ptr_eq(&projected.schema(), &projected_schema));
+            assert!(Arc::ptr_eq(projected.column(0), projected.column(2)));
+            assert!(Arc::ptr_eq(projected.column(1), projected.column(5)));
+        }
 
         // Schema checks
         assert_eq!(schema.arrow_schema().fields().len(), batch.num_columns());

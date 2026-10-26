@@ -104,7 +104,7 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
-use common_recordbatch::filter::PruningFilter;
+use common_recordbatch::filter::MetadataFilter;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
@@ -581,7 +581,7 @@ impl MitoEngine {
 
     /// Lists all SSTs from the manifest of all regions in the engine.
     pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
-        self.scan_ssts_from_manifest(Vec::new(), 1024)
+        self.scan_ssts_from_manifest(&[], 1024)
             .flat_map(stream::iter)
             .collect()
             .await
@@ -592,7 +592,7 @@ impl MitoEngine {
     /// Filters are conservative; callers must retain their residual predicates.
     pub fn scan_ssts_from_manifest(
         &self,
-        filters: Vec<Expr>,
+        filters: &[Expr],
         batch_size: usize,
     ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
         self.scan_ssts_from_manifest_projected(filters, batch_size, None)
@@ -602,15 +602,15 @@ impl MitoEngine {
     /// variable-sized fields. The projection must include residual filter columns.
     pub fn scan_ssts_from_manifest_projected(
         &self,
-        filters: Vec<Expr>,
+        filters: &[Expr],
         batch_size: usize,
-        projection: Option<Vec<usize>>,
+        projection: Option<&[usize]>,
     ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
         let engine = self.clone();
-        let projection = crate::region::ManifestSstProjection::new(projection.as_deref());
+        let projection = crate::region::ManifestSstProjection::new(projection);
+        let filters = MetadataFilter::new(filters);
         Box::pin(async_stream::stream! {
             let node_id = engine.inner.workers.file_ref_manager().node_id();
-            let filters = PruningFilter::new(&filters);
             if !filters.matches(|column| match column {
                 sst_entry::NODE_ID => Some(ScalarValue::UInt64(node_id)),
                 _ => None,
@@ -1753,7 +1753,7 @@ impl MitoEngine {
 fn manifest_region_matches(
     region_id: RegionId,
     node_id: Option<u64>,
-    filters: &PruningFilter,
+    filters: &MetadataFilter,
 ) -> bool {
     filters.matches(|column| {
         Some(match column {
@@ -1778,7 +1778,7 @@ mod tests {
     #[test]
     fn test_manifest_region_predicates() {
         use super::manifest_region_matches;
-        use common_recordbatch::filter::PruningFilter;
+        use common_recordbatch::filter::MetadataFilter;
         use datafusion_expr::{col, lit};
         let region = store_api::storage::RegionId::new(42, 3);
         for (expr, expected) in [
@@ -1790,7 +1790,7 @@ mod tests {
             // A type mismatch is left to the residual filter, never pruned.
             (col("region_id").eq(lit("invalid")), true),
         ] {
-            let filter = PruningFilter::new(std::slice::from_ref(&expr));
+            let filter = MetadataFilter::new(std::slice::from_ref(&expr));
             assert_eq!(
                 manifest_region_matches(region, None, &filter),
                 expected,
