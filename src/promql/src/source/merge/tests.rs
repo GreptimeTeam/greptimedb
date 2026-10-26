@@ -504,7 +504,7 @@ async fn merges_two_unpacked_frames_through_the_frame_codec() {
 }
 
 #[tokio::test]
-async fn rejects_equal_timestamp_from_separate_heads() {
+async fn coalesces_identical_timestamp_from_separate_heads_and_rejects_conflict() {
     let key = read_key("rack-a", "sensor-1");
     let (left, _, _) = stream(
         label_source(1),
@@ -514,15 +514,241 @@ async fn rejects_equal_timestamp_from_separate_heads() {
     let (right, _, _) = stream(
         label_source(2),
         SeriesOrdering::KeyThenTime,
-        [ready(chunk(key, &[10], &[1.0], true))],
+        [ready(chunk(key.clone(), &[10], &[1.0], true))],
     );
-    let mut merged = merge_ordered_raw_series(vec![left, right]).unwrap();
-    let error = merged.next().await.unwrap().unwrap_err().to_string();
+    let rows = merge_ordered_raw_series(vec![left, right])
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].time.timestamp(0), Some(10));
+    assert!(rows[0].is_last);
+
+    let (left, _, _) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[10], &[1.0], true))],
+    );
+    let (right, _, _) = stream(
+        label_source(2),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key, &[10], &[2.0], true))],
+    );
+    let error = merge_ordered_raw_series(vec![left, right])
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(
-        error.contains("timestamp") || error.contains("time"),
+        error.contains("conflicting samples"),
         "unexpected error: {error}"
     );
-    assert!(merged.next().await.is_none());
+}
+
+#[tokio::test]
+async fn resolves_three_way_duplicate_heads_independent_of_input_order() {
+    let permutations = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for conflict in [false, true] {
+        for order in permutations {
+            let key = read_key("rack-a", "sensor-1");
+            let chunks = [
+                chunk(key.clone(), &[1, 10], &[10.0, 100.0], true),
+                chunk(key.clone(), &[2, 20], &[20.0, 200.0], true),
+                chunk(
+                    key.clone(),
+                    &[1, 99],
+                    &[if conflict { 999.0 } else { 10.0 }, 990.0],
+                    true,
+                ),
+            ];
+            let inputs = order
+                .into_iter()
+                .enumerate()
+                .map(|(region, index)| {
+                    stream(
+                        label_source(region as u32 + 1),
+                        SeriesOrdering::KeyThenTime,
+                        [ready(chunks[index].clone())],
+                    )
+                    .0
+                })
+                .collect();
+            let mut merged = merge_ordered_raw_series(inputs).unwrap();
+            if conflict {
+                let error = merged.next().await.unwrap().unwrap_err().to_string();
+                assert!(error.contains("conflicting samples"), "{error}");
+                assert!(merged.next().await.is_none(), "error must be terminal");
+            } else {
+                let rows = merged.try_collect::<Vec<_>>().await.unwrap();
+                let actual = rows
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.time.timestamp(0).unwrap(),
+                            float_sample(row, 0).to_bits(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    actual,
+                    [
+                        (1, 10.0_f64.to_bits()),
+                        (2, 20.0_f64.to_bits()),
+                        (10, 100.0_f64.to_bits()),
+                        (20, 200.0_f64.to_bits()),
+                        (99, 990.0_f64.to_bits()),
+                    ],
+                    "order {order:?}"
+                );
+                assert!(rows.last().unwrap().is_last);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn emits_maximal_prefix_before_competing_head_and_preserves_suffix() {
+    let key = read_key("rack-a", "sensor-1");
+    let (left, _, _) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(
+            key.clone(),
+            &[1, 3, 5, 7],
+            &[1.0, 3.0, 5.0, 7.0],
+            true,
+        ))],
+    );
+    let (right, _, _) = stream(
+        label_source(2),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key, &[4, 6], &[4.0, 6.0], true))],
+    );
+    let rows = merge_ordered_raw_series(vec![left, right])
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows[0].time.as_buffer().as_ref(), &[1, 3]);
+    assert_eq!(
+        rows.iter()
+            .flat_map(|row| row.time.as_buffer().iter().copied())
+            .collect::<Vec<_>>(),
+        [1, 3, 4, 5, 6, 7]
+    );
+    assert!(rows[..rows.len() - 1].iter().all(|row| !row.is_last));
+    assert!(rows.last().unwrap().is_last);
+}
+
+#[test]
+fn consumed_duplicate_head_waits_for_continuation_and_cancellation_drops_inputs() {
+    let key = read_key("rack-a", "sensor-1");
+    let gate = Arc::new(Mutex::new(None));
+    let release = Arc::new(AtomicUsize::new(0));
+    let (left, _, left_drops) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[1, 2], &[1.0, 2.0], true))],
+    );
+    let (right, _, right_drops) = gated_resuming_stream(
+        label_source(2),
+        chunk(key.clone(), &[1], &[1.0], false),
+        [ready(chunk(key.clone(), &[3], &[3.0], true))],
+        gate.clone(),
+        release.clone(),
+    );
+    let mut merged = merge_ordered_raw_series(vec![left, right]).unwrap();
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut merged).poll_next(&mut cx),
+        Poll::Pending
+    ));
+    assert!(
+        gate.lock().unwrap().is_some(),
+        "continuation must be polled"
+    );
+    assert_eq!(left_drops.load(Ordering::SeqCst), 0);
+    assert_eq!(right_drops.load(Ordering::SeqCst), 0);
+
+    release.store(1, Ordering::SeqCst);
+    if let Some(waker) = gate.lock().unwrap().take() {
+        waker.wake();
+    }
+    let first = futures::executor::block_on(merged.next()).unwrap().unwrap();
+    assert_eq!(first.time.as_buffer().as_ref(), &[1]);
+    assert!(!first.is_last);
+    let second = futures::executor::block_on(merged.next()).unwrap().unwrap();
+    assert_eq!(second.time.as_buffer().as_ref(), &[2]);
+    assert!(!second.is_last);
+    let third = futures::executor::block_on(merged.next()).unwrap().unwrap();
+    assert_eq!(third.time.as_buffer().as_ref(), &[3]);
+    assert!(third.is_last);
+
+    let gate = Arc::new(Mutex::new(None));
+    let release = Arc::new(AtomicUsize::new(0));
+    let left_key_drops = Arc::new(AtomicUsize::new(0));
+    let (left_key, left_key_weak) = owned_key(key.as_slice().to_vec(), left_key_drops.clone());
+    let mut left_chunk = chunk(key.clone(), &[1, 2], &[1.0, 2.0], true);
+    left_chunk.primary_key = left_key;
+    let right_chunk = chunk(key.clone(), &[1], &[1.0], false);
+    let resumed_key = read_key("rack-a", "sensor-1");
+    let (left, _, left_stream_drops) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(left_chunk)],
+    );
+    let (right, _, right_stream_drops) = gated_resuming_stream(
+        label_source(2),
+        right_chunk,
+        [ready(chunk(resumed_key, &[3], &[3.0], true))],
+        gate,
+        release,
+    );
+    let mut cancelled = merge_ordered_raw_series(vec![left, right]).unwrap();
+    assert!(matches!(
+        Pin::new(&mut cancelled).poll_next(&mut cx),
+        Poll::Pending
+    ));
+    assert!(left_key_weak.upgrade().is_some());
+    drop(cancelled);
+    assert_eq!(left_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(right_stream_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(left_key_drops.load(Ordering::SeqCst), 1);
+    assert!(left_key_weak.upgrade().is_none());
+}
+
+#[tokio::test]
+async fn non_overlapping_head_emits_whole_chunk() {
+    let key = read_key("rack-a", "sensor-1");
+    let (left, _, _) = stream(
+        label_source(1),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key.clone(), &[1, 2], &[1.0, 2.0], true))],
+    );
+    let (right, _, _) = stream(
+        label_source(2),
+        SeriesOrdering::KeyThenTime,
+        [ready(chunk(key, &[3, 4], &[3.0, 4.0], true))],
+    );
+    let rows = merge_ordered_raw_series(vec![left, right])
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].time.as_buffer().as_ref(), &[1, 2]);
+    assert_eq!(rows[1].time.as_buffer().as_ref(), &[3, 4]);
+    assert!(!rows[0].is_last && rows[1].is_last);
 }
 
 #[tokio::test]
@@ -675,6 +901,10 @@ async fn later_error_drops_held_candidate_and_heads_before_returning_error() {
     };
     assert!(error.contains("upstream boom"), "{error}");
     assert!(weak_a.upgrade().is_none() && weak_b.upgrade().is_none());
+    assert!(matches!(
+        Pin::new(&mut merged).poll_next(&mut cx),
+        Poll::Ready(None)
+    ));
     assert_eq!(key_a_drops.load(Ordering::SeqCst), 1);
     assert_eq!(key_b_drops.load(Ordering::SeqCst), 1);
     assert_eq!(first_drops.load(Ordering::SeqCst), 1);
@@ -1160,7 +1390,7 @@ async fn rejects_malformed_public_chunk_and_unfinished_series_at_eof() {
 }
 
 #[tokio::test]
-async fn equal_timestamp_at_successor_boundary_is_an_error() {
+async fn conflicting_equal_timestamp_at_successor_boundary_is_an_error() {
     let key = read_key("rack-a", "sensor-1");
     let (left, _, drops_a) = stream(
         label_source(1),

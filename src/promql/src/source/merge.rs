@@ -24,7 +24,9 @@ use common_error::ext::BoxedError;
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::LabelDecodeSpec;
+use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::RawSeriesChunk;
+use datatypes::series::samples::SampleRef;
 use datatypes::series::samples::{SeriesFields, SeriesSchema};
 use futures::Stream;
 use mito_codec::labels::{LabelProjection, PrimaryKeyLabelDecoder};
@@ -301,30 +303,66 @@ impl OrderedRawMerge {
             .time
             .timestamp(0)
             .ok_or_else(|| invalid("raw merge chunk has no timestamp"))?;
-        let mut end = chunk.time.len();
-        for input in &self.streams {
-            if let Some(head) = &input.head
-                && head.primary_key.as_slice() == key
-            {
-                let next = head
-                    .time
-                    .timestamp(0)
-                    .ok_or_else(|| invalid("raw merge chunk has no timestamp"))?;
-                if next == start {
-                    return Err(invalid(
-                        "raw merge inputs contain duplicate timestamps for a complete read key",
-                    ));
+        let next_same_key = self
+            .streams
+            .iter()
+            .enumerate()
+            .filter(|(other_index, input)| {
+                *other_index != index
+                    && input
+                        .head
+                        .as_ref()
+                        .is_some_and(|head| head.primary_key.as_slice() == key)
+            })
+            .filter_map(|(_, input)| input.head.as_ref()?.time.timestamp(0))
+            .min();
+        if next_same_key == Some(start) {
+            for other_index in 0..self.streams.len() {
+                if other_index == index {
+                    continue;
                 }
-                if next > start {
-                    end = end.min(
-                        chunk
-                            .time
-                            .as_buffer()
-                            .partition_point(|timestamp| *timestamp < next),
-                    );
+                let Some(head) = self.streams[other_index].head.as_ref() else {
+                    continue;
+                };
+                if head.primary_key.as_slice() == key && head.time.timestamp(0) == Some(start) {
+                    if !chunks_equal_at(&chunk, 0, head, 0, &self.schema)? {
+                        return Err(invalid(
+                            "raw merge inputs contain conflicting samples for a complete read key and timestamp",
+                        ));
+                    }
+                    if head.time.len() == 1 {
+                        self.streams[other_index].head = None;
+                    } else {
+                        self.streams[other_index].head =
+                            Some(slice_chunk(head, 1, head.time.len() - 1)?);
+                    }
                 }
             }
+            if chunk.time.len() > 1 {
+                self.streams[index].head = Some(slice_chunk(&chunk, 1, chunk.time.len() - 1)?);
+            }
+            let fields = SeriesFields::try_from_vec(
+                chunk
+                    .fields
+                    .iter()
+                    .map(|samples| samples.slice(0, 1).map_err(BoxedError::new))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+            .map_err(BoxedError::new)?;
+            return Ok(Some(RawSeriesChunk {
+                primary_key: chunk.primary_key,
+                metric: None,
+                time: chunk.time.slice(0, 1).map_err(BoxedError::new)?,
+                fields,
+                is_last: false,
+            }));
         }
+        let end = next_same_key.map_or(chunk.time.len(), |next| {
+            chunk
+                .time
+                .as_buffer()
+                .partition_point(|timestamp| *timestamp < next)
+        });
         if end == chunk.time.len() {
             return Ok(Some(RawSeriesChunk {
                 primary_key: chunk.primary_key,
@@ -375,6 +413,87 @@ impl OrderedRawMerge {
             is_last: false,
         }))
     }
+}
+
+fn slice_chunk(
+    chunk: &RawSeriesChunk,
+    offset: usize,
+    len: usize,
+) -> Result<RawSeriesChunk, BoxedError> {
+    Ok(RawSeriesChunk {
+        primary_key: chunk.primary_key.clone(),
+        metric: None,
+        time: chunk.time.slice(offset, len).map_err(BoxedError::new)?,
+        fields: SeriesFields::try_from_vec(
+            chunk
+                .fields
+                .iter()
+                .map(|samples| samples.slice(offset, len).map_err(BoxedError::new))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(BoxedError::new)?,
+        is_last: chunk.is_last,
+    })
+}
+
+fn chunks_equal_at(
+    a: &RawSeriesChunk,
+    ai: usize,
+    b: &RawSeriesChunk,
+    bi: usize,
+    schema: &SeriesSchema,
+) -> Result<bool, BoxedError> {
+    if a.primary_key != b.primary_key
+        || a.time.as_buffer()[ai] != b.time.as_buffer()[bi]
+        || a.fields.len() != b.fields.len()
+    {
+        return Ok(false);
+    }
+    for field in 0..schema.fields.len() {
+        if !samples_equal(
+            a.fields
+                .get(field)
+                .ok_or_else(|| invalid("missing raw field"))?
+                .sample(ai),
+            b.fields
+                .get(field)
+                .ok_or_else(|| invalid("missing raw field"))?
+                .sample(bi),
+        ) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn samples_equal(a: SampleRef<'_>, b: SampleRef<'_>) -> bool {
+    match (a, b) {
+        (SampleRef::Missing, SampleRef::Missing) => true,
+        (SampleRef::Float(a), SampleRef::Float(b)) => a.to_bits() == b.to_bits(),
+        (SampleRef::Histogram(a), SampleRef::Histogram(b)) => histograms_equal(a, b),
+        _ => false,
+    }
+}
+
+fn histograms_equal(a: HistogramView<'_>, b: HistogramView<'_>) -> bool {
+    a.schema == b.schema
+        && a.zero_threshold.to_bits() == b.zero_threshold.to_bits()
+        && a.sum.to_bits() == b.sum.to_bits()
+        && a.count.to_bits() == b.count.to_bits()
+        && a.zero_count.to_bits() == b.zero_count.to_bits()
+        && a.reset_hint == b.reset_hint
+        && a.start_timestamp == b.start_timestamp
+        && float_slices_equal(a.custom_values, b.custom_values)
+        && a.positive.span_offsets == b.positive.span_offsets
+        && a.positive.span_lengths == b.positive.span_lengths
+        && float_slices_equal(a.positive.buckets, b.positive.buckets)
+        && a.negative.span_offsets == b.negative.span_offsets
+        && a.negative.span_lengths == b.negative.span_lengths
+        && float_slices_equal(a.negative.buckets, b.negative.buckets)
+}
+
+fn float_slices_equal(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
 impl Stream for OrderedRawMerge {

@@ -364,6 +364,199 @@ async fn merges_typed_multifield_payload_through_frame_and_label_roundtrip() {
     assert!(!rows[0].is_last && !rows[1].is_last && !rows[2].is_last && rows[3].is_last);
 }
 
+fn histogram_variant_chunk(
+    key: Buffer,
+    sum: f64,
+    start_timestamp: Option<i64>,
+    buckets: &[f64],
+) -> RawSeriesChunk {
+    let mut chunk = payload_chunk(
+        key,
+        &[10],
+        &[Some(7.0)],
+        &[None],
+        &[None],
+        &[Some(sum)],
+        true,
+    );
+    let mut builder = HistogramBatchBuilder::new();
+    builder
+        .push(HistogramView {
+            schema: -19,
+            zero_threshold: 0.125,
+            sum,
+            count: 23.5,
+            zero_count: 2.25,
+            reset_hint: CounterResetHint::Unrecognized(37),
+            start_timestamp,
+            custom_values: &[1.5, 4.5],
+            positive: BucketSideView {
+                span_offsets: &[1],
+                span_lengths: &[2],
+                buckets,
+            },
+            negative: BucketSideView {
+                span_offsets: &[-2],
+                span_lengths: &[1],
+                buckets: &[0.75],
+            },
+        })
+        .unwrap();
+    let fields = SeriesFields::try_from_vec(vec![
+        chunk.fields.get(0).unwrap().clone(),
+        chunk.fields.get(1).unwrap().clone(),
+        Samples::try_from_histogram(UInt32Array::from(vec![Some(0)]), builder.finish().unwrap())
+            .unwrap(),
+    ])
+    .unwrap();
+    chunk.fields = fields;
+    chunk
+}
+
+#[tokio::test]
+async fn coalesces_equal_histograms_and_rejects_metadata_or_bucket_conflicts() {
+    let key = read_key("rack-payload", "sensor-9");
+    let matching = histogram_variant_chunk(key.clone(), 1.0, Some(-456), &[3.25, 7.5]);
+    let merged = merge_ordered_raw_series(vec![
+        payload_stream(label_source(1), vec![matching.clone()]),
+        payload_stream(label_source(2), vec![matching]),
+    ])
+    .unwrap();
+    let rows = merged.try_collect::<Vec<_>>().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].is_last);
+    assert!(
+        matches!(rows[0].fields.get(2).unwrap().sample(0), SampleRef::Histogram(h) if h.sum.to_bits() == 1.0_f64.to_bits())
+    );
+
+    for (description, left, right) in [
+        (
+            "histogram start timestamp",
+            histogram_variant_chunk(key.clone(), 1.0, Some(-456), &[3.25, 7.5]),
+            histogram_variant_chunk(key.clone(), 1.0, Some(-455), &[3.25, 7.5]),
+        ),
+        (
+            "histogram bucket only",
+            histogram_variant_chunk(key.clone(), 1.0, Some(-456), &[3.25, 7.5]),
+            histogram_variant_chunk(key.clone(), 1.0, Some(-456), &[3.25, 7.75]),
+        ),
+    ] {
+        let mut merged = merge_ordered_raw_series(vec![
+            payload_stream(label_source(1), vec![left]),
+            payload_stream(label_source(2), vec![right]),
+        ])
+        .unwrap();
+        let error = merged.next().await.unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("conflicting samples"),
+            "{description}: {error}"
+        );
+        assert!(
+            merged.next().await.is_none(),
+            "{description}: terminal error"
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_payloads_compare_missing_float_and_sample_kind_exactly() {
+    let key = read_key("rack-payload", "sensor-8");
+    let cases = [
+        (
+            "missing versus present",
+            payload_chunk(key.clone(), &[10], &[None], &[None], &[None], &[None], true),
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[Some(1.0)],
+                &[None],
+                &[None],
+                &[None],
+                true,
+            ),
+        ),
+        (
+            "signed zero",
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[Some(0.0)],
+                &[None],
+                &[None],
+                &[None],
+                true,
+            ),
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[Some(-0.0)],
+                &[None],
+                &[None],
+                &[None],
+                true,
+            ),
+        ),
+        (
+            "float versus histogram",
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[None],
+                &[Some(1.0)],
+                &[None],
+                &[None],
+                true,
+            ),
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[None],
+                &[None],
+                &[Some(1.0)],
+                &[None],
+                true,
+            ),
+        ),
+        (
+            "NaN payload bits",
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[Some(f64::from_bits(0x7ff8_0000_0000_0001))],
+                &[None],
+                &[None],
+                &[None],
+                true,
+            ),
+            payload_chunk(
+                key.clone(),
+                &[10],
+                &[Some(f64::from_bits(0x7ff8_0000_0000_0002))],
+                &[None],
+                &[None],
+                &[None],
+                true,
+            ),
+        ),
+    ];
+    for (description, left_chunk, right_chunk) in cases {
+        let mut merged = merge_ordered_raw_series(vec![
+            payload_stream(label_source(1), vec![left_chunk]),
+            payload_stream(label_source(2), vec![right_chunk]),
+        ])
+        .unwrap();
+        let error = merged.next().await.unwrap().unwrap_err().to_string();
+        assert!(
+            error.contains("conflicting samples"),
+            "{description}: {error}"
+        );
+        assert!(
+            merged.next().await.is_none(),
+            "{description}: terminal error"
+        );
+    }
+}
+
 #[tokio::test]
 async fn merge_retains_sliced_float_time_and_histogram_owners_until_output_drop() {
     let key = read_key("rack-slice", "sensor-9");
