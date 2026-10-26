@@ -43,6 +43,7 @@ use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
+use crate::map_time::DateFunction;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
@@ -848,6 +849,231 @@ fn scalar_root_preserves_nan_negative_zero_and_infinity() {
     }
 }
 
+fn eval_time(date: Option<DateFunction>, grid: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::EvalTime { date },
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn scalar_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .cloned()
+        .expect("scalar() reads evaluated values");
+    NativeNode {
+        expr: NativeExpr::ScalarOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn vector_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .cloned()
+        .expect("vector() reads a scalar");
+    NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(input),
+        },
+        output: evaluated(grid),
+    }
+}
+
+/// A binary node with at least one scalar side, typed as the compiler types it.
+fn scalar_binary(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let output = match (&left.output, &right.output) {
+        (NativeType::Samples(_), _) => left.output.clone(),
+        _ => right.output.clone(),
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output,
+    }
+}
+
+/// `time()` reports the evaluation time in seconds, fractions included, and a date function without
+/// an argument reads that time truncated to whole seconds, as Prometheus `dateWrapper` does.
+#[test]
+fn eval_time_reports_seconds_and_dates_of_the_grid() {
+    let grid = grid(3_598_500, 1_000, 3);
+    let tree = NativeTree::try_new(eval_time(None, Arc::clone(&grid))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(3598.5), Some(3599.5), Some(3600.5)]
+    );
+
+    let tree = NativeTree::try_new(vector_of(eval_time(Some(DateFunction::Hour), grid))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(0.0), Some(0.0), Some(1.0)]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `vector(c)` hands the constant on as one unlabelled series over the whole grid.
+#[test]
+fn vector_of_a_constant_is_one_unlabelled_series() {
+    let tree = NativeTree::try_new(vector_of(scalar(4.0, grid(0, 10, 3)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.name().is_none());
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(sample_values(&chunks[0]), vec![Some(4.0); 3]);
+}
+
+/// `scalar(v)` reports the value of the only series present at a point and NaN where none or
+/// several are, and answers only once its whole input has arrived.
+#[test]
+fn scalar_of_reads_the_whole_vector_at_each_point() {
+    let grid = grid(0, 10, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("x", "a"),
+                0,
+                vec![Some(1.0), Some(2.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a later series may still be present at these points"
+    );
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, named_metric("x", "b"), 1, vec![Some(5.0)], true),
+        )
+        .unwrap();
+    let chunks = execution.finish().unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.tags().is_empty());
+    let values = sample_values(&chunks[0]);
+    assert_eq!(values[0], Some(1.0));
+    assert!(values[1].is_some_and(f64::is_nan), "two series: {values:?}");
+    assert!(values[2].is_some_and(f64::is_nan), "no series: {values:?}");
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A varying scalar is broadcast point by point, on the side it was written: the vector chunks that
+/// arrive before it are held, charged to the node, and answered once it has arrived.
+#[test]
+fn a_varying_scalar_is_broadcast_on_its_side_once_it_arrives() {
+    let grid = grid(0, 10, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let vector = || evaluated_input_with_source_index(Arc::clone(&grid), 0);
+    let varying = || scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1));
+    let gt_bool = BinaryMatching {
+        return_bool: true,
+        ..binary_matching(BinaryOp::Gt)
+    };
+    let cases = [
+        (
+            scalar_binary(vector(), varying(), binary_matching(BinaryOp::Sub)),
+            vec![Some(9.0), Some(18.0), Some(27.0)],
+        ),
+        (
+            scalar_binary(varying(), vector(), binary_matching(BinaryOp::Sub)),
+            vec![Some(-9.0), Some(-18.0), Some(-27.0)],
+        ),
+        (
+            scalar_binary(vector(), varying(), gt_bool),
+            vec![Some(1.0), Some(1.0), Some(1.0)],
+        ),
+    ];
+    for (root, expected) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        // Leaves are counted left to right, so the source index is what names each side.
+        let source = |index| execution.state().input_ids(index).next().unwrap();
+        let (vector_input, scalar_input) = (source(0), source(1));
+        execution
+            .push_evaluated(
+                vector_input,
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("x", "a"),
+                    0,
+                    vec![Some(10.0), Some(20.0), Some(30.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                scalar_input,
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("y", "b"),
+                    0,
+                    vec![Some(1.0), Some(2.0), Some(3.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+        assert!(
+            execution.state().reserved_bytes() > 0,
+            "the held vector chunk is charged"
+        );
+        let chunks = execution.finish().unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].series.metric.name(), None, "the name is dropped");
+        assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+        assert_eq!(sample_values(&chunks[0]), expected);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// An operation between scalars where one varies is a scalar, computed point by point with each
+/// side where it was written.
+#[test]
+fn scalars_combine_point_by_point_when_one_varies() {
+    let grid = grid(10_000, 10_000, 2);
+    let time = || eval_time(None, Arc::clone(&grid));
+    let sixty = || scalar(60.0, Arc::clone(&grid));
+    let cases = [
+        (time(), sixty(), vec![Some(-50.0), Some(-40.0)]),
+        (sixty(), time(), vec![Some(50.0), Some(40.0)]),
+        (time(), time(), vec![Some(0.0), Some(0.0)]),
+    ];
+    for (left, right, expected) in cases {
+        let tree = NativeTree::try_new(scalar_binary(left, right, binary_matching(BinaryOp::Sub)))
+            .unwrap();
+        assert!(matches!(tree.root().output, NativeType::Scalar(_)));
+        let mut execution = executor(&tree, pool());
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(sample_values(&chunks[0]), expected);
+    }
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }
@@ -953,13 +1179,14 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
     fn walk(node: &RuntimeNode, out: &mut Vec<Weak<NodeMetrics>>) {
         out.push(Arc::downgrade(&node.metrics));
         match &node.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => walk(input, out),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => walk(input, out),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);

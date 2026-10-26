@@ -1942,6 +1942,27 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
     }
 }
 
+/// A statement that reads no data plans without a scan, and `scalar(v)` plans over its scan only
+/// when the table is one region: a partitioned table keeps the existing plan.
+#[tokio::test]
+async fn native_fused_plans_dynamic_scalars_over_one_region() {
+    for query in ["time() - 60", "vector(time())", "hour()"] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
+        assert!(fused.children().is_empty(), "{query}");
+    }
+    for query in [
+        "scalar(some_metric)",
+        "some_metric > bool scalar(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(find_fused_series(&plan).is_some(), "{query}");
+        let parted = native_engine_provider(vec![0]).await;
+        let plan = build_native_fused_plan_with_provider(query, true, parted).await;
+        assert!(find_fused_series(&plan).is_none(), "{query}");
+    }
+}
+
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
 #[tokio::test]
 async fn native_fused_rate_plans_to_a_fused_series_node() {
@@ -2518,6 +2539,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                     sources(right, out);
                 }
                 NativeExpr::Scalar(_)
+                | NativeExpr::EvalTime { .. }
+                | NativeExpr::ScalarOf { .. }
+                | NativeExpr::VectorOf { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Vector { .. } => {}
             }

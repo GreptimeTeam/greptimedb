@@ -77,10 +77,14 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   its doc is written for a caller that does not exist.
 - **A native window requires non-interleaved input.** Only `Contiguous` and
   `KeyThenTime` are accepted; `Interleaved` is refused when compiled.
-- **A fused tree runs ordinary raw children and a literal Scalar root.** Recursive native
-  execution keeps `source_index` routing for one or more raw children; only a validated
-  zero-source Scalar root is materialized on its bound grid without a scanner. It must not
+- **A fused tree runs ordinary raw children or none.** Recursive native execution keeps
+  `source_index` routing for one or more raw children; a zero-source tree (a constant,
+  `time()`, `vector(...)`) is materialized on its bound grid without a scanner. It must not
   displace the current multi-input vector path or the single-input partial aggregate path.
+- **`scalar(v)` needs every series in one execution.** `FusedSeriesExec` reads every input
+  partition into one execution when the tree holds `ScalarOf` (as it does for several
+  sources); that is one region's whole input only, so the planner admits such trees only
+  over an unpartitioned Mito table.
 - **A series closes exactly once**, on the chunk that says so — per input series,
   not per label set. A node that rewrites labels can hand two input series over
   under one label set, and each closes on its own chunk, so a label set may be

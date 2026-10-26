@@ -68,6 +68,13 @@ fn ordering(ordering: SeriesOrdering) -> &'static str {
     }
 }
 
+/// The grid a node's output is evaluated on, or `-` for one that has none.
+fn grid_of(node: &NativeNode) -> String {
+    node.output
+        .grid()
+        .map_or_else(|| "-".to_string(), |grid| grid_name(grid))
+}
+
 /// The operation a node computes, in the words of the query that produced it.
 fn describe(node: &NativeNode) -> String {
     match &node.expr {
@@ -88,6 +95,12 @@ fn describe(node: &NativeNode) -> String {
             NativeType::AggregateState(_) => "aggregate state".to_string(),
         },
         NativeExpr::Scalar(scalar) => scalar.value.to_string(),
+        NativeExpr::EvalTime { date: None } => format!("time() on grid {}", grid_of(node)),
+        NativeExpr::EvalTime { date: Some(date) } => {
+            format!("{}() on grid {}", date.name(), grid_of(node))
+        }
+        NativeExpr::ScalarOf { .. } => "scalar()".to_string(),
+        NativeExpr::VectorOf { .. } => "vector()".to_string(),
         NativeExpr::Instant { op, .. } => {
             let mut text = format!(
                 "lookback {}ms offset {} on grid {}",
@@ -349,6 +362,9 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Aggregate { .. } => "Aggregate",
         NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
+        NativeExpr::EvalTime { .. } => "EvalTime",
+        NativeExpr::ScalarOf { .. } => "ScalarOf",
+        NativeExpr::VectorOf { .. } => "VectorOf",
     }
 }
 
@@ -366,13 +382,15 @@ fn display_node(
     }
     write!(f, "{edge} {} {}", kind(&node.expr), describe(node))?;
     match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => {}
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => display_node(f, input, depth + 1, "input")?,
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input }
+        | NativeExpr::VectorOf { input } => display_node(f, input, depth + 1, "input")?,
         NativeExpr::Binary { left, right, .. } => {
             display_node(f, left, depth + 1, "left")?;
             display_node(f, right, depth + 1, "right")?;

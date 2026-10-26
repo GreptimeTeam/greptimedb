@@ -45,9 +45,10 @@ use crate::instant_eval::{
     select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::map::{
-    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
-    map_compare, map_math,
+    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, ScalarSeriesOperand, drop_metric_name,
+    map_arithmetic, map_arithmetic_series, map_compare, map_compare_series, map_math,
 };
+use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
@@ -1609,7 +1610,7 @@ impl BinaryRuntime {
 /// each logical series, and runs its kernel once, after the input has ended. The results are queued
 /// in the node's own output queue and handed over from there.
 struct VectorRuntime {
-    op: BoundVectorOp,
+    kernel: VectorKernel,
     /// The layout of the input, which is also what the node produces.
     schema: Arc<SeriesSchema>,
     input: RetainedInput,
@@ -1620,10 +1621,18 @@ struct VectorRuntime {
     computed: bool,
 }
 
+/// What a vector node computes over its whole input.
+enum VectorKernel {
+    /// An operation that answers a vector.
+    Op(BoundVectorOp),
+    /// `scalar(v)`, which answers one unlabelled series over the whole grid.
+    Scalar,
+}
+
 impl VectorRuntime {
-    fn new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Self {
+    fn new(kernel: VectorKernel, schema: Arc<SeriesSchema>) -> Self {
         Self {
-            op,
+            kernel,
             schema,
             input: RetainedInput::default(),
             merge_input: false,
@@ -1671,11 +1680,18 @@ impl VectorRuntime {
         } else {
             assembled
         };
-        buffer.grow(vector_workspace_bytes(&self.op, &self.schema, &assembled))?;
+        let workspace = match &self.kernel {
+            VectorKernel::Op(op) => vector_workspace_bytes(op, &self.schema, &assembled),
+            VectorKernel::Scalar => scalar_workspace_bytes(&self.schema),
+        };
+        buffer.grow(workspace)?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            vector_series(&self.op, &self.schema, assembled)?
+            match &self.kernel {
+                VectorKernel::Op(op) => vector_series(op, &self.schema, assembled)?,
+                VectorKernel::Scalar => vec![select::scalar(&self.schema, &assembled)?],
+            }
         };
         self.input.release();
         self.computed = true;
@@ -1690,6 +1706,14 @@ fn vector_overflow() -> DataFusionError {
          reserve overflow"
             .to_string(),
     )
+}
+
+/// What `scalar(v)` allocates beside its input: a value and a count per grid point, and the result.
+fn scalar_workspace_bytes(schema: &SeriesSchema) -> usize {
+    let points = schema.eval_grid.as_ref().map_or(0, |grid| {
+        usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
+    });
+    points.saturating_mul(std::mem::size_of::<Option<f64>>() + 1 + std::mem::size_of::<f64>())
 }
 
 /// Runs the kernel `op` binds over the whole input.
@@ -1853,22 +1877,49 @@ enum BroadcastOp {
     Compare(Comparison),
 }
 
-/// What a binary node holds when one operand is a constant: the operation, its scalar operand and
-/// the layout of the vector side.
+/// The scalar side of a broadcast.
+enum BroadcastScalar {
+    /// A constant, read off the scalar node's binding, at its position in the operation.
+    Literal(ScalarOperand),
+    /// A scalar that varies per grid point: the one closed chunk its node hands over.
+    ///
+    /// It is read whole before any vector chunk is answered, because a point of the vector side
+    /// can only be computed with the scalar's value at that point.
+    Dynamic {
+        /// Whether the scalar is the left operand.
+        left: bool,
+        value: Option<Series>,
+    },
+}
+
+/// What a binary node holds when one operand is a scalar: the operation, its scalar operand and
+/// the layout of the side it is broadcast over.
 ///
 /// A broadcast applies to each chunk as it arrives; unlike [`BinaryRuntime`], it does not retain
-/// both operands for whole-vector matching.
+/// both operands for whole-vector matching. The side it is broadcast over is the vector side, or
+/// the varying side of an operation between two scalars, which is one unlabelled series too.
 struct BroadcastRuntime {
     /// The scalar and its position in the operation.
-    operand: ScalarOperand,
+    scalar: BroadcastScalar,
+    /// Whether the side broadcast over is the left operand.
+    vector_left: bool,
     /// The operation applied to every value of the vector.
     op: BroadcastOp,
     /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
     /// on. A chunk of the vector side is checked against it by the kernel itself.
     sample_schema: Arc<SeriesSchema>,
+    /// Vector chunks that arrived before a varying scalar did, with the bytes each is charged at.
+    pending: VecDeque<(EvaluatedChunk, usize)>,
+    /// The bytes the pending chunks and the scalar's value hold.
+    held: usize,
 }
 
 impl BroadcastRuntime {
+    /// Whether the scalar varies per point and has not arrived yet.
+    fn awaits_scalar(&self) -> bool {
+        matches!(self.scalar, BroadcastScalar::Dynamic { value: None, .. })
+    }
+
     /// Whether the operation rewrites the label set of what it hands out.
     ///
     /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one
@@ -1902,15 +1953,37 @@ impl BroadcastRuntime {
     /// is answered even then — with a series carrying no row — because a consumer tells "nothing
     /// more here" from "no more input" by that chunk alone.
     fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
-        let output = match self.op {
-            BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
-                &self.sample_schema,
-                &chunk.series,
-                op,
-                self.operand,
-            )?),
-            BroadcastOp::Compare(comparison) => {
-                map_compare(&self.sample_schema, &chunk.series, comparison, self.operand)?
+        let output = match &self.scalar {
+            BroadcastScalar::Literal(operand) => match self.op {
+                BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
+                    &self.sample_schema,
+                    &chunk.series,
+                    op,
+                    *operand,
+                )?),
+                BroadcastOp::Compare(comparison) => {
+                    map_compare(&self.sample_schema, &chunk.series, comparison, *operand)?
+                }
+            },
+            BroadcastScalar::Dynamic { left, value } => {
+                let value = value.as_ref().ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "the binary node broadcast a scalar that has not arrived".to_string(),
+                    )
+                })?;
+                let operand = if *left {
+                    ScalarSeriesOperand::Left(value)
+                } else {
+                    ScalarSeriesOperand::Right(value)
+                };
+                match self.op {
+                    BroadcastOp::Arithmetic(op) => {
+                        map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
+                    }
+                    BroadcastOp::Compare(comparison) => {
+                        map_compare_series(&self.sample_schema, &chunk.series, comparison, operand)?
+                    }
+                }
             }
         };
         match output {
@@ -2045,21 +2118,48 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     Ok(position as usize)
 }
 
-/// One unlabelled constant value per statement grid point, closed on its only chunk.
-fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
-    let schema = SeriesSchema {
+/// The layout of a scalar's value carrier: one field on `grid`.
+fn scalar_schema(grid: Arc<EvalGrid>) -> SeriesSchema {
+    SeriesSchema {
         fields: Arc::from([FieldSpec {
             name: "value".into(),
         }]),
-        eval_grid: Some(Arc::clone(&grid)),
-    };
+        eval_grid: Some(grid),
+    }
+}
+
+/// The bytes one value per point of `grid` takes in a chunk of its own, reserved before it exists.
+fn grid_chunk_bytes(grid: &EvalGrid) -> Result<usize> {
+    let len = usize::try_from(grid.spec().len).map_err(|_| {
+        DataFusionError::Execution("scalar grid length does not fit memory size".into())
+    })?;
+    std::mem::size_of::<EvaluatedChunk>()
+        .checked_add(std::mem::size_of::<Float64Array>())
+        .and_then(|bytes| {
+            len.checked_mul(std::mem::size_of::<f64>())
+                .and_then(|values| bytes.checked_add(values))
+        })
+        .ok_or_else(|| DataFusionError::Execution("scalar allocation size overflow".into()))
+}
+
+/// One unlabelled constant value per statement grid point, closed on its only chunk.
+fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
+    scalar_chunk_on(&scalar_schema(Arc::clone(&grid)), grid, value)
+}
+
+/// [`scalar_chunk`] under `schema`, which names the one field.
+fn scalar_chunk_on(
+    schema: &SeriesSchema,
+    grid: Arc<EvalGrid>,
+    value: f64,
+) -> Result<EvaluatedChunk> {
     let len = grid.spec().len as usize;
     let time = GridRange::try_new(grid, 0, len).map_err(series_error)?;
     let values = Float64Array::from(vec![value; len]);
     let fields = SeriesFields::one(Samples::from_float(values));
     let metric = SeriesLabels::try_new(None, Vec::new()).map_err(series_error)?;
     let series =
-        Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+        Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
     EvaluatedChunk::try_new(series, true)
 }
 
@@ -2093,6 +2193,22 @@ struct RuntimeNode {
 enum RuntimeOp {
     Input(InputId),
     Scalar,
+    /// The evaluation time or a date function of it, produced once as one closed chunk.
+    EvalTime {
+        grid: Arc<EvalGrid>,
+        date: Option<DateFunction>,
+        produced: bool,
+        state: NodeState,
+    },
+    /// A scalar handed on as a vector. A constant input has no chunk of its own, so its value is
+    /// produced here, once.
+    VectorOf {
+        input: Box<RuntimeNode>,
+        literal: Option<f64>,
+        produced: bool,
+        schema: Arc<SeriesSchema>,
+        state: NodeState,
+    },
     Instant {
         input: Box<RuntimeNode>,
         instant: Option<InstantRuntime>,
@@ -2205,6 +2321,56 @@ impl RuntimeNode {
                 (RuntimeOp::Input(id), false)
             }
             NativeExpr::Scalar(_) => (RuntimeOp::Scalar, false),
+            NativeExpr::EvalTime { date } => {
+                let NativeType::Scalar(grid) = &node.output else {
+                    return Err(DataFusionError::Execution(
+                        "the evaluation time does not produce a scalar".to_string(),
+                    ));
+                };
+                (
+                    RuntimeOp::EvalTime {
+                        grid: Arc::clone(grid),
+                        date: *date,
+                        produced: false,
+                        state: NodeState::new("native.time", Arc::clone(&metrics), pool),
+                    },
+                    false,
+                )
+            }
+            NativeExpr::VectorOf { input } => {
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("vector() does not produce samples".to_string())
+                })?;
+                let literal = match &input.expr {
+                    NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                    _ => None,
+                };
+                let (child, _) = Self::build(input, pool, inputs)?;
+                (
+                    RuntimeOp::VectorOf {
+                        input: Box::new(child),
+                        literal,
+                        produced: false,
+                        schema,
+                        state: NodeState::new("native.vector_of", Arc::clone(&metrics), pool),
+                    },
+                    false,
+                )
+            }
+            NativeExpr::ScalarOf { input } => {
+                let schema = input.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("scalar() consumes non-sample input".to_string())
+                })?;
+                let (child, _) = Self::build(input, pool, inputs)?;
+                (
+                    RuntimeOp::Vector {
+                        input: Box::new(child),
+                        vector: Some(VectorRuntime::new(VectorKernel::Scalar, schema)),
+                        state: NodeState::new("native.scalar_of", Arc::clone(&metrics), pool),
+                    },
+                    false,
+                )
+            }
             NativeExpr::Instant { input, op } => {
                 let (child, shared) = Self::build(input, pool, inputs)?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
@@ -2322,7 +2488,7 @@ impl RuntimeNode {
                     ),
                     (None, Some(broadcast)) => {
                         let shared = broadcast.drops_labels()
-                            || if left_schema.is_some() {
+                            || if broadcast.vector_left {
                                 left_shared
                             } else {
                                 right_shared
@@ -2391,7 +2557,7 @@ impl RuntimeNode {
                             .to_string(),
                     ));
                 }
-                let mut vector = VectorRuntime::new(op.clone(), schema);
+                let mut vector = VectorRuntime::new(VectorKernel::Op(op.clone()), schema);
                 let (child, child_shared) = Self::build(input, pool, inputs)?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });
                 if limitk && child_shared {
@@ -2420,13 +2586,14 @@ impl RuntimeNode {
     fn register_metrics(&self, name: &str, set: &ExecutionPlanMetricsSet, partition: usize) {
         self.metrics.register(name, set, partition);
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => {
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => {
                 input.register_metrics(&format!("{name}.input"), set, partition)
             }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
@@ -2439,12 +2606,14 @@ impl RuntimeNode {
     fn reserved_bytes(&self) -> usize {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => 0,
+            RuntimeOp::EvalTime { state, .. } => state.buffer.reservation.size(),
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }
             | RuntimeOp::Map { input, state, .. }
             | RuntimeOp::Timestamp { input, state, .. }
             | RuntimeOp::Aggregate { input, state, .. }
-            | RuntimeOp::Vector { input, state, .. } => state
+            | RuntimeOp::Vector { input, state, .. }
+            | RuntimeOp::VectorOf { input, state, .. } => state
                 .buffer
                 .reservation
                 .size()
@@ -2497,6 +2666,56 @@ impl RuntimeNode {
             // value is the constant on the tree, which the consumer reads off its own binding. A
             // pull of it is therefore empty by construction and says nothing has stalled.
             RuntimeOp::Scalar => Ok(None),
+            RuntimeOp::EvalTime {
+                grid,
+                date,
+                produced,
+                state,
+            } => {
+                if !std::mem::replace(produced, true) {
+                    let schema = scalar_schema(Arc::clone(grid));
+                    state.produce(grid, || match date {
+                        None => map_time::time(&schema),
+                        Some(date) => map_time::date_of_eval_time(*date, &schema),
+                    })?;
+                }
+                state.pop_queued(evaluated_values)
+            }
+            RuntimeOp::VectorOf {
+                input,
+                literal,
+                produced,
+                schema,
+                state,
+            } => {
+                if let Some(value) = literal {
+                    if !std::mem::replace(produced, true) {
+                        let grid = schema.eval_grid.clone().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "vector() produces values without a grid".to_string(),
+                            )
+                        })?;
+                        state.produce(&grid, || {
+                            Ok(scalar_chunk_on(schema, Arc::clone(&grid), *value)?.series)
+                        })?;
+                    }
+                    return state.pop_queued(evaluated_values);
+                }
+                // A scalar is already one unlabelled series; only the layout it is named by changes.
+                let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                    return Ok(None);
+                };
+                let NativeChunk::Evaluated(EvaluatedChunk { series, is_last }) = chunk else {
+                    return Err(DataFusionError::Execution(
+                        "vector() consumes an evaluated scalar, not raw samples".to_string(),
+                    ));
+                };
+                let series = Series::try_new(schema, series.metric, series.time, series.fields)
+                    .map_err(series_error)?;
+                Ok(Some(NativeChunk::Evaluated(EvaluatedChunk::try_new(
+                    series, is_last,
+                )?)))
+            }
             RuntimeOp::Instant {
                 input,
                 instant,
@@ -2622,19 +2841,39 @@ impl RuntimeNode {
                 let Some(operation) = broadcast.as_mut() else {
                     return Err(no_broadcast());
                 };
-                // A broadcast reads the vector side only: the constant is on the node's binding, so
-                // there is no second stream to pull and no chunk to retain. Each chunk is
-                // transformed as it arrives and handed up, which is what keeps a broadcast over a
-                // whole vector from costing the vector.
-                let vector = match operation.operand {
-                    ScalarOperand::Left(_) => &mut **right,
-                    ScalarOperand::Right(_) => &mut **left,
+                // A constant is on the node's binding, so only the vector side is pulled. A varying
+                // scalar is read first, whole: until it arrives the vector side's chunks are held,
+                // and afterwards each chunk is transformed as it arrives and handed up, which is
+                // what keeps a broadcast over a whole vector from costing the vector.
+                let (vector, scalar) = if operation.vector_left {
+                    (&mut **left, &mut **right)
+                } else {
+                    (&mut **right, &mut **left)
                 };
+                if operation.awaits_scalar() {
+                    while let Some(chunk) = scalar.pull(inputs, inputs_finished)? {
+                        state.retain_scalar(operation, chunk)?;
+                    }
+                }
                 // An operation that empties every position yields no chunk, and the node asks its
                 // vector side again rather than reporting a decision it did not make.
                 loop {
-                    let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
-                        return Ok(None);
+                    if operation.awaits_scalar() {
+                        let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
+                            return Ok(None);
+                        };
+                        state.retain_pending(operation, chunk)?;
+                        continue;
+                    }
+                    let chunk = match operation.pending.pop_front() {
+                        Some((chunk, bytes)) => {
+                            operation.held = operation.held.saturating_sub(bytes);
+                            NativeChunk::Evaluated(chunk)
+                        }
+                        None => match vector.pull(inputs, inputs_finished)? {
+                            Some(chunk) => chunk,
+                            None => return Ok(None),
+                        },
                     };
                     if let Some(output) = state.broadcast(operation, chunk)? {
                         return Ok(Some(NativeChunk::Evaluated(output)));
@@ -2703,6 +2942,18 @@ impl RuntimeNode {
             // A scalar produces its value without reading anything, so it is settled from the
             // start: there is no chunk it owes its consumer.
             RuntimeOp::Scalar => true,
+            RuntimeOp::EvalTime {
+                produced, state, ..
+            } => *produced && state.queued.is_empty(),
+            RuntimeOp::VectorOf {
+                input,
+                literal,
+                produced,
+                state,
+                ..
+            } => {
+                state.queued.is_empty() && (*produced || literal.is_none()) && input.settled(inputs)
+            }
             // These report as they are handed chunks, so a child with nothing left is all it takes
             // for them to have nothing left either.
             RuntimeOp::Instant { input, state, .. }
@@ -2752,8 +3003,8 @@ impl RuntimeNode {
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
-            // A broadcast owes only what its vector side has not handed over yet: it answers each
-            // chunk as it reads it and keeps nothing, so it is settled exactly when that side is.
+            // A broadcast owes what its sides have not handed over yet and the vector chunks it
+            // holds for a scalar still to arrive. A constant side is settled from the start.
             RuntimeOp::Broadcast {
                 left,
                 right,
@@ -2763,10 +3014,9 @@ impl RuntimeNode {
                 state.queued.is_empty()
                     && broadcast
                         .as_ref()
-                        .is_some_and(|operation| match operation.operand {
-                            ScalarOperand::Left(_) => right.settled(inputs),
-                            ScalarOperand::Right(_) => left.settled(inputs),
-                        })
+                        .is_some_and(|operation| operation.pending.is_empty())
+                    && left.settled(inputs)
+                    && right.settled(inputs)
             }
         }
     }
@@ -2780,12 +3030,13 @@ impl RuntimeNode {
     /// later call, when what is below it has handed its answer over.
     fn flush_ready_merges(&mut self, inputs: &[InputSlot]) -> Result<bool> {
         match &mut self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(false),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(false),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.flush_ready_merges(inputs),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.flush_ready_merges(inputs),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 let left_flushed = left.flush_ready_merges(inputs)?;
                 let right_flushed = right.flush_ready_merges(inputs)?;
@@ -2817,12 +3068,13 @@ impl RuntimeNode {
     /// Whether any window still holds collected input that has not been merged.
     fn any_merge_pending(&self) -> bool {
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => false,
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => false,
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.any_merge_pending(),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.any_merge_pending(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.any_merge_pending() || right.any_merge_pending()
             }
@@ -2839,12 +3091,13 @@ impl RuntimeNode {
     /// finished. Both are refused here, before any of them allocates a workspace.
     fn unclosed(&self) -> Result<()> {
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Window { input, .. }
-            | RuntimeOp::Aggregate { input, .. } => input.unclosed(),
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.unclosed(),
             RuntimeOp::Binary {
                 left,
                 right,
@@ -2878,12 +3131,13 @@ impl RuntimeNode {
     /// reported -- so that a failure leaves nothing to be read on the way out.
     fn finish_windows(&mut self) -> Result<()> {
         match &mut self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.finish_windows(),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.finish_windows(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 // Both sides are finished even when the first one fails: the failure is reported
                 // from here, and an evaluator left holding a series would keep its bytes.
@@ -2910,6 +3164,11 @@ impl RuntimeNode {
             // A source keeps its queue in the caller-owned slot, which is released beside the tree,
             // and a scalar holds nothing at all.
             RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::EvalTime { state, .. } => state.release(),
+            RuntimeOp::VectorOf { input, state, .. } => {
+                state.release();
+                input.release();
+            }
             RuntimeOp::Instant {
                 input,
                 instant,
@@ -2992,29 +3251,17 @@ impl NativeExecutionState {
     pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
         let mut inputs = Vec::new();
         let (root, _) = RuntimeNode::build(tree.root(), &pool, &mut inputs)?;
-        let scalar_root = if inputs.is_empty() {
-            match (&tree.root().expr, &tree.root().output) {
-                (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
-                    Arc::clone(grid),
-                    *value,
-                    NodeState::new("native.scalar", Arc::clone(&root.metrics), &pool),
-                )),
-                _ => {
-                    return Err(DataFusionError::Execution(
-                        "native tree without inputs must be a scalar root".into(),
-                    ));
-                }
-            }
-        } else {
-            None
+        // A constant root has no node that produces its value, so the state produces it.
+        let scalar_root = match (&tree.root().expr, &tree.root().output) {
+            (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
+                Arc::clone(grid),
+                *value,
+                NodeState::new("native.scalar", Arc::clone(&root.metrics), &pool),
+            )),
+            _ => None,
         };
         match &tree.root().output {
-            NativeType::Scalar(_) if inputs.is_empty() => {}
-            NativeType::Scalar(_) => {
-                return Err(DataFusionError::Execution(
-                    "native scalar root unexpectedly has input nodes".into(),
-                ));
-            }
+            NativeType::Scalar(_) => {}
             NativeType::Samples(schema) if schema.eval_grid.is_some() => {}
             NativeType::Samples(_) => {
                 return Err(DataFusionError::Execution(
@@ -3079,18 +3326,7 @@ impl NativeExecutionState {
     /// down unchanged, because only a node that reads its whole input needs it.
     fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
         if let Some((grid, value, mut state)) = self.scalar_root.take() {
-            let len = usize::try_from(grid.spec().len).map_err(|_| {
-                DataFusionError::Execution("scalar grid length does not fit memory size".into())
-            })?;
-            let bytes = std::mem::size_of::<EvaluatedChunk>()
-                .checked_add(std::mem::size_of::<Float64Array>())
-                .and_then(|bytes| {
-                    len.checked_mul(std::mem::size_of::<f64>())
-                        .and_then(|values| bytes.checked_add(values))
-                })
-                .ok_or_else(|| {
-                    DataFusionError::Execution("scalar allocation size overflow".into())
-                })?;
+            let bytes = grid_chunk_bytes(&grid)?;
             state.buffer.grow(bytes)?;
             let chunk = scalar_chunk(grid, value)?;
             state.buffer.metrics.record_completed_series(1);
@@ -3359,10 +3595,69 @@ impl NodeState {
                 self.track(output)?;
             }
         }
-        // The chunk is gone and the label sets this node has handed out are what is left.
+        // The chunk is gone: the label sets this node has handed out, the chunks it holds for a
+        // scalar and the scalar's value are what is left.
         let emitted = self.emitted_bytes();
-        self.buffer.resize(emitted)?;
+        self.buffer.resize(emitted.saturating_add(broadcast.held))?;
         Ok(output)
+    }
+
+    /// Keeps the chunk a varying scalar operand hands over, the one closed series it is.
+    fn retain_scalar(
+        &mut self,
+        broadcast: &mut BroadcastRuntime,
+        chunk: NativeChunk,
+    ) -> Result<()> {
+        let NativeChunk::Evaluated(EvaluatedChunk { series, is_last }) = chunk else {
+            return Err(DataFusionError::Execution(
+                "the binary node broadcasts an evaluated scalar, not raw samples".to_string(),
+            ));
+        };
+        let BroadcastScalar::Dynamic { value, .. } = &mut broadcast.scalar else {
+            return Err(DataFusionError::Execution(
+                "the binary node read a chunk from a constant operand".to_string(),
+            ));
+        };
+        if value.is_some() || !is_last {
+            return Err(DataFusionError::Execution(
+                "a scalar operand hands over exactly one closed chunk".to_string(),
+            ));
+        }
+        let bytes = series_bytes(&series);
+        self.buffer.grow(bytes)?;
+        broadcast.held = broadcast.held.saturating_add(bytes);
+        *value = Some(series);
+        Ok(())
+    }
+
+    /// Holds one vector chunk until the scalar it is broadcast with arrives.
+    fn retain_pending(
+        &mut self,
+        broadcast: &mut BroadcastRuntime,
+        chunk: NativeChunk,
+    ) -> Result<()> {
+        let NativeChunk::Evaluated(chunk) = chunk else {
+            return Err(DataFusionError::Execution(
+                "the binary node broadcasts over an evaluated vector, not raw samples".to_string(),
+            ));
+        };
+        let bytes = evaluated_bytes(&chunk);
+        self.buffer.grow(bytes)?;
+        broadcast.held = broadcast.held.saturating_add(bytes);
+        broadcast.pending.push_back((chunk, bytes));
+        Ok(())
+    }
+
+    /// Builds the one closed chunk a node that reads no input produces, reserved before it is
+    /// built, and queues it for the pull that hands it over.
+    fn produce(&mut self, grid: &EvalGrid, series: impl FnOnce() -> Result<Series>) -> Result<()> {
+        let bytes = grid_chunk_bytes(grid)?;
+        self.buffer.grow(bytes)?;
+        let chunk = EvaluatedChunk::try_new(series()?, true)?;
+        self.buffer.metrics.record_completed_series(1);
+        self.queued
+            .push_back((NativeChunk::Evaluated(chunk), bytes));
+        Ok(())
     }
 
     /// Feeds one chunk to this node's window.
@@ -3510,7 +3805,7 @@ impl NodeState {
 
     /// Runs this node's vector kernel and queues the series it kept.
     fn compute_vector(&mut self, vector: &mut VectorRuntime) -> Result<()> {
-        let shares_input = matches!(vector.op, BoundVectorOp::Sort(_));
+        let shares_input = matches!(vector.kernel, VectorKernel::Op(BoundVectorOp::Sort(_)));
         let output = vector.compute(&mut self.buffer)?;
         let Some(output) = output else {
             return Ok(());
@@ -4488,66 +4783,63 @@ fn unsupported_binary(operands: &str) -> DataFusionError {
     ))
 }
 
-/// The broadcast a binary node with one constant operand is, read off its binding.
+/// The broadcast a binary node with one scalar operand is, read off its binding.
 ///
-/// The two sides say which mode this is: one evaluated vector and one constant is a broadcast. The
-/// constant comes from the scalar node's own binding — the value the node produces — and the
-/// operation from the matching the compiler bound; [`ScalarOperand`] preserves the constant's side.
+/// The two sides say which mode this is: one evaluated vector and one scalar is a broadcast over
+/// the vector, and two scalars of which one varies is a broadcast over the varying one. A constant
+/// comes from the scalar node's own binding and [`ScalarOperand`] preserves its side; a varying
+/// scalar is read from the chunk its node hands over. The operation is the matching the compiler
+/// bound.
 ///
-/// Of the rejection arms in the operand-type match below, only the two-constant one is a shape a
-/// tree that `validate` accepts can put here; the others are backstops that keep the match
-/// exhaustive. That is not the wide safety margin it looks like: [`NativeNode::validate`] refuses a
-/// binary operand that produces neither evaluated values nor a scalar before any of this runs, so a
-/// raw side or an aggregate-state side can never reach this function at all. The refusals after the
-/// match — a constant operand that is not a literal scalar node, and a constant carrying matching
-/// modifiers — are reachable through a validated tree.
+/// [`NativeNode::validate`] refuses a binary operand that produces neither evaluated values nor a
+/// scalar before any of this runs, so the last arm below is an exhaustiveness backstop.
 fn broadcast_runtime(
     left: &NativeNode,
     right: &NativeNode,
     matching: &BinaryMatching,
 ) -> Result<BroadcastRuntime> {
-    let (scalar_operand, vector, constant) = match (&left.output, &right.output) {
-        (NativeType::Samples(vector), NativeType::Scalar(_)) if vector.eval_grid.is_some() => (
-            ScalarOperand::Right as fn(f64) -> ScalarOperand,
-            vector,
-            right,
-        ),
-        (NativeType::Scalar(_), NativeType::Samples(vector)) if vector.eval_grid.is_some() => (
-            ScalarOperand::Left as fn(f64) -> ScalarOperand,
-            vector,
-            left,
-        ),
-        // The two-constant pair is reachable through the state builder, which is what this arm
-        // guards: `validate` accepts a binary node of two constants (it binds them to a scalar), and
-        // a compiler that could not fold a scalar–scalar operation would emit one. No constant has
-        // labels or fields to broadcast over, so there is no vector to apply the operation to. The
-        // executor test `an_unimplemented_node_is_reported_not_panicked` builds this pair directly.
-        (NativeType::Scalar(_), NativeType::Scalar(_)) => {
-            return Err(unsupported_binary(
-                "two constants, which broadcast over no vector",
-            ));
+    let literal = |node: &NativeNode| match &node.expr {
+        NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+        _ => None,
+    };
+    let (vector_left, sample_schema) = match (&left.output, &right.output) {
+        (NativeType::Samples(vector), NativeType::Scalar(_)) if vector.eval_grid.is_some() => {
+            (true, Arc::clone(vector))
         }
-        // Raw samples or aggregate state: `validate` already refused either as a binary operand, so
-        // this arm is the exhaustiveness backstop rather than a reachable case.
+        (NativeType::Scalar(_), NativeType::Samples(vector)) if vector.eval_grid.is_some() => {
+            (false, Arc::clone(vector))
+        }
+        (NativeType::Scalar(grid), NativeType::Scalar(_)) => {
+            // Two constants are folded by the compiler; one that was not has no series to carry
+            // the result. The executor test `an_unimplemented_node_is_reported_not_panicked`
+            // builds this pair directly.
+            if literal(left).is_some() && literal(right).is_some() {
+                return Err(unsupported_binary(
+                    "two constants, which broadcast over no vector",
+                ));
+            }
+            (
+                literal(left).is_none(),
+                Arc::new(scalar_schema(Arc::clone(grid))),
+            )
+        }
         (_, _) => {
             return Err(unsupported_binary(
-                "an operand that is neither evaluated samples nor a constant, which no validated \
+                "an operand that is neither evaluated samples nor a scalar, which no validated \
                  tree binds as a binary operand",
             ));
         }
     };
-    let NativeExpr::Scalar(BoundScalar { value }) = &constant.expr else {
-        // NotImplemented rather than Execution: this is a shape the runtime does not support, not a
-        // tree whose values are wrong. A caller that falls back to another planner on NotImplemented
-        // then still can, which an Execution would deny it.
-        return Err(DataFusionError::NotImplemented(
-            "the native runtime does not execute this Binary node, which broadcasts an operand that \
-             is not a literal scalar: the constant side has to be a Scalar node, and a computed \
-             constant such as `1 < bool 2` is not one until it is folded"
-                .to_string(),
-        ));
+    let scalar_side = if vector_left { right } else { left };
+    let scalar = match literal(scalar_side) {
+        Some(value) if vector_left => BroadcastScalar::Literal(ScalarOperand::Right(value)),
+        Some(value) => BroadcastScalar::Literal(ScalarOperand::Left(value)),
+        None => BroadcastScalar::Dynamic {
+            left: !vector_left,
+            value: None,
+        },
     };
-    // A constant has no labels, so the modifiers a vector–vector operation would use have no
+    // A scalar has no labels, so the modifiers a vector–vector operation would use have no
     // meaning here: a tree that carries them describes another operation than the one it computes.
     if matching.labels != MatchingLabels::Ignoring(Vec::new())
         || matching.cardinality != Cardinality::OneToOne
@@ -4556,9 +4848,12 @@ fn broadcast_runtime(
         return Err(matched_scalar());
     }
     Ok(BroadcastRuntime {
-        operand: scalar_operand(*value),
+        scalar,
+        vector_left,
         op: broadcast_op(matching)?,
-        sample_schema: Arc::clone(vector),
+        sample_schema,
+        pending: VecDeque::new(),
+        held: 0,
     })
 }
 

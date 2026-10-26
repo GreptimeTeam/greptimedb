@@ -354,7 +354,7 @@ struct Split {
 /// shapes the merge does not produce.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => Ok(None),
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(None),
         NativeExpr::Map { input, op } => {
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
@@ -415,7 +415,9 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::Vector { input, .. } => match split(input, fields, time_index)? {
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::ScalarOf { input }
+        | NativeExpr::VectorOf { input } => match split(input, fields, time_index)? {
             Some(_) => Err(declined(
                 "an aggregate under an operation that reads evaluated values",
             )),
@@ -484,13 +486,15 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
                 .samples()
                 .filter(|schema| schema.eval_grid.is_none())
                 .map(|schema| schema.fields.to_vec()),
-            NativeExpr::Scalar(_) => None,
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => raw_fields(input),
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::ScalarOf { input }
+            | NativeExpr::VectorOf { input } => raw_fields(input),
             NativeExpr::Binary { left, right, .. } => {
                 raw_fields(left).or_else(|| raw_fields(right))
             }

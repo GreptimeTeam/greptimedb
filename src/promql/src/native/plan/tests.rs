@@ -1340,9 +1340,9 @@ fn a_vector_operation_cannot_consume_raw_samples() {
 /// A node that reports samples while holding no input node is refused where the node is built.
 ///
 /// The tree is constructed directly here — a child module of `native::plan` may — because the node
-/// is one the public constructors decline: a scalar root is the only zero-input shape a fused node
-/// accepts, and samples without a source would be an empty vector reported as an answer. Every
-/// public constructor therefore stays a checked one.
+/// is one the public constructors decline: a constant does not produce samples, and a zero-input
+/// tree has no scan that would refuse it later. Every public constructor therefore stays a checked
+/// one.
 #[test]
 fn a_samples_root_without_an_input_is_refused() {
     let statement_grid = grid(0, 60_000, 4);
@@ -1369,7 +1369,7 @@ fn a_samples_root_without_an_input_is_refused() {
     .expect_err("a samples root reads no source while reporting samples");
 
     assert!(
-        error.to_string().contains("constant scalar"),
-        "the refusal must name the shape a zero-child tree has to be: {error}"
+        error.to_string().contains("does not produce a scalar"),
+        "the refusal must name the contract the root breaks: {error}"
     );
 }

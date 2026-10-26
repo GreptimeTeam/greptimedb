@@ -51,8 +51,8 @@
 //! by, so their answers are the ones the untagged fixture gives.
 //!
 //! A query the native route declines is checked the other way round. [`check_fallback_case`] runs
-//! shapes the compiler has no node for - `time()`, `scalar(v)`, a fold over two sources and a
-//! subquery - with the native request on and with it off, and requires that no native node ran in
+//! shapes the route does not take - a fold over two sources and a subquery - with the native
+//! request on and with it off, and requires that no native node ran in
 //! either plan and that both runs report rows derived from the fixture by hand. A hint that quietly
 //! took the route for one of them would show a fused producer or a frontend merge in the plans that
 //! executed, which is what is observed.
@@ -62,10 +62,9 @@
 //! `max(10 - rate(...))`), and above it the merge's suffix rebuilds it over the merged value with
 //! the operands in the order they were written (`100 - avg(rate(...))`, `100 / sum(rate(...))`,
 //! `-sum(rate(...))`). Deliberately not covered yet: the aggregate split carries a literal scalar
-//! as its only binary sibling, so a computed scalar (`scalar(...)`, `time()`) or a whole-vector
-//! combination such as `sort`, `absent` or `and`/`or`/`unless` beside the aggregate keeps the
-//! existing plan. [`check_fallback_case`] pins that the computed scalars do, and that a fold over a
-//! second source and a subquery keep it too.
+//! as its only binary sibling, so a whole-vector combination such as `sort`, `absent` or
+//! `and`/`or`/`unless` beside the aggregate keeps the existing plan. `time()` and `scalar(v)` run
+//! natively without the split: one fused execution reads the whole of this one-region table.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -1186,27 +1185,34 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
         check_case(&instance, &observer, case).await;
     }
 
-    // The shapes the native compiler declines, each declined for its own reason, and each checked on
-    // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
-    // must answer what the fixture derives by hand.
-    //
-    // `time()` is the evaluation instant and nothing else, so the single row is at `EVAL_MILLIS` and
-    // carries `EVAL_SECS`. `scalar` reports the one value present at a point only when exactly one
-    // series is present at it, so the five counter series make it NaN; a route that folded one
-    // partition at a time would report the number of whichever partition held a single series, so
-    // the NaN also says the whole vector was read at once. The division folds two *different* tables
-    // - 15 over 30 - and a subquery evaluates its own body on a grid of its own: both read across
-    // series and neither can be answered by a producer per partition, so both keep the existing
-    // plan. The subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each
-    // of which the same extrapolated rate answers 15 - both samples stay further from the window's
-    // ends than the 66s threshold - so the maximum is 15 as well.
-    let fallback_cases = [
+    // `scalar` reports the one value present at a point only when exactly one series is present at
+    // it, so the five counter series make it NaN; an execution per partition would report the
+    // number of whichever partition held a single series.
+    for case in [
         case("time()".to_string(), &[(&[], EVAL_SECS as f64)], false),
         case(
             format!("scalar({COUNTER_TABLE})"),
             &[(&[], f64::NAN)],
             false,
         ),
+    ] {
+        let promql = case.promql.as_str();
+        let (native, capture) = run_query(&instance, promql, true, &observer).await;
+        assert_rows(&native.rows, &case.expected, &format!("native `{promql}`"));
+        assert_eq!(1, capture.fused.len(), "`{promql}` runs one fused node");
+        assert!(capture.finalize.is_empty(), "`{promql}` needs no merge");
+    }
+
+    // The shapes the native compiler declines, each declined for its own reason, and each checked on
+    // the plans that really ran: none may hold a fused producer or a frontend merge, and both routes
+    // must answer what the fixture derives by hand.
+    //
+    // The division folds two *different* tables - 15 over 30 - and a subquery evaluates its own
+    // body on a grid of its own: both read across series and neither can be answered by a producer
+    // per partition, so both keep the existing plan. The subquery's window spans the two inner points `EVAL_SECS - 1` and `EVAL_SECS`, at each
+    // of which the same extrapolated rate answers 15 - both samples stay further from the window's
+    // ends than the 66s threshold - so the maximum is 15 as well.
+    let fallback_cases = [
         case(
             format!("sum(rate({COUNTER_TABLE}[5m])) / sum({GAUGE_TABLE})"),
             &[(&[], 15.0 / 30.0)],
