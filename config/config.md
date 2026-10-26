@@ -191,7 +191,7 @@
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
-| `region_engine.mito.experimental_compaction_output_parallelism` | Integer | 1 | Max number of threads one compaction output uses to decode its input files<br/>and to encode its SST columns. Values below 2 disable both. |
+| `region_engine.mito.experimental_compaction_output_parallelism` | Integer | 1 | Default per-output parallelism for input decoding and SST column encoding.<br/>Each stage is bounded independently; this is not a global thread limit.<br/>Values below 2 disable parallel decoding/encoding, but not the merge pipeline.<br/>Tables can override it with 'compaction.experimental_output_parallelism' (positive integer). |
 | `region_engine.mito.auto_flush_interval` | String | `10m` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size`. |
@@ -670,7 +670,7 @@
 | `region_engine.mito.max_background_purges` | Integer | Auto | Max number of running background purge jobs (default: number of cpu cores). |
 | `region_engine.mito.experimental_compaction_memory_limit` | String | 0 | Memory budget for compaction tasks.<br/>Supports absolute size (e.g., "2GiB", "512MB") or percentage of system memory (e.g., "50%").<br/>Setting it to 0 or "unlimited" disables the limit. |
 | `region_engine.mito.experimental_compaction_on_exhausted` | String | wait | Behavior when compaction cannot acquire memory from the budget.<br/>Options: "wait" (default, 10s), "wait(<duration>)", "fail" |
-| `region_engine.mito.experimental_compaction_output_parallelism` | Integer | 1 | Max number of threads one compaction output uses to decode its input files<br/>and to encode its SST columns. Values below 2 disable both. |
+| `region_engine.mito.experimental_compaction_output_parallelism` | Integer | 1 | Default per-output parallelism for input decoding and SST column encoding.<br/>Each stage is bounded independently; this is not a global thread limit.<br/>Values below 2 disable parallel decoding/encoding, but not the merge pipeline.<br/>Tables can override it with 'compaction.experimental_output_parallelism' (positive integer). |
 | `region_engine.mito.auto_flush_interval` | String | `10m` | Interval to auto flush a region if it has not flushed yet. |
 | `region_engine.mito.global_write_buffer_size` | String | Auto | Global write buffer size for all regions. If not set, it's default to 1/8 of OS memory with a max limitation of 1GB. |
 | `region_engine.mito.global_write_buffer_reject_size` | String | Auto | Global write buffer size threshold to reject write requests. If not set, it's default to 2 times of `global_write_buffer_size` |

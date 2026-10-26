@@ -591,9 +591,7 @@ impl SstMerger for DefaultSstMerger {
             filter_deleted: output.filter_deleted,
             time_range: output.output_time_range,
             merge_mode,
-            read_parallelism: context
-                .engine_config
-                .experimental_compaction_output_parallelism,
+            read_parallelism: write_opts.encode_parallelism,
         };
         let source = spawn_merge(builder.build_flat_sst_reader().await?);
 
@@ -758,8 +756,12 @@ impl<M: SstMerger> DefaultCompactor<M> {
                         row_group_size: context.region_options.row_group_size(),
                         float_field_encoding: context.region_options.float_field_encoding,
                         encode_parallelism: context
-                            .engine_config
-                            .experimental_compaction_output_parallelism,
+                            .region_options
+                            .compaction_output_parallelism_or(
+                                context
+                                    .engine_config
+                                    .experimental_compaction_output_parallelism,
+                            ),
                         encode_runtime: EncodeRuntime::Compact,
                     },
                 )
@@ -805,8 +807,12 @@ where
                 row_group_size: compaction_region.region_options.row_group_size(),
                 float_field_encoding: compaction_region.region_options.float_field_encoding,
                 encode_parallelism: compaction_region
-                    .engine_config
-                    .experimental_compaction_output_parallelism,
+                    .region_options
+                    .compaction_output_parallelism_or(
+                        compaction_region
+                            .engine_config
+                            .experimental_compaction_output_parallelism,
+                    ),
                 encode_runtime: EncodeRuntime::Compact,
             };
             let merger = self.merger.clone();

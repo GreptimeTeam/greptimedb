@@ -129,8 +129,9 @@ pub struct MitoConfig {
     pub experimental_compaction_memory_limit: MemoryLimit,
     /// Behavior when compaction cannot acquire memory from the budget.
     pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
-    /// Max number of threads one compaction output uses to decode its input
-    /// files and to encode its SST columns. Values below 2 disable both.
+    /// Default per-output parallelism for input decoding and SST column encoding,
+    /// bounded independently per stage. Values below 2 disable both.
+    /// Tables can override it with `compaction.experimental_output_parallelism`.
     pub experimental_compaction_output_parallelism: usize,
 
     // Flush configs:

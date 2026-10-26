@@ -203,8 +203,9 @@ impl SeqScan {
         let channel_size = compute_parallel_channel_size(DEFAULT_READ_BATCH_SIZE);
         let parallelism = stream_ctx.input.compaction_read_parallelism;
         if parallelism > 1 && sources.len() > 1 {
-            // Decodes inputs ahead of the merge, at most `parallelism` at a time.
-            let semaphore = Arc::new(Semaphore::new(parallelism));
+            // More permits than inputs cannot increase concurrency. Clamping also
+            // keeps oversized user settings below the semaphore's permit limit.
+            let semaphore = Arc::new(Semaphore::new(parallelism.min(sources.len())));
             sources = sources
                 .into_iter()
                 .map(|source| spawn_compact_stream(source, channel_size, Some(semaphore.clone())))
