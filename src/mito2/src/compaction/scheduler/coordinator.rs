@@ -16,10 +16,9 @@
 #[path = "coordinator_test.rs"]
 mod tests;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll};
 use std::time::Instant;
@@ -36,33 +35,13 @@ use crate::metrics::{
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
 
-/// Input-byte cost, reconciled after a successful merge. Failed partial merges
-/// retain the estimate rather than getting free service for work already done.
-#[derive(Debug)]
-pub(crate) struct CompactionCost {
-    estimated: u64,
-    actual: AtomicU64,
-}
-
-impl CompactionCost {
-    pub(crate) fn new(estimated: u64) -> Self {
-        Self {
-            estimated,
-            actual: AtomicU64::new(estimated),
-        }
-    }
-
-    pub(crate) fn record_actual(&self, bytes: u64) {
-        self.actual.store(bytes, Ordering::Relaxed);
-    }
-}
-
 /// Already prepared work. Its task owns the existing execution ID, cancellation
 /// state and input leases; no second grant message can outlive that ownership.
 pub(crate) struct ReadyUnit {
     queued_at: Instant,
     state: CancellableTaskState,
-    cost: Arc<CompactionCost>,
+    /// Immutable merge-work estimate; zero for metadata-only expiration.
+    input_bytes: u64,
     job: Job,
     completion: Job,
 }
@@ -70,14 +49,14 @@ pub(crate) struct ReadyUnit {
 impl ReadyUnit {
     pub(crate) fn new(
         state: CancellableTaskState,
-        cost: Arc<CompactionCost>,
+        input_bytes: u64,
         job: Job,
         completion: Job,
     ) -> Self {
         Self {
             queued_at: Instant::now(),
             state,
-            cost,
+            input_bytes,
             job,
             completion,
         }
@@ -101,6 +80,9 @@ pub(crate) struct CompactionCoordinator {
 #[derive(Default)]
 struct CoordinatorState {
     regions: HashMap<RegionId, RegionQueue>,
+    /// Iteration scales with current ready regions, not a hash table's peak capacity.
+    /// Idle regions retain service debt in `regions` without participating in admission.
+    ready_regions: BTreeSet<RegionId>,
     running: usize,
     closed: bool,
     dispatching: bool,
@@ -122,10 +104,10 @@ struct AdmittedUnit {
     job: Option<Job>,
     completion: Option<Job>,
     state: CancellableTaskState,
-    cost: Arc<CompactionCost>,
     coordinator: Weak<CompactionCoordinator>,
     region_id: RegionId,
-    weight: u128,
+    /// Immutable charge, including admission-time weight; refunded only before first poll.
+    charged_cost: u128,
     started: bool,
 }
 
@@ -187,6 +169,7 @@ impl CompactionCoordinator {
                 queue.service = queue.service.max(service);
             }
             queue.ready.push_back(unit);
+            state.ready_regions.insert(region_id);
             COMPACTION_READY_UNITS.inc();
         }
         self.dispatch();
@@ -212,6 +195,9 @@ impl CompactionCoordinator {
                 }
             }
             queue.ready = ready;
+            if queue.ready.is_empty() {
+                state.ready_regions.remove(&region_id);
+            }
             state.prune(region_id);
             cancelled
         };
@@ -239,7 +225,7 @@ impl CompactionCoordinator {
             let notified = self.drained.notified();
             let drained = {
                 let state = self.lock();
-                state.running == 0 && state.regions.values().all(|q| q.ready.is_empty())
+                state.running == 0 && state.ready_regions.is_empty()
             };
             if drained {
                 break;
@@ -268,10 +254,10 @@ impl CompactionCoordinator {
                 }
                 next
             };
-            let Some((region_id, unit, weight)) = next else {
+            let Some((region_id, unit, charged_cost)) = next else {
                 break;
             };
-            let admitted = AdmittedUnit::new(self, region_id, unit, weight);
+            let admitted = AdmittedUnit::new(self, region_id, unit, charged_cost);
             // Rejection drops the future and returns its credit/resources. The
             // existing Released path reports a missing terminal result as failure.
             if let Err(err) = self.executor.schedule(Box::pin(admitted)) {
@@ -280,16 +266,13 @@ impl CompactionCoordinator {
         }
     }
 
-    fn release(self: &Arc<Self>, region_id: RegionId, estimated: u128, actual: u128) {
+    fn release(self: &Arc<Self>, region_id: RegionId, refund: u128) {
         {
             let mut state = self.lock();
             state.running -= 1;
             if let Some(queue) = state.regions.get_mut(&region_id) {
                 queue.running -= 1;
-                queue.service = queue
-                    .service
-                    .saturating_sub(estimated)
-                    .saturating_add(actual);
+                queue.service = queue.service.saturating_sub(refund);
             }
             state.prune(region_id);
         }
@@ -326,20 +309,22 @@ impl CoordinatorState {
     /// monopolizing ties. Queue order retains the region's fair picker priority.
     fn admit(&mut self) -> Option<(RegionId, ReadyUnit, u128)> {
         let region_id = self
-            .regions
+            .ready_regions
             .iter()
-            .filter(|(_, q)| !q.ready.is_empty())
+            .filter_map(|id| self.regions.get(id).map(|queue| (id, queue)))
             .min_by_key(|(id, q)| (q.service, q.last_served, **id))
             .map(|(id, _)| *id)?;
         let queue = self.regions.get_mut(&region_id)?;
         let weight = if queue.ready.len() > 1 { 2 } else { 1 };
         let unit = queue.ready.pop_front()?;
+        if queue.ready.is_empty() {
+            self.ready_regions.remove(&region_id);
+        }
         COMPACTION_READY_UNITS.dec();
         COMPACTION_ADMITTED_UNITS.inc();
         self.virtual_time = self.virtual_time.max(queue.service);
-        queue.service = queue
-            .service
-            .saturating_add(charge(unit.cost.estimated, weight));
+        let charged_cost = charge(unit.input_bytes, weight);
+        queue.service = queue.service.saturating_add(charged_cost);
         self.sequence = self.sequence.wrapping_add(1);
         queue.last_served = self.sequence;
         queue.running += 1;
@@ -347,13 +332,13 @@ impl CoordinatorState {
         debug!(
             "Admit compaction unit: region={}, input_bytes={}, weight={}, service={}, ready={}, admitted={}",
             region_id,
-            unit.cost.estimated,
+            unit.input_bytes,
             weight,
             queue.service,
             queue.ready.len(),
             queue.running,
         );
-        Some((region_id, unit, weight))
+        Some((region_id, unit, charged_cost))
     }
 
     fn prune(&mut self, region_id: RegionId) {
@@ -377,7 +362,7 @@ impl AdmittedUnit {
         coordinator: &Arc<CompactionCoordinator>,
         region_id: RegionId,
         unit: ReadyUnit,
-        weight: u128,
+        charged_cost: u128,
     ) -> Self {
         COMPACTION_ADMISSION_WAIT.observe(unit.queued_at.elapsed().as_secs_f64());
         let job = Box::pin(async move {
@@ -392,10 +377,9 @@ impl AdmittedUnit {
             job: Some(job),
             completion: Some(unit.completion),
             state: unit.state,
-            cost: unit.cost,
             coordinator: Arc::downgrade(coordinator),
             region_id,
-            weight,
+            charged_cost,
             started: false,
         }
     }
@@ -409,11 +393,15 @@ impl Future for AdmittedUnit {
             return Poll::Ready(());
         }
         self.started = true;
-        self.job
-            .as_mut()
-            .expect("admitted unit owns its job until drop")
-            .as_mut()
-            .poll(cx)
+        let Some(job) = self.job.as_mut() else {
+            return Poll::Ready(());
+        };
+        let poll = job.as_mut().poll(cx);
+        if poll.is_ready() {
+            // A completed future stays completed if the executor polls it again.
+            drop(self.job.take());
+        }
+        poll
     }
 }
 
@@ -424,16 +412,8 @@ impl Drop for AdmittedUnit {
         drop(self.job.take());
         COMPACTION_ADMITTED_UNITS.dec();
         if let Some(coordinator) = self.coordinator.upgrade() {
-            let actual = if self.started {
-                charge(self.cost.actual.load(Ordering::Relaxed), self.weight)
-            } else {
-                0
-            };
-            coordinator.release(
-                self.region_id,
-                charge(self.cost.estimated, self.weight),
-                actual,
-            );
+            let refund = if self.started { 0 } else { self.charged_cost };
+            coordinator.release(self.region_id, refund);
         }
         if let Some(completion) = self.completion.take() {
             common_runtime::spawn_global(completion);

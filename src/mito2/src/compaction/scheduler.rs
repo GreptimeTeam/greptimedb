@@ -29,7 +29,7 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_recordbatch::filter::MetadataFilter;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
-pub(crate) use coordinator::{CompactionCoordinator, CompactionCost, ReadyUnit};
+pub(crate) use coordinator::{CompactionCoordinator, ReadyUnit};
 #[cfg(test)]
 use datafusion_common::ScalarValue;
 pub(crate) use planning::CompactionPickFinished;

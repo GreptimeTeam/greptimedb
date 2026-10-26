@@ -27,7 +27,7 @@ use store_api::storage::RegionId;
 use crate::compaction::compactor::{CompactionContext, CompactionRegion};
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{
-    CompactionCoordinator, CompactionCost, CompactionScheduler, CompactionTransition, ReadyUnit,
+    CompactionCoordinator, CompactionScheduler, CompactionTransition, ReadyUnit,
 };
 use crate::compaction::task::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
@@ -309,11 +309,6 @@ impl CompactionScheduler {
                 request_sender: self.request_sender.clone(),
                 listener: self.listener.clone(),
                 estimated_memory_bytes: unit.estimated_memory_bytes(),
-                cost: Arc::new(CompactionCost::new(
-                    unit.inputs
-                        .iter()
-                        .fold(0u64, |sum, f| sum.saturating_add(f.size())),
-                )),
                 unit,
                 memory_manager: self.memory_manager.clone(),
                 memory_policy: self.memory_policy,
@@ -357,7 +352,7 @@ impl CompactionScheduler {
             };
             let id = task.execution.plan_id();
             let state = task.state.clone();
-            let cost = task.cost.clone();
+            let input_bytes = task.unit.estimated_input_bytes();
             let sender = self.request_sender.clone();
             let completion = Box::pin(async move {
                 let _ = sender
@@ -369,17 +364,16 @@ impl CompactionScheduler {
                     }))
                     .await;
             });
-            let job = Box::pin(InflightCompaction::run(
-                async move {
-                    task.run().await;
-                    drop(task);
-                },
-                INFLIGHT_COMPACTION_COUNT.clone(),
-            ));
-            if let Err(err) = self
-                .coordinator
-                .schedule(region_id, ReadyUnit::new(state, cost, job, completion))
-                && let Some(local) = self.local_units_mut(region_id)
+            let job = Box::pin(async move {
+                INFLIGHT_COMPACTION_COUNT.inc();
+                task.run().await;
+                drop(task);
+                INFLIGHT_COMPACTION_COUNT.dec();
+            });
+            if let Err(err) = self.coordinator.schedule(
+                region_id,
+                ReadyUnit::new(state, input_bytes, job, completion),
+            ) && let Some(local) = self.local_units_mut(region_id)
             {
                 local.finish(id, Err(Arc::new(err)));
                 local.release_unit(id);
