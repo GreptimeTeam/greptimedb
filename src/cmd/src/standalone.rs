@@ -277,6 +277,10 @@ impl App for Instance {
 pub struct StartCommand {
     #[clap(long)]
     http_addr: Option<String>,
+    /// The address to bind the dedicated public HTTP API server. Setting this
+    /// flag also enables the API server.
+    #[clap(long)]
+    http_api_server_addr: Option<String>,
     #[clap(long = "grpc-bind-addr", alias = "rpc-bind-addr", alias = "rpc-addr")]
     grpc_bind_addr: Option<String>,
     #[clap(long)]
@@ -365,6 +369,11 @@ impl StartCommand {
 
         if let Some(addr) = &self.http_addr {
             opts.http.addr.clone_from(addr);
+        }
+
+        if let Some(addr) = &self.http_api_server_addr {
+            opts.http.api_server_addr.clone_from(addr);
+            opts.http.enable_api_server = true;
         }
 
         if let Some(data_home) = &self.data_home {
