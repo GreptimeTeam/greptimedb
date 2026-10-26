@@ -14706,6 +14706,7 @@ dependencies = [
  "flow",
  "frontend",
  "hostname 0.4.1",
+ "humantime-serde",
  "log-store",
  "mito2",
  "pipeline",

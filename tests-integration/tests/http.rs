@@ -3418,6 +3418,8 @@ max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
+max_concurrent_queries = 0
+concurrent_query_limiter_timeout = "100ms"
 heartbeat_env_vars = []
 
 [http]
