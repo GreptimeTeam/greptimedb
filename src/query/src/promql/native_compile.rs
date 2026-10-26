@@ -555,11 +555,12 @@ fn set_operation(context: &Context, binary: &BinaryExpr, op: SetOp) -> Result<Na
              parser only accepts a set operator between two vectors"
         )));
     };
-    // `or` reports the right side's samples under the left side's fields, which the kernel can only
-    // do field by field.
-    if lhs.fields.len() != rhs.fields.len() {
+    // Prometheus has one value per sample, and the existing planner refuses a set operator over
+    // several fields, so per-field presence has no reference semantics to follow.
+    if lhs.fields.len() != 1 || rhs.fields.len() != 1 {
         return Err(not_implemented(&format!(
-            "the set operation `{binary}` between vectors of {} and {} fields",
+            "the set operation `{binary}` between vectors of {} and {} fields: a set operator is \
+             compiled over one field on each side",
             lhs.fields.len(),
             rhs.fields.len()
         )));

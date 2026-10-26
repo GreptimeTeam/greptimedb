@@ -1889,10 +1889,10 @@ fn set_operators_bind_their_operator_and_labels() {
 }
 
 /// What a set operator cannot carry is refused rather than dropped: Prometheus refuses a fill value
-/// on a set operator, which this parser accepts, and `or` cannot hand on a right side whose fields
-/// do not pair with the left side's.
+/// on a set operator, which this parser accepts, and a side of several fields has no reference
+/// semantics, even when both sides carry the same number.
 #[test]
-fn a_set_operation_refuses_a_fill_value_and_unpaired_fields() {
+fn a_set_operation_refuses_a_fill_value_and_several_fields() {
     let error = compile_selectors(
         &with_binary_modifier("a and b", |modifier| {
             modifier.fill_values = VectorMatchFillValues::new(0.0, 0.0);
@@ -1906,21 +1906,24 @@ fn a_set_operation_refuses_a_fill_value_and_unpaired_fields() {
         "{error}"
     );
 
-    let error = compile_selectors(
-        &eval_stmt("a or b"),
-        &|requirement| {
-            Ok(match requirement.metric.as_deref() {
-                Some("a") => raw_schema_with_fields(2),
-                _ => raw_schema(),
-            })
-        },
-        SeriesOrdering::KeyThenTime,
-    )
-    .expect_err("`or` over two and one fields compiled");
-    assert!(
-        matches!(&error, DataFusionError::NotImplemented(message) if message.contains("2 and 1")),
-        "{error}"
-    );
+    for (query, fields) in [("a or b", (2, 1)), ("a and b", (2, 2))] {
+        let error = compile_selectors(
+            &eval_stmt(query),
+            &|requirement| {
+                Ok(match requirement.metric.as_deref() {
+                    Some("a") => raw_schema_with_fields(fields.0),
+                    _ => raw_schema_with_fields(fields.1),
+                })
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect_err(&format!("`{query}` over {fields:?} fields compiled"));
+        let expected = format!("{} and {} fields", fields.0, fields.1);
+        assert!(
+            matches!(&error, DataFusionError::NotImplemented(message) if message.contains(&expected)),
+            "{query}: {error}"
+        );
+    }
 }
 
 /// A statement with no vector has nothing to read, so it is refused: a tree reads a scan and reports

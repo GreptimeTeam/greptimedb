@@ -1415,6 +1415,16 @@ enum PairKernel {
     Set(BoundSetOp),
 }
 
+impl PairKernel {
+    /// What the node running this kernel is called in an error.
+    fn node(&self) -> &'static str {
+        match self {
+            Self::Binary(_) => "the binary node",
+            Self::Set(_) => "the set node",
+        }
+    }
+}
+
 /// What side `index` is called in an error.
 fn side_name(index: usize) -> &'static str {
     match index {
@@ -1426,8 +1436,8 @@ fn side_name(index: usize) -> &'static str {
 /// The node a [`RetainedInput`] belongs to, which its messages name; formatted only when one is.
 #[derive(Clone, Copy)]
 enum Reader {
-    /// The operand at `side` of a binary node.
-    Operand { side: usize },
+    /// The operand at `side` of `node`, a binary or set node.
+    Operand { side: usize, node: &'static str },
     /// The input of a vector operation.
     Vector,
 }
@@ -1435,14 +1445,14 @@ enum Reader {
 impl Reader {
     fn owner(self) -> String {
         match self {
-            Self::Operand { .. } => "the binary node".to_string(),
+            Self::Operand { node, .. } => node.to_string(),
             Self::Vector => "the vector operation".to_string(),
         }
     }
 
     fn input(self) -> String {
         match self {
-            Self::Operand { side } => format!("its {} operand", side_name(side)),
+            Self::Operand { side, .. } => format!("its {} operand", side_name(side)),
             Self::Vector => "its input".to_string(),
         }
     }
@@ -1456,6 +1466,14 @@ impl BinaryRuntime {
             schemas,
             operands: [RetainedInput::default(), RetainedInput::default()],
             computed: false,
+        }
+    }
+
+    /// The reader of the operand at `side`, which names this node in its messages.
+    fn reader(&self, side: usize) -> Reader {
+        Reader::Operand {
+            side,
+            node: self.kernel.node(),
         }
     }
 
@@ -1480,8 +1498,8 @@ impl BinaryRuntime {
         let [left, right] = &self.operands;
         let [left_schema, right_schema] = &self.schemas;
         Ok([
-            left.assemble(left_schema, Reader::Operand { side: 0 })?,
-            right.assemble(right_schema, Reader::Operand { side: 1 })?,
+            left.assemble(left_schema, self.reader(0))?,
+            right.assemble(right_schema, self.reader(1))?,
         ])
     }
 
@@ -1503,7 +1521,7 @@ impl BinaryRuntime {
     /// remaining rows were never read.
     fn closed(&self) -> Result<()> {
         for (side, operand) in self.operands.iter().enumerate() {
-            operand.ensure_closed(Reader::Operand { side })?;
+            operand.ensure_closed(self.reader(side))?;
         }
         Ok(())
     }
@@ -1520,15 +1538,17 @@ impl BinaryRuntime {
         validate_binary_operand(schema.as_ref(), std::slice::from_ref(&chunk.series)).map_err(
             |error| {
                 DataFusionError::Execution(format!(
-                    "the binary node rejected its {} operand: {error}",
+                    "{} rejected its {} operand: {error}",
+                    self.kernel.node(),
                     side_name(side)
                 ))
             },
         )?;
+        let reader = self.reader(side);
         let Some(operand) = self.operands.get_mut(side) else {
             return Err(no_binary());
         };
-        operand.retain(chunk, Reader::Operand { side })
+        operand.retain(chunk, reader)
     }
 
     /// Runs the kernel over both operands and returns the series it produced.
@@ -1558,7 +1578,10 @@ impl BinaryRuntime {
         // retained chunks hold, so what they add is metadata, and it is reserved before it exists:
         // the assembly allocates as it goes, and a figure read from it afterwards would be a figure
         // the pool never admitted.
-        let assembly = self.assembly_bytes().ok_or_else(reservation_overflow)?;
+        let node = self.kernel.node();
+        let assembly = self
+            .assembly_bytes()
+            .ok_or_else(|| reservation_overflow(node))?;
         buffer.grow(assembly)?;
         let assembled = match self.assemble() {
             Ok(assembled) => assembled,
@@ -1583,7 +1606,7 @@ impl BinaryRuntime {
                 let bytes = retained
                     .checked_add(assembly)
                     .and_then(|held| held.checked_add(workspace))
-                    .ok_or_else(reservation_overflow)?;
+                    .ok_or_else(|| reservation_overflow(node))?;
                 buffer.resize(bytes)
             };
             match &self.kernel {
@@ -3492,9 +3515,10 @@ impl NodeState {
         chunk: NativeChunk,
     ) -> Result<()> {
         let NativeChunk::Evaluated(chunk) = chunk else {
-            return Err(DataFusionError::Execution(
-                "the binary node consumes evaluated chunks, not raw samples".to_string(),
-            ));
+            return Err(DataFusionError::Execution(format!(
+                "{} consumes evaluated chunks, not raw samples",
+                binary.kernel.node()
+            )));
         };
         // The figure is read before the chunk is retained, because reserving after the fact would be
         // reserving for memory the node already holds.
@@ -4649,16 +4673,15 @@ fn broadcast_op(matching: &BinaryMatching) -> Result<BroadcastOp> {
 
 /// The error for a reservation the platform cannot express.
 ///
-/// The binary node reserves its retained operands and the kernel's live workspace together, and
-/// the kernel reports the second as a size of its own. A sum of the two that does not fit an
+/// A binary or set node reserves its retained operands and the kernel's live workspace together,
+/// and the kernel reports the second as a size of its own. A sum of the two that does not fit an
 /// address space cannot be reserved, so the execution is refused rather than run with a figure
 /// that wrapped.
-fn reservation_overflow() -> DataFusionError {
-    DataFusionError::Execution(
-        "the operands and the kernel's workspace of the binary node do not fit one address space: \
-         the bytes it would reserve overflow"
-            .to_string(),
-    )
+fn reservation_overflow(node: &str) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the operands and the kernel's workspace of {node} do not fit one address space: the bytes \
+         it would reserve overflow"
+    ))
 }
 
 fn series_error(error: datatypes::error::Error) -> DataFusionError {

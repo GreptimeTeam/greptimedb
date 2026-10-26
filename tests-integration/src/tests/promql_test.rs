@@ -2922,6 +2922,48 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
     }
 }
 
+/// A set operator over a two-field table keeps the existing plan, which refuses it: neither
+/// Prometheus nor that plan defines per-field presence.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_multi_field_set_operation_keeps_the_legacy_plan() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_multi_field_set",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_two_fields (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, \
+         a DOUBLE, b DOUBLE)",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "INSERT INTO native_two_fields VALUES ('h0', 5000, 1, 2)",
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = "TQL EVAL (5, 5, '1s') native_two_fields and native_two_fields";
+    observer.clear();
+    let native = instance
+        .do_query(sql, native_query_context(true, 4))
+        .await
+        .remove(0);
+    assert!(
+        observer.fused().is_none(),
+        "the set operation was planned natively"
+    );
+    let legacy = instance
+        .do_query(sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    let (Err(native), Err(legacy)) = (native, legacy) else {
+        panic!("the existing plan answered a multi-field set operation");
+    };
+    assert_eq!(native.to_string(), legacy.to_string());
+}
+
 /// Repeated selectors retain correct binary results while using independent physical scans.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_repeated_selector_binary_uses_independent_scans() {
