@@ -38,7 +38,11 @@
 - `[case]` is report metadata only. `[scenario]` is the executable regression
   configuration and must include `kind`, data layout, tables, queries, and
   thresholds. Rust owns case schema, defaults, validation, and normalized plan
-  output through `query_perf_fixture plan`. `.github/scripts/query-regression-run.py`
+  output through `query_perf_fixture plan`. Exception: the exact external
+  descriptor `tests/perf/native_promql_vmbench_lite/benchmark.toml` dispatches
+  through its fixed Python adapter for pinned O11ybench standalone lanes; it is
+  not Rust scenario DSL. See its README for ownership and workflow commands.
+  `.github/scripts/query-regression-run.py`
   owns process lifecycle; `query_regression_runner` consumes normalized plans,
   frontend endpoints, direct-SST materialization requests, and OTLP target/finalize
   requests.

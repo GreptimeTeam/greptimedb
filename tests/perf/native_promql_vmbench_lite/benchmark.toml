@@ -1,0 +1,15 @@
+schema_version = 1
+o11ybench_sha = "46dfc3635ed1da84914bef50f4c488023747dd52"
+tsdg_sha = "8c9b9927fbdb140e96d9d208facb7a7369a96187"
+phase = "smoke"
+start = "2025-03-21T09:50:00Z"
+end = "2025-03-21T10:20:00Z"
+step = "30s"
+scan_partitions = 4
+serial_warmup = 1
+serial_tries = 2
+duration_seconds = 2
+warmup_seconds = 1
+concurrencies = [1, 4, 8]
+rtol = 1e-10
+atol = 1e-12

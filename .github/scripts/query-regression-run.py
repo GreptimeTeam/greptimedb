@@ -24,6 +24,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -549,6 +550,21 @@ def run_case(args: argparse.Namespace, case_path: Path, work_dir: Path) -> int:
     candidate_bin = args.candidate_bin or args.candidate_src / "target" / target_dir / "greptime"
     fixture_generator = args.fixture_generator or args.candidate_src / "target" / target_dir / "query_perf_fixture"
     runner = args.runner or args.candidate_src / "target" / target_dir / "query_regression_runner"
+    external_descriptor = (
+        args.candidate_src / "tests/perf/native_promql_vmbench_lite/benchmark.toml"
+    ).resolve()
+    if case_path.resolve() == external_descriptor:
+        command = [
+            sys.executable,
+            str((args.candidate_src / ".github/scripts/native-promql-vmbench-lite.py").resolve()),
+            "--descriptor", str(case_path.resolve()),
+            "--candidate-bin", str(candidate_bin.resolve()),
+            "--candidate-ref", args.candidate_ref,
+            "--base-ref", args.base_ref,
+            "--work-dir", str(work_dir.resolve()),
+            "--run-url", args.run_url,
+        ]
+        return subprocess.run(command, check=False).returncode
     plan = load_plan(fixture_generator, case_path)
     scenario = plan.get("scenario")
     kind = scenario.get("kind") if isinstance(scenario, dict) else None
