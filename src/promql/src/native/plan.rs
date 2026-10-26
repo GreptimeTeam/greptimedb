@@ -190,6 +190,31 @@ pub struct BoundMap {
     pub ops: Arc<[MapOp]>,
 }
 
+/// A math function whose scalar parameters are bound as nodes, because at least one of them varies
+/// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
+/// function is a [`MathOp`] in a [`BoundMap`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterizedOp {
+    /// `round(v, to_nearest)`.
+    Round,
+    /// `clamp(v, min, max)`.
+    Clamp,
+    /// `clamp_min(v, min)`.
+    ClampMin,
+    /// `clamp_max(v, max)`.
+    ClampMax,
+}
+
+impl ParameterizedOp {
+    /// How many parameters the function reads after its vector.
+    pub fn arity(self) -> usize {
+        match self {
+            Self::Clamp => 2,
+            Self::Round | Self::ClampMin | Self::ClampMax => 1,
+        }
+    }
+}
+
 /// One operation of a map, applied to each series on its own: math over its float values, a
 /// function of its native histograms, or a change of its labels. Each can give two series one label
 /// set, which is why all live in a map.
@@ -354,6 +379,13 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundMap,
     },
+    /// A point-wise math function over its input whose parameters are scalar nodes, in argument
+    /// order.
+    ParameterizedMap {
+        input: Box<NativeNode>,
+        op: ParameterizedOp,
+        parameters: Vec<NativeNode>,
+    },
     /// The timestamp of an evaluated input, in seconds.
     Timestamp { input: Box<NativeNode> },
     /// An aggregate over its input.
@@ -422,6 +454,9 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
                 true
             }
         }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => reads_across_series(input) || parameters.iter().any(reads_across_series),
         NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::ScalarOf { .. }
@@ -575,6 +610,38 @@ impl NativeNode {
                 };
                 if op.ops.is_empty() {
                     return Err(invalid("a map holds no operation"));
+                }
+                ensure_samples(&self.output, "a map")?;
+                ensure_same_fields(&input.output, &self.output, "a map")?;
+                ensure_grid(&self.output, input_grid, "a map")?;
+            }
+            NativeExpr::ParameterizedMap {
+                input,
+                op,
+                parameters,
+            } => {
+                input.validate()?;
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a map consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                if parameters.len() != op.arity() {
+                    return Err(invalid(&format!(
+                        "{op:?} reads {} parameter(s), but {} are bound",
+                        op.arity(),
+                        parameters.len()
+                    )));
+                }
+                for parameter in parameters {
+                    parameter.validate()?;
+                    if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
+                    {
+                        return Err(invalid(
+                            "a map parameter is not a scalar on its input's grid",
+                        ));
+                    }
                 }
                 ensure_samples(&self.output, "a map")?;
                 ensure_same_fields(&input.output, &self.output, "a map")?;

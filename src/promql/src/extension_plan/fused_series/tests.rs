@@ -366,6 +366,14 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
             }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                for parameter in parameters {
+                    *parameter = rewrite(parameter, orderings, seen);
+                }
+            }
         }
         NativeNode {
             expr,

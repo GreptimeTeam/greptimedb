@@ -1963,6 +1963,47 @@ async fn native_fused_plans_dynamic_scalars_over_one_region() {
     }
 }
 
+/// A map whose parameter reads no data runs per partition over its scan, and one whose parameter
+/// is `scalar(v)` needs a table of one region. A partitioned table and three selectors keep the
+/// existing plan, which cannot plan `scalar(v)` as a function parameter and says so.
+#[tokio::test]
+async fn native_fused_plans_varying_map_parameters() {
+    let plan = build_native_fused_plan("round(some_metric, time() / 1e9)", true).await;
+    let fused = find_fused_series(&plan).expect("a data-free parameter uses the native route");
+    assert_eq!(1, fused.children().len());
+    // Such a map is still one series at a time, so it can be one side of a two-scan match.
+    let query = "round(some_metric, time() / 1e9) - on(tag_0) some_metric";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("the match uses the native route");
+    assert_eq!(2, fused.children().len(), "{query}");
+
+    let query = "clamp_min(some_metric, scalar(some_metric))";
+    let plan = build_native_fused_plan(query, true).await;
+    assert!(find_fused_series(&plan).is_some(), "{query}");
+
+    for (query, partitions) in [
+        ("clamp_min(some_metric, scalar(some_metric))", vec![0]),
+        (
+            "clamp(some_metric, scalar(some_metric), scalar(some_metric))",
+            vec![],
+        ),
+    ] {
+        let error = PromPlanner::stmt_to_plan_with_annotations(
+            native_engine_provider(partitions).await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+            None,
+            true,
+        )
+        .await
+        .expect_err("the existing planner refuses a scalar(v) parameter");
+        assert!(
+            error.to_string().contains("Cannot accept multiple vector"),
+            "{query}: {error}"
+        );
+    }
+}
+
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
 #[tokio::test]
 async fn native_fused_rate_plans_to_a_fused_series_node() {
@@ -2542,6 +2583,7 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 | NativeExpr::EvalTime { .. }
                 | NativeExpr::ScalarOf { .. }
                 | NativeExpr::VectorOf { .. }
+                | NativeExpr::ParameterizedMap { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Vector { .. } => {}
             }

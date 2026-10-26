@@ -4364,3 +4364,83 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     );
     assert_eq!(rows, expected_rows(&[(0, "", nan)]));
 }
+
+/// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
+/// parameter that reads no data runs per partition over the scan; `scalar(v)` runs as one execution
+/// over every partition. The existing planner refuses any parameter that is not a number literal,
+/// so the answers are checked against Prometheus' alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_map_with_varying_parameters_matches_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_varying_parameter_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dyn_param (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO dyn_param (host, ts, val) VALUES \
+         ('a', 0, 1), ('a', 10000, 2), ('a', 20000, 3), ('b', 20000, 10), ('b', 30000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // `scalar(dyn_param{host="a"})` is 1, 2, 3 and then NaN; Go's `math.Max` answers NaN for it.
+    let sql = "TQL EVAL (0, 40, '10s', '5s') clamp_min(dyn_param, scalar(dyn_param{host=\"a\"}))";
+    observer.clear();
+    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 2);
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    assert_eq!(
+        native,
+        expected_rows(&[
+            (0, "a", 1.0),
+            (10_000, "a", 2.0),
+            (20_000, "a", 3.0),
+            (20_000, "b", 10.0),
+            (30_000, "b", f64::NAN),
+        ])
+    );
+    let legacy = instance
+        .do_query(sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    assert!(
+        legacy.is_err(),
+        "the existing planner refuses `scalar(v)` as a parameter"
+    );
+
+    // The nearest is 1, 2, 4 and 8 at the four steps that hold samples.
+    let sql = "TQL EVAL (0, 40, '10s', '5s') round(dyn_param, 2 ^ (time() / 10))";
+    observer.clear();
+    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 1);
+    assert_eq!(plan.output_partitioning().partition_count(), 4);
+    assert_eq!(
+        native,
+        expected_rows(&[
+            (0, "a", 1.0),
+            (10_000, "a", 2.0),
+            (20_000, "a", 4.0),
+            (20_000, "b", 12.0),
+            (30_000, "b", 24.0),
+        ])
+    );
+    let legacy = instance
+        .do_query(sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    assert!(
+        legacy.is_err(),
+        "the existing planner refuses the parameter"
+    );
+}

@@ -762,6 +762,14 @@ pub(crate) fn whole_input_scalar(root: &NativeNode) -> bool {
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::VectorOf { input } => scalar_only(input, found),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                scalar_only(input, found)
+                    && parameters
+                        .iter()
+                        .all(|parameter| scalar_only(parameter, found))
+            }
             NativeExpr::Binary {
                 left,
                 right,
@@ -806,6 +814,10 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
             matches!(input.expr, NativeExpr::Input(_))
         }
         NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => pointwise_operand(input),
+        // A parameter that reads no data has the same value in every execution.
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => pointwise_operand(input) && parameters.iter().all(data_free),
         // A scalar that reads no data is broadcast over the vector side's positions. Two vectors
         // are a match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
@@ -1053,6 +1065,7 @@ mod tests {
                 | NativeExpr::EvalTime { .. }
                 | NativeExpr::ScalarOf { .. }
                 | NativeExpr::VectorOf { .. }
+                | NativeExpr::ParameterizedMap { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Vector { .. } => {}
             }

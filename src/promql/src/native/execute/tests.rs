@@ -48,7 +48,7 @@ use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -1074,6 +1074,107 @@ fn scalars_combine_point_by_point_when_one_varies() {
     }
 }
 
+fn parameterized(
+    input: NativeNode,
+    op: ParameterizedOp,
+    parameters: Vec<NativeNode>,
+) -> NativeNode {
+    let output = input.output.clone();
+    NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }
+}
+
+/// Runs `root` over one vector series `x{job="a"}` on input 0 and the series `y` its parameters read
+/// on input 1, with the vector pushed first, and returns the one answer.
+fn run_parameterized(
+    root: NativeNode,
+    vector: Vec<Option<f64>>,
+    y: Vec<Option<f64>>,
+) -> EvaluatedChunk {
+    let schema = evaluated_schema(root.output.grid().cloned().unwrap());
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let source = |index| execution.state().input_ids(index).next().unwrap();
+    let (vector_input, scalar_input) = (source(0), source(1));
+    execution
+        .push_evaluated(
+            vector_input,
+            evaluated_chunk_of(&schema, named_metric("x", "a"), 0, vector, true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "the vector waits for its parameters"
+    );
+    assert!(
+        execution.state().reserved_bytes() > 0,
+        "the held chunk is charged"
+    );
+    execution
+        .push_evaluated(
+            scalar_input,
+            evaluated_chunk_of(&schema, named_metric("y", "b"), 0, y, true),
+        )
+        .unwrap();
+    let mut chunks = execution.finish().unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(pool.reserved(), 0);
+    chunks.remove(0)
+}
+
+/// A parameter is read at each point, as Prometheus reads it at each step: `round` rounds every
+/// point to its own nearest, and a NaN nearest makes that point NaN.
+#[test]
+fn a_map_reads_its_scalar_parameter_at_each_point() {
+    let grid = grid(0, 10, 3);
+    let root = parameterized(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        ParameterizedOp::Round,
+        vec![scalar_of(evaluated_input_with_source_index(grid, 1))],
+    );
+    let chunk = run_parameterized(
+        root,
+        vec![Some(12.4), Some(17.0), Some(5.0)],
+        vec![Some(1.0), Some(10.0), Some(f64::NAN)],
+    );
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+    let values = sample_values(&chunk);
+    assert_eq!(&values[..2], &[Some(12.0), Some(20.0)]);
+    assert!(values[2].is_some_and(f64::is_nan), "{values:?}");
+}
+
+/// `clamp` with a maximum below its minimum at a point has no value there, which is Prometheus'
+/// empty vector for that step; a constant parameter beside a varying one is read as the constant.
+#[test]
+fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
+    let grid = grid(0, 10, 3);
+    let root = parameterized(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        ParameterizedOp::Clamp,
+        vec![
+            scalar(0.0, Arc::clone(&grid)),
+            scalar_of(evaluated_input_with_source_index(grid, 1)),
+        ],
+    );
+    let chunk = run_parameterized(
+        root,
+        vec![Some(7.0), Some(3.0), Some(-2.0)],
+        vec![Some(5.0), Some(-1.0), Some(10.0)],
+    );
+    assert_eq!(
+        decided(std::slice::from_ref(&chunk)),
+        vec![(0, Some(5.0)), (2, Some(0.0))]
+    );
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }
@@ -1190,6 +1291,14 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
+            }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                walk(input, out);
+                for parameter in parameters {
+                    walk(parameter, out);
+                }
             }
         }
     }

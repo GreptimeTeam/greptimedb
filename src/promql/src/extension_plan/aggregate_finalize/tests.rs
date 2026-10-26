@@ -551,6 +551,14 @@ fn the_prefix_and_the_suffix_each_name_their_own_source_zero() {
                 inputs(left, found);
                 inputs(right, found);
             }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                inputs(input, found);
+                for parameter in parameters {
+                    inputs(parameter, found);
+                }
+            }
         }
     }
 

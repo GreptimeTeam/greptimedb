@@ -29,7 +29,7 @@ use promql::map_time::DateFunction;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundSetOp,
-    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use promql::range_eval::RangeFunction;
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
@@ -2046,6 +2046,67 @@ fn scalar_of_a_vector_binds_a_scalar_that_is_broadcast_where_it_was_written() {
     assert!(matches!(left.expr, NativeExpr::EvalTime { date: None }));
     assert!(matches!(right.expr, NativeExpr::Instant { .. }));
     assert_eq!(matching.op, BinaryOp::Sub);
+}
+
+/// `round` and the `clamp` functions bind their parameters as scalar nodes, in argument order, when
+/// any of them varies, and keep the constant map otherwise; each selector is bound in the order it
+/// was written.
+#[test]
+fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
+    let compiled = |query: &str| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+    };
+    let parts = |tree: &NativeTree| match &tree.root().expr {
+        NativeExpr::ParameterizedMap {
+            input,
+            op,
+            parameters,
+        } => (input.as_ref().clone(), *op, parameters.clone()),
+        other => panic!("expected a parameterized map, got {other:?}"),
+    };
+
+    let tree = compiled("round(x, scalar(y))").tree;
+    let (input, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::Round);
+    assert!(matches!(input.expr, NativeExpr::Instant { .. }));
+    assert!(matches!(
+        parameters.as_slice(),
+        [NativeNode {
+            expr: NativeExpr::ScalarOf { .. },
+            ..
+        }]
+    ));
+
+    let tree = compiled("clamp(x, 0, time())").tree;
+    let (_, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::Clamp);
+    assert_eq!(constant(&parameters[0]), Some(0.0));
+    assert!(matches!(
+        parameters[1].expr,
+        NativeExpr::EvalTime { date: None }
+    ));
+
+    let compiled_three = compiled("clamp(x, scalar(a), scalar(b))");
+    let (_, op, parameters) = parts(&compiled_three.tree);
+    assert_eq!(op, ParameterizedOp::Clamp);
+    assert_eq!(parameters.len(), 2);
+    let names = compiled_three
+        .inputs
+        .iter()
+        .map(|input| input.requirement.metric.clone().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["x", "a", "b"]);
+
+    let tree = compiled("round(x, 2 * 5)").tree;
+    assert!(matches!(
+        map_op(tree.root()),
+        MathOp::Round { nearest } if nearest == 10.0
+    ));
 }
 
 /// A scalar holds one value per point, so `scalar(v)` over two value columns is refused rather
@@ -4917,6 +4978,14 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 set_input_source(left, source);
                 set_input_source(right, source);
+            }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                set_input_source(input, source);
+                for parameter in parameters {
+                    set_input_source(parameter, source);
+                }
             }
             NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
         }

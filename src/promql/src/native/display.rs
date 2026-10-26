@@ -28,7 +28,7 @@ use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::RangeFunction;
 use crate::select::SortOrder;
@@ -101,6 +101,12 @@ fn describe(node: &NativeNode) -> String {
         }
         NativeExpr::ScalarOf { .. } => "scalar()".to_string(),
         NativeExpr::VectorOf { .. } => "vector()".to_string(),
+        NativeExpr::ParameterizedMap { op, .. } => match op {
+            ParameterizedOp::Round => "round".to_string(),
+            ParameterizedOp::Clamp => "clamp".to_string(),
+            ParameterizedOp::ClampMin => "clamp_min".to_string(),
+            ParameterizedOp::ClampMax => "clamp_max".to_string(),
+        },
         NativeExpr::Instant { op, .. } => {
             let mut text = format!(
                 "lookback {}ms offset {} on grid {}",
@@ -378,6 +384,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::EvalTime { .. } => "EvalTime",
         NativeExpr::ScalarOf { .. } => "ScalarOf",
         NativeExpr::VectorOf { .. } => "VectorOf",
+        NativeExpr::ParameterizedMap { .. } => "ParameterizedMap",
         NativeExpr::Set { .. } => "Set",
     }
 }
@@ -405,6 +412,14 @@ fn display_node(
         | NativeExpr::Vector { input, .. }
         | NativeExpr::ScalarOf { input }
         | NativeExpr::VectorOf { input } => display_node(f, input, depth + 1, "input")?,
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => {
+            display_node(f, input, depth + 1, "input")?;
+            for parameter in parameters {
+                display_node(f, parameter, depth + 1, "parameter")?;
+            }
+        }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             display_node(f, left, depth + 1, "left")?;
             display_node(f, right, depth + 1, "right")?;

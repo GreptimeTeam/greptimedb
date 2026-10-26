@@ -45,8 +45,9 @@ use crate::instant_eval::{
     select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
 };
 use crate::map::{
-    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, ScalarSeriesOperand, drop_metric_name,
-    map_arithmetic, map_arithmetic_series, map_compare, map_compare_series, map_math,
+    ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
+    drop_metric_name, map_arithmetic, map_arithmetic_series, map_compare, map_compare_series,
+    map_math, map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::AggregateRuntime;
@@ -54,7 +55,7 @@ use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
 use crate::native::plan::{
     BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    NativeTree, NativeType, ParameterizedOp,
 };
 #[cfg(test)]
 pub(crate) use crate::native::runs::absorb_rebuilds;
@@ -1951,10 +1952,72 @@ struct BroadcastRuntime {
     /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
     /// on. A chunk of the vector side is checked against it by the kernel itself.
     sample_schema: Arc<SeriesSchema>,
-    /// Vector chunks that arrived before a varying scalar did, with the bytes each is charged at.
+    /// Vector chunks that arrived before a varying scalar did, and the scalar's value.
+    held: HeldForScalars,
+}
+
+/// What a node computed with varying scalars holds until they have arrived: the vector chunks
+/// that came first, and the bytes those chunks and the scalars' values are charged at.
+///
+/// A point of the vector can only be computed with the scalars' values at that point, and a
+/// scalar such as `scalar(v)` arrives only once its whole input has ended.
+#[derive(Default)]
+struct HeldForScalars {
     pending: VecDeque<(EvaluatedChunk, usize)>,
-    /// The bytes the pending chunks and the scalar's value hold.
-    held: usize,
+    bytes: usize,
+}
+
+impl HeldForScalars {
+    /// The next held vector chunk, no longer charged here.
+    fn pop(&mut self) -> Option<EvaluatedChunk> {
+        let (chunk, bytes) = self.pending.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(bytes);
+        Some(chunk)
+    }
+}
+
+/// What a map with scalar parameters holds: its function and output layout, each parameter's
+/// value once it has arrived, and the vector chunks that arrived before them.
+struct ParameterizedMapRuntime {
+    op: ParameterizedOp,
+    schema: Arc<SeriesSchema>,
+    /// A constant parameter's value, which its node does not hand over as a chunk.
+    literals: Vec<Option<f64>>,
+    /// Each parameter's one unlabelled series, in argument order.
+    values: Vec<Option<Series>>,
+    held: HeldForScalars,
+}
+
+impl ParameterizedMapRuntime {
+    fn ready(&self) -> bool {
+        self.values.iter().all(Option::is_some)
+    }
+
+    /// Applies the function to one chunk with each parameter read at each point.
+    fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
+        let value = |index: usize| {
+            self.values
+                .get(index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "the map was applied before its parameters arrived".to_string(),
+                    )
+                })
+        };
+        let function = match self.op {
+            ParameterizedOp::Round => ParameterizedMath::Round {
+                to_nearest: value(0)?,
+            },
+            ParameterizedOp::Clamp => ParameterizedMath::Clamp {
+                min: value(0)?,
+                max: value(1)?,
+            },
+            ParameterizedOp::ClampMin => ParameterizedMath::ClampMin { min: value(0)? },
+            ParameterizedOp::ClampMax => ParameterizedMath::ClampMax { max: value(0)? },
+        };
+        map_math_with_parameters(&self.schema, &chunk.series, function)
+    }
 }
 
 impl BroadcastRuntime {
@@ -2268,6 +2331,12 @@ enum RuntimeOp {
         map: Option<MapRuntime>,
         state: NodeState,
     },
+    ParameterizedMap {
+        input: Box<RuntimeNode>,
+        parameters: Vec<RuntimeNode>,
+        map: Option<ParameterizedMapRuntime>,
+        state: NodeState,
+    },
     Timestamp {
         input: Box<RuntimeNode>,
         schema: Option<Arc<SeriesSchema>>,
@@ -2480,6 +2549,44 @@ impl RuntimeNode {
                     true,
                 )
             }
+            NativeExpr::ParameterizedMap {
+                input,
+                op,
+                parameters,
+            } => {
+                let (child, _) = Self::build(input, pool, inputs)?;
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("map does not produce samples".to_string())
+                })?;
+                let literals = parameters
+                    .iter()
+                    .map(|parameter| match &parameter.expr {
+                        NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                        _ => None,
+                    })
+                    .collect();
+                let nodes = parameters
+                    .iter()
+                    .map(|parameter| Self::build(parameter, pool, inputs).map(|(node, _)| node))
+                    .collect::<Result<Vec<_>>>()?;
+                let mut state = NodeState::new("native.map", Arc::clone(&metrics), pool);
+                state.emitted = Some(Emitted::default());
+                (
+                    RuntimeOp::ParameterizedMap {
+                        input: Box::new(child),
+                        parameters: nodes,
+                        map: Some(ParameterizedMapRuntime {
+                            op: *op,
+                            schema,
+                            literals,
+                            values: vec![None; parameters.len()],
+                            held: HeldForScalars::default(),
+                        }),
+                        state,
+                    },
+                    true,
+                )
+            }
             NativeExpr::Timestamp { input } => {
                 let (child, _) = Self::build(input, pool, inputs)?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
@@ -2668,6 +2775,14 @@ impl RuntimeNode {
                 left.register_metrics(&format!("{name}.left"), set, partition);
                 right.register_metrics(&format!("{name}.right"), set, partition);
             }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.register_metrics(&format!("{name}.input"), set, partition);
+                for (index, parameter) in parameters.iter().enumerate() {
+                    parameter.register_metrics(&format!("{name}.parameter{index}"), set, partition);
+                }
+            }
         }
     }
 
@@ -2697,6 +2812,19 @@ impl RuntimeNode {
                 .size()
                 .saturating_add(left.reserved_bytes())
                 .saturating_add(right.reserved_bytes()),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                state,
+                ..
+            } => parameters.iter().fold(
+                state
+                    .buffer
+                    .reservation
+                    .size()
+                    .saturating_add(input.reserved_bytes()),
+                |total, parameter| total.saturating_add(parameter.reserved_bytes()),
+            ),
         }
     }
 }
@@ -2849,6 +2977,62 @@ impl RuntimeNode {
                     }
                 }
             }
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                let Some(operation) = map.as_mut() else {
+                    return Err(no_map());
+                };
+                // Every parameter is read whole first, as a broadcast reads its scalar; a constant
+                // one is materialized from its binding.
+                for (index, parameter) in parameters.iter_mut().enumerate() {
+                    let slot = &mut operation.values[index];
+                    if slot.is_some() {
+                        continue;
+                    }
+                    if let Some(value) = operation.literals[index] {
+                        let grid = operation.schema.eval_grid.clone().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "a map produces values without a grid".to_string(),
+                            )
+                        })?;
+                        let chunk = NativeChunk::Evaluated(scalar_chunk(grid, value)?);
+                        state.hold_scalar(&mut operation.held, slot, chunk)?;
+                        continue;
+                    }
+                    while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
+                        state.hold_scalar(&mut operation.held, slot, chunk)?;
+                    }
+                }
+                loop {
+                    if !operation.ready() {
+                        let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                            return Ok(None);
+                        };
+                        state.hold_pending(&mut operation.held, chunk)?;
+                        continue;
+                    }
+                    let chunk = match operation.held.pop() {
+                        Some(chunk) => chunk,
+                        None => match input.pull(inputs, inputs_finished)? {
+                            Some(NativeChunk::Evaluated(chunk)) => chunk,
+                            Some(NativeChunk::Raw(_)) => {
+                                return Err(DataFusionError::Execution(
+                                    "the map node consumes an evaluated chunk, not raw samples"
+                                        .to_string(),
+                                ));
+                            }
+                            None => return Ok(None),
+                        },
+                    };
+                    if let Some(output) = state.parameterized_map(operation, chunk)? {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
             RuntimeOp::Timestamp {
                 input,
                 schema,
@@ -2918,9 +3102,11 @@ impl RuntimeNode {
                 } else {
                     (&mut **right, &mut **left)
                 };
-                if operation.awaits_scalar() {
+                if let BroadcastScalar::Dynamic { value, .. } = &mut operation.scalar
+                    && value.is_none()
+                {
                     while let Some(chunk) = scalar.pull(inputs, inputs_finished)? {
-                        state.retain_scalar(operation, chunk)?;
+                        state.hold_scalar(&mut operation.held, value, chunk)?;
                     }
                 }
                 // An operation that empties every position yields no chunk, and the node asks its
@@ -2930,14 +3116,11 @@ impl RuntimeNode {
                         let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
                             return Ok(None);
                         };
-                        state.retain_pending(operation, chunk)?;
+                        state.hold_pending(&mut operation.held, chunk)?;
                         continue;
                     }
-                    let chunk = match operation.pending.pop_front() {
-                        Some((chunk, bytes)) => {
-                            operation.held = operation.held.saturating_sub(bytes);
-                            NativeChunk::Evaluated(chunk)
-                        }
+                    let chunk = match operation.held.pop() {
+                        Some(chunk) => NativeChunk::Evaluated(chunk),
                         None => match vector.pull(inputs, inputs_finished)? {
                             Some(chunk) => chunk,
                             None => return Ok(None),
@@ -3013,6 +3196,19 @@ impl RuntimeNode {
             RuntimeOp::EvalTime {
                 produced, state, ..
             } => *produced && state.queued.is_empty(),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && map
+                        .as_ref()
+                        .is_some_and(|operation| operation.held.pending.is_empty())
+                    && input.settled(inputs)
+                    && parameters.iter().all(|parameter| parameter.settled(inputs))
+            }
             RuntimeOp::VectorOf {
                 input,
                 literal,
@@ -3082,7 +3278,7 @@ impl RuntimeNode {
                 state.queued.is_empty()
                     && broadcast
                         .as_ref()
-                        .is_some_and(|operation| operation.pending.is_empty())
+                        .is_some_and(|operation| operation.held.pending.is_empty())
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
@@ -3099,6 +3295,15 @@ impl RuntimeNode {
     fn flush_ready_merges(&mut self, inputs: &[InputSlot]) -> Result<bool> {
         match &mut self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(false),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                for parameter in parameters {
+                    flushed |= parameter.flush_ready_merges(inputs)?;
+                }
+                Ok(flushed)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
@@ -3137,6 +3342,9 @@ impl RuntimeNode {
     fn any_merge_pending(&self) -> bool {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => false,
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => input.any_merge_pending() || parameters.iter().any(RuntimeNode::any_merge_pending),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
@@ -3160,6 +3368,12 @@ impl RuntimeNode {
     fn unclosed(&self) -> Result<()> {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.unclosed()?;
+                parameters.iter().try_for_each(RuntimeNode::unclosed)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
@@ -3200,6 +3414,16 @@ impl RuntimeNode {
     fn finish_windows(&mut self) -> Result<()> {
         match &mut self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                // Every evaluator is finished even after one fails, as for a binary node.
+                let first = input.finish_windows();
+                parameters
+                    .iter_mut()
+                    .map(RuntimeNode::finish_windows)
+                    .fold(first, Result::and)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
@@ -3233,6 +3457,19 @@ impl RuntimeNode {
             // and a scalar holds nothing at all.
             RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
             RuntimeOp::EvalTime { state, .. } => state.release(),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                *map = None;
+                state.release();
+                input.release();
+                for parameter in parameters {
+                    parameter.release();
+                }
+            }
             RuntimeOp::VectorOf { input, state, .. } => {
                 state.release();
                 input.release();
@@ -3563,6 +3800,48 @@ impl NodeState {
         Ok(output)
     }
 
+    /// Maps one evaluated chunk with its parameters read at each point, keeping its axis and its
+    /// closing.
+    ///
+    /// `None` means no point kept a value and the chunk does not close its series. What this node
+    /// holds afterwards is the label sets it handed out and what it holds for its parameters.
+    fn parameterized_map(
+        &mut self,
+        map: &ParameterizedMapRuntime,
+        chunk: EvaluatedChunk,
+    ) -> Result<Option<EvaluatedChunk>> {
+        let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
+        self.buffer.grow(evaluated_bytes(&chunk))?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let outcome = {
+            let _timer = metrics.timer();
+            map.apply(&chunk)
+        };
+        metrics.record_input(1, positions);
+        if closing {
+            metrics.record_completed_series(1);
+        }
+        let output = match outcome? {
+            Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
+            // A closing chunk is handed over even when no point kept a value, because a consumer
+            // tells "nothing more here" from "no more input" by that chunk alone.
+            None if closing => {
+                let metric = drop_metric_name(&chunk.series.metric)?;
+                let empty = no_row_series(&map.schema, &chunk.series, metric)?;
+                Some(EvaluatedChunk::try_new(empty, true)?)
+            }
+            None => None,
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+            self.track(output)?;
+        }
+        let emitted = self.emitted_bytes();
+        self.buffer.resize(emitted.saturating_add(map.held.bytes))?;
+        Ok(output)
+    }
+
     /// Projects evaluation timestamps from one evaluated chunk, preserving its closing.
     fn timestamp(
         &mut self,
@@ -3666,55 +3945,48 @@ impl NodeState {
         // The chunk is gone: the label sets this node has handed out, the chunks it holds for a
         // scalar and the scalar's value are what is left.
         let emitted = self.emitted_bytes();
-        self.buffer.resize(emitted.saturating_add(broadcast.held))?;
+        self.buffer
+            .resize(emitted.saturating_add(broadcast.held.bytes))?;
         Ok(output)
     }
 
-    /// Keeps the chunk a varying scalar operand hands over, the one closed series it is.
-    fn retain_scalar(
+    /// Keeps the chunk a varying scalar operand hands over, the one closed series it is, in `slot`.
+    fn hold_scalar(
         &mut self,
-        broadcast: &mut BroadcastRuntime,
+        held: &mut HeldForScalars,
+        slot: &mut Option<Series>,
         chunk: NativeChunk,
     ) -> Result<()> {
         let NativeChunk::Evaluated(EvaluatedChunk { series, is_last }) = chunk else {
             return Err(DataFusionError::Execution(
-                "the binary node broadcasts an evaluated scalar, not raw samples".to_string(),
+                "a scalar operand is an evaluated series, not raw samples".to_string(),
             ));
         };
-        let BroadcastScalar::Dynamic { value, .. } = &mut broadcast.scalar else {
-            return Err(DataFusionError::Execution(
-                "the binary node read a chunk from a constant operand".to_string(),
-            ));
-        };
-        if value.is_some() || !is_last {
+        if slot.is_some() || !is_last {
             return Err(DataFusionError::Execution(
                 "a scalar operand hands over exactly one closed chunk".to_string(),
             ));
         }
         let bytes = series_bytes(&series);
         self.buffer.grow(bytes)?;
-        broadcast.held = broadcast.held.saturating_add(bytes);
-        *value = Some(series);
+        held.bytes = held.bytes.saturating_add(bytes);
+        *slot = Some(series);
         Ok(())
     }
 
-    /// Holds one vector chunk until the scalar it is broadcast with arrives.
-    fn retain_pending(
-        &mut self,
-        broadcast: &mut BroadcastRuntime,
-        chunk: NativeChunk,
-    ) -> Result<()> {
+    /// Holds one vector chunk until the scalars it is computed with arrive.
+    fn hold_pending(&mut self, held: &mut HeldForScalars, chunk: NativeChunk) -> Result<()> {
         let NativeChunk::Evaluated(chunk) = chunk else {
             return Err(DataFusionError::Execution(
-                "the binary node broadcasts over an evaluated vector, not raw samples".to_string(),
+                "a scalar is applied to an evaluated vector, not raw samples".to_string(),
             ));
         };
         // A held chunk owns its label set as well as its samples, and holding it is what keeps
         // both alive until the scalar arrives.
         let bytes = series_bytes(&chunk.series);
         self.buffer.grow(bytes)?;
-        broadcast.held = broadcast.held.saturating_add(bytes);
-        broadcast.pending.push_back((chunk, bytes));
+        held.bytes = held.bytes.saturating_add(bytes);
+        held.pending.push_back((chunk, bytes));
         Ok(())
     }
 
@@ -4925,8 +5197,7 @@ fn broadcast_runtime(
         vector_left,
         op: broadcast_op(matching)?,
         sample_schema,
-        pending: VecDeque::new(),
-        held: 0,
+        held: HeldForScalars::default(),
     })
 }
 

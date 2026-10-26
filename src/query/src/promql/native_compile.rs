@@ -27,6 +27,7 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <round or clamp>(<expression>, <scalar>+)      e.g. round(x, scalar(y)), clamp(x, 0, time())
 //!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
@@ -149,7 +150,7 @@ use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    NativeType, ParameterizedOp,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
@@ -242,7 +243,9 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          is any shape here, so a subquery nests on a grid of its own as in \
                          `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
                          `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
-                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a native \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), with \
+                         `round` and the `clamp` functions also taking scalars \
+                         (`round(x, scalar(y))`), a native \
                          histogram function over any of them (`histogram_count(x)`), a label \
                          function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
@@ -393,6 +396,14 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::VectorOf { input } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 check(left, inputs, next) && check(right, inputs, next)
+            }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                check(input, inputs, next)
+                    && parameters
+                        .iter()
+                        .all(|parameter| check(parameter, inputs, next))
             }
         }
     }
@@ -948,6 +959,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
     // wrote.
+    if let Some(node) = parameterized_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     if let Some((op, vector)) = math_op(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Math(op), vector);
     }
@@ -1020,6 +1034,54 @@ fn scalar_call(
         _ => return Ok(None),
     };
     Ok(Some(node))
+}
+
+/// Binds `round`, `clamp`, `clamp_min` or `clamp_max` whose parameters are not all constants, or
+/// returns `None` for any other call. Prometheus reads each parameter at every step, so each one is
+/// bound as the scalar node it compiles to; with constant parameters the call is a [`MathOp`].
+fn parameterized_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let op = match name {
+        "round" => ParameterizedOp::Round,
+        "clamp" => ParameterizedOp::Clamp,
+        "clamp_min" => ParameterizedOp::ClampMin,
+        "clamp_max" => ParameterizedOp::ClampMax,
+        _ => return Ok(None),
+    };
+    let Some((vector, parameters)) = args.split_first() else {
+        return Ok(None);
+    };
+    if parameters.len() != op.arity()
+        || parameters
+            .iter()
+            .all(|parameter| constant_value(parameter).is_some())
+    {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let parameters = parameters
+        .iter()
+        .map(|parameter| compile_expr(context, parameter))
+        .collect::<Result<Vec<_>>>()?;
+    let output = input.output.clone();
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }))
 }
 
 /// `vector(s)`: the scalar `input` as one series without labels, under one value field.
