@@ -26,7 +26,7 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
-use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
+use mito_codec::labels::PrimaryKeyLabelDecoder;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
 /// Materializes complete metric labels from a raw-series frame stream.
@@ -61,10 +61,9 @@ pub fn materialize_raw_labels(
         ));
     }
     let decoder = match &decode {
-        Some(description) => Some(
-            PrimaryKeyLabelDecoder::from_decode_spec(description, LabelProjection::All)
-                .map_err(BoxedError::new)?,
-        ),
+        Some(description) => {
+            Some(PrimaryKeyLabelDecoder::from_decode_spec(description).map_err(BoxedError::new)?)
+        }
         None => None,
     };
 
@@ -140,22 +139,11 @@ impl RawSeriesStream for MaterializedRawSeriesStream {
 impl MaterializedRawSeriesStream {
     fn materialize(&mut self, chunk: RawSeriesChunk) -> Result<RawSeriesChunk, BoxedError> {
         let metric = match (&mut self.decoder, chunk.metric) {
-            (Some(decoder), None) => {
-                match decoder
+            (Some(decoder), None) => Some(
+                decoder
                     .decode(&chunk.primary_key)
-                    .map_err(BoxedError::new)?
-                {
-                    DecodedLabels::Complete(metric) => Some(metric),
-                    DecodedLabels::Projected(_) => {
-                        return Err(BoxedError::new(
-                            InvalidSeriesSnafu {
-                                reason: "primary-key decoder returned projected labels",
-                            }
-                            .build(),
-                        ));
-                    }
-                }
-            }
+                    .map_err(BoxedError::new)?,
+            ),
             (None, Some(metric)) => Some(metric),
             (Some(_), Some(_)) => {
                 return Err(BoxedError::new(

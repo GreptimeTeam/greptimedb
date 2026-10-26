@@ -30,7 +30,9 @@ use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
 use common_query::{Output, OutputData, OutputMeta};
-use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
+use common_recordbatch::adapter::{
+    RecordBatchStreamAdapter, RegionQueryStatCounters, SERIES_SCAN_EXEC_NAME,
+};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
@@ -50,9 +52,7 @@ use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
-use table::table::scan::{
-    REGION_SCAN_EXEC_NAME, RegionScanExec, SERIES_SCAN_EXEC_NAME, SeriesScanExec,
-};
+use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec, SeriesScanExec};
 use tracing::Span;
 
 use crate::analyze::DistAnalyzeExec;
@@ -772,7 +772,7 @@ mod tests {
     };
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
-    use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
+    use datafusion::physical_plan::joins::{CrossJoinExec, HashJoinExec, JoinOn, PartitionMode};
     use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
@@ -790,7 +790,7 @@ mod tests {
     use store_api::storage::{RegionId, ScanRequest};
     use table::metadata::{TableInfoBuilder, TableMetaBuilder};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
-    use table::table::scan::{RegionScanExec, SeriesScanExec};
+    use table::table::scan::RegionScanExec;
 
     use super::*;
     use crate::options::QueryOptions;
@@ -862,9 +862,10 @@ mod tests {
         fn raw_series_schema(
             &self,
             _label_source: &RawLabelSource,
-        ) -> std::result::Result<Option<Arc<datatypes::series::SeriesSchema>>, BoxedError> {
-            Ok(Some(Arc::new(datatypes::series::SeriesSchema {
-                fields: Arc::from([]),
+        ) -> std::result::Result<Option<Arc<datatypes::series::samples::SeriesSchema>>, BoxedError>
+        {
+            Ok(Some(Arc::new(datatypes::series::samples::SeriesSchema {
+                fields: Arc::from([datatypes::series::samples::FieldSpec { name: "ts".into() }]),
                 eval_grid: None,
             })))
         }
@@ -963,28 +964,11 @@ mod tests {
             .expect("RecordingScanner supports a native series scan")
     }
 
-    fn build_join_plan(
+    fn build_mixed_scan_plan(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
     ) -> Arc<dyn ExecutionPlan> {
-        let on: JoinOn = vec![(
-            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
-            Arc::new(Column::new("ts", 0)) as Arc<dyn PhysicalExpr>,
-        )];
-        Arc::new(
-            HashJoinExec::try_new(
-                left,
-                right,
-                on,
-                None,
-                &JoinType::Inner,
-                None,
-                PartitionMode::CollectLeft,
-                NullEquality::NullEqualsNull,
-                false,
-            )
-            .unwrap(),
-        )
+        Arc::new(CrossJoinExec::new(left, right))
     }
 
     fn query_stat_counters_for_test() -> RegionQueryStatCounters {
@@ -1007,7 +991,7 @@ mod tests {
         let region_id = RegionId::new(1024, 42);
         let left = build_query_load_region_scan(Some(region_id));
         let right = build_series_scan(Some(region_id), None);
-        let plan = build_join_plan(left, right);
+        let plan = build_mixed_scan_plan(left, right);
 
         assert_eq!(super::query_load_region_id(&plan), Some(region_id.as_u64()));
     }
@@ -1016,7 +1000,7 @@ mod tests {
     fn query_load_region_id_rejects_mixed_region_scans() {
         let left = build_query_load_region_scan(Some(RegionId::new(1024, 42)));
         let right = build_series_scan(Some(RegionId::new(1024, 43)), None);
-        let plan = build_join_plan(left, right);
+        let plan = build_mixed_scan_plan(left, right);
 
         assert!(super::query_load_region_id(&plan).is_none());
     }
@@ -1072,7 +1056,7 @@ mod tests {
         let counters = query_stat_counters_for_test();
         let left = build_query_stat_counter_region_scan(counters.clone());
         let right = build_series_scan(None, Some(counters.clone()));
-        let plan = build_join_plan(left, right);
+        let plan = build_mixed_scan_plan(left, right);
 
         let actual = super::query_stat_counters(&plan).unwrap();
         assert!(Arc::ptr_eq(
@@ -1089,7 +1073,7 @@ mod tests {
     fn query_stat_counters_rejects_mixed_counter_plan_with_series_scan() {
         let left = build_query_stat_counter_region_scan(query_stat_counters_for_test());
         let right = build_series_scan(None, Some(query_stat_counters_for_test()));
-        let plan = build_join_plan(left, right);
+        let plan = build_mixed_scan_plan(left, right);
 
         assert!(super::query_stat_counters(&plan).is_none());
     }

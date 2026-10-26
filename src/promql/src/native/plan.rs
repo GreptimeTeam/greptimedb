@@ -23,10 +23,10 @@
 //! operation states about its input, which is what lets a new combination of supported operations
 //! be an ordinary tree instead of another hand-written shape.
 //!
-//! What the tree cannot express yet is deliberate for this stage: [`NativeExpr::Binary`] holds an
-//! arithmetic or comparison operation, so `and`, `or` and `unless` have no node, and
-//! [`NativeExpr::Scalar`] holds a constant, so `time()` and `scalar(v)` have no node either. The
-//! legality below is therefore about the operations that exist, not about PromQL's whole surface.
+//! The tree's scalar node carries constants bound on an evaluation grid; it does not express
+//! PromQL's time-varying `time()` or data-derived `scalar(v)`. Binary nodes represent arithmetic
+//! and comparisons, not set operators (`and`, `or`, `unless`). Validation therefore concerns the
+//! operations represented in this model, not PromQL's whole surface.
 
 use std::sync::Arc;
 

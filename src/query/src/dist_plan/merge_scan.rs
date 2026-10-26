@@ -69,7 +69,6 @@ use crate::dist_plan::dyn_filter_bridge::{
     query_context_with_refreshed_initial_dyn_filter_regs,
     register_dyn_filter_subscribers_for_region, register_remote_dyn_filters,
 };
-use crate::dist_plan::planner::CaptureNativeRawRoute;
 use crate::dist_plan::{
     FilterId, RemoteDynFilterProducerId, RemoteDynFilterRegistryLease, Subscriber,
 };
@@ -495,32 +494,6 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
-    /// Optional route provenance captured by the distributed planner from the
-    /// same physical route that selected `regions`. Ordinary execution never
-    /// reads it, so `None` keeps every existing plan unchanged.
-    native_raw_route: Option<CaptureNativeRawRoute>,
-}
-
-/// Borrowed handoff view over the ordinary plan state a native raw consumer
-/// needs to read the captured route.
-///
-/// It borrows the existing [`MergeScanExec`] fields instead of duplicating them;
-/// the output schema is available from the public `ExecutionPlan::schema()` of
-/// the plan this source came from.
-// TODO(narthex): remove this allowance once the remote native PromQL planner
-// (#9670) consumes the captured route; this PR only captures it.
-#[allow(dead_code)]
-pub(crate) struct NativeRawSource<'a> {
-    /// Frozen route provenance in ordinary region order.
-    pub(crate) route: &'a CaptureNativeRawRoute,
-    /// The exact ordinary input logical plan sent to every region.
-    pub(crate) plan: &'a LogicalPlan,
-    /// The table the ordinary plan scans.
-    pub(crate) table: &'a TableName,
-    /// The handler that performs the region reads.
-    pub(crate) region_query_handler: &'a RegionQueryHandlerRef,
-    /// The query context of the ordinary execution.
-    pub(crate) query_ctx: &'a QueryContextRef,
 }
 
 impl std::fmt::Debug for MergeScanExec {
@@ -604,43 +577,6 @@ impl MergeScanExec {
             captured_remote_dyn_filters: Arc::default(),
             target_partition,
             enable_per_region_metrics,
-            native_raw_route: None,
-        })
-    }
-
-    /// Attaches the native raw route captured from the same physical route that
-    /// selected this plan's regions.
-    ///
-    /// The artifact is provenance for a native raw consumer; ordinary execution
-    /// never reads it.
-    pub(crate) fn with_native_raw_route(mut self, native_raw_route: CaptureNativeRawRoute) -> Self {
-        self.native_raw_route = Some(native_raw_route);
-        self
-    }
-
-    /// Returns the frozen region targets captured for this plan together with
-    /// the ordinary execution state a native raw consumer needs to read them.
-    ///
-    /// Returns `None` unless the planner proved the route and ordinary region
-    /// dispatch stays unchanged: a scan that already captured remote dynamic
-    /// filters, or a flow sink scan, keeps its ordinary path, so a consumer must
-    /// fall back as well. An assigned producer id alone is not active intent,
-    /// because the analyzer assigns one to every merge scan.
-    // TODO(narthex): remove this allowance once the remote native PromQL planner
-    // (#9670) consumes the captured route; this PR only captures it.
-    #[allow(dead_code)]
-    pub(crate) fn native_raw_source(&self) -> Option<NativeRawSource<'_>> {
-        if !self.captured_remote_dyn_filters.lock().unwrap().is_empty() || self.is_flow_sink_scan()
-        {
-            return None;
-        }
-        let route = self.native_raw_route.as_ref()?;
-        Some(NativeRawSource {
-            route,
-            plan: &self.plan,
-            table: &self.table,
-            region_query_handler: &self.region_query_handler,
-            query_ctx: &self.query_ctx,
         })
     }
 
@@ -1431,7 +1367,7 @@ mod tests {
     use datatypes::vectors::{Int64Vector, StringVector, TimestampMillisecondVector};
     use futures_util::{Stream, TryStreamExt};
     use session::ReadPreference;
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::QueryContext;
     use session::query_id::QueryId;
     use snafu::IntoError;
     use table::table::scan::REGION_SCAN_EXEC_NAME;
@@ -1441,7 +1377,7 @@ mod tests {
 
     use super::*;
     use crate::dist_plan::DynFilterRegistryManager;
-    use crate::options::{FLOW_SINK_TABLE_ID, QueryOptions};
+    use crate::options::QueryOptions;
     use crate::query_engine::{QueryEngineContext, QueryEngineState};
     use crate::region_query::RegionQueryHandler;
 
@@ -1608,217 +1544,6 @@ mod tests {
             exec.properties().output_ordering().is_none(),
             "target_partition < region_count means one output partition may concatenate multiple sorted region streams"
         );
-    }
-
-    #[test]
-    fn merge_scan_ordinary_construction_has_no_native_raw_route() {
-        // The artifact is provenance only: an ordinary plan carries none and
-        // executes exactly as before.
-        let exec = merge_scan_exec_with_sorted_input(1, 1);
-
-        assert!(exec.native_raw_source().is_none());
-    }
-
-    #[test]
-    fn merge_scan_keeps_captured_native_raw_route() {
-        let region_id = RegionId::new(1024, 1);
-        let exec =
-            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
-                targets: vec![(region_id, test_target(1))],
-            });
-
-        let source = exec.native_raw_source().unwrap();
-        assert_eq!(vec![(region_id, test_target(1))], source.route.targets);
-        // The bundle borrows the ordinary plan state, not a copy of it.
-        assert_eq!(1, source.plan.schema().fields().len());
-        assert_eq!("table", source.table.table_name);
-        assert_eq!(1, exec.partition_count());
-    }
-
-    #[test]
-    fn merge_scan_declines_native_raw_route_for_captured_dyn_filters() {
-        // An assigned remote dynamic-filter producer id is identity, not intent:
-        // the analyzer assigns one to every merge scan, so a plan that captured no
-        // filters keeps the handoff view.
-        let region_id = RegionId::new(1024, 1);
-        let exec = remote_dyn_filter_test_exec(
-            Arc::new(TestRegionQueryHandler::default()),
-            QueryContext::arc(),
-        )
-        .with_native_raw_route(CaptureNativeRawRoute {
-            targets: vec![(region_id, test_target(1))],
-        });
-
-        assert!(exec.captured_remote_dyn_filters().is_empty());
-        assert!(exec.native_raw_source().is_some());
-
-        // A filter this producer accepted is really captured, and only then does the
-        // plan keep its ordinary dispatch.
-        install_remote_dyn_filter(&exec);
-        assert_eq!(1, exec.captured_remote_dyn_filters().len());
-        assert!(exec.native_raw_source().is_none());
-
-        // A rewrite of the same scan keeps the frozen route and the captured filters,
-        // so the rewritten plan still declines the handoff view.
-        let plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
-        let replaced = plan
-            .replace_children(
-                vec![],
-                datafusion::physical_plan::ReplaceChildrenOptions::new(
-                    datafusion::physical_plan::ChildrenPropertiesMode::Recompute,
-                ),
-            )
-            .unwrap();
-        let exec = replaced.downcast_ref::<MergeScanExec>().unwrap();
-        assert_eq!(
-            vec![(region_id, test_target(1))],
-            exec.native_raw_route.as_ref().unwrap().targets
-        );
-        assert_eq!(1, exec.captured_remote_dyn_filters().len());
-        assert!(exec.native_raw_source().is_none());
-    }
-
-    #[tokio::test]
-    async fn merge_scan_execution_ignores_native_raw_route() {
-        // Attaching the artifact must not change what an ordinary execution
-        // reads: every region is still dispatched through the handler's own
-        // target selection, with the ordinary read preference, and the same
-        // batches come back in the same order.
-        let regions = vec![
-            RegionId::new(1024, 2),
-            RegionId::new(1024, 1),
-            RegionId::new(1024, 3),
-        ];
-        let batch_for = |region_number: u32| {
-            let base = i64::from(region_number) * 10;
-            record_batch(
-                int64_schema(&["a", "b"]),
-                vec![
-                    Arc::new(Int64Vector::from_slice([base + 1])) as _,
-                    Arc::new(Int64Vector::from_slice([base + 2])) as _,
-                ],
-            )
-        };
-        let responses = || -> Vec<(RegionId, RecordBatch)> {
-            regions
-                .iter()
-                .map(|region_id| (*region_id, batch_for(region_id.region_number())))
-                .collect()
-        };
-        // Region striping keeps the selection order, so this is the whole output.
-        let expected = [(21, 22), (11, 12), (31, 32)];
-
-        let baseline_handler = Arc::new(TestRegionQueryHandler::new(responses()));
-        let baseline = collect_merge_scan(merge_scan_exec_with_handler(
-            regions.clone(),
-            expected_int64_schema(),
-            baseline_handler.clone(),
-            1,
-        ))
-        .await
-        .unwrap();
-        assert_eq!(expected.len(), baseline.len());
-        for (batch, values) in baseline.iter().zip(expected) {
-            assert_int64_batch(batch, values);
-        }
-
-        // Deliberately different peers, and in a deliberately different order:
-        // an execution that read the artifact would dispatch to these.
-        let handler = Arc::new(TestRegionQueryHandler::new(responses()));
-        let with_route = collect_merge_scan(
-            merge_scan_exec_with_handler(
-                regions.clone(),
-                expected_int64_schema(),
-                handler.clone(),
-                1,
-            )
-            .with_native_raw_route(CaptureNativeRawRoute {
-                targets: vec![
-                    (regions[2], test_target(7)),
-                    (regions[0], test_target(8)),
-                    (regions[1], test_target(9)),
-                ],
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(baseline, with_route);
-        assert_eq!(expected.len(), with_route.len());
-        for (batch, values) in with_route.iter().zip(expected) {
-            assert_int64_batch(batch, values);
-        }
-        for exec_handler in [&baseline_handler, &handler] {
-            assert_eq!(regions.len(), exec_handler.select_target_calls());
-            assert_eq!(
-                vec![ReadPreference::Leader; regions.len()],
-                exec_handler.read_preferences()
-            );
-            // The ordinary plan dispatches to the target its handler selected,
-            // never to a peer from the artifact.
-            assert_eq!(vec![1; regions.len()], exec_handler.do_get_targets());
-        }
-    }
-
-    #[test]
-    fn merge_scan_with_new_children_preserves_native_raw_route() {
-        let region_id = RegionId::new(1024, 1);
-        let plan: Arc<dyn ExecutionPlan> = Arc::new(
-            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
-                targets: vec![(region_id, test_target(3))],
-            }),
-        );
-
-        let replaced = plan
-            .replace_children(
-                vec![],
-                datafusion::physical_plan::ReplaceChildrenOptions::new(
-                    datafusion::physical_plan::ChildrenPropertiesMode::Recompute,
-                ),
-            )
-            .unwrap();
-        let exec = replaced.downcast_ref::<MergeScanExec>().unwrap();
-        assert_eq!(
-            vec![(region_id, test_target(3))],
-            exec.native_raw_source().unwrap().route.targets
-        );
-    }
-
-    #[test]
-    fn merge_scan_declines_native_raw_route_for_flow_sink_scan() {
-        // A flow sink read keeps its ordinary dispatch, so the handoff view is
-        // not offered even though the artifact exists for these regions.
-        let region_id = RegionId::new(1024, 1);
-        let query_ctx = Arc::new(
-            QueryContextBuilder::default()
-                .set_extension(
-                    FLOW_SINK_TABLE_ID.to_string(),
-                    region_id.table_id().to_string(),
-                )
-                .build(),
-        );
-        let plan = LogicalPlanBuilder::empty(true).build().unwrap();
-        let schema = plan.schema().as_arrow().clone();
-
-        let exec = MergeScanExec::new(
-            &SessionStateBuilder::new().build(),
-            TableName::new("catalog", "schema", "table"),
-            vec![region_id],
-            plan,
-            &schema,
-            Arc::new(TestRegionQueryHandler::default()),
-            query_ctx,
-            1,
-            None,
-            false,
-        )
-        .unwrap()
-        .with_native_raw_route(CaptureNativeRawRoute {
-            targets: vec![(region_id, test_target(1))],
-        });
-
-        assert!(exec.is_flow_sink_scan());
-        assert!(exec.native_raw_source().is_none());
     }
 
     #[test]
@@ -2397,18 +2122,6 @@ mod tests {
                 responses,
                 ..Default::default()
             }
-        }
-
-        fn select_target_calls(&self) -> usize {
-            self.select_target_calls.load(Ordering::SeqCst)
-        }
-
-        fn read_preferences(&self) -> Vec<ReadPreference> {
-            self.read_preferences.lock().unwrap().clone()
-        }
-
-        fn do_get_targets(&self) -> Vec<u64> {
-            self.do_get_targets.lock().unwrap().clone()
         }
     }
 

@@ -2508,15 +2508,37 @@ fn direct_frame_stream(
     schema: Arc<SeriesSchema>,
     input: Option<SendableRawSeriesStream>,
 ) -> FusedSeriesStream {
-    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
-    let builder = SeriesFrameBuilder::try_new(
-        &schema,
-        FrameLabelMode::Explicit,
-        None,
+    direct_frame_stream_with_limits(
+        schema,
+        input,
         SeriesFrameBuilder::DEFAULT_MAX_ROWS,
         SeriesFrameBuilder::DEFAULT_MAX_BYTES,
     )
-    .unwrap();
+}
+
+fn direct_frame_stream_with_max_rows(
+    schema: Arc<SeriesSchema>,
+    input: Option<SendableRawSeriesStream>,
+    max_rows: usize,
+) -> FusedSeriesStream {
+    direct_frame_stream_with_limits(
+        schema,
+        input,
+        max_rows,
+        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
+    )
+}
+
+fn direct_frame_stream_with_limits(
+    schema: Arc<SeriesSchema>,
+    input: Option<SendableRawSeriesStream>,
+    max_rows: usize,
+    max_bytes: usize,
+) -> FusedSeriesStream {
+    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
+    let builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, max_rows, max_bytes)
+            .unwrap();
     FusedSeriesStream {
         inputs: input.into_iter().map(|input| (0, input)).collect(),
         executor: None,
@@ -2527,6 +2549,7 @@ fn direct_frame_stream(
         partial_fold: None,
         frame_builder: Some(builder),
         eval_schema: Some(schema),
+        evaluated_validator: common_query::series_frame::EvaluatedSequenceValidator::new(),
         frame_cursor: None,
         _export_budget: Arc::new(Mutex::new(None)),
         ready: VecDeque::new(),
@@ -2556,6 +2579,136 @@ fn sparse_eval_chunk(rows: usize, value: f64) -> (Arc<SeriesSchema>, EvaluatedCh
     (schema, chunk)
 }
 
+#[test]
+fn frame_output_validates_evaluated_chain_boundaries() {
+    let (schema, first) = sparse_eval_chunk(1, 1.0);
+    let mut stream = direct_frame_stream_with_max_rows(schema, None, 1);
+
+    let mut open = first.clone();
+    open.is_last = false;
+    stream.convert(open).unwrap();
+    assert!(
+        stream.evaluated_validator.finish().is_err(),
+        "open chain is not EOF"
+    );
+    let first_batch = futures::executor::block_on(stream.next())
+        .expect("the open chunk is framed before EOF")
+        .expect("the first frame batch is valid");
+    drop(first_batch);
+    let error = futures::executor::block_on(stream.next())
+        .expect("actual EOF rejects an unclosed chain")
+        .expect_err("unclosed chain must fail terminally");
+    assert!(error.to_string().contains("ended before a chain closed"));
+    assert!(stream.frame_builder.is_none());
+
+    let (schema, first) = sparse_eval_chunk(1, 1.0);
+    let (_, later) = sparse_eval_chunk(1, 2.0);
+    let mut stream = direct_frame_stream(schema, None);
+    let mut open = first.clone();
+    open.is_last = false;
+    stream.convert(open).unwrap();
+    let later = EvaluatedChunk {
+        series: later.series,
+        is_last: true,
+    };
+    assert!(
+        stream.convert(later).is_err(),
+        "overlapping/decreasing position rejected"
+    );
+    stream.fail();
+    assert!(stream.frame_builder.is_none());
+    assert!(stream.frame_cursor.is_none());
+
+    let (schema, first) = sparse_eval_chunk(1, 1.0);
+    let mut stream = direct_frame_stream(schema, None);
+    let mut empty = first.clone();
+    empty.series.time =
+        TimeAxis::from_grid_spans(empty.series.time.grid().unwrap().clone(), Vec::new()).unwrap();
+    empty.is_last = false;
+    assert!(
+        stream.convert(empty).is_err(),
+        "frame output rejects empty nonfinal chunks"
+    );
+
+    let (schema, mut first) = sparse_eval_chunk(1, 1.0);
+    let mut stream = direct_frame_stream(schema, None);
+    first.is_last = false;
+    stream.convert(first.clone()).unwrap();
+    let mut changed = first;
+    changed.is_last = true;
+
+    changed.series.metric = SeriesLabels::try_new(Some(Arc::from("other")), Vec::new()).unwrap();
+    assert!(
+        stream.convert(changed).is_err(),
+        "identity cannot change before close"
+    );
+}
+
+#[test]
+fn frame_output_accepts_independent_closed_chains_and_sparse_gaps() {
+    let (schema, chunk) = sparse_eval_chunk(1, 1.0);
+    let mut stream = direct_frame_stream(schema, None);
+    stream.convert(chunk.clone()).unwrap();
+    stream.convert(chunk).unwrap();
+    assert!(stream.evaluated_validator.finish().is_ok());
+
+    let (schema, chunk) = sparse_eval_chunk(1, 1.0);
+    let mut stream = direct_frame_stream(schema, None);
+    let mut open = chunk.clone();
+    open.is_last = false;
+    stream.convert(open.clone()).unwrap();
+    let empty_close = EvaluatedChunk::try_new(
+        Series {
+            metric: chunk.series.metric.clone(),
+            time: TimeAxis::from_grid_spans(chunk.series.time.grid().unwrap().clone(), Vec::new())
+                .unwrap(),
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(Vec::<f64>::new()))),
+        },
+        true,
+    )
+    .unwrap();
+    stream.convert(empty_close.clone()).unwrap();
+    assert!(stream.evaluated_validator.finish().is_ok());
+
+    let mut stream = direct_frame_stream(Arc::clone(stream.eval_schema.as_ref().unwrap()), None);
+    stream.convert(open.clone()).unwrap();
+    let mut wrong_close = empty_close;
+    wrong_close.series.metric =
+        SeriesLabels::try_new(Some(Arc::from("other")), Vec::new()).unwrap();
+    assert!(stream.convert(wrong_close).is_err());
+
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, 4).unwrap()).unwrap());
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: VALUE.into() }]),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let labels = SeriesLabels::try_new(Some(Arc::from(METRIC)), Vec::new()).unwrap();
+    let left = EvaluatedChunk::try_new(
+        Series {
+            metric: labels.clone(),
+            time: TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(0, 1)]).unwrap(),
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![1.0]))),
+        },
+        false,
+    )
+    .unwrap();
+    let right = EvaluatedChunk::try_new(
+        Series {
+            metric: labels,
+            time: TimeAxis::from_grid_spans(grid, vec![GridSpan::new(3, 1)]).unwrap(),
+            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![2.0]))),
+        },
+        true,
+    )
+    .unwrap();
+    let mut stream = direct_frame_stream(schema, None);
+    let mut left = left;
+    left.is_last = false;
+    stream.convert(left).unwrap();
+    stream.convert(right).unwrap();
+    assert!(stream.evaluated_validator.finish().is_ok());
+}
+
 /// A large evaluated chunk is encoded over successive polls rather than queued as all of its
 /// physical frame batches at once.
 #[tokio::test]
@@ -2563,7 +2716,7 @@ async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
     const ROWS: usize = 800;
     let value = f64::from_bits(0x4009_21fb_5444_2d18);
     let (schema, chunk) = sparse_eval_chunk(ROWS, value);
-    let mut stream = direct_frame_stream(Arc::clone(&schema), None);
+    let mut stream = direct_frame_stream_with_limits(Arc::clone(&schema), None, usize::MAX, 1);
     stream
         .convert(chunk)
         .expect("the evaluated chunk becomes a cursor");
@@ -2578,6 +2731,10 @@ async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
 
     let first = stream.next().await.unwrap().unwrap();
     assert!(first.num_rows() <= SeriesFrameBuilder::DEFAULT_MAX_ROWS);
+    assert!(
+        first.num_rows() < ROWS,
+        "the first batch cannot drain 800 rows"
+    );
     assert!(
         stream.frame_cursor.is_some(),
         "the first batch cannot drain 800 rows"
@@ -2648,7 +2805,8 @@ async fn dropping_a_partly_emitted_frame_releases_its_input() {
     let dropped = Arc::new(AtomicBool::new(false));
     let raw_input = Box::pin(StagedStream::new(frame_schema(), vec![raw_frame]).dropped(&dropped));
     let input = unpack_raw_series(raw_input, Some(Arc::clone(&raw))).unwrap();
-    let mut stream = direct_frame_stream(Arc::clone(&schema), Some(input));
+    let mut stream =
+        direct_frame_stream_with_limits(Arc::clone(&schema), Some(input), usize::MAX, 1);
     stream.convert(chunk).unwrap();
     assert!(stream.next().await.unwrap().unwrap().num_rows() > 0);
     assert!(stream.frame_cursor.is_some());
@@ -3668,6 +3826,11 @@ async fn a_partial_fold_exports_state_from_every_partition() {
     .expect("a rate tree with a partial count is executable");
 
     assert_eq!(
+        datafusion::physical_plan::execution_plan::EmissionType::Final,
+        exec.properties().emission_type,
+        "the partial state is emitted only after the input reaches EOF"
+    );
+    assert_eq!(
         2,
         exec.properties().output_partitioning().partition_count(),
         "the node's partition count is its input's"
@@ -3953,13 +4116,11 @@ async fn a_failed_input_exports_no_partial_state() {
 #[tokio::test]
 async fn series_frame_output_uses_evaluated_codec_schema() {
     let tree = rate_tree();
-    let frame_node = FusedSeries::try_new_with_format(
+    let frame_node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("evaluated samples have a frame schema");
     assert!(
@@ -3985,13 +4146,11 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
 #[test]
 fn series_frame_rejects_multiple_sources_during_planning() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
-    let err = FusedSeries::try_new_with_format(
+    let err = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
-        binary_output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .unwrap_err();
     assert!(err.to_string().contains("multiple sources"));
@@ -4010,13 +4169,11 @@ async fn series_frame_preserves_four_input_partitions() {
         })
         .collect::<Vec<_>>();
     let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .unwrap();
     let exec = plan_of(node, memory_exec_partitioned(partitions)).unwrap();
@@ -4061,13 +4218,11 @@ async fn series_frame_rate_matches_plain_rows_bitwise() {
             .unwrap(),
     );
     let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .unwrap();
     let exec = plan_of(node, input).unwrap();
@@ -4146,13 +4301,11 @@ fn the_explain_text_names_the_frame_format_only() {
         Explain(&rows).to_string(),
         "the row-table line is what it always was"
     );
-    let framed = FusedSeries::try_new_with_format(
+    let framed = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     assert!(
@@ -4181,13 +4334,11 @@ fn the_logical_schema_follows_the_output_format() {
     assert_eq!(FusedOutputFormat::PlainRows, rows.format);
     assert_eq!(&output_schema(), rows.schema().inner());
 
-    let framed = FusedSeries::try_new_with_format(
+    let framed = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     assert_eq!(FusedOutputFormat::SeriesFrame, framed.format);
@@ -4210,13 +4361,11 @@ fn the_logical_schema_follows_the_output_format() {
 #[test]
 fn rebuilding_a_frame_node_keeps_its_output_format() {
     let rows = fused(rate_tree());
-    let framed = FusedSeries::try_new_with_format(
+    let framed = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     let rebuilt = framed
@@ -4247,15 +4396,8 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
         time_index: TIME.to_string(),
         tags: vec![HOST.to_string(), NAME.to_string()],
     };
-    let error = FusedSeries::try_new_with_format(
-        Arc::from(PROMQL),
-        scalar,
-        binding,
-        Vec::new(),
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
-    )
-    .expect_err("a scalar is not a series to frame");
+    let error = FusedSeries::try_new_series_frame(Arc::from(PROMQL), scalar, binding, Vec::new())
+        .expect_err("a scalar is not a series to frame");
     assert!(
         matches!(error, DataFusionError::Plan(_)),
         "refused with {error}"
@@ -4301,13 +4443,11 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
         )
     });
     let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(schema)],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     let exec = plan_of(node, source).expect("the runtime executes the tree");
@@ -4407,13 +4547,11 @@ async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
         true,
     );
     let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     let exec = plan_of(node, memory_exec(vec![frame_of(&schema, &chunk)]))
@@ -4492,13 +4630,11 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
         vec![frame_of(&schema, &chunk_of_host("web-2", 2.0))],
     ];
     let tree = rate_tree();
-    let node = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_series_frame(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
-        FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
     let exec =

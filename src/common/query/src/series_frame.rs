@@ -57,10 +57,6 @@ use store_api::region_engine::{
     NO_BOUND_LABEL_SOURCE, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 
-mod record_batches;
-
-pub use record_batches::{InputMapping, record_batches_to_raw_series};
-
 #[cfg(test)]
 mod tests;
 
@@ -580,17 +576,18 @@ impl SequenceValidator {
 /// them closes itself, so a closed chain may be followed by another chain whose labels happen to be
 /// equal. Only the still-open chain is remembered, which is what keeps such a contribution from being
 /// refused as a re-opened series while still refusing a chain that changes identity before it closes.
-struct EvaluatedSequenceValidator {
+#[derive(Default)]
+pub struct EvaluatedSequenceValidator {
     /// The labels of the open chain and the last grid position it carried.
     open: Option<(SeriesLabels, usize)>,
 }
 
 impl EvaluatedSequenceValidator {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self { open: None }
     }
 
-    fn finish(&self) -> datafusion_common::Result<()> {
+    pub fn finish(&self) -> datafusion_common::Result<()> {
         if self.open.is_some() {
             return Err(invalid(
                 "evaluated series stream ended before a chain closed",
@@ -599,7 +596,7 @@ impl EvaluatedSequenceValidator {
         Ok(())
     }
 
-    fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
+    pub fn validate(&mut self, series: &Series, is_last: bool) -> datafusion_common::Result<()> {
         let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
         else {
             // No carried position: only a closing chunk may be empty, and it closes the chain it

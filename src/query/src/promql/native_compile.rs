@@ -15,8 +15,8 @@
 //! Compiles a PromQL AST into a [`NativeTree`].
 //!
 //! This is the front half of the native evaluation model: it reads the parsed statement and writes
-//! down what it means as bound nodes. It runs nothing, and nothing calls it yet, so the subset it
-//! accepts is one recursive rule:
+//! down what it means as bound nodes. The native planner uses this compiler to build a tree for
+//! standalone execution. Its accepted expressions are described by the recursive rule below:
 //!
 //! ```text
 //! <expression>                                     one of, recursively:
@@ -657,11 +657,9 @@ fn binary_op(op: &TokenType) -> Option<BinaryOp> {
 
 /// Compiles an aggregation into an aggregate node over the expression it groups.
 ///
-/// Every aggregator that folds a group's values into one value per grid point binds, whether or not
-/// its kernel exists yet: `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and
-/// `quantile`. Binding a shape the compiler can describe and letting the runtime refuse a kind it
-/// cannot execute keeps this the one place that says what an aggregate means, so a kernel landing
-/// later changes no binding.
+/// The aggregators that fold a group's values into one value per grid point bind to an aggregate
+/// node: `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and `quantile`. The
+/// runtime validates whether the resulting tree can execute.
 ///
 /// The rest of the parser's aggregates are a different shape and bind as a vector operation
 /// ([`vector_aggregate`]) rather than as a kind that would compute something else: `topk`,
@@ -1306,8 +1304,13 @@ fn instant_selection_timestamp(
     timestamp: bool,
 ) -> Result<NativeNode> {
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
-    let offset_ms = selector_offset_ms(&selector.offset)?;
+    let mut offset_ms = selector_offset_ms(&selector.offset)?;
     let at_ms = selector_anchor_ms(&selector.at, context.stmt)?;
+    // Prometheus timestamp(selector @ anchor offset d) selects at the anchor, ignoring the
+    // offset; timestamp() then reports that selected sample's timestamp.
+    if timestamp && at_ms.is_some() {
+        offset_ms = 0;
+    }
     let output_grid = Arc::clone(&context.grid);
     let (grid_start_ms, grid_end_ms) = grid_endpoints(&output_grid)?;
     let (source_index, schema) = bind_selector(

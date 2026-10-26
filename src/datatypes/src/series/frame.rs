@@ -810,6 +810,15 @@ impl SeriesFrameBuilder {
         self.rows.len() >= self.max_rows || self.bytes >= self.max_bytes
     }
 
+    /// Bytes available to an evaluated row that is being assembled before cursor advancement.
+    fn available_bytes(&self) -> Option<usize> {
+        if self.rows.len() >= self.max_rows || self.bytes >= self.max_bytes {
+            None
+        } else {
+            Some(self.max_bytes - self.bytes)
+        }
+    }
+
     /// Whether `row` may join the buffered rows without crossing either bound.
     ///
     /// An empty builder accepts any individually measured row; a group total that would overflow
@@ -1001,7 +1010,7 @@ impl SeriesFrameCursor {
         loop {
             let row = match self.pending.take() {
                 Some(row) => row,
-                None => match self.next_row()? {
+                None => match self.next_row(builder.available_bytes())? {
                     Some(row) => {
                         self.pending = Some(row);
                         continue;
@@ -1027,10 +1036,10 @@ impl SeriesFrameCursor {
     }
 
     /// Builds and measures the next row, or `None` when the chunk is exhausted.
-    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+    fn next_row(&mut self, available_bytes: Option<usize>) -> Result<Option<FrameRow>> {
         match &mut self.walk {
             ChunkWalk::Raw(walk) => walk.next_row(),
-            ChunkWalk::Evaluated(walk) => walk.next_row(),
+            ChunkWalk::Evaluated(walk) => walk.next_row(available_bytes),
         }
     }
 }
@@ -1092,11 +1101,10 @@ impl RawWalk {
 impl EvaluatedWalk {
     /// Builds the next row, or `None` when the chunk is exhausted.
     ///
-    /// A row covers one `(run of carried positions, sample segment)` intersection, which is why its
-    /// positions are always one span: the holes between runs are not rows, so nothing is ever filled
-    /// in for a grid position the chunk does not hold. The `is_last` a producer declared is carried
-    /// by the chunk's final row only, so a consumer that sees it knows the chain ended exactly there.
-    fn next_row(&mut self) -> Result<Option<FrameRow>> {
+    /// A row may cover several run/segment intersections, but never crosses a dense segment
+    /// boundary. Grid holes are represented by separate spans while the sample slice stays
+    /// contiguous. Cursor state is committed only after the complete row has been measured.
+    fn next_row(&mut self, available_bytes: Option<usize>) -> Result<Option<FrameRow>> {
         let Self {
             series,
             is_last,
@@ -1108,7 +1116,6 @@ impl EvaluatedWalk {
             closing,
         } = self;
         if *closing {
-            *closing = false;
             // A chunk that carries no position still owes its consumer one row: the row that says the
             // chain ends here. It holds no grid position and no sample, and each field is kept as the
             // producer built it - an empty float stays float, an empty histogram stays histogram - so a
@@ -1127,53 +1134,105 @@ impl EvaluatedWalk {
                 bytes: 0,
             };
             row.bytes = measure_row(&row)?;
+            *closing = false;
             return Ok(Some(row));
         }
-        let Some(current) = runs.get(*run) else {
+        let Some(_) = runs.get(*run) else {
             return Ok(None);
         };
-        let remaining = current.len - *offset;
-        let mut take = remaining;
-        for (index, field) in series.fields.iter().enumerate() {
-            let part = segment(field, segments[index])?;
-            take = take.min(part.len().saturating_sub(offsets[index]));
-        }
-        if take == 0 {
-            return invalid_series("empty sample segment");
-        }
-        let row_offset = current.row + *offset;
-        let mut samples = Vec::with_capacity(series.fields.len());
-        for (index, field) in series.fields.iter().enumerate() {
-            let part = segment(field, segments[index])?;
-            samples.push(part.slice(offsets[index], take)?);
-        }
-        let mut row = FrameRow {
-            key: None,
-            metric: Some(series.metric.clone()),
-            is_last: *is_last && *run + 1 == runs.len() && take == remaining,
-            time: RowTime::Spans(vec![GridSpan::new(current.position + *offset, take)]),
-            samples,
-            bytes: 0,
-        };
-        row.bytes = measure_row(&row)?;
-        *offset += take;
-        if *offset == current.len {
-            *run += 1;
-            *offset = 0;
-        }
-        for (index, field) in series.fields.iter().enumerate() {
-            let length = segment(field, segments[index])?.len();
-            offsets[index] += take;
-            if offsets[index] == length {
-                segments[index] += 1;
-                offsets[index] = 0;
+        let mut next_run = *run;
+        let mut next_offset = *offset;
+        let mut next_segments = segments.clone();
+        let mut next_offsets = offsets.clone();
+        let mut total = 0usize;
+        let mut row: Option<FrameRow> = None;
+        while let Some(current) = runs.get(next_run) {
+            let remaining = current.len - next_offset;
+            let mut take = remaining;
+            let mut segment_remaining_lengths = Vec::with_capacity(series.fields.len());
+            for (index, field) in series.fields.iter().enumerate() {
+                let part = segment(field, next_segments[index])?;
+                let segment_remaining = part.len().saturating_sub(next_offsets[index]);
+                segment_remaining_lengths.push(segment_remaining);
+                take = take.min(segment_remaining);
+            }
+            let reaches_segment_boundary = segment_remaining_lengths.contains(&take);
+            if take == 0 {
+                return invalid_series("empty sample segment");
+            }
+            total = add_checked(total, take)?;
+            let mut samples = Vec::with_capacity(series.fields.len());
+            for (index, field) in series.fields.iter().enumerate() {
+                samples.push(segment(field, segments[index])?.slice(offsets[index], total)?);
+            }
+            if let Some(row) = &mut row {
+                let RowTime::Spans(row_spans) = &mut row.time else {
+                    unreachable!("evaluated row has spans")
+                };
+                row_spans.push(GridSpan::new(current.position + next_offset, take));
+                let old_bytes = row.bytes;
+                let sample_growth = sample_growth(&row.samples, &samples)?;
+                let proposed_span_count = row_spans.len();
+                checked_offset(proposed_span_count)?;
+                checked_offset(total)?;
+                let proposed_bytes = add_checked(
+                    add_checked(old_bytes, add_checked(SPAN_CHARGE, 2)?)?,
+                    sample_growth,
+                )?;
+                let old_samples = std::mem::replace(&mut row.samples, samples);
+                let old_last = row.is_last;
+                row.is_last = *is_last && next_run + 1 == runs.len() && take == remaining;
+                if available_bytes.is_some_and(|available| proposed_bytes > available) {
+                    if let RowTime::Spans(row_spans) = &mut row.time {
+                        row_spans.pop();
+                    }
+                    row.samples = old_samples;
+                    row.is_last = old_last;
+                    row.bytes = old_bytes;
+                    break;
+                }
+                row.bytes = proposed_bytes;
+            } else {
+                let mut candidate = FrameRow {
+                    key: None,
+                    metric: Some(series.metric.clone()),
+                    is_last: *is_last && next_run + 1 == runs.len() && take == remaining,
+                    time: RowTime::Spans(vec![GridSpan::new(current.position + next_offset, take)]),
+                    samples,
+                    bytes: 0,
+                };
+                candidate.bytes = measure_row(&candidate)?;
+                row = Some(candidate);
+            }
+            next_offset += take;
+            if next_offset == current.len {
+                next_run += 1;
+                next_offset = 0;
+            }
+            for (index, field) in series.fields.iter().enumerate() {
+                let length = segment(field, next_segments[index])?.len();
+                next_offsets[index] += take;
+                if next_offsets[index] == length {
+                    next_segments[index] += 1;
+                    next_offsets[index] = 0;
+                }
+            }
+            // An individually oversized atomic intersection must be emitted alone.
+            if available_bytes.is_none()
+                || available_bytes.is_some_and(|available| row.as_ref().unwrap().bytes > available)
+                || reaches_segment_boundary
+            {
+                break;
             }
         }
-        debug_assert!(
-            row_offset + take <= series.time.len(),
-            "an evaluated row exceeds the axis it walks"
-        );
-        Ok(Some(row))
+        if let Some(row) = &mut row {
+            row.bytes = measure_row(row)?;
+        }
+        *run = next_run;
+        *offset = next_offset;
+        segments.clone_from(&next_segments);
+        offsets.clone_from(&next_offsets);
+        Ok(row)
     }
 }
 
@@ -1260,17 +1319,48 @@ impl RowTime {
     }
 }
 
-/// Per-row encoded-size measure, computed once per row when the cursor produces it.
-///
-/// The measure dominates every cumulative offset domain the encoder writes: binary/UTF-8 child
-/// bytes, list element counts, bitmap bytes, and the visible extent of each histogram table list.
-/// A group total of `min(max_bytes, i32::MAX)` therefore guarantees that all Arrow offsets and
-/// lengths stay representable, without tracking a separate offset counter. This is a bound used
-/// for batching work, not the exact encoded size.
+/// Incrementally measures one field's added charge while an evaluated row grows.
+fn sample_growth(old: &[Samples], proposed: &[Samples]) -> Result<usize> {
+    old.iter()
+        .zip(proposed)
+        .try_fold(0usize, |growth, (old, proposed)| {
+            let old_charge = sample_charge(old)?;
+            let proposed_charge = sample_charge(proposed)?;
+            let added = proposed_charge
+                .checked_sub(old_charge)
+                .ok_or_else(|| err("evaluated sample measure decreased"))?;
+            growth
+                .checked_add(added)
+                .ok_or_else(|| err("raw series frame offset overflow"))
+        })
+}
+
+fn sample_charges(samples: &[Samples]) -> Result<usize> {
+    samples.iter().try_fold(0usize, |bytes, sample| {
+        add_checked(bytes, sample_charge(sample)?)
+    })
+}
+
+fn sample_charge(sample: &Samples) -> Result<usize> {
+    let mut bytes = FIELD_CHARGE;
+    match sample
+        .dense()
+        .ok_or_else(|| err("sample segment is not dense"))?
+    {
+        DenseSamplesRef::Float(values) => add_checked(bytes, float_charge(values.len())?),
+        DenseSamplesRef::Histogram(values) => add_checked(bytes, histogram_charge(values)?),
+        DenseSamplesRef::Mixed(values) => {
+            bytes = add_checked(bytes, float_charge(values.floats().len())?)?;
+            add_checked(bytes, histogram_charge(values.histograms())?)
+        }
+    }
+}
+
 fn measure_row(row: &FrameRow) -> Result<usize> {
+    let time_len = row.time.len()?;
     let key_len = row.key.as_ref().map(Buffer::len).unwrap_or(0);
     checked_offset(key_len)?;
-    checked_offset(row.time.len()?)?;
+    checked_offset(time_len)?;
     let mut bytes = add_checked(ROW_CHARGE, key_len)?;
     bytes = match &row.time {
         RowTime::Timestamps(timestamps) => add_checked(bytes, mul_checked(timestamps.len(), 8)?)?,
@@ -1280,24 +1370,7 @@ fn measure_row(row: &FrameRow) -> Result<usize> {
             mul_checked(spans.len(), 2)?,
         )?,
     };
-    for samples in &row.samples {
-        bytes = add_checked(bytes, FIELD_CHARGE)?;
-        match samples
-            .dense()
-            .ok_or_else(|| err("sample segment is not dense"))?
-        {
-            DenseSamplesRef::Float(values) => {
-                bytes = add_checked(bytes, float_charge(values.len())?)?
-            }
-            DenseSamplesRef::Histogram(values) => {
-                bytes = add_checked(bytes, histogram_charge(values)?)?
-            }
-            DenseSamplesRef::Mixed(values) => {
-                bytes = add_checked(bytes, float_charge(values.floats().len())?)?;
-                bytes = add_checked(bytes, histogram_charge(values.histograms())?)?;
-            }
-        }
-    }
+    bytes = add_checked(bytes, sample_charges(&row.samples)?)?;
     if let Some(metric) = &row.metric {
         if let Some(name) = metric.name() {
             checked_offset(name.len())?;

@@ -1425,7 +1425,12 @@ mod test {
         let waker = futures::task::noop_waker_ref();
         let mut cx = Context::from_waker(waker);
 
-        for status in [StatusCode::Internal, StatusCode::RequestOutdated] {
+        for status in [
+            StatusCode::InvalidArguments,
+            StatusCode::Internal,
+            StatusCode::Unknown,
+            StatusCode::RequestOutdated,
+        ] {
             // Unique per case, so a match proves the *original* error survived.
             let marker = format!("df-record-batch-stream-adapter-typed-error-marker-{status}");
 
@@ -1491,6 +1496,12 @@ mod test {
                 panic!("expected a poll stream error, got {roundtrip_error:?}");
             };
             assert_eq!(roundtrip_error.status_code(), status);
+            let expected_output = match status {
+                StatusCode::Internal => "Internal error: 1003".to_string(),
+                StatusCode::Unknown => "Internal error: 1000".to_string(),
+                _ => marker.clone(),
+            };
+            assert_eq!(roundtrip_error.output_msg(), expected_output);
             assert_typed_external(
                 df_error,
                 status,

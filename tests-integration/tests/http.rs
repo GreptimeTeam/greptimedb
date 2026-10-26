@@ -1960,18 +1960,30 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
         promql::extension_plan::FusedOutputFormat::PlainRows,
         promql::extension_plan::FusedOutputFormat::SeriesFrame,
     ] {
-        scan_plan.clone().reset_state().unwrap();
-        let exec = promql::extension_plan::FusedSeries::try_new_with_format(
-            Arc::from("native_demo"),
-            tree.clone(),
-            binding.clone(),
-            vec![logical_child.clone()],
-            row_schema.clone().to_dfschema_ref().unwrap(),
-            format,
-        )
-        .unwrap()
-        .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
-        .unwrap();
+        let scan_plan = scan_plan.clone().reset_state().unwrap();
+        let node = match format {
+            promql::extension_plan::FusedOutputFormat::PlainRows => {
+                promql::extension_plan::FusedSeries::try_new(
+                    Arc::from("native_demo"),
+                    tree.clone(),
+                    binding.clone(),
+                    vec![logical_child.clone()],
+                    row_schema.clone().to_dfschema_ref().unwrap(),
+                )
+            }
+            promql::extension_plan::FusedOutputFormat::SeriesFrame => {
+                promql::extension_plan::FusedSeries::try_new_series_frame(
+                    Arc::from("native_demo"),
+                    tree.clone(),
+                    binding.clone(),
+                    vec![logical_child.clone()],
+                )
+            }
+        };
+        let exec = node
+            .unwrap()
+            .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
+            .unwrap();
         let context = "standalone raw SeriesScanExec replay";
         let mut actual = Vec::new();
         let mut closed = 0;

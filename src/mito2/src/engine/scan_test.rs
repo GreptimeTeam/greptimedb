@@ -5313,7 +5313,10 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     };
     assert_eq!("two_phase", series.mode());
     let mut scanner = engine.handle_query(region_id, request).await.unwrap();
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(
+        SeriesOrdering::Contiguous,
+        scanner.raw_series_ordering().unwrap()
+    );
     let metadata = scanner.metadata();
     let source = RawLabelSource::PrimaryKey {
         metric_name: Arc::from("fixture_metric"),
@@ -5352,7 +5355,7 @@ async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
             .unwrap()
             .unwrap();
         // The storage-side contract: every partition stream reports the scanner's declaration.
-        assert_eq!(scanner.raw_series_ordering(), stream.ordering());
+        assert_eq!(scanner.raw_series_ordering().unwrap(), stream.ordering());
         assert_eq!(SeriesOrdering::Contiguous, stream.ordering());
         schema.get_or_insert_with(|| Arc::clone(stream.schema()));
         chunks.extend(stream.try_collect::<Vec<_>>().await.unwrap());
@@ -5589,7 +5592,10 @@ async fn test_two_phase_raw_stream_stays_contiguous_across_disjoint_partition_as
         panic!("sparse PerSeries request must use SeriesScan");
     };
     assert_eq!("two_phase", scanner.mode());
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(
+        SeriesOrdering::Contiguous,
+        scanner.raw_series_ordering().unwrap()
+    );
     // Composition of the pinned scan input: the two flushes pin two SST sources and the third
     // write round stays in one memtable source. Each source reports the rows its write round
     // wrote, so this asserts the layout instead of only asserting that something was read.
@@ -5909,7 +5915,10 @@ async fn test_two_phase_raw_same_partition_multi_round_assignment_stays_contiguo
         panic!("sparse PerSeries request must use SeriesScan");
     };
     assert_eq!("two_phase", scanner.mode());
-    assert_eq!(SeriesOrdering::Contiguous, scanner.raw_series_ordering());
+    assert_eq!(
+        SeriesOrdering::Contiguous,
+        scanner.raw_series_ordering().unwrap()
+    );
     // The fixture must really be one SST source plus one memtable source, or the two rounds below
     // would be explained by something else.
     {
@@ -6244,10 +6253,9 @@ fn decode_declared_labels(
     description: &datatypes::series::frame::LabelDecodeSpec,
     chunks: &[datatypes::series::raw::RawSeriesChunk],
 ) -> Vec<datatypes::series::SeriesLabels> {
-    use mito_codec::labels::{DecodedLabels, LabelProjection, PrimaryKeyLabelDecoder};
+    use mito_codec::labels::PrimaryKeyLabelDecoder;
 
-    let mut decoder =
-        PrimaryKeyLabelDecoder::from_decode_spec(description, LabelProjection::All).unwrap();
+    let mut decoder = PrimaryKeyLabelDecoder::from_decode_spec(description).unwrap();
     chunks
         .iter()
         .map(|chunk| {
@@ -6255,12 +6263,7 @@ fn decode_declared_labels(
                 chunk.metric.is_none(),
                 "a key-encoded chunk leaves its labels undecoded"
             );
-            match decoder.decode(chunk.primary_key.as_slice()).unwrap() {
-                DecodedLabels::Complete(metric) => metric,
-                DecodedLabels::Projected(_) => {
-                    panic!("decoding every label must yield complete labels")
-                }
-            }
+            decoder.decode(chunk.primary_key.as_slice()).unwrap()
         })
         .collect()
 }

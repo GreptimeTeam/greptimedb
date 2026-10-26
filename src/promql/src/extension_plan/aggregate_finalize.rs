@@ -890,7 +890,10 @@ async fn merge_into_batches(
         reservation.try_resize(merger.state_bytes())?;
     }
     // Only a successful end of the input answers: a failed read dropped the state above instead.
-    let series = merger.finish_budgeted(|total| reservation.try_resize(total))?;
+    let mut series = merger.finish_budgeted(|total| reservation.try_resize(total))?;
+    // Partition arrival order is not a statement-level output order. Match Prometheus label
+    // comparison before presenting the finalized groups so equivalent executions answer alike.
+    series.sort_by(compare_series_labels);
     // The merge is consumed by its answer, which replaces what it kept. The whole answer is charged at
     // once and held until the loop ends: the vector and every series still waiting in it stay live
     // while the loop folds them one by one, so releasing them one at a time would leave the rest
@@ -938,6 +941,31 @@ async fn merge_into_batches(
     // The rows are what stays held once the series they came from are gone.
     answer.try_resize(batches.iter().map(RecordBatch::get_array_memory_size).sum())?;
     Ok(batches)
+}
+
+/// Compares the complete Prometheus label sets in label-name order, with no temporary allocation.
+fn compare_series_labels(a: &Series, b: &Series) -> Ordering {
+    fn labels(series: &Series) -> impl Iterator<Item = (&str, &str)> {
+        let tags = series.metric.tags();
+        let name_index = tags.partition_point(|tag| tag.name.as_ref() < "__name__");
+        tags[..name_index]
+            .iter()
+            .map(|tag| (tag.name.as_ref(), tag.value.as_ref()))
+            .chain(
+                series
+                    .metric
+                    .name()
+                    .into_iter()
+                    .map(|name| ("__name__", name)),
+            )
+            .chain(
+                tags[name_index..]
+                    .iter()
+                    .map(|tag| (tag.name.as_ref(), tag.value.as_ref())),
+            )
+    }
+
+    labels(a).cmp(labels(b))
 }
 
 /// Hands over every chunk the suffix has settled, as rows.

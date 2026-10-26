@@ -45,7 +45,8 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use common_query::series_frame::{
-    ensure_frame_matches_label_source, pack_evaluated_series, unpack_raw_series,
+    EvaluatedSequenceValidator, ensure_frame_matches_label_source, pack_evaluated_series,
+    unpack_raw_series,
 };
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
@@ -240,38 +241,7 @@ impl FusedSeries {
         children: Vec<LogicalPlan>,
         output_schema: DFSchemaRef,
     ) -> DataFusionResult<Self> {
-        Self::try_new_with_format(
-            promql,
-            tree,
-            binding,
-            children,
-            output_schema,
-            FusedOutputFormat::PlainRows,
-        )
-    }
-
-    /// Creates a node with an explicitly selected output format.
-    pub fn try_new_with_format(
-        promql: Arc<str>,
-        tree: NativeTree,
-        binding: FusedSeriesBinding,
-        children: Vec<LogicalPlan>,
-        output_schema: DFSchemaRef,
-        format: FusedOutputFormat,
-    ) -> DataFusionResult<Self> {
         validate_binding(&tree, &binding, children.len())?;
-        if format == FusedOutputFormat::SeriesFrame && children.len() > 1 {
-            return Err(DataFusionError::Plan(
-                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
-            ));
-        }
-        let output_schema = if format == FusedOutputFormat::SeriesFrame {
-            Arc::new(datafusion::common::DFSchema::try_from(
-                series_frame_output_schema(evaluated_output(&tree)?.as_ref())?,
-            )?)
-        } else {
-            output_schema
-        };
         Ok(Self {
             promql,
             tree,
@@ -279,7 +249,34 @@ impl FusedSeries {
             children,
             output_schema,
             partial_fold: None,
-            format,
+            format: FusedOutputFormat::PlainRows,
+        })
+    }
+
+    /// Creates a node that emits evaluated series frames using the codec's schema.
+    pub fn try_new_series_frame(
+        promql: Arc<str>,
+        tree: NativeTree,
+        binding: FusedSeriesBinding,
+        children: Vec<LogicalPlan>,
+    ) -> DataFusionResult<Self> {
+        validate_binding(&tree, &binding, children.len())?;
+        if children.len() > 1 {
+            return Err(DataFusionError::Plan(
+                "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
+            ));
+        }
+        let output_schema = Arc::new(datafusion::common::DFSchema::try_from(
+            series_frame_output_schema(evaluated_output(&tree)?.as_ref())?,
+        )?);
+        Ok(Self {
+            promql,
+            tree,
+            binding,
+            children,
+            output_schema,
+            partial_fold: None,
+            format: FusedOutputFormat::SeriesFrame,
         })
     }
 
@@ -1021,9 +1018,14 @@ impl FusedSeriesExec {
             } else {
                 partition_count
             }),
-            inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
-                input.properties().emission_type
-            }),
+            if partial_fold.is_some() {
+                // Partial aggregate state is only emitted after the scan reaches EOF.
+                EmissionType::Final
+            } else {
+                inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
+                    input.properties().emission_type
+                })
+            },
             inputs
                 .first()
                 .map_or(Boundedness::Bounded, |(input, _, _)| {
@@ -1247,6 +1249,7 @@ impl ExecutionPlan for FusedSeriesExec {
             partial_fold,
             frame_builder,
             eval_schema,
+            evaluated_validator: EvaluatedSequenceValidator::new(),
             frame_cursor: None,
             _export_budget: Arc::clone(&export_budget),
             ready: VecDeque::new(),
@@ -1370,6 +1373,8 @@ pub struct FusedSeriesStream {
     partial_fold: Option<PartialFold>,
     frame_builder: Option<SeriesFrameBuilder>,
     eval_schema: Option<Arc<SeriesSchema>>,
+    /// Validates evaluated chunk chains emitted as frames, independently of upstream inputs.
+    evaluated_validator: EvaluatedSequenceValidator,
     /// The evaluated chunk whose frame is still being appended across downstream polls.
     frame_cursor: Option<SeriesFrameCursor>,
     /// Keeps exported state batches charged for as long as this stream holds them.
@@ -1454,6 +1459,7 @@ impl FusedSeriesStream {
         self.executor = None;
         self.partial_fold = None;
         self.frame_builder = None;
+        self.evaluated_validator = EvaluatedSequenceValidator::new();
         self.frame_cursor = None;
         self.inputs.clear();
         // This reservation belongs only to this execution. Release it even if the consumer keeps
@@ -1476,6 +1482,11 @@ impl FusedSeriesStream {
         if let Some(schema) = self.eval_schema.as_ref()
             && self.frame_builder.is_some()
         {
+            self.evaluated_validator
+                .validate(&chunk.series, chunk.is_last)
+                .map_err(|error| {
+                    DataFusionError::Execution(format!("invalid evaluated chunk sequence: {error}"))
+                })?;
             self.frame_cursor = Some(
                 SeriesFrameCursor::try_new_evaluated(schema, chunk.series, chunk.is_last).map_err(
                     |error| {
@@ -1579,6 +1590,10 @@ impl Stream for FusedSeriesStream {
                     }
                     Ok(None) => {
                         if this.inputs.is_empty() {
+                            if let Err(error) = this.evaluated_validator.finish() {
+                                this.fail();
+                                return Poll::Ready(Some(Err(error)));
+                            }
                             this.executor = None;
                         }
                     }
@@ -1600,7 +1615,12 @@ impl Stream for FusedSeriesStream {
                         }
                     }
                     Ok(None) => {
-                        if let Err(error) = this.finish_fold().and_then(|()| this.flush_frames()) {
+                        if let Err(error) = this
+                            .evaluated_validator
+                            .finish()
+                            .and_then(|()| this.finish_fold())
+                            .and_then(|()| this.flush_frames())
+                        {
                             this.fail();
                             return Poll::Ready(Some(Err(error)));
                         }

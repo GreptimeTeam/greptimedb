@@ -180,10 +180,9 @@ pub fn select_instants(
 ///
 /// `timestamp(x @ t)` selects at `t` for every point, so its selection repeats one row. This
 /// kernel reports the sample the caller selected and does not decide the selector's time
-/// modifiers: the native Instant caller passes its offset into the selection, so
-/// `timestamp(x @ t offset d)` reports the sample at `t - d`, matching GreptimeDB's existing
-/// planner rather than Prometheus' special case for #8433, which ignores the offset here. `info()`
-/// applies it too.
+/// modifiers: the native Instant caller passes its offset into the selection. For
+/// `timestamp(x @ t offset d)`, it selects at `t` as Prometheus does, ignoring the offset;
+/// `info()` retains ordinary selector offset behavior.
 pub fn timestamp_of_selection(
     schema: &Arc<SeriesSchema>,
     metric: &SeriesLabels,
