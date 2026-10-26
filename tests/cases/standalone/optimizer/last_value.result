@@ -154,6 +154,7 @@ explain analyze
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 explain analyze select
     last_value(val order by ts),
     last_value(val order by ts) respect nulls
@@ -170,7 +171,7 @@ group by host;
 |_|_|_AggregateExec: mode=FinalPartitioned, gby=[host@0 as host], aggr=[last_value(t.val) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) RESPECT NULLS ORDER BY [t.ts ASC NULLS LAST]] REDACTED
 |_|_|_RepartitionExec: REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[host@1 as host], aggr=[last_value(t.val) ORDER BY [t.ts ASC NULLS LAST], last_value(t.val) RESPECT NULLS ORDER BY [t.ts ASC NULLS LAST]] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: false }" REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: false }", "projection": ["ts", "host", "val"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 4_|
 +-+-+-+
