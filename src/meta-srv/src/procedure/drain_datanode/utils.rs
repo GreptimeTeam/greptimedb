@@ -18,11 +18,15 @@ use common_error::ext::BoxedError;
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
+use common_meta::peer::Peer;
+use common_time::util::current_time_millis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
+use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
-use crate::procedure::drain_datanode::DrainDatanodePlan;
+use crate::procedure::drain_datanode::{Context, DrainDatanodePlan, PersistentContext};
+use crate::selector::common;
 
 /// Builds the drain plan of `node_id`.
 ///
@@ -75,4 +79,87 @@ pub(crate) async fn build_datanode_plan(
         leader_regions: leader_regions.into_iter().collect(),
         follower_region_count,
     })
+}
+
+/// Returns true if `node_id` still leads `region_id`.
+///
+/// The table route is authoritative, so a region that is not listed anymore is reported as
+/// not led by the datanode.
+pub(crate) async fn leads_region(
+    table_metadata_manager: &TableMetadataManagerRef,
+    node_id: DatanodeId,
+    region_id: RegionId,
+) -> Result<bool> {
+    let Some(table_route) = table_metadata_manager
+        .table_route_manager()
+        .table_route_storage()
+        .get(region_id.table_id())
+        .await
+        .map_err(BoxedError::new)
+        .context(error::OtherSnafu)?
+    else {
+        return Ok(false);
+    };
+    let TableRouteValue::Physical(table_route) = table_route else {
+        return Ok(false);
+    };
+    let Some(region_route) = table_route
+        .region_routes
+        .iter()
+        .find(|region_route| region_route.region.id == region_id)
+    else {
+        return Ok(false);
+    };
+
+    Ok(region_route.leader_peer.as_ref().map(|peer| peer.id) == Some(node_id))
+}
+
+/// Returns an error if the drain exceeded its deadline.
+pub(crate) fn ensure_drain_deadline(persistent_ctx: &PersistentContext) -> Result<()> {
+    if current_time_millis() < persistent_ctx.deadline_ms {
+        return Ok(());
+    }
+
+    error::ExceededDeadlineSnafu {
+        operation: format!(
+            "Drain datanode {}, migrated: {}, remaining leader regions: {}",
+            persistent_ctx.node_id,
+            persistent_ctx.migrated,
+            persistent_ctx.leader_regions.len()
+        ),
+    }
+    .fail()
+}
+
+/// Selects the migration destination of `region_id` off the drained datanode.
+///
+/// Returns the pinned target when
+/// [`PersistentContext::target_node_id`] is `Some`, otherwise the schedulable datanode with
+/// the smallest peer id. Candidates come from the peer discovery, so the returned peer
+/// carries its address and was not marked unschedulable; the drained datanode and the
+/// existing followers are excluded.
+pub(crate) async fn select_migration_target(
+    ctx: &Context,
+    region_id: RegionId,
+    follower_peers: &[Peer],
+) -> Result<Peer> {
+    let node_id = ctx.persistent_ctx.node_id;
+    let target_node_id = ctx.persistent_ctx.target_node_id;
+    let target = common::active_schedulable_datanodes(&ctx.selector_ctx, None)
+        .await?
+        .into_iter()
+        .map(|datanode| datanode.peer)
+        .filter(|peer| peer.id != node_id)
+        .filter(|peer| target_node_id.is_none_or(|target| peer.id == target))
+        .filter(|peer| !follower_peers.iter().any(|follower| follower.id == peer.id))
+        .min_by_key(|peer| peer.id);
+
+    match target {
+        Some(peer) => Ok(peer),
+        None => error::DrainDatanodeAbortSnafu {
+            node_id,
+            failed_regions: vec![region_id],
+        }
+        .fail(),
+    }
 }

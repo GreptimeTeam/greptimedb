@@ -22,7 +22,7 @@ use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::key::NodeSchedulingRole;
-use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
+use crate::procedure::drain_datanode::dispatch::Dispatch;
 use crate::procedure::drain_datanode::{Context, State, utils};
 
 /// Fences the datanode and builds the drain plan.
@@ -58,7 +58,7 @@ impl State for DrainDatanodeStart {
         ctx.persistent_ctx.leader_regions = plan.leader_regions;
         ctx.persistent_ctx.follower_region_count = plan.follower_region_count;
 
-        Ok((Box::new(DrainDatanodeEnd), Status::executing(true)))
+        Ok((Box::new(Dispatch), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {

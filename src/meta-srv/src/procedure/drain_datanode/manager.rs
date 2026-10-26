@@ -16,11 +16,13 @@ use std::sync::Arc;
 
 use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::procedure::drain_datanode::{
-    ContextFactory, DrainDatanodeProcedure, DrainDatanodeProcedureTask, PersistentContext,
+    ContextFactory, DEFAULT_DRAIN_TIMEOUT, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
+    MAX_PARALLELISM, PersistentContext,
 };
 
 pub type DrainDatanodeManagerRef = Arc<DrainDatanodeManager>;
@@ -56,20 +58,41 @@ impl DrainDatanodeManager {
             }
             .fail();
         }
+        if task.parallelism == 0 || task.parallelism > MAX_PARALLELISM {
+            return error::InvalidArgumentsSnafu {
+                err_msg: format!("the parallelism must be in 1..={}", MAX_PARALLELISM),
+            }
+            .fail();
+        }
+        let timeout = task.timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
+        if timeout.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "the timeout must be greater than zero",
+            }
+            .fail();
+        }
 
         let persistent_ctx = PersistentContext {
             node_id: task.node_id,
             target_node_id: task.target_node_id,
+            parallelism: task.parallelism,
+            strategy: task.strategy,
             leader_regions: vec![],
+            migrated: 0,
+            failed_regions: vec![],
             follower_region_count: 0,
+            rescan_round: 0,
+            // The budget starts when the task is submitted, so neither a slow start nor a
+            // restart extends it.
+            deadline_ms: current_time_millis() + timeout.as_millis() as i64,
         };
         let procedure = DrainDatanodeProcedure::new(self.context_factory.build(persistent_ctx));
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!(
-            "Starting drain datanode procedure {procedure_id} for datanode {}",
-            task.node_id
+            "Starting drain datanode procedure {procedure_id} for datanode {}, timeout: {:?}",
+            task.node_id, timeout
         );
         self.procedure_manager
             .submit(procedure_with_id)

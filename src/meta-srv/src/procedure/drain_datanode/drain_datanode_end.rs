@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::procedure::drain_datanode::{Context, State};
 
-/// Finishes the procedure with the drain plan.
+/// Finishes the procedure with the drain report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DrainDatanodeEnd;
 
@@ -35,10 +35,11 @@ impl State for DrainDatanodeEnd {
         let persistent_ctx = &ctx.persistent_ctx;
         let output = serde_json::json!({
             "node_id": persistent_ctx.node_id,
-            // The leader regions still placed on the datanode. Migrating them is not part
-            // of this procedure yet.
-            "leader_regions": persistent_ctx.leader_regions,
+            "migrated": persistent_ctx.migrated,
+            "failed_regions": persistent_ctx.failed_regions,
             "follower_region_count": persistent_ctx.follower_region_count,
+            // `false` means the datanode still leads the regions in `failed_regions`.
+            "drained": persistent_ctx.failed_regions.is_empty(),
         });
 
         Ok((Box::new(DrainDatanodeEnd), Status::done_with_output(output)))

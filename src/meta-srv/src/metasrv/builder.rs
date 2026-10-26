@@ -75,6 +75,7 @@ use crate::node_scheduling::NodeSchedulingManager;
 use crate::peer::MetasrvPeerAllocator;
 use crate::procedure::drain_datanode::ContextFactory as DrainDatanodeContextFactory;
 use crate::procedure::drain_datanode::manager::DrainDatanodeManager;
+use crate::procedure::region_migration::DEFAULT_REGION_MIGRATION_TIMEOUT;
 use crate::procedure::region_migration::DefaultContextFactory;
 use crate::procedure::region_migration::manager::RegionMigrationManager;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManager;
@@ -417,6 +418,9 @@ impl MetasrvBuilder {
             DrainDatanodeContextFactory {
                 table_metadata_manager: table_metadata_manager.clone(),
                 node_scheduling_manager: node_scheduling_manager.clone(),
+                region_migration_manager: region_migration_manager.clone(),
+                selector_ctx: selector_ctx.clone(),
+                migration_timeout: DEFAULT_REGION_MIGRATION_TIMEOUT,
             },
         ));
         drain_datanode_manager.try_start()?;
