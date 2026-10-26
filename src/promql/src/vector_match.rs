@@ -1223,7 +1223,7 @@ fn set_vectors_inner(
 
 /// The figures one set field's phases are charged from, read once from its operands.
 struct SetFieldMetadata {
-    /// The filter side's match groups.
+    /// The filter side's match-group table, without the presence bitmaps it holds.
     tables: usize,
     /// The widest key one row builds: the match key a kept series is looked up by, or the key a row
     /// is filed under.
@@ -1241,7 +1241,6 @@ fn set_field_metadata(
     for series in filter.series {
         tables = tables
             .saturating_add(match_key_bytes(&series.metric, labels))
-            .saturating_add(2 * std::mem::size_of::<usize>())
             .saturating_add(GROUP_SLOT_BYTES);
     }
     // `or` files the filter side's rows too, so both sides' label sets bound a row's keys and the
@@ -1276,8 +1275,8 @@ fn set_field(
         SetOp::Unless => (lhs, rhs, false),
         SetOp::Or => (rhs, lhs, false),
     };
-    // The walk is one phase, entered before the group table exists. A kept series reads its
-    // candidates through one cursor each, so the widest group's cursors join it once it does.
+    // The walk is one phase, entered before the group table exists; each group's bitmap joins it
+    // as the group is first met.
     let metadata = match budget.as_deref_mut() {
         Some(budget) => {
             let metadata = set_field_metadata(labels, kept, filter);
@@ -1286,11 +1285,12 @@ fn set_field(
         }
         None => None,
     };
-    let filter_groups = group(filter, labels);
-    if let Some(budget) = budget.as_deref_mut() {
-        let widest = filter_groups.values().map(Vec::len).max().unwrap_or(0);
-        budget.grow(widest.saturating_mul(std::mem::size_of::<RowCursor<'_>>()))?;
-    }
+    let presence = group_presence(
+        filter,
+        labels,
+        grid.spec().len as usize,
+        budget.as_deref_mut(),
+    )?;
     // A set operator hands on its operands' label sets unchanged, so a row is filed under the label
     // set of the series it came from.
     let charged = budget.is_some();
@@ -1323,29 +1323,14 @@ fn set_field(
     }
     for (index, series) in kept.series.iter().enumerate() {
         let label_set = label_set(&series.metric);
-        let candidates = filter_groups.get(&group_key(&series.metric, labels));
-        let candidate_indices: &[usize] = candidates.map_or(&[], Vec::as_slice);
-        // One forward cursor per candidate: `kept`'s positions only increase, so the row a
-        // candidate is read at only increases as well.
-        let mut candidate_cursors: Vec<RowCursor<'_>> = candidate_indices
-            .iter()
-            .map(|&candidate| filter.cursor(candidate))
-            .collect();
+        let bits = presence.get(&group_key(&series.metric, labels));
         let mut cursor = kept.cursor(index);
         for (point, row) in kept.positions(index) {
             let sample = cursor.at(row).expect("a row never goes back");
             if matches!(sample, SampleRef::Missing) {
                 continue;
             }
-            let mut matched = false;
-            for (&candidate, candidate_cursor) in
-                candidate_indices.iter().zip(&mut candidate_cursors)
-            {
-                if filter.present(candidate, point, candidate_cursor) {
-                    matched = true;
-                    break;
-                }
-            }
+            let matched = bits.is_some_and(|bits| bits[point / 64] & (1 << (point % 64)) != 0);
             if matched == keep_matched {
                 results.insert(
                     &series.metric,
@@ -1360,7 +1345,7 @@ fn set_field(
     }
     // The group table is gone before the sort phase, which is charged without it: the message the
     // sort may append and one slot per row it sorts, entered before it allocates either.
-    drop(filter_groups);
+    drop(presence);
     if let (Some(budget), Some(metadata)) = (budget.as_deref_mut(), &metadata) {
         budget.phase(
             metadata
@@ -1380,6 +1365,43 @@ fn set_field(
         errors.push((duplicate.point, 0, message));
     }
     Ok(results)
+}
+
+/// The points at which each match group of `operand` holds a sample, one bit per grid point.
+///
+/// Prometheus decides a set operator at a step from the signatures present on the filter side, so
+/// a kept sample needs only whether its group is present at its point: built once from the filter
+/// side's rows, that is one lookup per kept sample however many series share the group. A group's
+/// bitmap is charged as the group is first met, before it is allocated.
+fn group_presence(
+    operand: &Operand<'_>,
+    labels: &MatchingLabels,
+    points: usize,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<HashMap<GroupKey, Vec<u64>>> {
+    let words = points.div_ceil(64);
+    let mut presence: HashMap<GroupKey, Vec<u64>> = HashMap::new();
+    for (index, series) in operand.series.iter().enumerate() {
+        let bits = match presence.entry(group_key(&series.metric, labels)) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                if let Some(budget) = budget.as_deref_mut() {
+                    budget.grow(words.saturating_mul(std::mem::size_of::<u64>()))?;
+                }
+                entry.insert(vec![0; words])
+            }
+        };
+        let mut cursor = operand.cursor(index);
+        for (point, row) in operand.positions(index) {
+            if !matches!(
+                cursor.at(row).expect("a row never goes back"),
+                SampleRef::Missing
+            ) {
+                bits[point / 64] |= 1 << (point % 64);
+            }
+        }
+    }
+    Ok(presence)
 }
 
 /// Joins the per-field results into series with all fields, by label set.

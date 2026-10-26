@@ -3442,3 +3442,96 @@ fn a_set_operation_holds_the_rows_it_keeps() {
         "`and` holds {and} bytes and `unless` {unless}"
     );
 }
+
+/// Membership is read from each match group's presence, however many series share the group and
+/// however sparse each of them is: one group here holds sixteen filter series that each carry a
+/// few points, the grid spans several 64-point words, and every operator, with either side as the
+/// filter, agrees with the step-by-step reference.
+#[test]
+fn set_membership_of_crowded_sparse_groups_matches_the_reference() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10, 150).unwrap()).unwrap());
+    let points = grid.spec().len as usize;
+    let schema = schema(1, &grid);
+    let side = |rng: &mut StdRng, name: &str, jobs: &[(&str, usize)], density: f64| -> Side {
+        let mut builder = GridSeriesBuilder::try_new(Arc::new(schema.clone())).unwrap();
+        let (mut series, mut dense) = (Vec::new(), Vec::new());
+        for (job, count) in jobs {
+            for member in 0..*count {
+                let labels = Labels::from([
+                    ("__name__".to_string(), name.to_string()),
+                    ("job".to_string(), job.to_string()),
+                    ("host".to_string(), format!("{name}{member}")),
+                ]);
+                let values: Dense = (0..points)
+                    .map(|point| vec![rng.random_bool(density).then_some(point as f64)])
+                    .collect();
+                builder.begin_series();
+                for (point, row) in values.iter().enumerate() {
+                    builder.push(point, row).unwrap();
+                }
+                series.extend(builder.finish(metric(&labels)).unwrap());
+                dense.push((labels, values));
+            }
+        }
+        Side {
+            schema: schema.clone(),
+            series,
+            dense,
+        }
+    };
+    let labels = MatchingLabels::On(vec![Arc::from("job")]);
+    for seed in 0..20 {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let crowded = side(&mut rng, "r", &[("x", 16), ("y", 2)], 0.05);
+        let dense = side(&mut rng, "l", &[("x", 2), ("y", 2), ("z", 1)], 0.6);
+        for (lhs, rhs) in [(&dense, &crowded), (&crowded, &dense)] {
+            for op in [SetOp::And, SetOp::Or, SetOp::Unless] {
+                let expected = reference_set(op, &labels, &lhs.dense, &rhs.dense, points);
+                let actual = set_vectors(
+                    op,
+                    &labels,
+                    &lhs.schema,
+                    &lhs.series,
+                    &rhs.schema,
+                    &rhs.series,
+                );
+                assert_output(actual, expected, seed);
+            }
+        }
+    }
+}
+
+/// Each match group's presence bitmap is charged: one sample per series, so a longer grid adds
+/// nothing but the bitmaps, which grow by one 64-bit word per group per 64 points.
+#[test]
+fn a_set_operation_charges_its_presence_bitmaps() {
+    const GROUPS: usize = 32;
+    let peak = |points: usize| {
+        let grid = budget_grid(points);
+        let schema = Arc::new(schema(1, &grid));
+        let lhs = vec![budget_operand(&schema, "a", &[0])];
+        let rhs: Vec<Series> = (0..GROUPS)
+            .map(|group| jobbed_operand(&schema, "b", &format!("j{group}"), &[0]))
+            .collect();
+        let mut seen = Vec::new();
+        set_vectors_with_reservation(
+            SetOp::Unless,
+            &MatchingLabels::On(vec![Arc::from("job")]),
+            &schema,
+            &lhs,
+            &schema,
+            &rhs,
+            &mut |total| {
+                seen.push(total);
+                Ok(())
+            },
+        )
+        .unwrap();
+        seen.into_iter().max().unwrap()
+    };
+    let (short, long) = (peak(64), peak(64 * 65));
+    assert!(
+        long >= short + GROUPS * 64 * std::mem::size_of::<u64>(),
+        "64 points peak at {short} bytes and 4160 at {long}"
+    );
+}
