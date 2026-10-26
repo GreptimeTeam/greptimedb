@@ -91,6 +91,13 @@ pub enum Error {
         region_id: RegionId,
     },
 
+    #[snafu(display("Another drain procedure is running for datanode: {}", node_id))]
+    DrainDatanodeRunning {
+        #[snafu(implicit)]
+        location: Location,
+        node_id: DatanodeId,
+    },
+
     #[snafu(display(
         "The region migration procedure is completed for region: {}, target_peer: {}",
         region_id,
@@ -1254,6 +1261,7 @@ impl ErrorExt for Error {
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
+            | Error::DrainDatanodeRunning { .. }
             | Error::RegionMigrated { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
