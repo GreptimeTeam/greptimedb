@@ -163,9 +163,8 @@ pub(crate) async fn pick_automatic_for_test(
     region: &CompactionRegion,
     history: &mut PickHistory,
     max_outputs: Option<usize>,
-    time_range: Option<TimestampRange>,
 ) -> Result<Option<PickerOutput>> {
-    pick_automatic(region, history, max_outputs, time_range).await
+    pick_automatic(region, history, max_outputs, None).await
 }
 
 impl CompactionScheduler {

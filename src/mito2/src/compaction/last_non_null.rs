@@ -345,7 +345,7 @@ mod tests {
             history.observe_for_test(keys.iter().copied(), waiting_since);
             let promoted = TWCS_SELECTED_CANDIDATES.with_label_values(&["l0_merge", "promoted"]);
             let promoted_before = promoted.get();
-            let picked = pick_automatic_for_test(&region, &mut history, limit, None)
+            let picked = pick_automatic_for_test(&region, &mut history, limit)
                 .await
                 .unwrap();
             let mut attempted_windows: HashSet<_> =
@@ -437,7 +437,7 @@ mod tests {
         let start = Instant::now();
         history.observe_for_test([old].into_iter(), start);
         for _ in 0..3 {
-            let picked = pick_automatic_for_test(&region, &mut history, Some(1), None)
+            let picked = pick_automatic_for_test(&region, &mut history, Some(1))
                 .await
                 .unwrap()
                 .unwrap();
@@ -455,7 +455,7 @@ mod tests {
         // Advance only the waiting age, without sleeping or acknowledging any
         // execution. The same hot L0 remains eligible in the unchanged snapshot.
         history.seed_for_test(old, start - Duration::from_secs(120));
-        let picked = pick_automatic_for_test(&region, &mut history, Some(1), None)
+        let picked = pick_automatic_for_test(&region, &mut history, Some(1))
             .await
             .unwrap()
             .unwrap();
@@ -513,11 +513,17 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(false)]
-    #[case(true)]
+    #[case::unlimited(false, None, vec![vec![0, 1, 2, 3], vec![4]], vec![0, 1, 2])]
+    #[case::busy_unlimited(true, None, vec![vec![4]], vec![0, 1, 2])]
+    #[case::one_slot(false, Some(1), vec![vec![0, 1, 2, 3]], vec![1, 2])]
+    #[case::busy_one_slot(true, Some(1), vec![vec![4]], vec![0, 1, 2])]
+    #[case::zero_budget(false, Some(0), vec![], vec![])]
+    #[case::busy_zero_budget(true, Some(0), vec![], vec![])]
     fn test_absorbed_seed_closes_disconnected_members_and_defers_busy_group(
         #[case] busy: bool,
-        #[values(None, Some(0), Some(1))] max_outputs: Option<usize>,
+        #[case] max_outputs: Option<usize>,
+        #[case] expected_groups: Vec<Vec<usize>>,
+        #[case] expected_attempted: Vec<usize>,
     ) {
         let metadata = metadata_for_test();
         let files: Vec<_> = [(0, 10), (10, 20), (100, 110), (110, 120), (200, 210)]
@@ -533,7 +539,7 @@ mod tests {
             priority_seed,
         ];
 
-        let (mut outputs, attempted) = build_closed_outputs(
+        let (outputs, attempted) = build_closed_outputs(
             seeds,
             files.clone(),
             &metadata,
@@ -542,38 +548,16 @@ mod tests {
                 ..Default::default()
             },
         );
-        let expected_count: usize = if busy { 1 } else { 2 };
-        assert_eq!(expected_count.min(max_outputs.unwrap_or(2)), outputs.len());
-        if max_outputs == Some(0) {
-            assert!(attempted.is_empty());
-            return;
-        }
-        assert_eq!(
-            if !busy && max_outputs == Some(1) {
-                vec![1, 2]
-            } else {
-                vec![0, 1, 2]
-            },
-            attempted
-        );
-        if !busy {
-            let first = outputs.pop().unwrap();
-            assert_eq!(4, first.inputs.len());
-            assert_eq!(file_ids(&files[..4]), file_ids(&first.inputs));
+        assert_eq!(expected_attempted, attempted);
+        assert_eq!(expected_groups.len(), outputs.len());
+        // Compare in execution priority order: the compactor pops from the end.
+        for (output, indices) in outputs.iter().rev().zip(expected_groups) {
+            let expected: HashSet<_> = indices.iter().map(|&index| files[index].file_id()).collect();
+            assert_eq!(indices.len(), output.inputs.len());
+            assert_eq!(expected, file_ids(&output.inputs));
             // Preserve the absorbed seed's conservative tombstone policy.
-            assert!(!first.filter_deleted);
-            if max_outputs == Some(1) {
-                return;
-            }
+            assert!(!output.filter_deleted);
         }
-        assert_eq!(
-            vec![files[4].file_id()],
-            outputs[0]
-                .inputs
-                .iter()
-                .map(FileHandle::file_id)
-                .collect::<Vec<_>>()
-        );
     }
 
     #[rstest::rstest]
