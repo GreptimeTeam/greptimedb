@@ -159,6 +159,12 @@ pub struct GcConfig {
     /// expel time is the time when the file is considered as removed, as in removed from the manifest.
     /// This should only occur rarely, as manifest keep tracks in `removed_files` field
     /// unless something goes wrong.
+    ///
+    /// It is also the age threshold of the sweep that reclaims temporary files left behind
+    /// by a crashed HDFS writer, and that sweep runs even if `enable` is false. HDFS advances
+    /// the modification time of a file under construction only as its blocks complete, so
+    /// lowering this value also shrinks the margin between the sweep and files that are
+    /// still being written.
     #[serde(with = "humantime_serde")]
     pub unknown_file_lingering_time: Duration,
     /// Maximum concurrent list operations per GC job.
@@ -167,6 +173,8 @@ pub struct GcConfig {
     /// Maximum concurrent GC jobs.
     /// This is used to limit the number of concurrent GC jobs running on the datanode
     /// to prevent too many concurrent GC jobs from overwhelming the datanode.
+    /// Setting it to 0 disables GC jobs and the temporary file sweep, which is limited
+    /// to the same number of concurrent tasks.
     pub max_concurrent_gc_job: usize,
 }
 
@@ -177,8 +185,9 @@ impl Default for GcConfig {
             // expect long running queries to be finished(or at least be able to notify it's using a deleted file) within a reasonable time
             lingering_time: Some(Duration::from_secs(60 * 60)),
             // 1 day, for unknown expel time, which is when this file get removed from manifest.
-            // Only applies to full-listing GC for active/open regions. A long default avoids
-            // accidentally deleting pre-manifest files (e.g. compaction/flush still in progress).
+            // A long default avoids accidentally deleting pre-manifest files (e.g.
+            // compaction/flush still in progress) or temporary files of a writer that is
+            // still alive; the temporary file sweep uses this value as well.
             unknown_file_lingering_time: Duration::from_secs(24 * 60 * 60),
             max_concurrent_lister_per_gc_job: 32,
             max_concurrent_gc_job: 4,
@@ -806,7 +815,7 @@ impl LocalGcWorker {
     /// Only `.puffin` files (not subdirectories) are included.
     async fn list_region_index_files(&self, region_id: RegionId) -> Result<Vec<Entry>> {
         let region_dir = self.access_layer.build_region_dir(region_id);
-        let index_dir = object_store::util::join_dir(&region_dir, "index");
+        let index_dir = location::index_dir(&region_dir);
 
         let mut lister = match self
             .access_layer
