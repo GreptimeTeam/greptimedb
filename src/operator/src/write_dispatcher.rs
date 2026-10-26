@@ -25,7 +25,9 @@ use backon::{BackoffBuilder, ExponentialBuilder};
 use catalog::CatalogManagerRef;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::cache_invalidator::{CacheInvalidatorRef, Context};
-use common_meta::error::{Error, ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu};
+use common_meta::error::{
+    BatchRequestSnafu, Error, ExternalSnafu, Result, TableInfoNotFoundSnafu, UnexpectedSnafu,
+};
 use common_meta::instruction::CacheIdent;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::peer::{Peer, PeerRef};
@@ -33,7 +35,7 @@ use common_meta::rpc::router;
 use futures::future;
 use partition::manager::{PartitionRuleManager, PartitionRuleManagerRef};
 use prometheus::Histogram;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio_util::sync::CancellationToken;
@@ -178,24 +180,17 @@ impl WriteDispatcher {
         cancellation: Option<&CancellationToken>,
     ) -> Result<RegionResponse> {
         let histogram = histogram.as_ref();
-        let writes = if self.retry.is_some() {
-            writes
-                .into_iter()
-                .flat_map(|(peer, request)| {
-                    split_request(request)
-                        .into_iter()
-                        .map(move |request| (Arc::clone(&peer), request))
-                })
-                .collect()
-        } else {
-            writes
-        };
-        let attempts = future::join_all(
-            writes
-                .into_iter()
-                .map(|(peer, request)| self.send(peer, request, histogram)),
-        )
-        .await;
+        let attempts = future::join_all(writes.into_iter().map(|(peer, request)| async move {
+            if self.retry.is_some() {
+                self.send_batch(peer, request, histogram).await
+            } else {
+                vec![self.send(peer, request, histogram).await]
+            }
+        }))
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
         self.finish(attempts, histogram, cancellation).await
     }
 
@@ -203,10 +198,13 @@ impl WriteDispatcher {
     pub(crate) async fn send(
         &self,
         peer: PeerRef,
-        request: RegionRequest,
+        mut request: RegionRequest,
         histogram: Option<&Histogram>,
     ) -> WriteAttempt {
         if let Some(retry) = &self.retry {
+            if matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
+                api::region::set_accept_partial_result(request.header.get_or_insert_default());
+            }
             return retry
                 .send(
                     RoutedWrite {
@@ -262,6 +260,80 @@ impl WriteDispatcher {
         regions: &[RegionId],
     ) -> partition::error::Result<HashMap<RegionId, PeerRef>> {
         resolve_peers(&self.partition_manager, regions).await
+    }
+
+    async fn send_batch(
+        &self,
+        peer: PeerRef,
+        mut request: RegionRequest,
+        histogram: Option<&Histogram>,
+    ) -> Vec<WriteAttempt> {
+        if !matches!(&request.body, Some(Body::Inserts(_) | Body::Deletes(_))) {
+            return vec![self.send(peer, request, histogram).await];
+        }
+        // Upgrade datanodes first and roll back frontends first: old datanodes
+        // cannot report which entries succeeded, so retrying a batch may replay writes.
+        api::region::set_accept_partial_result(request.header.get_or_insert_default());
+        let request = Arc::new(request);
+        let requester = self.node_manager.datanode(&peer).await;
+        let result = {
+            let _timer = histogram.map(Histogram::start_timer);
+            requester.handle(Arc::clone(&request)).await
+        };
+        let error = match result {
+            Ok(response) => return vec![WriteAttempt::Success(response)],
+            Err(error) => error,
+        };
+        let request = match Arc::try_unwrap(request) {
+            Ok(request) => request,
+            Err(_) => {
+                return vec![WriteAttempt::Failed {
+                    error: UnexpectedSnafu {
+                        err_msg: "Region request is still shared after its RPC completed",
+                    }
+                    .build(),
+                    request: None,
+                }];
+            }
+        };
+        let requests = split_request(request);
+        match error {
+            Error::PartialRegion { response } => {
+                let mut failures: HashMap<_, _> = response.failures.into_iter().collect();
+                let mut attempts = vec![WriteAttempt::Success(RegionResponse {
+                    affected_rows: response.affected_rows,
+                    extensions: response.extensions,
+                    metadata: Vec::new(),
+                })];
+                for (index, request) in requests.into_iter().enumerate() {
+                    if let Some(error) = failures.remove(&index) {
+                        let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
+                            peer: Arc::clone(&peer),
+                            request: Arc::new(request),
+                        });
+                        attempts.push(WriteAttempt::Failed { error, request });
+                    }
+                }
+                attempts
+            }
+            error => {
+                // A whole-RPC failure cannot confirm success for any entry.
+                let error = Arc::new(error);
+                requests
+                    .into_iter()
+                    .map(|request| {
+                        let request = error.retry_hint().is_retryable().then(|| RoutedWrite {
+                            peer: Arc::clone(&peer),
+                            request: Arc::new(request),
+                        });
+                        WriteAttempt::Failed {
+                            error: BatchRequestSnafu.into_error(Arc::clone(&error)),
+                            request,
+                        }
+                    })
+                    .collect()
+            }
+        }
     }
 
     async fn dispatch_inner(

@@ -31,6 +31,14 @@ use crate::grpc::{TonicResult, cancellation};
 
 #[async_trait]
 pub trait RegionServerHandler: Send + Sync {
+    /// Handles a complete request, allowing implementations to inspect request headers.
+    async fn handle_region_request(&self, request: RegionRequest) -> Result<RegionResponse> {
+        let body = request.body.context(InvalidQuerySnafu {
+            reason: "Expecting non-empty region request body.",
+        })?;
+        self.handle(body).await
+    }
+
     async fn handle(&self, request: region_request::Body) -> Result<RegionResponse>;
 }
 
@@ -51,15 +59,12 @@ impl RegionServerRequestHandler {
         let tracing_context = TracingContext::from_w3c(
             &request
                 .header
+                .as_ref()
                 .context(InvalidQuerySnafu {
                     reason: "Expecting non-empty region request header.",
                 })?
                 .tracing_context,
         );
-        let query = request.body.context(InvalidQuerySnafu {
-            reason: "Expecting non-empty region request body.",
-        })?;
-
         let handler = self.handler.clone();
 
         // Executes requests in another runtime to
@@ -71,7 +76,7 @@ impl RegionServerRequestHandler {
         // 2. avoid the handler blocks the gRPC runtime incidentally.
         let handle = self.runtime.spawn(async move {
             handler
-                .handle(query)
+                .handle_region_request(request)
                 .trace(tracing_context.attach(info_span!("RegionServerRequestHandler::handle")))
                 .await
                 .map_err(|e| {
