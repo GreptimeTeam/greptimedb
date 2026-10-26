@@ -1516,8 +1516,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ) {
                 // Fence writes here: writes the worker handles later see
                 // Downgrading, and earlier ones have finished. This only
-                // changes a writable or staging leader.
-                region.set_role(RegionRole::DowngradingLeader);
+                // changes a writable or staging leader, but always fences
+                // Leader grants for heartbeats sent before.
+                region.demote(RegionRole::DowngradingLeader);
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;

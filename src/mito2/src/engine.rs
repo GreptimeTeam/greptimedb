@@ -98,7 +98,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -335,8 +335,8 @@ impl MitoEngine {
     }
 
     /// Renews the lease of this node from a heartbeat response that carries region leases.
-    pub fn renew_node_lease(&self, deadline: Instant) {
-        self.inner.workers.node_lease().renew(deadline);
+    pub fn renew_node_lease(&self, deadline: Instant, lease: Duration) {
+        self.inner.workers.node_lease().renew(deadline, lease);
     }
 
     /// Freezes the clock of the lease checks at `at`.
@@ -1610,7 +1610,12 @@ impl RegionEngine for MitoEngine {
         if role.writable() {
             region.leader_deadline.extend(deadline);
         }
-        region.set_role(role);
+        if role == RegionRole::Leader {
+            let lease = self.inner.workers.node_lease().max_lease();
+            region.grant_leader(deadline.checked_sub(lease).unwrap_or(deadline));
+        } else {
+            region.set_role(role);
+        }
         Ok(())
     }
 

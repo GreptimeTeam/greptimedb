@@ -25,7 +25,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
@@ -188,6 +188,9 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv.
     pub(crate) leader_deadline: Deadline,
+    /// When the region was last demoted. Leader grants for heartbeats sent before do not make it
+    /// writable again. The lock covers raising it or comparing with it, and the role change.
+    pub(crate) grant_gate: Mutex<Option<Instant>>,
     /// Region stats.
     pub(crate) region_stats: RegionStats,
     /// manifest stats
@@ -251,6 +254,8 @@ pub(crate) struct NodeLease {
     /// Whether writes need a lease. Only a datanode the metasrv controls sets it.
     enabled: AtomicBool,
     deadline: Deadline,
+    /// The longest lease length seen, in nanoseconds.
+    max_lease: AtomicU64,
     /// The time of the lease checks while a test freezes it, in the unit of [Deadline]; 0 when
     /// it is not frozen.
     #[cfg(any(test, feature = "test"))]
@@ -266,8 +271,16 @@ impl NodeLease {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn renew(&self, deadline: Instant) {
+    pub(crate) fn renew(&self, deadline: Instant, lease: Duration) {
         self.deadline.extend(deadline);
+        self.max_lease
+            .fetch_max(lease.as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    /// Returns the longest lease length seen, so a deadline minus it is never later than the
+    /// heartbeat the lease was granted for.
+    pub(crate) fn max_lease(&self) -> Duration {
+        Duration::from_nanos(self.max_lease.load(Ordering::Relaxed))
     }
 
     /// Returns the current time in the unit of [Deadline].
@@ -494,6 +507,26 @@ impl MitoRegion {
     /// Sets the region role state.
     pub(crate) fn set_role(&self, next_role: RegionRole) {
         self.manifest_ctx.set_role(next_role, self.region_id);
+    }
+
+    /// Raises the grant gate to now, then sets `role`.
+    pub(crate) fn demote(&self, role: RegionRole) {
+        let mut gate = self.grant_gate.lock().unwrap();
+        *gate = Some(Instant::now());
+        self.set_role(role);
+    }
+
+    /// Applies a Leader grant for a heartbeat sent at `sent_at`, unless the region was demoted
+    /// after that heartbeat.
+    pub(crate) fn grant_leader(&self, sent_at: Instant) {
+        // A writable region needs no change. Staging still leaves staging below.
+        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            return;
+        }
+        let gate = self.grant_gate.lock().unwrap();
+        if gate.is_none_or(|gate| sent_at >= gate) {
+            self.set_role(RegionRole::Leader);
+        }
     }
 
     pub(crate) fn region_role(&self) -> RegionRole {
@@ -2342,6 +2375,7 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             leader_deadline: Default::default(),
+            grant_gate: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         }
@@ -2948,6 +2982,7 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             leader_deadline: Default::default(),
+            grant_gate: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         };

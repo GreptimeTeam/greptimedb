@@ -276,10 +276,11 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
                 err_msg: "'region_lease' is missing in heartbeat response",
             })?;
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
-        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
+        let lease = Duration::from_secs(region_lease.lease_seconds);
+        let deadline = start_instant + lease;
 
         if let Some(mito) = self.region_server.mito_engine() {
-            mito.renew_node_lease(deadline.into_std());
+            mito.renew_node_lease(deadline.into_std(), lease);
         }
         self.renew_region_leases(&region_lease.regions, deadline)
             .await;
@@ -448,8 +449,10 @@ impl CountdownTask {
                                     error!(err; "Failed to set region role to {role} for region {region_id}");
                                 }
 
-                            // Finalize leadership: persist backfilled metadata.
+                            // Finalize leadership when the grant made the region a leader: persist
+                            // backfilled metadata.
                             } else if !prev_role_leader && role == RegionRole::Leader
+                                && self.region_server.is_region_leader(self.region_id).unwrap_or(false)
                                 && let Err(err) = self
                                     .region_server
                                     .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
@@ -503,18 +506,23 @@ impl CountdownTask {
 #[cfg(test)]
 mod test {
 
+    use std::sync::atomic::AtomicUsize;
+
     use api::v1::Rows;
     use api::v1::meta::{HeartbeatResponse, RegionLease};
     use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use mito2::config::MitoConfig;
+    use mito2::engine::MITO_ENGINE_NAME;
     use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{
+        RegionEngine, SetRegionRoleStateResponse, SetRegionRoleStateSuccess,
+    };
     use store_api::region_request::{
         EnterStagingRequest, RegionPutRequest, StagingPartitionDirective,
     };
 
     use super::*;
-    use crate::tests::mock_region_server;
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     /// Handles a heartbeat response that grants `regions` for a heartbeat sent now.
     async fn handle_lease_response(alive_keeper: &RegionAliveKeeper, regions: Vec<GrantedRegion>) {
@@ -532,6 +540,38 @@ mod test {
         let mut ctx =
             HeartbeatResponseHandlerContext::new(Arc::new(HeartbeatMailbox::new(tx)), response);
         alive_keeper.handle(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ignored_leader_grant_does_not_finalize_leadership() {
+        common_telemetry::init_default_ut_logging();
+        let region_server = mock_region_server();
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let (engine, _) = MockRegionEngine::with_custom_apply_fn(MITO_ENGINE_NAME, |engine| {
+            // The engine ignores the grant, so the region stays a follower.
+            engine.mock_role = Some(Some(RegionRole::Follower));
+            let finalized = finalized.clone();
+            engine.handle_set_readonly_gracefully_mock_fn = Some(Box::new(move |_| {
+                finalized.fetch_add(1, Ordering::Relaxed);
+                Ok(SetRegionRoleStateResponse::success(
+                    SetRegionRoleStateSuccess::mito(0),
+                ))
+            }));
+        });
+        let region_id = RegionId::new(1024, 1);
+        region_server.register_test_region(region_id, engine);
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        alive_keeper.register_region(region_id).await;
+        let grant = GrantedRegion {
+            region_id: region_id.as_u64(),
+            role: api::v1::meta::RegionRole::Leader.into(),
+            extensions: HashMap::new(),
+        };
+        handle_lease_response(&alive_keeper, vec![grant]).await;
+        // The countdown task has handled the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(0, finalized.load(Ordering::Relaxed));
     }
 
     #[tokio::test(flavor = "multi_thread")]
