@@ -103,6 +103,15 @@ impl RegionEngine for MetaRegionEngine {
         unimplemented!()
     }
 
+    fn set_region_role_with_lease(
+        &self,
+        _region_id: RegionId,
+        _role: RegionRole,
+        _deadline: std::time::Instant,
+    ) -> Result<(), BoxedError> {
+        unimplemented!()
+    }
+
     async fn set_region_role_state_gracefully(
         &self,
         _region_id: RegionId,

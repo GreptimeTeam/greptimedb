@@ -278,6 +278,9 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
         let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
 
+        if let Some(mito) = self.region_server.mito_engine() {
+            mito.renew_node_lease(deadline.into_std());
+        }
         self.renew_region_leases(&region_lease.regions, deadline)
             .await;
         self.close_staled_regions(&region_lease.closeable_region_ids)
@@ -435,7 +438,7 @@ impl CountdownTask {
                         },
                         Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            if let Err(err) = self.region_server.set_region_role(self.region_id, role) {
+                            if let Err(err) = self.region_server.set_region_role_with_lease(self.region_id, role, deadline.into_std()) {
                                 if err.status_code() == StatusCode::RegionNotFound {
                                     // Table metadata in metasrv is deleted after its regions are dropped.
                                     // The datanode may still receive lease renewal responses that depend on the metadata
@@ -500,13 +503,91 @@ impl CountdownTask {
 #[cfg(test)]
 mod test {
 
+    use api::v1::Rows;
+    use api::v1::meta::{HeartbeatResponse, RegionLease};
+    use common_meta::heartbeat::mailbox::HeartbeatMailbox;
     use mito2::config::MitoConfig;
-    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
     use store_api::region_engine::RegionEngine;
-    use store_api::region_request::{EnterStagingRequest, StagingPartitionDirective};
+    use store_api::region_request::{
+        EnterStagingRequest, RegionPutRequest, StagingPartitionDirective,
+    };
 
     use super::*;
     use crate::tests::mock_region_server;
+
+    /// Handles a heartbeat response that grants `regions` for a heartbeat sent now.
+    async fn handle_lease_response(alive_keeper: &RegionAliveKeeper, regions: Vec<GrantedRegion>) {
+        let (tx, _rx) = mpsc::channel(1);
+        let response = HeartbeatResponse {
+            region_lease: Some(RegionLease {
+                regions,
+                duration_since_epoch: alive_keeper.epoch().elapsed().as_millis() as u64,
+                // The countdown of a granted region does not expire during the test.
+                lease_seconds: 86400,
+                closeable_region_ids: vec![],
+            }),
+            ..Default::default()
+        };
+        let mut ctx =
+            HeartbeatResponseHandlerContext::new(Arc::new(HeartbeatMailbox::new(tx)), response);
+        alive_keeper.handle(&mut ctx).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lease_responses_let_regions_write() {
+        common_telemetry::init_default_ut_logging();
+        let mut region_server = mock_region_server();
+        let mut engine_env = TestEnv::with_prefix("region-alive-keeper-write-lease").await;
+        let engine = engine_env.create_engine(MitoConfig::default()).await;
+        engine.require_write_lease();
+        // The clock of the lease checks stands still, so only the lease propagation matters.
+        engine.freeze_lease_clock(std::time::Instant::now());
+        region_server.register_engine(Arc::new(engine));
+        let alive_keeper =
+            RegionAliveKeeper::new(region_server.clone(), None, Duration::from_millis(100));
+        let create = |region_id| {
+            let request = RegionRequest::Create(CreateRequestBuilder::new().build());
+            region_server.handle_request(region_id, request)
+        };
+        let schema = rows_schema(&CreateRequestBuilder::new().build());
+        let put = |region_id| {
+            let rows = Rows {
+                schema: schema.clone(),
+                rows: build_rows(0, 1),
+            };
+            let request = RegionRequest::Put(RegionPutRequest {
+                rows,
+                hint: None,
+                partition_expr_version: None,
+                skip_wal: false,
+            });
+            region_server.handle_request(region_id, request)
+        };
+
+        // Created before any heartbeat response, the region has no lease.
+        let region_id = RegionId::new(1024, 1);
+        create(region_id).await.unwrap();
+        assert!(put(region_id).await.unwrap_err().is_retryable());
+
+        // A response renews the lease of the node, under which regions created later write.
+        handle_lease_response(&alive_keeper, vec![]).await;
+        let created_region_id = RegionId::new(1024, 2);
+        create(created_region_id).await.unwrap();
+        put(created_region_id).await.unwrap();
+
+        // A Leader grant renews the lease of the region.
+        alive_keeper.register_region(region_id).await;
+        let grant = GrantedRegion {
+            region_id: region_id.as_u64(),
+            role: api::v1::meta::RegionRole::Leader.into(),
+            extensions: HashMap::new(),
+        };
+        handle_lease_response(&alive_keeper, vec![grant]).await;
+        // The countdown task has applied the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        put(region_id).await.unwrap();
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn region_alive_keeper() {

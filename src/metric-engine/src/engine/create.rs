@@ -324,6 +324,11 @@ impl MetricEngineInner {
             let column_metadata = *physical_schema_map.get(name).unwrap();
             (name.to_string(), column_metadata.clone())
         });
+        // The data region has the new columns, whatever happens to the metadata write.
+        self.state
+            .write()
+            .unwrap()
+            .add_physical_columns(data_region_id, new_add_columns);
 
         extension_return_value.insert(
             ALTER_PHYSICAL_EXTENSION_KEY.to_string(),
@@ -335,11 +340,10 @@ impl MetricEngineInner {
             .add_logical_regions(physical_region_id, true, logical_region_columns)
             .await?;
 
-        {
-            let mut state = self.state.write().unwrap();
-            state.add_physical_columns(data_region_id, new_add_columns);
-            state.add_logical_regions(physical_region_id, logical_regions.clone());
-        }
+        self.state
+            .write()
+            .unwrap()
+            .add_logical_regions(physical_region_id, logical_regions.clone());
         for logical_region_id in logical_regions {
             self.metadata_region
                 .open_logical_region(logical_region_id)
