@@ -50,6 +50,7 @@ ORDER BY k;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT k, v
 FROM partition_pruning_cast_partitioned
 WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
@@ -60,6 +61,7 @@ WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT k, v
 FROM partition_pruning_cast_partitioned
 WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;

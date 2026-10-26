@@ -104,6 +104,7 @@ ORDER BY k;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT k, v
 FROM partition_pruning_cast_partitioned
 WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
@@ -115,7 +116,7 @@ WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 | 1_| 0_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["k", "v"], "filters": ["k >= Float32(1.25)", "k < Float32(2.5)", "k >= Float32(1.25)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
@@ -127,6 +128,7 @@ WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (partitioning.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE SELECT k, v
 FROM partition_pruning_cast_partitioned
 WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
@@ -139,7 +141,7 @@ WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
 |_|_|_|
 | 1_| 0_|_FilterExec: CAST(v@1 AS Int32) IS NOT NULL REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["k", "v"], "filters": ["k >= Float32(1.25)", "k < Float32(2.5)", "CAST(v AS Int32) IS NOT NULL", "k >= Float32(1.25)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 1_|
 +-+-+-+
