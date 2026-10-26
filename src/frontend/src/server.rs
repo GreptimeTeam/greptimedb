@@ -429,6 +429,7 @@ where
                     user_provider.clone(),
                     Some(self.instance.process_manager().clone()),
                 )
+                .with_influxdb_handler(instance.clone())
                 .with_batching_enabled(postgres_batching),
             ) as Box<dyn Server>;
 
