@@ -24,18 +24,18 @@ use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
 use crate::sst::file::{FileMeta, delete_files};
-use crate::sst::file_ref::{FileReferenceGuard, FileReferenceManagerRef};
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::range_index::RangeIndexDeleter;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Purges a retired SST and its indexes after all metadata views release their readers.
-    /// The lifetime's reference guard has already been released.
+    /// The lifetime's file reference has already been released.
     fn purge_file(&self, file_meta: FileMeta);
 
-    /// Registers one logical SST lifetime for object-store GC, regardless of index version.
-    /// The returned guard releases the reference even if the file is not retired.
-    fn new_file(&self, _: &FileMeta) -> Option<FileReferenceGuard> {
+    /// Returns the object-store reference manager used by SST lifetimes.
+    /// Local and no-op purgers do not track GC references.
+    fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
         None
     }
 }
@@ -232,8 +232,8 @@ impl FilePurger for ObjectStoreFilePurger {
         );
     }
 
-    fn new_file(&self, file_meta: &FileMeta) -> Option<FileReferenceGuard> {
-        Some(self.file_ref_manager.register_file(file_meta))
+    fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+        Some(self.file_ref_manager.clone())
     }
 }
 

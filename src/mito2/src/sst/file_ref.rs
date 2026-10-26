@@ -51,34 +51,6 @@ pub struct FileReferenceManager {
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
 
-/// One logical SST reference, released even when its lifetime ends without retirement.
-/// Index metadata views share this guard through their SST lifetime.
-#[derive(Debug)]
-pub struct FileReferenceGuard {
-    file_id: RegionFileId,
-    manager: FileReferenceManagerRef,
-}
-
-impl FileReferenceGuard {
-    /// Extends snapshot protection without registering another reader reference.
-    pub(crate) fn update_index_version(&self, index_version: Option<IndexVersion>) {
-        if let Some(mut region) = self
-            .manager
-            .files_per_region
-            .get_mut(&self.file_id.region_id())
-            && let Some(file) = region.files.get_mut(&self.file_id.file_id())
-        {
-            file.max_index_version = file.max_index_version.max(index_version);
-        }
-    }
-}
-
-impl Drop for FileReferenceGuard {
-    fn drop(&mut self) {
-        self.manager.remove_file(self.file_id);
-    }
-}
-
 /// Older GC workers match index references by exact version. Expand file-level protection
 /// into the existing wire format, including the no-index reference used by old SST metadata.
 /// This is a conservative snapshot, not a reference count for each index version.
@@ -195,9 +167,9 @@ impl FileReferenceManager {
         })
     }
 
-    /// Registers a logical SST lifetime. Index replacements reuse the returned guard;
-    /// independent lifetimes, such as copied regions, must each register their own guard.
-    pub fn register_file(self: &Arc<Self>, file_meta: &FileMeta) -> FileReferenceGuard {
+    /// Registers a logical SST lifetime, paired with `remove_file` when that lifetime ends.
+    /// Index replacements reuse the reference; independent lifetimes register separately.
+    pub(crate) fn register_file(&self, file_meta: &FileMeta) {
         let mut region = self.files_per_region.entry(file_meta.region_id).or_default();
         let file = region.files.entry(file_meta.file_id).or_insert_with(|| {
             GC_REF_FILE_CNT.inc();
@@ -208,13 +180,23 @@ impl FileReferenceManager {
         });
         file.count += 1;
         file.max_index_version = file.max_index_version.max(file_meta.index_version());
-        FileReferenceGuard {
-            file_id: file_meta.file_id(),
-            manager: self.clone(),
+    }
+
+    /// Extends snapshot protection without registering another reader reference.
+    pub(crate) fn update_index_version(
+        &self,
+        file_id: RegionFileId,
+        index_version: Option<IndexVersion>,
+    ) {
+        if let Some(mut region) = self.files_per_region.get_mut(&file_id.region_id())
+            && let Some(file) = region.files.get_mut(&file_id.file_id())
+        {
+            file.max_index_version = file.max_index_version.max(index_version);
         }
     }
 
-    fn remove_file(&self, file_id: RegionFileId) {
+    /// Releases a logical SST reference, regardless of whether the file was retired.
+    pub(crate) fn remove_file(&self, file_id: RegionFileId) {
         if let Entry::Occupied(mut region) = self.files_per_region.entry(file_id.region_id()) {
             if let std::collections::hash_map::Entry::Occupied(mut file) =
                 region.get_mut().files.entry(file_id.file_id())
@@ -242,36 +224,36 @@ mod tests {
     use crate::sst::file::IndexType;
 
     #[test]
-    fn test_file_lifetime_guards_keep_all_versions_until_last_release() {
-        let manager = Arc::new(FileReferenceManager::new(None));
+    fn test_file_references_keep_all_versions_until_last_release() {
+        let manager = FileReferenceManager::new(None);
         let meta = FileMeta {
             region_id: RegionId::new(1, 1),
             file_id: FileId::random(),
             ..Default::default()
         };
-        let first = manager.register_file(&meta);
+        manager.register_file(&meta);
         assert_eq!(
             manager.ref_file_set(meta.region_id).unwrap(),
             HashSet::from([FileRef::new(meta.region_id, meta.file_id, None)])
         );
-        first.update_index_version(Some(2));
+        manager.update_index_version(meta.file_id(), Some(2));
         let updated = FileMeta {
             index_version: 2,
             available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
             ..meta.clone()
         };
-        let independent = manager.register_file(&updated);
+        manager.register_file(&updated);
         // A stale independent lifetime must not lower the protected index generation.
-        first.update_index_version(Some(0));
+        manager.update_index_version(meta.file_id(), Some(0));
         let expected: HashSet<_> = [None, Some(0), Some(1), Some(2)]
             .into_iter()
             .map(|version| FileRef::new(meta.region_id, meta.file_id, version))
             .collect();
         assert_eq!(manager.ref_file_set(meta.region_id).unwrap(), expected);
 
-        drop(independent);
+        manager.remove_file(updated.file_id());
         assert_eq!(manager.ref_file_set(meta.region_id).unwrap(), expected);
-        drop(first);
+        manager.remove_file(meta.file_id());
         assert!(manager.ref_file_set(meta.region_id).is_none());
     }
 }
