@@ -582,12 +582,10 @@ impl FileHandle {
         let primary_key_range = meta
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
-        let lifetime = self.inner.lifetime.clone();
-        *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
                 meta,
-                lifetime,
+                self.inner.lifetime.clone(),
                 primary_key_range,
             )),
         }
@@ -649,16 +647,6 @@ impl FileHandle {
             .compacting
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
-    }
-
-    pub fn index_outdated(&self) -> bool {
-        self.inner.index_outdated.load(Ordering::Relaxed)
-    }
-
-    pub fn set_index_outdated(&self, index_outdated: bool) {
-        self.inner
-            .index_outdated
-            .store(index_outdated, Ordering::Relaxed);
     }
 
     /// Returns a reference to the [FileMeta].
@@ -793,17 +781,20 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
-    index_outdated: AtomicBool,
     primary_key_range: RwLock<PrimaryKeyRange>,
     lifetime: Arc<SstLifetime>,
 }
 
 impl Drop for FileHandleInner {
     fn drop(&mut self) {
-        self.lifetime.file_purger.remove_file(
-            self.meta.clone(),
-            self.index_outdated.load(Ordering::Acquire),
-        );
+        // `SstLifetime` is only held by `FileHandleInner`s of the same file, so a strong
+        // count of 1 means this is the last live view: no `FileHandle` of the file exists,
+        // thus no concurrent `mark_deleted`, `clone` or `with_updated_index` can race here.
+        let is_delete =
+            Arc::strong_count(&self.lifetime) == 1 && self.lifetime.deleted.load(Ordering::Acquire);
+        self.lifetime
+            .file_purger
+            .remove_file(self.meta.clone(), is_delete);
     }
 }
 
@@ -814,7 +805,6 @@ impl FileHandleInner {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         let lifetime = Arc::new(SstLifetime {
-            meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
             file_purger,
         });
@@ -830,7 +820,6 @@ impl FileHandleInner {
         Self {
             meta,
             compacting: AtomicBool::new(false),
-            index_outdated: AtomicBool::new(false),
             primary_key_range: RwLock::new(
                 primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
             ),
@@ -839,22 +828,11 @@ impl FileHandleInner {
     }
 }
 
-/// Physical deletion must wait for readers of every index metadata version.
+/// Retirement and final purge are shared by every index metadata view of the same SST.
 /// Independent logical references (for example, copied regions) do not share this guard.
 struct SstLifetime {
-    /// Latest metadata ensures final purge includes indexes newer than the last reader's view.
-    meta: Mutex<FileMeta>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
-}
-
-impl Drop for SstLifetime {
-    fn drop(&mut self) {
-        if self.deleted.load(Ordering::Acquire) {
-            self.file_purger
-                .purge_file(self.meta.get_mut().unwrap().clone());
-        }
-    }
 }
 
 /// Delete files for a region.
@@ -910,6 +888,44 @@ pub async fn delete_files(
         )
         .await;
     }
+    Ok(())
+}
+
+/// Deletes a SST file and all its index files (of every index version) from storage and cache.
+///
+/// Index files are discovered by listing, so the caller does not need to know which index
+/// versions exist. Used by the final purge of a retired SST, whose last live view may carry
+/// stale index metadata.
+pub async fn delete_file_and_all_indexes(
+    region_id: RegionId,
+    file_id: FileId,
+    access_layer: &AccessLayerRef,
+    cache_manager: &Option<CacheManagerRef>,
+) -> crate::error::Result<()> {
+    if let Some(cache) = cache_manager {
+        cache.remove_parquet_meta_data(RegionFileId::new(region_id, file_id));
+    }
+    // List index files before deleting anything, so a listing failure leaves
+    // the file untouched.
+    let index_ids = access_layer
+        .list_index_files(RegionFileId::new(region_id, file_id))
+        .await?;
+    access_layer.delete_ssts(region_id, &[file_id]).await?;
+    access_layer.delete_indexes(&index_ids).await?;
+
+    // Purges caches and the stager of every found index version (and the SST itself).
+    if index_ids.is_empty() {
+        purge_index_cache_stager(region_id, false, access_layer, cache_manager, file_id, 0).await;
+    } else {
+        purge_indexes(&index_ids, access_layer, cache_manager).await;
+    }
+
+    debug!(
+        "Deleted SST file and {} index files for region {}: {:?}",
+        index_ids.len(),
+        region_id,
+        file_id
+    );
     Ok(())
 }
 

@@ -325,6 +325,40 @@ impl AccessLayer {
         Ok(())
     }
 
+    /// Lists all index files of the given SST, of every index version.
+    ///
+    /// Returns an empty vec if the index directory does not exist.
+    pub(crate) async fn list_index_files(
+        &self,
+        file_id: RegionFileId,
+    ) -> Result<Vec<RegionIndexId>> {
+        let index_dir = join_dir(&self.build_region_dir(file_id.region_id()), "index");
+        let mut lister = match self.object_store.lister_with(&index_dir).await {
+            Ok(lister) => lister,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                // The index directory may not exist at all (e.g. the SST has no index).
+                return Ok(vec![]);
+            }
+            Err(e) => return Err(e).context(OpenDalSnafu),
+        };
+
+        // Index files are named `{file_id}.puffin` or `{file_id}.{version}.puffin`.
+        let prefix = format!("{}.", file_id.file_id());
+        let mut index_ids = vec![];
+        while let Some(entry) = lister.try_next().await.context(OpenDalSnafu)? {
+            if !entry.metadata().is_file() || !entry.name().starts_with(&prefix) {
+                continue;
+            }
+            match location::parse_index_file_info(entry.path()) {
+                Ok((_, version)) => index_ids.push(RegionIndexId::new(file_id, version)),
+                Err(e) => {
+                    warn!(e; "Failed to parse index file path: {}", entry.path());
+                }
+            }
+        }
+        Ok(index_ids)
+    }
+
     /// Returns the directory of the region in the table.
     pub fn build_region_dir(&self, region_id: RegionId) -> String {
         region_dir_from_table_dir(&self.table_dir, region_id, self.path_type)
