@@ -20,13 +20,16 @@ use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
 use super::super::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 use crate::map::MathOp;
 use crate::native::plan::MapOp;
 use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -368,6 +371,48 @@ fn an_aggregate_and_a_binary_name_their_binding() {
             .lines()
             .nth(1),
         Some("  root Binary + ignoring [] one-to-one fill_right 0.5")
+    );
+}
+
+/// A set operation names its operator and its matching labels: the logical plan compares fused
+/// nodes by this rendering, so `and`, `or` and `unless`, and `on` and `ignoring`, must not read
+/// alike.
+#[test]
+fn a_set_operation_names_its_operator_and_labels() {
+    let out = grid(0, 60_000, 4);
+    let operand = || {
+        window_over(
+            raw_input(),
+            RangeFunction::Rate,
+            300_000,
+            0,
+            None,
+            Arc::clone(&out),
+        )
+    };
+    let root_line = |op: SetOp, labels: MatchingLabels| {
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Set {
+                left: Box::new(operand()),
+                right: Box::new(operand()),
+                op: BoundSetOp { op, labels },
+            },
+            output: evaluated(Arc::clone(&out)),
+        })
+        .unwrap();
+        tree.to_string().lines().nth(1).unwrap().to_string()
+    };
+    assert_eq!(
+        root_line(SetOp::And, MatchingLabels::On(vec!["job".into()])),
+        "  root Set and on [job]"
+    );
+    assert_eq!(
+        root_line(SetOp::Or, MatchingLabels::Ignoring(vec!["job".into()])),
+        "  root Set or ignoring [job]"
+    );
+    assert_eq!(
+        root_line(SetOp::Unless, MatchingLabels::Ignoring(Vec::new())),
+        "  root Set unless ignoring []"
     );
 }
 

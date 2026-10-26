@@ -323,6 +323,12 @@ impl PromPlanner {
                 {
                     return Ok(None);
                 }
+                // A two-scan plan has no placement over a table split into several regions: the
+                // dist analyzer refuses a multi-child node there, so such a query keeps the
+                // existing plan instead of failing.
+                if selectors.len() == 2 && table_meta.partition_column_names().next().is_some() {
+                    return Ok(None);
+                }
                 // The region's columnar series-index samples, one of the readers this scan may be
                 // served by, store `Float64` fields only, and the logical plan cannot tell which
                 // reader arrives. So every field has to be `Float64`: an integer, a `Float32`, a
@@ -644,15 +650,19 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
     lower.and(column.lt_eq(upper))
 }
 
-/// Whether `root` is a supported one-to-one match between two independent scan occurrences.
+/// Whether `root` is a supported one-to-one match or set operation between two independent scan
+/// occurrences.
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
-    let NativeExpr::Binary {
-        left,
-        right,
-        matching,
-    } = &root.expr
-    else {
-        return false;
+    let (left, right, matching) = match &root.expr {
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => (left, right, matching),
+        NativeExpr::Set { left, right, .. } => {
+            return pointwise_operand(left) && pointwise_operand(right);
+        }
+        _ => return false,
     };
 
     let supported_operator = matches!(
@@ -741,7 +751,8 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
         | NativeExpr::Aggregate { .. }
-        | NativeExpr::Vector { .. } => false,
+        | NativeExpr::Vector { .. }
+        | NativeExpr::Set { .. } => false,
     }
 }
 
@@ -928,7 +939,7 @@ mod tests {
                 | NativeExpr::Window { input, .. }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Timestamp { input } => collect(input, sources),
-                NativeExpr::Binary { left, right, .. } => {
+                NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                     collect(left, sources);
                     collect(right, sources);
                 }

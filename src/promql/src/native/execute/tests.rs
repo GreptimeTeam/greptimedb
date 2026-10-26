@@ -34,8 +34,8 @@ use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
-    NodeState, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms, map_chunk,
-    operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
+    map_chunk, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -46,13 +46,13 @@ use crate::map_label::LabelRewrite;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
-    BoundMap, BoundScalar, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{
-    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, reset_visited_pairs,
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, reset_visited_pairs,
     visited_pairs,
 };
 
@@ -527,7 +527,7 @@ fn binary_runtime(
     (
         NodeState::new("native.binary", Arc::new(NodeMetrics::default()), pool),
         BinaryRuntime::new(
-            Arc::new(binary_matching(BinaryOp::Add)),
+            PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
         ),
     )
@@ -7187,6 +7187,238 @@ fn an_all_missing_match_group_fits_its_pool() {
     );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Set operations, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// A set node over `left` and `right`, bound the way the compiler binds one: the left side's fields
+/// on the grid both operands share.
+fn set_of(left: NativeNode, right: NativeNode, op: SetOp, labels: MatchingLabels) -> NativeNode {
+    let output = left.output.clone();
+    NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp { op, labels },
+        },
+        output,
+    }
+}
+
+/// Every series a chunk stream holds, by its rendered label set with the metric name first.
+fn decided_by_label_set(chunks: &[EvaluatedChunk]) -> Vec<(String, Decided)> {
+    let mut series: Vec<(String, Decided)> = chunks
+        .iter()
+        .map(|chunk| {
+            let metric = &chunk.series.metric;
+            let labels = metric
+                .name()
+                .into_iter()
+                .map(|name| format!("__name__={name}"))
+                .chain(
+                    metric
+                        .tags()
+                        .iter()
+                        .map(|tag| format!("{}={}", tag.name, tag.value)),
+                )
+                .collect::<Vec<_>>()
+                .join(",");
+            (labels, decided(std::slice::from_ref(chunk)))
+        })
+        .collect();
+    series.sort_by(|a, b| a.0.cmp(&b.0));
+    series
+}
+
+/// Each operator matches per grid point, by the labels it was bound with, and hands samples on with
+/// the labels of the side they came from.
+///
+/// `l{job="a"}` holds every point and `l{job="b"}` only the last two; `r{job="a"}` holds the middle
+/// two and `r{job="b"}` every point. The pods differ on every pair, so the default matching pairs
+/// nothing, while `on(job)` and `ignoring(pod)` pair by job alone.
+#[test]
+fn set_operators_match_by_their_labels_at_each_point() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let left = [
+        (pod_metric("l", "a", "x"), 0, vec![1.0, 2.0, 3.0, 4.0]),
+        (pod_metric("l", "b", "y"), 2, vec![7.0, 8.0]),
+    ];
+    let right = [
+        (pod_metric("r", "a", "z"), 1, vec![10.0, 20.0]),
+        (pod_metric("r", "b", "w"), 0, vec![30.0, 40.0, 50.0, 60.0]),
+    ];
+    let on_job = || MatchingLabels::On(vec!["job".into()]);
+    let la = "__name__=l,job=a,pod=x".to_string();
+    let lb = "__name__=l,job=b,pod=y".to_string();
+    let rb = "__name__=r,job=b,pod=w".to_string();
+    for (op, labels, expected) in [
+        (
+            SetOp::And,
+            on_job(),
+            vec![
+                (la.clone(), vec![(1, Some(2.0)), (2, Some(3.0))]),
+                (lb.clone(), vec![(2, Some(7.0)), (3, Some(8.0))]),
+            ],
+        ),
+        (SetOp::And, MatchingLabels::Ignoring(Vec::new()), vec![]),
+        (
+            SetOp::Unless,
+            MatchingLabels::Ignoring(vec!["pod".into()]),
+            vec![(la.clone(), vec![(0, Some(1.0)), (3, Some(4.0))])],
+        ),
+        // `r{job="a"}` finds the left side's job at each of its points and is dropped; `r{job="b"}`
+        // fills the two points where the left side has no `job="b"`, under its own labels.
+        (
+            SetOp::Or,
+            on_job(),
+            vec![
+                (
+                    la.clone(),
+                    vec![
+                        (0, Some(1.0)),
+                        (1, Some(2.0)),
+                        (2, Some(3.0)),
+                        (3, Some(4.0)),
+                    ],
+                ),
+                (lb.clone(), vec![(2, Some(7.0)), (3, Some(8.0))]),
+                (rb.clone(), vec![(0, Some(30.0)), (1, Some(40.0))]),
+            ],
+        ),
+    ] {
+        let tree = NativeTree::try_new(set_of(
+            evaluated_input_with_source_index(Arc::clone(&grid), 0),
+            evaluated_input_with_source_index(Arc::clone(&grid), 1),
+            op,
+            labels.clone(),
+        ))
+        .unwrap();
+        let mut execution = executor(&tree, pool());
+        for (source, side) in [(0, &left), (1, &right)] {
+            let id = execution.state().input_ids(source).next().unwrap();
+            for (metric, start, values) in side.iter() {
+                execution
+                    .push_evaluated(
+                        id,
+                        evaluated_chunk_of(
+                            &schema,
+                            metric.clone(),
+                            *start,
+                            values.iter().copied().map(Some).collect(),
+                            true,
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            decided_by_label_set(&run(&mut execution)),
+            expected,
+            "{op:?} {labels:?}"
+        );
+        assert_eq!(execution.state().reserved_bytes(), 0, "{op:?} {labels:?}");
+    }
+}
+
+/// The rows a set operation keeps are reserved from the pool like a binary operation's workspace:
+/// a pool that holds both operands, their assembly and the kept output, but not the rows the kernel
+/// files and merges on the way, refuses the operation and gets back what the node held.
+#[test]
+fn an_oversized_set_workspace_is_refused_by_the_pool() {
+    let points = 10_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let operand = || evaluated_chunk(&schema, 0, vec![1.0; points as usize], true);
+    let (retained, assembly) = binary_charge(&schema, &operand(), &operand());
+    // Room for a copy of the one-field output on top of what the node holds before the kernel runs,
+    // which is far less than the rows `and` files for every point and the merge reads them into.
+    let pool = bounded_pool(retained + assembly + 2 * points as usize * 9);
+    let tree = NativeTree::try_new(set_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        SetOp::And,
+        MatchingLabels::Ignoring(Vec::new()),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for source in [0, 1] {
+        let id = execution.state().input_ids(source).next().unwrap();
+        execution.push_evaluated(id, operand()).unwrap();
+    }
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "the set workspace was not refused by the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
+}
+
+/// The results a set node queues are held with their labels until each is handed on: a result's
+/// label set is owned by the queued chunk, so a queue of long-labelled one-point results is mostly
+/// labels, and the reservation drops to zero once the queue is drained or the execution dropped.
+#[test]
+fn queued_set_results_hold_their_labels_until_handed_on() {
+    const SERIES: usize = 64;
+    const LABEL: usize = 4_096;
+    let grid = grid(0, 60_000, 1);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(set_of(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input_with_source_index(Arc::clone(&grid), 1),
+        SetOp::And,
+        MatchingLabels::On(Vec::new()),
+    ))
+    .unwrap();
+    let start = |pool: &Arc<dyn MemoryPool>| {
+        let mut execution = executor(&tree, Arc::clone(pool));
+        let (left, right) = (
+            execution.state().input_ids(0).next().unwrap(),
+            execution.state().input_ids(1).next().unwrap(),
+        );
+        for index in 0..SERIES {
+            let metric = pod_metric("l", &format!("{index:0>LABEL$}"), "x");
+            execution
+                .push_evaluated(
+                    left,
+                    evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0)], true),
+                )
+                .unwrap();
+        }
+        execution
+            .push_evaluated(
+                right,
+                evaluated_chunk_of(&schema, pod_metric("r", "a", "y"), 0, vec![Some(2.0)], true),
+            )
+            .unwrap();
+        execution.end_of_input().unwrap();
+        // The first pull runs the kernel and hands one result on; the rest stay queued.
+        assert!(execution.next_chunk().unwrap().is_some());
+        execution
+    };
+
+    let drained = pool();
+    let mut execution = start(&drained);
+    assert!(
+        drained.reserved() >= (SERIES - 1) * LABEL,
+        "{} bytes held for {} queued results of {LABEL}-byte labels",
+        drained.reserved(),
+        SERIES - 1
+    );
+    let mut handed_on = 1;
+    while execution.next_chunk().unwrap().is_some() {
+        handed_on += 1;
+    }
+    assert_eq!(handed_on, SERIES);
+    assert_eq!(drained.reserved(), 0);
+
+    let dropped = pool();
+    drop(start(&dropped));
+    assert_eq!(dropped.reserved(), 0);
 }
 
 // ---------------------------------------------------------------------------

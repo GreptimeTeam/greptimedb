@@ -52,8 +52,8 @@ use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
 use crate::native::plan::{
-    BoundInstant, BoundScalar, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 #[cfg(test)]
 pub(crate) use crate::native::runs::absorb_rebuilds;
@@ -62,7 +62,7 @@ use crate::range_eval::RangeEvaluator;
 use crate::select::{self, SortOrder};
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels,
-    binary_vectors_with_reservation, validate_binary_operand,
+    binary_vectors_with_reservation, set_vectors_with_reservation, validate_binary_operand,
 };
 
 #[cfg(test)]
@@ -1388,7 +1388,7 @@ impl RetainedInput {
     }
 }
 
-/// What a binary node holds: both operands until they end.
+/// What a binary or set node holds: both operands until they end.
 ///
 /// The operation pairs two whole vectors point by point, so this node cannot answer from the chunks
 /// in hand the way a map does: it retains every chunk each operand hands over, assembles the chunks
@@ -1396,8 +1396,8 @@ impl RetainedInput {
 /// input has ended and both operands closed. The chunks it produces are queued in the node's own
 /// output queue and handed over from there.
 struct BinaryRuntime {
-    /// The operation and its modifiers, bound by the compiler.
-    matching: Arc<BinaryMatching>,
+    /// The kernel and the modifiers the compiler bound it with.
+    kernel: PairKernel,
     /// The layout each operand is bound to, what a chunk of it is checked against: `0` is the left
     /// operand and `1` the right one, the order the tree declares them in.
     schemas: [Arc<SeriesSchema>; 2],
@@ -1405,6 +1405,24 @@ struct BinaryRuntime {
     operands: [RetainedInput; 2],
     /// Whether the kernel has run. It runs at most once: the operands it read are gone afterwards.
     computed: bool,
+}
+
+/// The kernel a [`BinaryRuntime`] runs over its two assembled operands.
+enum PairKernel {
+    /// An arithmetic or comparison operation between matched series.
+    Binary(Arc<BinaryMatching>),
+    /// `and`, `or` or `unless`, which keeps samples of either side as they are.
+    Set(BoundSetOp),
+}
+
+impl PairKernel {
+    /// What the node running this kernel is called in an error.
+    fn node(&self) -> &'static str {
+        match self {
+            Self::Binary(_) => "the binary node",
+            Self::Set(_) => "the set node",
+        }
+    }
 }
 
 /// What side `index` is called in an error.
@@ -1418,8 +1436,8 @@ fn side_name(index: usize) -> &'static str {
 /// The node a [`RetainedInput`] belongs to, which its messages name; formatted only when one is.
 #[derive(Clone, Copy)]
 enum Reader {
-    /// The operand at `side` of a binary node.
-    Operand { side: usize },
+    /// The operand at `side` of `node`, a binary or set node.
+    Operand { side: usize, node: &'static str },
     /// The input of a vector operation.
     Vector,
 }
@@ -1427,27 +1445,35 @@ enum Reader {
 impl Reader {
     fn owner(self) -> String {
         match self {
-            Self::Operand { .. } => "the binary node".to_string(),
+            Self::Operand { node, .. } => node.to_string(),
             Self::Vector => "the vector operation".to_string(),
         }
     }
 
     fn input(self) -> String {
         match self {
-            Self::Operand { side } => format!("its {} operand", side_name(side)),
+            Self::Operand { side, .. } => format!("its {} operand", side_name(side)),
             Self::Vector => "its input".to_string(),
         }
     }
 }
 
 impl BinaryRuntime {
-    /// The run-time state of the binary operation `matching` over its two operands.
-    fn new(matching: Arc<BinaryMatching>, schemas: [Arc<SeriesSchema>; 2]) -> Self {
+    /// The run-time state of `kernel` over its two operands.
+    fn new(kernel: PairKernel, schemas: [Arc<SeriesSchema>; 2]) -> Self {
         Self {
-            matching,
+            kernel,
             schemas,
             operands: [RetainedInput::default(), RetainedInput::default()],
             computed: false,
+        }
+    }
+
+    /// The reader of the operand at `side`, which names this node in its messages.
+    fn reader(&self, side: usize) -> Reader {
+        Reader::Operand {
+            side,
+            node: self.kernel.node(),
         }
     }
 
@@ -1472,8 +1498,8 @@ impl BinaryRuntime {
         let [left, right] = &self.operands;
         let [left_schema, right_schema] = &self.schemas;
         Ok([
-            left.assemble(left_schema, Reader::Operand { side: 0 })?,
-            right.assemble(right_schema, Reader::Operand { side: 1 })?,
+            left.assemble(left_schema, self.reader(0))?,
+            right.assemble(right_schema, self.reader(1))?,
         ])
     }
 
@@ -1495,7 +1521,7 @@ impl BinaryRuntime {
     /// remaining rows were never read.
     fn closed(&self) -> Result<()> {
         for (side, operand) in self.operands.iter().enumerate() {
-            operand.ensure_closed(Reader::Operand { side })?;
+            operand.ensure_closed(self.reader(side))?;
         }
         Ok(())
     }
@@ -1512,15 +1538,17 @@ impl BinaryRuntime {
         validate_binary_operand(schema.as_ref(), std::slice::from_ref(&chunk.series)).map_err(
             |error| {
                 DataFusionError::Execution(format!(
-                    "the binary node rejected its {} operand: {error}",
+                    "{} rejected its {} operand: {error}",
+                    self.kernel.node(),
                     side_name(side)
                 ))
             },
         )?;
+        let reader = self.reader(side);
         let Some(operand) = self.operands.get_mut(side) else {
             return Err(no_binary());
         };
-        operand.retain(chunk, Reader::Operand { side })
+        operand.retain(chunk, reader)
     }
 
     /// Runs the kernel over both operands and returns the series it produced.
@@ -1550,7 +1578,10 @@ impl BinaryRuntime {
         // retained chunks hold, so what they add is metadata, and it is reserved before it exists:
         // the assembly allocates as it goes, and a figure read from it afterwards would be a figure
         // the pool never admitted.
-        let assembly = self.assembly_bytes().ok_or_else(reservation_overflow)?;
+        let node = self.kernel.node();
+        let assembly = self
+            .assembly_bytes()
+            .ok_or_else(|| reservation_overflow(node))?;
         buffer.grow(assembly)?;
         let assembled = match self.assemble() {
             Ok(assembled) => assembled,
@@ -1571,20 +1602,32 @@ impl BinaryRuntime {
             // The timer covers this node's own work only: it is dropped before the driver polls
             // the input again.
             let _timer = metrics.timer();
-            binary_vectors_with_reservation(
-                &self.matching,
-                left_schema,
-                left,
-                right_schema,
-                right,
-                &mut |workspace| {
-                    let bytes = retained
-                        .checked_add(assembly)
-                        .and_then(|held| held.checked_add(workspace))
-                        .ok_or_else(reservation_overflow)?;
-                    buffer.resize(bytes)
-                },
-            )
+            let mut reserve = |workspace: usize| {
+                let bytes = retained
+                    .checked_add(assembly)
+                    .and_then(|held| held.checked_add(workspace))
+                    .ok_or_else(|| reservation_overflow(node))?;
+                buffer.resize(bytes)
+            };
+            match &self.kernel {
+                PairKernel::Binary(matching) => binary_vectors_with_reservation(
+                    matching,
+                    left_schema,
+                    left,
+                    right_schema,
+                    right,
+                    &mut reserve,
+                ),
+                PairKernel::Set(set) => set_vectors_with_reservation(
+                    set.op,
+                    &set.labels,
+                    left_schema,
+                    left,
+                    right_schema,
+                    right,
+                    &mut reserve,
+                ),
+            }
         };
         // The operands and the assembled series have been handed to the kernel and the reservation
         // covers the workspace it allocated past them, so a failure is the driver's to release: it
@@ -2300,7 +2343,7 @@ impl RuntimeNode {
                     {
                         (
                             Some(BinaryRuntime::new(
-                                Arc::new(matching.clone()),
+                                PairKernel::Binary(Arc::new(matching.clone())),
                                 [Arc::clone(left_schema), Arc::clone(right_schema)],
                             )),
                             None,
@@ -2347,6 +2390,31 @@ impl RuntimeNode {
                         ));
                     }
                 }
+            }
+            NativeExpr::Set { left, right, op } => {
+                let (Some(left_schema), Some(right_schema)) =
+                    (left.output.samples(), right.output.samples())
+                else {
+                    return Err(DataFusionError::Execution(
+                        "a set operation consumes two vectors".to_string(),
+                    ));
+                };
+                let set = BinaryRuntime::new(
+                    PairKernel::Set(op.clone()),
+                    [Arc::clone(left_schema), Arc::clone(right_schema)],
+                );
+                let (left_node, _) = Self::build(left, pool, inputs)?;
+                let (right_node, _) = Self::build(right, pool, inputs)?;
+                // The kernel files one series per label set, so its output shares none.
+                (
+                    RuntimeOp::Binary {
+                        left: Box::new(left_node),
+                        right: Box::new(right_node),
+                        binary: Some(set),
+                        state: NodeState::new("native.set", Arc::clone(&metrics), pool),
+                    },
+                    false,
+                )
             }
             NativeExpr::Aggregate { input, op } => {
                 let schema = node
@@ -3447,9 +3515,10 @@ impl NodeState {
         chunk: NativeChunk,
     ) -> Result<()> {
         let NativeChunk::Evaluated(chunk) = chunk else {
-            return Err(DataFusionError::Execution(
-                "the binary node consumes evaluated chunks, not raw samples".to_string(),
-            ));
+            return Err(DataFusionError::Execution(format!(
+                "{} consumes evaluated chunks, not raw samples",
+                binary.kernel.node()
+            )));
         };
         // The figure is read before the chunk is retained, because reserving after the fact would be
         // reserving for memory the node already holds.
@@ -3535,16 +3604,18 @@ impl NodeState {
         for series in output {
             // The kernel decided every point of a result series at once, so the one chunk it is
             // handed over as closes it.
-            let shared = shares_input.then(|| {
+            // The result is already admitted, within the workspace reserved for the kernel. What the
+            // queue keeps is the result as it is owned: its samples and its labels, which the chunk
+            // keeps alive until it is handed on.
+            let bytes = if shares_input {
                 let (fresh, table_bytes) = unbilled_tables(&series, &tables);
                 tables.extend(fresh);
                 self.queued_tables = self.queued_tables.saturating_add(table_bytes);
                 operand_chunk_bytes(&series)
-            });
+            } else {
+                series_bytes(&series)
+            };
             let chunk = NativeChunk::Evaluated(EvaluatedChunk::try_new(series, true)?);
-            // The result is already admitted, within the workspace reserved for the kernel. What the
-            // queue keeps is the estimate of the chunk that holds it.
-            let bytes = shared.unwrap_or_else(|| chunk.bytes());
             self.queued.push_back((chunk, bytes));
             closed += 1;
         }
@@ -4604,16 +4675,15 @@ fn broadcast_op(matching: &BinaryMatching) -> Result<BroadcastOp> {
 
 /// The error for a reservation the platform cannot express.
 ///
-/// The binary node reserves its retained operands and the kernel's live workspace together, and
-/// the kernel reports the second as a size of its own. A sum of the two that does not fit an
+/// A binary or set node reserves its retained operands and the kernel's live workspace together,
+/// and the kernel reports the second as a size of its own. A sum of the two that does not fit an
 /// address space cannot be reserved, so the execution is refused rather than run with a figure
 /// that wrapped.
-fn reservation_overflow() -> DataFusionError {
-    DataFusionError::Execution(
-        "the operands and the kernel's workspace of the binary node do not fit one address space: \
-         the bytes it would reserve overflow"
-            .to_string(),
-    )
+fn reservation_overflow(node: &str) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the operands and the kernel's workspace of {node} do not fit one address space: the bytes \
+         it would reserve overflow"
+    ))
 }
 
 fn series_error(error: datatypes::error::Error) -> DataFusionError {
