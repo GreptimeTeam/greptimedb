@@ -105,17 +105,12 @@ fn build_system_table(
         .unwrap();
     Arc::new(Table::new(
         Arc::new(table_info),
-        table.filter_pushdown_type(),
+        FilterPushDownType::Inexact,
         Arc::new(SystemTableDataSource::new(table)),
     ))
 }
 
 pub trait SystemTable {
-    /// Whether the table evaluates all supplied predicates before applying a limit.
-    fn filter_pushdown_type(&self) -> FilterPushDownType {
-        FilterPushDownType::Inexact
-    }
-
     fn table_id(&self) -> TableId;
 
     fn table_name(&self) -> &'static str;

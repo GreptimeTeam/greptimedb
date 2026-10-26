@@ -351,7 +351,7 @@ mod tests {
             &self,
             filters: &[&datafusion::logical_expr::Expr],
         ) -> Result<Vec<datafusion::logical_expr::TableProviderFilterPushDown>> {
-            Ok(vec![datafusion::logical_expr::TableProviderFilterPushDown::Exact; filters.len()])
+            Ok(vec![datafusion::logical_expr::TableProviderFilterPushDown::Inexact; filters.len()])
         }
 
         async fn scan(
