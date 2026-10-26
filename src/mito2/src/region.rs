@@ -273,14 +273,18 @@ impl NodeLease {
 
     pub(crate) fn renew(&self, deadline: Instant, lease: Duration) {
         self.deadline.extend(deadline);
+        // A lease too long to store saturates, and then counts as unknown.
         let lease = u64::try_from(lease.as_nanos()).unwrap_or(u64::MAX);
         self.max_lease.fetch_max(lease, Ordering::Relaxed);
     }
 
     /// Returns the longest lease length seen, so a deadline minus it is never later than the
-    /// heartbeat the lease was granted for.
-    pub(crate) fn max_lease(&self) -> Duration {
-        Duration::from_nanos(self.max_lease.load(Ordering::Relaxed))
+    /// heartbeat the lease was granted for. Returns `None` once a lease was too long to store.
+    pub(crate) fn max_lease(&self) -> Option<Duration> {
+        match self.max_lease.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            nanos => Some(Duration::from_nanos(nanos)),
+        }
     }
 
     /// Returns the current time in the unit of [Deadline].
@@ -523,8 +527,10 @@ impl MitoRegion {
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             return;
         }
-        // An unrepresentable send time is earlier than any gate.
-        let sent_at = deadline.checked_sub(node_lease.max_lease());
+        // An unknown or unrepresentable send time is earlier than any gate.
+        let sent_at = node_lease
+            .max_lease()
+            .and_then(|lease| deadline.checked_sub(lease));
         let gate = self.grant_gate.lock().unwrap();
         if gate.is_none_or(|gate| sent_at.is_some_and(|sent_at| sent_at >= gate)) {
             self.set_role(RegionRole::Leader);

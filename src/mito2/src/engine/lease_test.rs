@@ -319,15 +319,17 @@ async fn test_lease_too_long_for_nanos_is_stale() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("lease-too-long").await;
     let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    // One nanosecond more than a u64 of nanoseconds holds.
-    let lease = Duration::from_nanos(u64::MAX) + Duration::from_nanos(1);
-    engine.renew_node_lease(Instant::now() + LEASE, lease);
+    // Longer than a u64 of nanoseconds holds. Clamping it to that would derive a send time LEASE
+    // after the real one, which is after the gate.
+    let lease = Duration::from_nanos(u64::MAX) + LEASE;
+    let sent_before = Instant::now() - Duration::from_millis(1);
+    engine.renew_node_lease(sent_before + lease, lease);
     engine
         .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
         .await
         .unwrap();
 
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    grant(&engine, RegionRole::Leader, sent_before + lease);
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
