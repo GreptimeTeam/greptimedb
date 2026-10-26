@@ -1261,6 +1261,131 @@ fn histogram_payload_and_present_all_null_representation_survive() {
     );
 }
 
+#[test]
+fn direct_decoder_validates_ordering_for_raw_and_evaluated_batches() {
+    let raw_schema = test_schema(&["value"]);
+    let raw_frame_schema =
+        series_frame_schema(&raw_schema, FrameLabelMode::Key, Some(&dense_description())).unwrap();
+    let raw_chunk = float_chunk(&raw_schema, &[1], None, vec![1], vec![Some(2.0)], true);
+    let raw_batch = pack_raw_series_chunk(
+        &raw_schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &raw_chunk,
+    )
+    .unwrap()
+    .remove(0);
+    let raw_decoder =
+        SeriesFrameDecoder::try_new(&raw_schema, FrameLabelMode::Key, Some(&dense_description()))
+            .unwrap();
+
+    let evaluated_schema = SeriesSchema {
+        fields: raw_schema.fields.clone(),
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 10, 3).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let evaluated_frame_schema =
+        series_frame_schema(&evaluated_schema, FrameLabelMode::Explicit, None).unwrap();
+    let series = Series::try_new(
+        &evaluated_schema,
+        metric(Some("cpu"), &[]),
+        TimeAxis::from_grid_spans(
+            evaluated_schema.eval_grid.clone().unwrap(),
+            vec![crate::series::time::GridSpan::new(1, 1)],
+        )
+        .unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![Some(3.0)]))),
+    )
+    .unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&evaluated_schema, FrameLabelMode::Explicit, None, 8, 1024)
+            .unwrap();
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&evaluated_schema, series, true).unwrap();
+    while cursor.append_to(&mut builder).unwrap().is_some() {}
+    let evaluated_batch = builder.flush().unwrap().unwrap();
+    let evaluated_decoder =
+        SeriesFrameDecoder::try_new(&evaluated_schema, FrameLabelMode::Explicit, None).unwrap();
+
+    let raw_empty = arrow::record_batch::RecordBatch::new_empty(raw_frame_schema);
+    let evaluated_empty = arrow::record_batch::RecordBatch::new_empty(evaluated_frame_schema);
+    for (content, empty, nonempty) in [
+        ("raw", &raw_empty, &raw_batch),
+        ("evaluated", &evaluated_empty, &evaluated_batch),
+    ] {
+        for (ordering, accepted) in [
+            (None, false),
+            (Some("future_value"), false),
+            (Some("interleaved"), false),
+            (Some("contiguous"), true),
+            (Some("read_key_then_time"), content == "raw"),
+        ] {
+            for batch in [empty, nonempty] {
+                let mut metadata = batch.schema().metadata().clone();
+                match ordering {
+                    Some(value) => {
+                        metadata.insert(ORDERING.to_string(), value.to_string());
+                    }
+                    None => {
+                        metadata.remove(ORDERING);
+                    }
+                }
+                let schema = Arc::new(Schema::new_with_metadata(
+                    batch.schema().fields().clone(),
+                    metadata,
+                ));
+                let batch = arrow::record_batch::RecordBatch::try_new(
+                    schema.clone(),
+                    batch.columns().to_vec(),
+                )
+                .unwrap();
+                let declaration = SeriesFrameDeclaration::parse(schema.as_ref());
+                if accepted {
+                    assert!(declaration.is_ok(), "{content} ordering {ordering:?}");
+                    if content == "raw" {
+                        let rows = raw_decoder.decode_raw(&batch).unwrap();
+                        assert_eq!(rows.len(), batch.num_rows());
+                        if !rows.is_empty() {
+                            assert!(rows[0].is_last);
+                            assert!(matches!(
+                                rows[0].fields.get(0).unwrap().sample(0),
+                                SampleRef::Float(value) if value == 2.0
+                            ));
+                        }
+                    } else {
+                        let rows = evaluated_decoder.decode_evaluated(&batch).unwrap();
+                        assert_eq!(rows.len(), batch.num_rows());
+                        if !rows.is_empty() {
+                            assert!(rows[0].1);
+                            assert!(matches!(
+                                rows[0].0.fields.get(0).unwrap().sample(0),
+                                SampleRef::Float(value) if value == 3.0
+                            ));
+                        }
+                    }
+                } else {
+                    assert!(
+                        declaration.unwrap_err().to_string().contains("ordering"),
+                        "{content} ordering {ordering:?}"
+                    );
+                    let result = if content == "raw" {
+                        raw_decoder.decode_raw(&batch).map(|_| ())
+                    } else {
+                        evaluated_decoder.decode_evaluated(&batch).map(|_| ())
+                    };
+                    assert!(
+                        result.unwrap_err().to_string().contains("ordering"),
+                        "{content} ordering {ordering:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The encoder's own declarations are refused when they contradict the frame, and the schema with
 /// no fields is refused; an evaluation grid, by contrast, now describes a legal evaluated frame
 /// instead of making the schema unusable here.
@@ -1304,36 +1429,6 @@ fn rejects_invalid_schema_and_metadata_and_accepts_valid_empty() {
     let decoder =
         SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Key, Some(&dense_description()))
             .unwrap();
-    let mut missing_ordering = empty_schema.metadata().clone();
-    missing_ordering.remove(ORDERING);
-    let missing_schema = Arc::new(Schema::new_with_metadata(
-        empty_schema.fields().clone(),
-        missing_ordering,
-    ));
-    let missing = arrow::record_batch::RecordBatch::new_empty(missing_schema);
-    assert!(decoder.decode_raw(&missing).is_err());
-    let mut unknown_ordering = empty_schema.metadata().clone();
-    unknown_ordering.insert(ORDERING.to_string(), "future_value".to_string());
-    let unknown_schema = Arc::new(Schema::new_with_metadata(
-        empty_schema.fields().clone(),
-        unknown_ordering,
-    ));
-    let unknown = arrow::record_batch::RecordBatch::new_empty(unknown_schema);
-    assert!(decoder.decode_raw(&unknown).is_err());
-    let mut key_then_time = empty_schema.metadata().clone();
-    key_then_time.insert(ORDERING.to_string(), "read_key_then_time".to_string());
-    let key_then_time_schema = Arc::new(Schema::new_with_metadata(
-        empty_schema.fields().clone(),
-        key_then_time,
-    ));
-    assert!(
-        decoder
-            .decode_raw(&arrow::record_batch::RecordBatch::new_empty(
-                key_then_time_schema
-            ))
-            .unwrap()
-            .is_empty()
-    );
     let empty = arrow::record_batch::RecordBatch::new_empty(empty_schema.clone());
     assert!(
         unpack_raw_series_frame(
@@ -3408,6 +3503,13 @@ fn decoder_reuses_cached_schema_and_rejects_schema_evolution() {
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].primary_key.as_slice(), &[1]);
     assert_eq!(
+        match decoded[0].fields.get(0).unwrap().dense().unwrap() {
+            crate::series::samples::DenseSamplesRef::Float(values) => values.value(0),
+            _ => panic!("expected float samples"),
+        },
+        1.0
+    );
+    assert_eq!(
         (0..decoded[0].time.len())
             .map(|position| decoded[0].time.timestamp(position).unwrap())
             .collect::<Vec<_>>(),
@@ -3621,13 +3723,14 @@ fn schema_with_metadata(metadata: Vec<(String, String)>) -> Schema {
     Schema::new_with_metadata(layout.fields().clone(), metadata.into_iter().collect())
 }
 
-/// The four metadata entries every raw frame declares, with the given label mode.
+/// The five metadata entries every raw v2 frame declares, with the given label mode.
 fn base_metadata(labels: &str) -> Vec<(String, String)> {
     [
         ("greptime.series.layout", "v2"),
         ("greptime.series.content", "raw"),
         ("greptime.series.labels", labels),
         ("greptime.series.time", "timestamps"),
+        ("greptime.series.ordering", "contiguous"),
     ]
     .into_iter()
     .map(|(key, value)| (key.to_string(), value.to_string()))
@@ -3709,14 +3812,8 @@ fn raw_series_label_decode_metadata_fixture() {
             Some(&dense_description()),
         )
         .unwrap();
-        let mut metadata = layout.metadata().clone();
-        metadata.extend(case.metadata.clone());
-        if case.encoding.is_none() {
-            if !case.metadata.contains_key(ORDERING) {
-                metadata.remove(ORDERING);
-            }
-        }
-        let frame_schema = Schema::new_with_metadata(layout.fields().clone(), metadata);
+        let frame_schema =
+            Schema::new_with_metadata(layout.fields().clone(), case.metadata.clone());
         match case.encoding.as_deref() {
             None => assert!(
                 series_frame_label_decode(&frame_schema).is_err(),

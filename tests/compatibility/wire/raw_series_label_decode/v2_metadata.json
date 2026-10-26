@@ -6,7 +6,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": "dense"
   },
@@ -17,7 +18,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"sparse\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"sparse\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": "sparse"
   },
@@ -27,7 +29,8 @@
       "greptime.series.layout": "v2",
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
-      "greptime.series.time": "timestamps"
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -38,7 +41,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":2,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":2,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -49,7 +53,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -60,7 +65,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}],\"future\":0}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}],\"future\":0}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -71,7 +77,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":\"1\",\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":\"1\",\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -82,7 +89,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -93,7 +101,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -104,7 +113,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "greptime"
+      "greptime.series.label_decode": "greptime",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -115,7 +125,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
-      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}"
+      "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -127,7 +138,8 @@
       "greptime.series.labels": "key",
       "greptime.series.time": "timestamps",
       "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
-      "greptime.series.future": "x"
+      "greptime.series.future": "x",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -138,7 +150,8 @@
       "greptime.series.content": "evaluated",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
-      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -150,7 +163,8 @@
       "greptime.series.labels": "key",
       "greptime.series.time": "grid_spans",
       "greptime.series.label_decode": "{\"version\":1,\"metric_name\":\"cpu_usage\",\"encoding\":\"dense\",\"primary_key\":[{\"column_id\":1,\"name\":\"host\",\"physical_type\":{\"String\":{\"size_type\":\"Utf8\"}}},{\"column_id\":2,\"name\":\"shard\",\"physical_type\":{\"UInt32\":{}}}],\"logical_tags\":[{\"column_id\":1,\"name\":\"host\"},{\"column_id\":2,\"name\":\"shard\"}]}",
-      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   },
@@ -161,7 +175,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
-      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}"
+      "greptime.series.grid": "{\"start_ms\":0,\"step_ms\":10000,\"len\":4}",
+      "greptime.series.ordering": "contiguous"
     },
     "encoding": null
   }

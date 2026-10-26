@@ -311,81 +311,7 @@ fn named_fixture() -> (
     Arc<Mutex<State>>,
     store_api::metadata::RegionMetadataRef,
 ) {
-    let schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-        ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
-        ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
-        ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
-        ),
-    ]));
-    let batch = RecordBatch::new(
-        schema.clone(),
-        vec![
-            Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
-            Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
-        ],
-    )
-    .unwrap();
-    let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
-    let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-    builder
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            semantic_type: SemanticType::Tag,
-            column_id: 7,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
-            semantic_type: SemanticType::Field,
-            column_id: 11,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
-            semantic_type: SemanticType::Field,
-            column_id: 12,
-        })
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            semantic_type: SemanticType::Timestamp,
-            column_id: 13,
-        })
-        .primary_key(vec![7]);
-    let metadata = Arc::new(builder.build().unwrap());
-    let raw_schema = Arc::new(SeriesSchema {
-        fields: vec![
-            FieldSpec {
-                name: Arc::from("aux"),
-            },
-            FieldSpec {
-                name: Arc::from("value"),
-            },
-        ]
-        .into(),
-        eval_grid: None,
-    });
-    let state = Arc::new(Mutex::new(State::default()));
-    let scanner = TestScanner {
-        properties: ScannerProperties::default(),
-        metadata: metadata.clone(),
-        batches,
-        raw_schema: Some(raw_schema),
-        chunks: vec![],
-        state: state.clone(),
-    };
-    (
-        Arc::new(RegionScanExec::new(Box::new(scanner), ScanRequest::default(), None).unwrap()),
-        state,
-        metadata,
-    )
+    named_fixture_with_tag_count(false)
 }
 
 fn named_fixture_with_two_tags() -> (
@@ -393,9 +319,29 @@ fn named_fixture_with_two_tags() -> (
     Arc<Mutex<State>>,
     store_api::metadata::RegionMetadataRef,
 ) {
-    let schema = Arc::new(Schema::new(vec![
-        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-        ColumnSchema::new("rack", ConcreteDataType::string_datatype(), false),
+    named_fixture_with_tag_count(true)
+}
+
+fn named_fixture_with_tag_count(
+    two_tags: bool,
+) -> (
+    Arc<RegionScanExec>,
+    Arc<Mutex<State>>,
+    store_api::metadata::RegionMetadataRef,
+) {
+    let mut columns = vec![ColumnSchema::new(
+        "host",
+        ConcreteDataType::string_datatype(),
+        false,
+    )];
+    if two_tags {
+        columns.push(ColumnSchema::new(
+            "rack",
+            ConcreteDataType::string_datatype(),
+            false,
+        ));
+    }
+    columns.extend([
         ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
         ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
         ColumnSchema::new(
@@ -403,31 +349,34 @@ fn named_fixture_with_two_tags() -> (
             ConcreteDataType::timestamp_millisecond_datatype(),
             false,
         ),
-    ]));
-    let batch = RecordBatch::new(
-        schema.clone(),
-        vec![
-            Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef,
-            Arc::new(datatypes::vectors::StringVector::from_slice(&["r1"])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
-            Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
-            Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
-        ],
-    )
-    .unwrap();
+    ]);
+    let schema = Arc::new(Schema::new(columns));
+    let mut vectors: Vec<VectorRef> =
+        vec![Arc::new(datatypes::vectors::StringVector::from_slice(&["node"])) as VectorRef];
+    if two_tags {
+        vectors.push(Arc::new(datatypes::vectors::StringVector::from_slice(&["r1"])) as VectorRef);
+    }
+    vectors.extend([
+        Arc::new(datatypes::vectors::Float64Vector::from_slice([2.0])) as VectorRef,
+        Arc::new(datatypes::vectors::Float64Vector::from_slice([1.0])) as VectorRef,
+        Arc::new(TimestampMillisecondVector::from_slice([42])) as VectorRef,
+    ]);
+    let batch = RecordBatch::new(schema.clone(), vectors).unwrap();
     let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
     let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
-    builder
-        .push_column_metadata(ColumnMetadata {
-            column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
-            semantic_type: SemanticType::Tag,
-            column_id: 7,
-        })
-        .push_column_metadata(ColumnMetadata {
+    builder.push_column_metadata(ColumnMetadata {
+        column_schema: ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        semantic_type: SemanticType::Tag,
+        column_id: 7,
+    });
+    if two_tags {
+        builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("rack", ConcreteDataType::string_datatype(), false),
             semantic_type: SemanticType::Tag,
             column_id: 8,
-        })
+        });
+    }
+    builder
         .push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new("aux", ConcreteDataType::float64_datatype(), false),
             semantic_type: SemanticType::Field,
@@ -446,8 +395,8 @@ fn named_fixture_with_two_tags() -> (
             ),
             semantic_type: SemanticType::Timestamp,
             column_id: 13,
-        })
-        .primary_key(vec![7, 8]);
+        });
+    builder.primary_key(if two_tags { vec![7, 8] } else { vec![7] });
     let metadata = Arc::new(builder.build().unwrap());
     let raw_schema = Arc::new(SeriesSchema {
         fields: vec![

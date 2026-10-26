@@ -17,9 +17,9 @@ The fixture proves that missing ordering metadata and unknown values are rejecte
 the two known values decode, and that a whole declaration is accepted or refused
 consistently with its layout and content: a
 `v3` layout, an unregistered `greptime.series.*` key, a raw frame that declares a
-grid, and any content/time or content/labels contradiction are refusals. The
-evaluated cases are read as declarations only; the streaming round trips for
-evaluated frames are covered by the crate's evaluated tests.
+grid, and any content/time or content/labels contradiction are refusals.
+Evaluated declarations use explicit `contiguous` ordering; streaming round trips
+for evaluated frames are covered by the crate's evaluated tests.
 
 Because the declaration is cross-checked, a frame that names `evaluated` content
 is only an evaluated frame when it also declares `explicit` labels, `grid_spans`
@@ -30,7 +30,8 @@ schema builder and `unpack_evaluated_series` refuse it. The fixture keeps a
 hand-written evaluated frame that states it and verifies that declaration
 parsing refuses it.
 
-The fixture also pins rejection of evaluated `read_key_then_time` metadata. It does not prove interoperability with an old binary, nor does it test
-an end-to-end client or service. Separate pack/IPC tests check the declared
+The fixture also pins rejection of evaluated `read_key_then_time` metadata. It
+does not prove interoperability with an old binary or test an end-to-end client
+or service. Separate pack/IPC tests check the declared
 ordering schema and batch schema agreement for both orderings, including empty
 streams, and check the same for the evaluated frame across Arrow IPC.

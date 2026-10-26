@@ -78,7 +78,8 @@
       "greptime.series.layout": "v3",
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
-      "greptime.series.time": "timestamps"
+      "greptime.series.time": "timestamps",
+      "greptime.series.ordering": "contiguous"
     },
     "ordering": "contiguous",
     "declaration": "rejected"
@@ -90,7 +91,8 @@
       "greptime.series.content": "raw",
       "greptime.series.labels": "explicit",
       "greptime.series.time": "timestamps",
-      "greptime.series.future": "x"
+      "greptime.series.future": "x",
+      "greptime.series.ordering": "contiguous"
     },
     "ordering": "contiguous",
     "declaration": "rejected"

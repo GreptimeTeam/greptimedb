@@ -2528,12 +2528,7 @@ fn raw_series_ordering_metadata_fixture() {
         } else {
             raw_series_frame_schema(&schema(), FrameLabelMode::Explicit).unwrap()
         };
-        let mut metadata = frame_schema.metadata().clone();
-        metadata.extend(case.metadata);
-        if literal_ordering.is_none() {
-            metadata.remove("greptime.series.ordering");
-        }
-        let frame_schema = frame_schema.as_ref().clone().with_metadata(metadata);
+        let frame_schema = frame_schema.as_ref().clone().with_metadata(case.metadata);
         match literal_ordering {
             Some(expected) => assert_eq!(
                 series_frame_ordering(&frame_schema)
@@ -3059,8 +3054,18 @@ async fn unpack_round_trips_a_key_frame_and_rejects_one_without_a_description() 
     );
 }
 
-/// The ordering a frame declares is the only ordering a consumer has: unpacking a `KeyThenTime`
-/// frame reports `KeyThenTime` although nobody passed it in.
+/// An evaluated stream with no ordering declaration is rejected before the empty source is polled.
+#[tokio::test]
+async fn unpack_rejects_missing_ordering_on_empty_evaluated_stream() {
+    let frame = series_frame_schema(&evaluated_schema(), FrameLabelMode::Explicit, None).unwrap();
+    let mut metadata = frame.metadata().clone();
+    metadata.remove("greptime.series.ordering");
+    let frame = Arc::new(Schema::new_with_metadata(frame.fields().clone(), metadata));
+    let (source, polls, _) = df_source(vec![], frame);
+    assert!(super::unpack_evaluated_series(source, None).is_err());
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn unpack_reports_the_ordering_the_frame_declares() {
     let (input, _, _) = raw_custom(
