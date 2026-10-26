@@ -32,7 +32,7 @@ use crate::native::plan::{
 };
 use crate::range_eval::RangeFunction;
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp};
 
 /// The header line of every tree.
 const HEADER: &str = "NativeTree";
@@ -156,10 +156,7 @@ fn describe(node: &NativeNode) -> String {
             "{}{} {} {}{}",
             binary_op(matching.op),
             if matching.return_bool { " bool" } else { "" },
-            match &matching.labels {
-                MatchingLabels::On(labels) => format!("on [{}]", label_list(labels)),
-                MatchingLabels::Ignoring(labels) => format!("ignoring [{}]", label_list(labels)),
-            },
+            matching_labels(&matching.labels),
             match &matching.cardinality {
                 Cardinality::OneToOne => "one-to-one".to_string(),
                 Cardinality::ManyToOne(labels) => format!("many-to-one [{}]", label_list(labels)),
@@ -167,6 +164,22 @@ fn describe(node: &NativeNode) -> String {
             },
             fill(matching.fill)
         ),
+        NativeExpr::Set { op, .. } => format!(
+            "{} {}",
+            match op.op {
+                SetOp::And => "and",
+                SetOp::Or => "or",
+                SetOp::Unless => "unless",
+            },
+            matching_labels(&op.labels)
+        ),
+    }
+}
+
+fn matching_labels(labels: &MatchingLabels) -> String {
+    match labels {
+        MatchingLabels::On(labels) => format!("on [{}]", label_list(labels)),
+        MatchingLabels::Ignoring(labels) => format!("ignoring [{}]", label_list(labels)),
     }
 }
 
@@ -349,6 +362,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Aggregate { .. } => "Aggregate",
         NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
+        NativeExpr::Set { .. } => "Set",
     }
 }
 
@@ -373,7 +387,7 @@ fn display_node(
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. } => display_node(f, input, depth + 1, "input")?,
-        NativeExpr::Binary { left, right, .. } => {
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             display_node(f, left, depth + 1, "left")?;
             display_node(f, right, depth + 1, "right")?;
         }
