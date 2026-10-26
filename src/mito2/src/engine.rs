@@ -48,6 +48,8 @@ mod filter_deleted_test;
 mod flush_test;
 #[cfg(test)]
 mod index_build_test;
+#[cfg(test)]
+mod lease_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -325,6 +327,22 @@ impl MitoEngine {
 
     pub fn gc_limiter(&self) -> GcLimiterRef {
         self.inner.workers.gc_limiter()
+    }
+
+    /// Makes regions acknowledge only writes whose WAL append completes within their lease.
+    pub fn require_write_lease(&self) {
+        self.inner.workers.node_lease().enable();
+    }
+
+    /// Renews the lease of this node from a heartbeat response that carries region leases.
+    pub fn renew_node_lease(&self, deadline: Instant) {
+        self.inner.workers.node_lease().renew(deadline);
+    }
+
+    /// Freezes the clock of the lease checks at `at`.
+    #[cfg(any(test, feature = "test"))]
+    pub fn freeze_lease_clock(&self, at: Instant) {
+        self.inner.workers.node_lease().freeze_clock(at);
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -1579,6 +1597,21 @@ impl RegionEngine for MitoEngine {
         self.inner
             .set_region_role(region_id, role)
             .map_err(BoxedError::new)
+    }
+
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError> {
+        let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
+        // Before the role, and even if the role leaves the region's state unchanged.
+        if role.writable() {
+            region.leader_deadline.extend(deadline);
+        }
+        region.set_role(role);
+        Ok(())
     }
 
     async fn set_region_role_state_gracefully(

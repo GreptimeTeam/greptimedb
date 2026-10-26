@@ -471,6 +471,23 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`.
+    pub fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_region_role_with_lease(region_id, role, deadline)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
