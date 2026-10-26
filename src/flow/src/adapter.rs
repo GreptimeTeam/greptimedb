@@ -980,6 +980,22 @@ impl StreamingEngine {
         })
     }
 
+    pub(crate) async fn source_table_ids(&self, flow_id: FlowId) -> Result<Vec<TableId>, Error> {
+        let slot = self
+            .stateless_flows
+            .read()
+            .await
+            .get(&flow_id)
+            .cloned()
+            .context(FlowNotFoundSnafu { id: flow_id })?;
+        let runtime = slot.runtime.read().await;
+        let flow = runtime
+            .flow
+            .as_ref()
+            .context(FlowNotFoundSnafu { id: flow_id })?;
+        Ok(vec![flow.source_table_id])
+    }
+
     async fn fetch_table_pk_schema(
         &self,
         table_name: &TableName,

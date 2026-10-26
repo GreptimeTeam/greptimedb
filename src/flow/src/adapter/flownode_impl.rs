@@ -693,6 +693,24 @@ impl FlowEngine for FlowDualEngine {
             FlowType::Streaming => self.streaming_engine.create_flow(args).await?,
         };
         if created.is_none() {
+            if self
+                .src_table2flow
+                .read()
+                .await
+                .flow_infos
+                .contains_key(&flow_id)
+            {
+                return Ok(None);
+            }
+
+            let source_table_ids = match flow_type {
+                FlowType::Batching => self.batching_engine.source_table_ids(flow_id).await?,
+                FlowType::Streaming => self.streaming_engine.source_table_ids(flow_id).await?,
+            };
+            let mut routing = self.src_table2flow.write().await;
+            if !routing.flow_infos.contains_key(&flow_id) {
+                routing.add_flow(flow_id, flow_type, source_table_ids);
+            }
             return Ok(None);
         }
 
