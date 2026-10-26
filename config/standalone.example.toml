@@ -939,6 +939,12 @@ staging_size = "2GB"
 ## Setting it to "0s" to disable TTL.
 staging_ttl = "7d"
 
+## When to build indexes for new SST files.
+## - `sync`: build indexes while writing SST files during flush and compaction.
+## - `async`: build indexes in the background after the SST files are written. Queries read
+##   these files without indexes until the build finishes.
+build_mode = "sync"
+
 ## Cache size for inverted index metadata.
 metadata_cache_size = "64MiB"
 
