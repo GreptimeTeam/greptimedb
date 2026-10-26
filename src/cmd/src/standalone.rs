@@ -1352,6 +1352,8 @@ mod tests {
         let mut file = create_named_temp_file();
         let toml_str = r#"
             enable_memory_catalog = true
+            max_concurrent_queries = 8
+            concurrent_query_limiter_timeout = "250ms"
 
             [wal]
             provider = "raft_engine"
@@ -1410,6 +1412,11 @@ mod tests {
             .component;
         let fe_opts = options.frontend_options();
         let dn_opts = options.datanode_options();
+        assert_eq!(dn_opts.max_concurrent_queries, 8);
+        assert_eq!(
+            dn_opts.concurrent_query_limiter_timeout,
+            Duration::from_millis(250)
+        );
         let logging_opts = options.logging;
         assert_eq!("127.0.0.1:4000".to_string(), fe_opts.http.addr);
         assert_eq!(Duration::from_secs(33), fe_opts.http.timeout);

@@ -15,7 +15,7 @@
 //! Engine event listener for tests.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -38,6 +38,9 @@ pub trait EventListener: Send + Sync {
 
     /// Notifies the listener that the engine is stalled.
     fn on_write_stall(&self) {}
+
+    /// Notifies the listener after a batch of writes is appended to the WAL.
+    async fn on_write_wal_end(&self) {}
 
     /// Notifies the listener that the region starts to do flush.
     async fn on_flush_begin(&self, region_id: RegionId) {
@@ -615,5 +618,40 @@ impl EventListener for GateIndexBuildListener {
         self.abort_count.fetch_add(1, Ordering::Relaxed);
         self.abort_notify.notify_one();
         self.stop_notify.notify_one();
+    }
+}
+
+/// Listener to pause a batch of writes after it is appended to the WAL.
+#[derive(Default)]
+pub struct WriteWalListener {
+    pause: AtomicBool,
+    appended_notify: Notify,
+    resume_notify: Notify,
+}
+
+impl WriteWalListener {
+    /// Pauses the next batch of writes after it is appended to the WAL.
+    pub fn pause_next(&self) {
+        self.pause.store(true, Ordering::Relaxed);
+    }
+
+    /// Waits until the paused batch is appended to the WAL.
+    pub async fn wait_appended(&self) {
+        self.appended_notify.notified().await;
+    }
+
+    /// Resumes the paused batch.
+    pub fn resume(&self) {
+        self.resume_notify.notify_one();
+    }
+}
+
+#[async_trait]
+impl EventListener for WriteWalListener {
+    async fn on_write_wal_end(&self) {
+        if self.pause.swap(false, Ordering::Relaxed) {
+            self.appended_notify.notify_one();
+            self.resume_notify.notified().await;
+        }
     }
 }

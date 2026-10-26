@@ -831,7 +831,10 @@ enable = false
 lingering_time = "1h"
 
 ## Lingering time before deleting unknown files (files with undetermined expel time).
-## Only applies during full file listing GC.
+## It is also the age threshold of the sweep that reclaims temporary files left behind by
+## a crashed HDFS writer, and that sweep runs even if `enable` is false. HDFS advances the
+## modification time of a file under construction only as its blocks complete, so lowering
+## this value also shrinks the margin between the sweep and files that are still being written.
 ## This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);
 ## do not configure this value too small in production to avoid deleting pre-manifest files
 ## from in-progress compaction or flush.
