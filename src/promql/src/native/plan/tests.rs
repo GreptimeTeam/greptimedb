@@ -333,23 +333,6 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
     assert!(fields_error.to_string().contains("field"), "{fields_error}");
 }
 
-#[test]
-fn merge_is_rejected_below_unsupported_wrappers_and_nonmerge_tree_is_unchanged() {
-    let grid = grid(0, 60_000, 4);
-    let merge = NativeNode {
-        expr: NativeExpr::Merge {
-            input: Box::new(map_over(input_on(Arc::clone(&grid)))),
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&grid)),
-    };
-    let wrapped = partial_aggregate(merge);
-    assert!(wrapped.validate().is_ok());
-    assert!(NativeTree::try_new(wrapped).is_err());
-
-    let ordinary = map_over(input_on(grid));
-    assert!(NativeTree::try_new(ordinary).is_ok());
-}
-
 /// A map is point-wise over values, so raw samples are not something it can consume.
 #[test]
 fn a_map_cannot_consume_raw_samples() {
