@@ -27,7 +27,7 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
-//!   <round or clamp>(<expression>, <scalar>+)      e.g. round(x, scalar(y)), clamp(x, 0, time())
+//!   <round or clamp>(<expression>, <scalar>+)      e.g. round(x, time() / 10), clamp(x, 0, time())
 //!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
@@ -245,7 +245,7 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
                          function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), with \
                          `round` and the `clamp` functions also taking scalars \
-                         (`round(x, scalar(y))`), a native \
+                         (`round(x, time() / 10)`), a native \
                          histogram function over any of them (`histogram_count(x)`), a label \
                          function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \

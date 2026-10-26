@@ -1175,6 +1175,27 @@ fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
     );
 }
 
+/// A closing chunk whose every point has `clamp`'s maximum below its minimum keeps no value, and is
+/// still handed over, empty, under the labels the map produces: a consumer tells "nothing more here"
+/// from "no more input" by that chunk alone.
+#[test]
+fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
+    let grid = grid(0, 10, 2);
+    let root = parameterized(
+        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        ParameterizedOp::Clamp,
+        vec![
+            scalar(1.0, Arc::clone(&grid)),
+            scalar_of(evaluated_input_with_source_index(grid, 1)),
+        ],
+    );
+    let chunk = run_parameterized(root, vec![Some(5.0), Some(6.0)], vec![Some(0.0), Some(0.0)]);
+    assert!(chunk.is_last);
+    assert_eq!(chunk.series.time.len(), 0);
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }

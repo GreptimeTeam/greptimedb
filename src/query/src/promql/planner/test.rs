@@ -1964,8 +1964,8 @@ async fn native_fused_plans_dynamic_scalars_over_one_region() {
 }
 
 /// A map whose parameter reads no data runs per partition over its scan, and one whose parameter
-/// is `scalar(v)` needs a table of one region. A partitioned table and three selectors keep the
-/// existing plan, which cannot plan `scalar(v)` as a function parameter and says so.
+/// is `scalar(v)` needs a table of one region. A partitioned table and three selectors are declined
+/// by the native route.
 #[tokio::test]
 async fn native_fused_plans_varying_map_parameters() {
     let plan = build_native_fused_plan("round(some_metric, time() / 1e9)", true).await;
@@ -1988,19 +1988,20 @@ async fn native_fused_plans_varying_map_parameters() {
             vec![],
         ),
     ] {
-        let error = PromPlanner::stmt_to_plan_with_annotations(
-            native_engine_provider(partitions).await,
-            &build_eval_stmt(query),
-            &build_query_engine_state(),
-            None,
-            true,
-        )
-        .await
-        .expect_err("the existing planner refuses a scalar(v) parameter");
-        assert!(
-            error.to_string().contains("Cannot accept multiple vector"),
-            "{query}: {error}"
-        );
+        // Asked of the native route alone: what the existing planner does with the query is not
+        // this route's to decide.
+        let stmt = build_eval_stmt(query);
+        let mut planner = PromPlanner {
+            table_provider: native_engine_provider(partitions).await,
+            ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
+            promql_annotations: None,
+            native_fused: true,
+        };
+        let plan = planner
+            .try_plan_native_fused(&stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+        assert!(plan.is_none(), "{query}");
     }
 }
 

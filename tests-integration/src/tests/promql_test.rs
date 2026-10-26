@@ -4367,8 +4367,8 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
 /// parameter that reads no data runs per partition over the scan; `scalar(v)` runs as one execution
-/// over every partition. The existing planner refuses any parameter that is not a number literal,
-/// so the answers are checked against Prometheus' alone.
+/// over every partition. The answers are Prometheus' literal ones: the existing planner does not plan
+/// a parameter that is not a number literal, so it has no answer to compare.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_map_with_varying_parameters_matches_prometheus() {
     common_telemetry::init_default_ut_logging();
@@ -4408,14 +4408,6 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
             (30_000, "b", f64::NAN),
         ])
     );
-    let legacy = instance
-        .do_query(sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    assert!(
-        legacy.is_err(),
-        "the existing planner refuses `scalar(v)` as a parameter"
-    );
 
     // The nearest is 1, 2, 4 and 8 at the four steps that hold samples.
     let sql = "TQL EVAL (0, 40, '10s', '5s') round(dyn_param, 2 ^ (time() / 10))";
@@ -4434,13 +4426,5 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
             (20_000, "b", 12.0),
             (30_000, "b", 24.0),
         ])
-    );
-    let legacy = instance
-        .do_query(sql, native_query_context(false, 4))
-        .await
-        .remove(0);
-    assert!(
-        legacy.is_err(),
-        "the existing planner refuses the parameter"
     );
 }

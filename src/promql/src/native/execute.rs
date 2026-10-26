@@ -1952,12 +1952,13 @@ struct BroadcastRuntime {
     /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
     /// on. A chunk of the vector side is checked against it by the kernel itself.
     sample_schema: Arc<SeriesSchema>,
-    /// Vector chunks that arrived before a varying scalar did, and the scalar's value.
+    /// Vector chunks that arrived before a varying scalar did, and the bytes charged for them and
+    /// for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
     held: HeldForScalars,
 }
 
-/// What a node computed with varying scalars holds until they have arrived: the vector chunks
-/// that came first, and the bytes those chunks and the scalars' values are charged at.
+/// The vector chunks a node computed with varying scalars holds until they have arrived, and the
+/// bytes charged for those chunks and for the scalars' values, which the node keeps itself.
 ///
 /// A point of the vector can only be computed with the scalars' values at that point, and a
 /// scalar such as `scalar(v)` arrives only once its whole input has ended.
