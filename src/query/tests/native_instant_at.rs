@@ -236,7 +236,8 @@ fn native_anchored_timestamp_selection_boundaries() {
     let stale = f64::from_bits(common_query::prometheus::PROMETHEUS_STALE_NAN_BITS);
     let all_times = [-1500, 500, 1500, 3500];
     let all_values = [Some(7.0), Some(1.0), Some(2.0), Some(3.0)];
-    let cases: &[(&str, u64, &[i64], &[Option<f64>], &[f64])] = &[
+    type Case<'a> = (&'a str, u64, &'a [i64], &'a [Option<f64>], &'a [f64]);
+    let cases: &[Case<'_>] = &[
         (
             "timestamp(a @ 2 offset 1s)",
             5_000,
