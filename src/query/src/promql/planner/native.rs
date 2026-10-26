@@ -29,6 +29,8 @@
 //! built to the shape the existing unary pipeline produces — the time index, then the series
 //! fields, then the tags — so a node planned here can be consumed by the same code that consumes a
 //! `SeriesNormalize` output.
+//!
+//! A constant statement is planned with no scan: one node, no child, the time index and value.
 
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -56,8 +58,10 @@ use snafu::ResultExt;
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
-use crate::promql::native_compile::{compile_selectors, statement_grid};
-use crate::promql::planner::PromPlanner;
+use crate::promql::native_compile::{
+    compile_selectors, compile_statement, constant_value, statement_grid,
+};
+use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
 
 /// The query-context key that turns the native fused-series route on for one query.
@@ -141,10 +145,7 @@ impl PromPlanner {
         }
 
         let mut selectors = Vec::new();
-        if !collect_selectors(prom_expr, &mut selectors)
-            || selectors.is_empty()
-            || selectors.len() > 2
-        {
+        if !collect_selectors(prom_expr, &mut selectors) || selectors.len() > 2 {
             return Ok(None);
         }
         // Preserve the original single-selector admission allowlist. Broader binary syntax is only
@@ -158,6 +159,39 @@ impl PromPlanner {
         let Ok(grid) = statement_grid(&stmt) else {
             return Ok(None);
         };
+        // No selector is not proof of a constant: `time()` and other data-free functions are
+        // unsupported here, so the existing fold is asked before a zero-child node is bound.
+        if selectors.is_empty() {
+            if constant_value(prom_expr).is_none() {
+                return Ok(None);
+            }
+            let tree = match compile_statement(&stmt) {
+                Ok(tree) => tree,
+                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+            };
+            // A constant has no scan: no metric, no tags, and the value under the name the existing
+            // path gives a bare literal.
+            let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
+            let value = DEFAULT_FIELD_COLUMN.to_string();
+            let output_schema = fused_output_schema(&[value], &[], &time_index)?;
+            let node = FusedSeries::try_new(
+                Arc::from(prom_expr.to_string()),
+                tree,
+                FusedSeriesBinding {
+                    grid,
+                    time_index,
+                    tags: Vec::new(),
+                    metric_name: None,
+                },
+                Vec::new(),
+                output_schema,
+            )
+            .context(DataFusionPlanningSnafu)?;
+            return Ok(Some(LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            })));
+        }
         let original_context = self.ctx.clone();
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
@@ -742,6 +776,13 @@ fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
         {
             admitted_selector(&call.args.args[0])
         }
+        PromExpr::Unary(unary) => admitted_selector(&unary.expr),
+        PromExpr::Binary(binary) if constant_value(&binary.lhs).is_some() => {
+            admitted_selector(&binary.rhs)
+        }
+        PromExpr::Binary(binary) if constant_value(&binary.rhs).is_some() => {
+            admitted_selector(&binary.lhs)
+        }
         _ => None,
     }
 }
@@ -958,8 +999,12 @@ mod tests {
     }
 
     #[test]
-    fn single_selector_admission_keeps_scalar_binaries_on_fallback() {
-        for query in ["x * 2", "2 - x", "(x * 2) + 3"] {
+    fn single_selector_admission_accepts_literal_broadcasts_and_unary() {
+        for query in ["x * 2", "2 - x", "(x * 2) + 3", "-x"] {
+            let expression = promql_parser::parser::parse(query).unwrap();
+            assert!(admitted_selector(&expression).is_some(), "{query}");
+        }
+        for query in ["time() + x", "scalar(x) + x", "x + y"] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_none(), "{query}");
         }

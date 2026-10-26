@@ -1859,6 +1859,39 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     plan.inputs().into_iter().find_map(find_fused_series)
 }
 
+/// Literal roots need no raw scan, while a literal beside a selector broadcasts over that input.
+#[tokio::test]
+async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
+    for (query, value) in [("1 + 2", 3.0), ("-1", -1.0)] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("constant root uses native route");
+        assert!(
+            fused.children().is_empty(),
+            "{query}: {:?}",
+            fused.children()
+        );
+        let NativeExpr::Scalar(scalar) = &fused.tree().root().expr else {
+            panic!("{query}: {:?}", fused.tree().root().expr);
+        };
+        assert_eq!(value, scalar.value, "{query}");
+    }
+
+    for query in [
+        "some_metric * 100",
+        "100 / some_metric",
+        "-some_metric",
+        "rate(some_metric[5m]) * 100",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("selector expression uses native route");
+        assert_eq!(1, fused.children().len(), "{query}");
+        assert!(
+            matches!(fused.children()[0], LogicalPlan::TableScan(_)),
+            "{query}"
+        );
+    }
+}
+
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
 #[tokio::test]
 async fn native_fused_rate_plans_to_a_fused_series_node() {

@@ -109,10 +109,13 @@ fn plan_fused_series(
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
 ) -> DfResult<Option<Arc<dyn ExecutionPlan>>> {
-    if physical_inputs.len() != fused.children().len() || physical_inputs.is_empty() {
+    if physical_inputs.len() != fused.children().len() {
         return Err(DataFusionError::Plan(
             "FusedSeries physical child count mismatch".into(),
         ));
+    }
+    if physical_inputs.is_empty() {
+        return fused.to_execution_plan(Vec::new()).map(Some);
     }
     if physical_inputs
         .iter()

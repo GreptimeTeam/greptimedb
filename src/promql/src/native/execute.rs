@@ -30,7 +30,7 @@ use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{
-    DenseSamplesRef, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+    DenseSamplesRef, FieldSpec, RowCursor, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
 };
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
@@ -1974,6 +1974,24 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     Ok(position as usize)
 }
 
+/// One unlabelled constant value per statement grid point, closed on its only chunk.
+fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
+    let schema = SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: "value".into(),
+        }]),
+        eval_grid: Some(Arc::clone(&grid)),
+    };
+    let len = grid.spec().len as usize;
+    let time = GridRange::try_new(grid, 0, len).map_err(series_error)?;
+    let values = Float64Array::from(vec![value; len]);
+    let fields = SeriesFields::one(Samples::from_float(values));
+    let metric = SeriesLabels::try_new(None, Vec::new()).map_err(series_error)?;
+    let series =
+        Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+    EvaluatedChunk::try_new(series, true)
+}
+
 /// A closing chunk carrying `metric` and no row at all.
 ///
 /// A series whose selection picked no source row still closes exactly once, on a chunk that holds
@@ -2068,6 +2086,8 @@ struct InputSlot {
 pub struct NativeExecutionState {
     root: RuntimeNode,
     inputs: Vec<InputSlot>,
+    /// A constant root waiting for its only pull; operand scalars remain chunkless.
+    scalar_root: Option<(Arc<EvalGrid>, f64, NodeState)>,
 }
 
 impl NodeState {
@@ -2834,25 +2854,46 @@ impl NativeExecutionState {
     pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
         let mut inputs = Vec::new();
         let (root, _) = RuntimeNode::build(tree.root(), &pool, &mut inputs)?;
-        match tree.root().output.samples() {
-            Some(schema) if schema.eval_grid.is_some() => {}
-            Some(_) => {
+        let scalar_root = if inputs.is_empty() {
+            match (&tree.root().expr, &tree.root().output) {
+                (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
+                    Arc::clone(grid),
+                    *value,
+                    NodeState::new("native.scalar", Arc::clone(&root.metrics), &pool),
+                )),
+                _ => {
+                    return Err(DataFusionError::Execution(
+                        "native tree without inputs must be a scalar root".into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        match &tree.root().output {
+            NativeType::Scalar(_) if inputs.is_empty() => {}
+            NativeType::Scalar(_) => {
+                return Err(DataFusionError::Execution(
+                    "native scalar root unexpectedly has input nodes".into(),
+                ));
+            }
+            NativeType::Samples(schema) if schema.eval_grid.is_some() => {}
+            NativeType::Samples(_) => {
                 return Err(DataFusionError::Execution(
                     "native runtime root produces raw samples".to_string(),
                 ));
             }
-            None => {
+            NativeType::AggregateState(_) => {
                 return Err(DataFusionError::Execution(
                     "native runtime root produces no sample output".to_string(),
                 ));
             }
         }
-        if inputs.is_empty() {
-            return Err(DataFusionError::Execution(
-                "native tree has no input node".to_string(),
-            ));
-        }
-        Ok(Self { root, inputs })
+        Ok(Self {
+            root,
+            inputs,
+            scalar_root,
+        })
     }
 
     /// Registers the metric handles of every node of this execution's tree with `set`.
@@ -2879,6 +2920,11 @@ impl NativeExecutionState {
             .map(|slot| slot.state.buffer.reservation.size())
             .fold(0usize, usize::saturating_add)
             .saturating_add(self.root.reserved_bytes())
+            .saturating_add(
+                self.scalar_root
+                    .as_ref()
+                    .map_or(0, |(_, _, state)| state.buffer.reservation.size()),
+            )
     }
 }
 
@@ -2894,6 +2940,27 @@ impl NativeExecutionState {
     /// `inputs_finished` is the caller's word that no more source chunks will arrive; it is passed
     /// down unchanged, because only a node that reads its whole input needs it.
     fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
+        if let Some((grid, value, mut state)) = self.scalar_root.take() {
+            let len = usize::try_from(grid.spec().len).map_err(|_| {
+                DataFusionError::Execution("scalar grid length does not fit memory size".into())
+            })?;
+            let bytes = std::mem::size_of::<EvaluatedChunk>()
+                .checked_add(std::mem::size_of::<Float64Array>())
+                .and_then(|bytes| {
+                    len.checked_mul(std::mem::size_of::<f64>())
+                        .and_then(|values| bytes.checked_add(values))
+                })
+                .ok_or_else(|| {
+                    DataFusionError::Execution("scalar allocation size overflow".into())
+                })?;
+            state.buffer.grow(bytes)?;
+            let chunk = scalar_chunk(grid, value)?;
+            state.buffer.metrics.record_completed_series(1);
+            state
+                .queued
+                .push_back((NativeChunk::Evaluated(chunk), bytes));
+            return state.pop_queued(evaluated_values);
+        }
         self.root.pull(&mut self.inputs, inputs_finished)
     }
 
@@ -2929,6 +2996,9 @@ impl NativeExecutionState {
     fn close(&mut self) -> Result<()> {
         let finished = self.root.finish_windows();
         self.root.release();
+        if let Some((_, _, mut state)) = self.scalar_root.take() {
+            state.release();
+        }
         // The slots are taken rather than only released: what a released slot still holds is its
         // schema and the grid that schema is addressed on, and a caller that keeps the stopped
         // executor would otherwise keep the input's schema and materialized timestamps alive past
@@ -2948,6 +3018,9 @@ impl NativeExecutionState {
     /// vector and nothing left to take.
     fn release(&mut self) {
         self.root.release();
+        if let Some((_, _, mut state)) = self.scalar_root.take() {
+            state.release();
+        }
         for mut slot in std::mem::take(&mut self.inputs) {
             slot.release();
         }
