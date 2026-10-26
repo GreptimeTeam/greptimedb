@@ -1,0 +1,175 @@
+CREATE TABLE partition_pruning_cast_partitioned (
+    ts TIMESTAMP TIME INDEX,
+    k FLOAT PRIMARY KEY,
+    v BIGINT,
+)
+PARTITION ON COLUMNS (k) (
+    k < 1.25,
+    k >= 1.25
+);
+
+Affected Rows: 0
+
+CREATE TABLE partition_pruning_cast_control (
+    ts TIMESTAMP TIME INDEX,
+    k FLOAT PRIMARY KEY,
+    v BIGINT,
+);
+
+Affected Rows: 0
+
+INSERT INTO partition_pruning_cast_partitioned VALUES
+    (1000, 1.0, 10),
+    (1000, 1.5, 15),
+    (1000, 2.5, 25);
+
+Affected Rows: 3
+
+INSERT INTO partition_pruning_cast_control VALUES
+    (1000, 1.0, 10),
+    (1000, 1.5, 15),
+    (1000, 2.5, 25);
+
+Affected Rows: 3
+
+SELECT k, v, CAST(k AS BIGINT) AS cast_k
+FROM partition_pruning_cast_partitioned ORDER BY k;
+
++-----+----+--------+
+| k   | v  | cast_k |
++-----+----+--------+
+| 1.0 | 10 | 1      |
+| 1.5 | 15 | 1      |
+| 2.5 | 25 | 2      |
++-----+----+--------+
+
+SELECT k, v, CAST(k AS BIGINT) AS cast_k
+FROM partition_pruning_cast_control ORDER BY k;
+
++-----+----+--------+
+| k   | v  | cast_k |
++-----+----+--------+
+| 1.0 | 10 | 1      |
+| 1.5 | 15 | 1      |
+| 2.5 | 25 | 2      |
++-----+----+--------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+EXPLAIN SELECT k, v, CAST(k AS BIGINT) AS cast_k
+FROM partition_pruning_cast_partitioned
+WHERE CAST(k AS BIGINT) = 1;
+
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                       |
+|               | Projection: partition_pruning_cast_partitioned.k, partition_pruning_cast_partitioned.v, CAST(partition_pruning_cast_partitioned.k AS Int64) AS cast_k |
+|               |   Filter: CAST(partition_pruning_cast_partitioned.k AS Int64) = Int64(1)                                                                              |
+|               |     TableScan: partition_pruning_cast_partitioned, partial_filters=[CAST(partition_pruning_cast_partitioned.k AS Int64) = Int64(1)]                   |
+|               | ]]                                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                                       |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+SELECT ts, k, v, CAST(k AS BIGINT) AS cast_k
+FROM partition_pruning_cast_partitioned
+WHERE CAST(k AS BIGINT) = 1
+ORDER BY k;
+
++---------------------+-----+----+--------+
+| ts                  | k   | v  | cast_k |
++---------------------+-----+----+--------+
+| 1970-01-01T00:00:01 | 1.0 | 10 | 1      |
+| 1970-01-01T00:00:01 | 1.5 | 15 | 1      |
++---------------------+-----+----+--------+
+
+SELECT ts, k, v, CAST(k AS BIGINT) AS cast_k
+FROM partition_pruning_cast_control
+WHERE CAST(k AS BIGINT) = 1
+ORDER BY k;
+
++---------------------+-----+----+--------+
+| ts                  | k   | v  | cast_k |
++---------------------+-----+----+--------+
+| 1970-01-01T00:00:01 | 1.0 | 10 | 1      |
+| 1970-01-01T00:00:01 | 1.5 | 15 | 1      |
++---------------------+-----+----+--------+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT k, v
+FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["k", "v"], "filters": ["k >= Float32(1.25)", "k < Float32(2.5)", "k >= Float32(1.25)"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (elapsed_compute.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (partitioning.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
+EXPLAIN ANALYZE SELECT k, v
+FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec REDACTED
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: CAST(v@1 AS Int32) IS NOT NULL REDACTED
+|_|_|_CooperativeExec REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["k", "v"], "filters": ["k >= Float32(1.25)", "k < Float32(2.5)", "CAST(v AS Int32) IS NOT NULL", "k >= Float32(1.25)"], "time_range":REDACTED
+|_|_|_|
+|_|_| Total rows: 1_|
++-+-+-+
+
+SELECT k, v FROM partition_pruning_cast_partitioned
+WHERE k >= 1.25::FLOAT AND k < 2.5::FLOAT AND CAST(v AS INT) IS NOT NULL;
+
++-----+----+
+| k   | v  |
++-----+----+
+| 1.5 | 15 |
++-----+----+
+
+SELECT k FROM partition_pruning_cast_partitioned
+WHERE k = 1.0 OR CAST(k AS BIGINT) = 1 ORDER BY k;
+
++-----+
+| k   |
++-----+
+| 1.0 |
+| 1.5 |
++-----+
+
+DROP TABLE partition_pruning_cast_partitioned;
+
+Affected Rows: 0
+
+DROP TABLE partition_pruning_cast_control;
+
+Affected Rows: 0
+
