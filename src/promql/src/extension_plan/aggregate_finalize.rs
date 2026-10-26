@@ -466,6 +466,17 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
             };
             Ok(Some(inner))
         }
+        // A set operation keeps samples by whether their match group is present on the other side,
+        // which the merged values of one side cannot answer.
+        NativeExpr::Set { left, right, .. } => {
+            match (
+                split(left, fields, time_index)?,
+                split(right, fields, time_index)?,
+            ) {
+                (None, None) => Ok(None),
+                _ => Err(declined("an aggregate under a set operation")),
+            }
+        }
     }
 }
 
@@ -491,7 +502,7 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => raw_fields(input),
-            NativeExpr::Binary { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 raw_fields(left).or_else(|| raw_fields(right))
             }
         }

@@ -1144,61 +1144,185 @@ pub fn set_vectors(
     rhs_schema: &SeriesSchema,
     rhs: &[Series],
 ) -> Result<Vec<Series>> {
+    set_vectors_inner(op, labels, lhs_schema, lhs, rhs_schema, rhs, None)
+}
+
+/// [`set_vectors`], handing the live workspace it holds to `reserve` as it allocates.
+///
+/// The figures follow [`binary_vectors_with_reservation`]: what the results keep is held as their
+/// containers grow, each field's walk and sort is a phase that replaces the one before it, and the
+/// merge is the last phase. A total `reserve` refuses ends the operation with that error.
+pub(crate) fn set_vectors_with_reservation(
+    op: SetOp,
+    labels: &MatchingLabels,
+    lhs_schema: &SeriesSchema,
+    lhs: &[Series],
+    rhs_schema: &SeriesSchema,
+    rhs: &[Series],
+    reserve: &mut dyn FnMut(usize) -> Result<()>,
+) -> Result<Vec<Series>> {
+    let mut budget = Budget::new(reserve);
+    set_vectors_inner(
+        op,
+        labels,
+        lhs_schema,
+        lhs,
+        rhs_schema,
+        rhs,
+        Some(&mut budget),
+    )
+}
+
+/// The one set kernel, whether or not a caller accounts for its workspace.
+fn set_vectors_inner(
+    op: SetOp,
+    labels: &MatchingLabels,
+    lhs_schema: &SeriesSchema,
+    lhs: &[Series],
+    rhs_schema: &SeriesSchema,
+    rhs: &[Series],
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
     let grid = same_grid(lhs_schema, rhs_schema)?;
     if lhs_schema.fields.len() != rhs_schema.fields.len() {
         return Err(DataFusionError::NotImplemented(
             "set operators between vectors with different field counts".into(),
         ));
     }
+    let width = lhs_schema.fields.len();
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.hold(output_bytes(width))?;
+    }
     let output = Arc::new(SeriesSchema {
         fields: lhs_schema.fields.clone(),
         eval_grid: Some(grid.clone()),
     });
     let mut errors = Vec::new();
-    let mut fields = Vec::with_capacity(output.fields.len());
-    for field in 0..output.fields.len() {
+    let mut fields = Vec::with_capacity(width);
+    for field in 0..width {
         let lhs = Operand::try_new(lhs_schema, lhs, field)?;
         let rhs = Operand::try_new(rhs_schema, rhs, field)?;
-        let mut results = set_field(op, labels, &lhs, &rhs)?;
-        if let Some(duplicate) = results.sort_rows() {
-            let timestamp = (grid.spec().start_ms as i128
-                + duplicate.point as i128 * grid.spec().step_ms as i128)
-                as i64;
-            errors.push((duplicate.point, 0, same_labelset(&duplicate.key, timestamp)));
+        let results = set_field(
+            op,
+            labels,
+            &grid,
+            &lhs,
+            &rhs,
+            &mut errors,
+            budget.as_deref_mut(),
+        )?;
+        // The field's group table and sort are gone with its frame; what it filed stays live.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.phase(0)?;
         }
         fields.push(results);
     }
     earliest_error(errors)?;
-    // A set operator accounts for no workspace, so its merge is charged nothing either.
-    merge_fields(fields, output, None)
+    merge_fields(fields, output, budget)
 }
 
+/// The figures one set field's phases are charged from, read once from its operands.
+struct SetFieldMetadata {
+    /// The filter side's match groups.
+    tables: usize,
+    /// The widest key one row builds: the match key a kept series is looked up by, or the key a row
+    /// is filed under.
+    scratch: usize,
+    /// The one message the field can report, a fixed frame around one rendering.
+    error: usize,
+}
+
+fn set_field_metadata(
+    labels: &MatchingLabels,
+    kept: &Operand<'_>,
+    filter: &Operand<'_>,
+) -> SetFieldMetadata {
+    let mut tables = 0usize;
+    for series in filter.series {
+        tables = tables
+            .saturating_add(match_key_bytes(&series.metric, labels))
+            .saturating_add(2 * std::mem::size_of::<usize>())
+            .saturating_add(GROUP_SLOT_BYTES);
+    }
+    // `or` files the filter side's rows too, so both sides' label sets bound a row's keys and the
+    // text of the message.
+    let (mut scratch, mut text) = (0usize, 0usize);
+    for series in kept.series.iter().chain(filter.series) {
+        scratch = scratch
+            .max(match_key_bytes(&series.metric, labels))
+            .max(result_key_bytes(&series.metric));
+        text = text.max(label_text_bytes(&series.metric));
+    }
+    SetFieldMetadata {
+        tables,
+        scratch,
+        error: ERROR_TEXT_BYTES.saturating_add(text),
+    }
+}
+
+/// Filters one field of the kept side by the presence of its match group on the filter side, and
+/// appends the first point where two kept rows share a label set as `(point, rank, message)`.
 fn set_field(
     op: SetOp,
     labels: &MatchingLabels,
+    grid: &EvalGrid,
     lhs: &Operand<'_>,
     rhs: &Operand<'_>,
+    errors: &mut Vec<(usize, u8, String)>,
+    mut budget: Option<&mut Budget<'_>>,
 ) -> Result<Results> {
     let (kept, filter, keep_matched) = match op {
         SetOp::And => (lhs, rhs, true),
         SetOp::Unless => (lhs, rhs, false),
         SetOp::Or => (rhs, lhs, false),
     };
+    // The walk is one phase, entered before the group table exists. A kept series reads its
+    // candidates through one cursor each, so the widest group's cursors join it once it does.
+    let metadata = match budget.as_deref_mut() {
+        Some(budget) => {
+            let metadata = set_field_metadata(labels, kept, filter);
+            budget.phase(metadata.tables.saturating_add(metadata.scratch))?;
+            Some(metadata)
+        }
+        None => None,
+    };
     let filter_groups = group(filter, labels);
-    // A set operator hands on the label sets of its operands and no caller accounts for its
-    // workspace, so it files its rows without charging them.
+    if let Some(budget) = budget.as_deref_mut() {
+        let widest = filter_groups.values().map(Vec::len).max().unwrap_or(0);
+        budget.grow(widest.saturating_mul(std::mem::size_of::<RowCursor<'_>>()))?;
+    }
+    // A set operator hands on its operands' label sets unchanged, so a row is filed under the label
+    // set of the series it came from.
+    let charged = budget.is_some();
+    let label_set = |metric: &SeriesLabels| {
+        if charged {
+            result_set_bytes(metric, metric, &[])
+        } else {
+            0
+        }
+    };
     let mut results = Results::default();
     if op == SetOp::Or {
         for index in 0..lhs.series.len() {
+            let metric = &lhs.series[index].metric;
+            let label_set = label_set(metric);
             let mut cursor = lhs.cursor(index);
             for (point, row) in lhs.positions(index) {
                 if let Some(value) = owned(cursor.at(row).expect("a row never goes back"))? {
-                    results.insert(&lhs.series[index].metric, 0, point, Some(value), 0, None)?;
+                    results.insert(
+                        metric,
+                        0,
+                        point,
+                        Some(value),
+                        label_set,
+                        budget.as_deref_mut(),
+                    )?;
                 }
             }
         }
     }
     for (index, series) in kept.series.iter().enumerate() {
+        let label_set = label_set(&series.metric);
         let candidates = filter_groups.get(&group_key(&series.metric, labels));
         let candidate_indices: &[usize] = candidates.map_or(&[], Vec::as_slice);
         // One forward cursor per candidate: `kept`'s positions only increase, so the row a
@@ -1223,9 +1347,37 @@ fn set_field(
                 }
             }
             if matched == keep_matched {
-                results.insert(&series.metric, 0, point, owned(sample)?, 0, None)?;
+                results.insert(
+                    &series.metric,
+                    0,
+                    point,
+                    owned(sample)?,
+                    label_set,
+                    budget.as_deref_mut(),
+                )?;
             }
         }
+    }
+    // The group table is gone before the sort phase, which is charged without it: the message the
+    // sort may append and one slot per row it sorts, entered before it allocates either.
+    drop(filter_groups);
+    if let (Some(budget), Some(metadata)) = (budget.as_deref_mut(), &metadata) {
+        budget.phase(
+            metadata
+                .error
+                .saturating_add(metadata.scratch)
+                .saturating_add(results.rows.saturating_mul(SORT_ROW_BYTES)),
+        )?;
+    }
+    if let Some(duplicate) = results.sort_rows() {
+        let timestamp = (grid.spec().start_ms as i128
+            + duplicate.point as i128 * grid.spec().step_ms as i128) as i64;
+        let message = same_labelset(&duplicate.key, timestamp);
+        // The message stays live until the earliest one is reported.
+        if let Some(budget) = budget {
+            budget.hold(std::mem::size_of::<String>().saturating_add(message.capacity()))?;
+        }
+        errors.push((duplicate.point, 0, message));
     }
     Ok(results)
 }

@@ -35,6 +35,7 @@
 //!   <expression> <operator> <constant>             e.g. x * 100, x > bool 0
 //!   <constant> <operator> <expression>             e.g. 1 / x, 0 < x
 //!   -<expression>                                  e.g. -x
+//!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
 //!   <aggregator> [(by|without)(<labels>)] (<expression>)
 //!                                                  e.g. avg by(job)(rate(x[5m]) * 100)
 //!   <aggregator> (<expression>) [(by|without)(<labels>)]
@@ -55,7 +56,8 @@
 //!                                                  offset 1m`
 //! ```
 //!
-//! where `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
+//! where `<set operator>` is `and`, `or` or `unless`, optionally with `on(...)` or `ignoring(...)`,
+//! `<aggregator>` is `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` or
 //! `quantile`, `<selector aggregator>` is `topk`, `bottomk`, `limitk` or `limit_ratio`, the
 //! function names are [`range_signature`]'s and [`math_signature`]'s, and which side
 //! of the matrix a range function's constants go on is [`RangeSignature`]'s: before it for
@@ -78,7 +80,8 @@
 //! `<expression>` → `Map` (a pointwise math, native histogram or label function over what its
 //! argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation between vectors or with a
-//! constant on one side), `Scalar` (that constant), `Aggregate` (one of the nine aggregators that
+//! constant on one side), `Scalar` (that constant), `Set` (`and`, `or` or `unless` between two
+//! vectors), `Aggregate` (one of the nine aggregators that
 //! fold a group's values into one value per grid point, optionally grouped) and `Vector` (an
 //! operation over the whole vector at each point: a sort, `absent`, a classic histogram function, a
 //! selecting aggregator or `count_values`). Everything else is a
@@ -141,12 +144,13 @@ use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
 use promql::vector_match::{
-    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, binary_output_schema,
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, binary_output_schema,
 };
 use promql_parser::label::{MatchOp as ParserMatchOp, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -239,9 +243,10 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a constant (`2 / (x + 1)`, \
-                         `x > bool 0`), a negation of one of them (`-x`), or one of the aggregators \
-                         that folds a group's values into one value per grid point — `sum`, `avg`, \
-                         `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         `x > bool 0`), a negation of one of them (`-x`), a set operation between \
+                         two of them (`x and on(job) y`, `x or y`, `x unless y`), or one of the \
+                         aggregators that folds a group's values into one value per grid point — \
+                         `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
@@ -368,7 +373,7 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. } => check(input, inputs, next),
-            NativeExpr::Binary { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 check(left, inputs, next) && check(right, inputs, next)
             }
         }
@@ -456,17 +461,8 @@ fn negate(context: &Context, operand: &PromExpr) -> Result<NativeNode> {
 /// A scalar carries no labels, so broadcasting it over a vector is unambiguous. Vector operands
 /// retain their own input bindings and matching, including a fill on either side.
 fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode> {
-    // A set operator combines two vectors' series rather than their values, and the tree has no node
-    // for it at all. Its name is reported before the operands are looked at, so a set operation
-    // between two vectors is refused as the set operation it is rather than as a binary operation
-    // the compiler has no node for.
-    if binary.op.is_set_operator() {
-        return Err(not_implemented(&format!(
-            "the set operator `{}` in `{binary}`, which has no native node: it combines two \
-             vectors' series, and every binary node here is an arithmetic or comparison operation \
-             over values",
-            binary.op
-        )));
+    if let Some(op) = set_op(&binary.op) {
+        return set_operation(context, binary, op);
     }
     let Some(op) = binary_op(&binary.op) else {
         return Err(not_implemented(&format!(
@@ -533,6 +529,54 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
     ))
 }
 
+/// Compiles `and`, `or` or `unless` between two vectors, matched by the labels the query wrote.
+///
+/// The parser already refuses a scalar operand, `bool` and `group_left` / `group_right` on a set
+/// operator. It does not refuse a fill value, which Prometheus does ("filling in missing series not
+/// allowed for set operators"), so that is refused here along with any cardinality other than the
+/// many-to-many the parser assigns.
+fn set_operation(context: &Context, binary: &BinaryExpr, op: SetOp) -> Result<NativeNode> {
+    let modifier = binary.modifier.as_ref();
+    if modifier.is_some_and(|modifier| {
+        modifier.card != VectorMatchCardinality::ManyToMany
+            || modifier.fill_values != VectorMatchFillValues::default()
+    }) {
+        return Err(not_implemented(&format!(
+            "the modifiers in `{binary}`: a set operator matches many-to-many and takes no fill \
+             value"
+        )));
+    }
+    let labels = matching_labels(modifier);
+    let left = compile_expr(context, &binary.lhs)?;
+    let right = compile_expr(context, &binary.rhs)?;
+    let (Some(lhs), Some(rhs)) = (left.output.samples(), right.output.samples()) else {
+        return Err(DataFusionError::Internal(format!(
+            "the set operation `{binary}` compiled an operand to something other than samples: the \
+             parser only accepts a set operator between two vectors"
+        )));
+    };
+    // `or` reports the right side's samples under the left side's fields, which the kernel can only
+    // do field by field.
+    if lhs.fields.len() != rhs.fields.len() {
+        return Err(not_implemented(&format!(
+            "the set operation `{binary}` between vectors of {} and {} fields",
+            lhs.fields.len(),
+            rhs.fields.len()
+        )));
+    }
+    // A set operation hands on the samples it keeps unchanged, so it reports the left side's fields
+    // on the grid both sides share.
+    let output = left.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp { op, labels },
+        },
+        output,
+    })
+}
+
 /// Wraps two compiled operands in the binary node that applies `op` to them.
 ///
 /// The output is the vector side's own binding, because a scalar carries no fields: a broadcast keeps
@@ -586,18 +630,12 @@ fn scalar_matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
 /// cardinality is one-to-one. Fill fields retain the parser's left/right values, which name the
 /// sides as written: the kernel swaps them together with the operands under `group_right`.
 ///
-/// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] refuses before
+/// `ManyToMany` is the cardinality of a set operator, which [`binary_operation`] compiles before
 /// asking for a matching, so reaching it means the two disagree; it is reported as a shape with no
 /// node rather than panicking on a path a query cannot take today.
 fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> {
     let modifier = binary.modifier.as_ref();
-    let labels = match modifier.and_then(|modifier| modifier.matching.as_ref()) {
-        None => MatchingLabels::Ignoring(Vec::new()),
-        Some(LabelModifier::Include(labels)) => MatchingLabels::On(label_names(&labels.labels)),
-        Some(LabelModifier::Exclude(labels)) => {
-            MatchingLabels::Ignoring(label_names(&labels.labels))
-        }
-    };
+    let labels = matching_labels(modifier);
     let cardinality = match modifier.map(|modifier| &modifier.card) {
         None | Some(VectorMatchCardinality::OneToOne) => Cardinality::OneToOne,
         Some(VectorMatchCardinality::ManyToOne(labels)) => {
@@ -625,6 +663,27 @@ fn vector_matching(binary: &BinaryExpr, op: BinaryOp) -> Result<BinaryMatching> 
         cardinality,
         fill,
     })
+}
+
+/// The set operator a PromQL token denotes, or `None` when it is not one.
+fn set_op(op: &TokenType) -> Option<SetOp> {
+    match op.id() {
+        token::T_LAND => Some(SetOp::And),
+        token::T_LOR => Some(SetOp::Or),
+        token::T_LUNLESS => Some(SetOp::Unless),
+        _ => None,
+    }
+}
+
+/// The labels `on(...)` or `ignoring(...)` names; with neither, every label but `__name__`.
+fn matching_labels(modifier: Option<&BinModifier>) -> MatchingLabels {
+    match modifier.and_then(|modifier| modifier.matching.as_ref()) {
+        None => MatchingLabels::Ignoring(Vec::new()),
+        Some(LabelModifier::Include(labels)) => MatchingLabels::On(label_names(&labels.labels)),
+        Some(LabelModifier::Exclude(labels)) => {
+            MatchingLabels::Ignoring(label_names(&labels.labels))
+        }
+    }
 }
 
 fn label_names(labels: &[String]) -> Vec<Arc<str>> {

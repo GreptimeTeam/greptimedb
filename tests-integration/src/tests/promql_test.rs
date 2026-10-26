@@ -2649,6 +2649,233 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     assert_eq!(native_rows, legacy_rows);
 }
 
+/// Set operators run over both whole scans in one execution (#9896 gathers every partition of each
+/// source). A right side of one series sits in one scan partition while the left side spans
+/// several, so a per-partition answer would differ for `and on()` and `unless on()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_set_operators_read_both_scans_whole() {
+    const HOSTS: usize = 4_608;
+    const POINTS: i64 = 6;
+    const BATCH_ROWS: usize = 512;
+
+    fn insert_request(table: &str, schema: &[ColumnSchema], rows: Vec<Row>) -> RowInsertRequests {
+        RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table.to_string(),
+                rows: Some(Rows {
+                    schema: schema.to_vec(),
+                    rows,
+                }),
+            }],
+        }
+    }
+
+    /// `(ts, host, kind, value)` of every row, sorted, since a set result keeps `kind`.
+    async fn rows(output: Output) -> Vec<(i64, String, String, f64)> {
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        };
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let text = |name: &str| {
+                cast(
+                    batch.column_by_name(name).unwrap().as_ref(),
+                    &DataType::Utf8,
+                )
+                .unwrap()
+            };
+            let (hosts, kinds) = (text("host"), text("kind"));
+            let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+            let kinds = kinds.as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch
+                .column_by_name("val")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                rows.push((
+                    timestamps.value(row),
+                    hosts.value(row).to_string(),
+                    kinds.value(row).to_string(),
+                    values.value(row),
+                ));
+            }
+        }
+        rows.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
+        rows
+    }
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_set_operators_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let table = "native_set_pair";
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {table} (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host, kind))"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "kind".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let mut batch = Vec::with_capacity(BATCH_ROWS);
+    for host in 0..HOSTS {
+        for (kind, intercept) in [("a", 100.0), ("b", 1_000.0)] {
+            for point in 0..POINTS {
+                batch.push(Row {
+                    values: vec![
+                        ValueData::StringValue(format!("h{host:04}")).into(),
+                        ValueData::StringValue(kind.to_string()).into(),
+                        ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                        ValueData::F64Value(intercept + point as f64).into(),
+                    ],
+                });
+                if batch.len() == BATCH_ROWS {
+                    let rows = std::mem::replace(&mut batch, Vec::with_capacity(BATCH_ROWS));
+                    instance
+                        .handle_row_inserts(
+                            insert_request(table, &schema, rows),
+                            QueryContext::arc(),
+                            false,
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+    }
+    if !batch.is_empty() {
+        instance
+            .handle_row_inserts(
+                insert_request(table, &schema, batch),
+                QueryContext::arc(),
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+    }
+    execute_all(
+        &instance,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let host = |host: usize| format!("h{host:04}");
+    let at_five = |hosts: &mut dyn Iterator<Item = usize>, kind: &str, value: f64| {
+        hosts
+            .map(|index| (5_000, host(index), kind.to_string(), value))
+            .collect::<Vec<_>>()
+    };
+    let mut union = at_five(&mut (0..10), "a", 105.0);
+    union.extend(at_five(&mut (0..100), "b", 1_005.0));
+    union.sort_by(|left, right| (left.0, &left.1, &left.2).cmp(&(right.0, &right.1, &right.2)));
+    // `spread` marks the queries whose left scan has to span several partitions: those are the
+    // ones a per-partition answer would get wrong.
+    for (query, spread, expected) in [
+        (
+            format!("{table}{{kind=\"a\"}} and on() {table}{{kind=\"b\",host=\"h0000\"}}"),
+            true,
+            at_five(&mut (0..HOSTS), "a", 105.0),
+        ),
+        (
+            format!("{table}{{kind=\"a\"}} unless on() {table}{{kind=\"b\",host=\"h0000\"}}"),
+            true,
+            Vec::new(),
+        ),
+        (
+            format!("{table}{{kind=\"a\"}} unless on(host) {table}{{kind=\"b\",host=~\"h00..\"}}"),
+            true,
+            at_five(&mut (100..HOSTS), "a", 105.0),
+        ),
+        (
+            format!(
+                "{table}{{kind=\"a\",host=~\"h000.\"}} or {table}{{kind=\"b\",host=~\"h00..\"}}"
+            ),
+            false,
+            union,
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
+        let children = plan.children();
+        assert_eq!(children.len(), 2, "{query}");
+        let left = children[0]
+            .downcast_ref::<CooperativeExec>()
+            .map_or(children[0], |cooperative| cooperative.input());
+        let left = left.downcast_ref::<SeriesScanExec>().unwrap();
+        assert_eq!(left.properties().partitioning.partition_count(), 4);
+        let nonempty = left
+            .metrics()
+            .unwrap()
+            .iter()
+            .filter(|metric| {
+                matches!(
+                    metric.value(),
+                    datafusion::physical_plan::metrics::MetricValue::OutputRows(count)
+                        if count.value() > 0
+                )
+            })
+            .filter_map(|metric| metric.partition())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(
+            !spread || nonempty.len() > 1,
+            "the left scan of `{query}` must spread over partitions: {nonempty:?}"
+        );
+        assert_eq!(native, expected, "native: {query}");
+        let legacy = rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "legacy: {query}");
+    }
+}
+
 /// Repeated selectors retain correct binary results while using independent physical scans.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_repeated_selector_binary_uses_independent_scans() {

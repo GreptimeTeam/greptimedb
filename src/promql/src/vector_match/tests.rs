@@ -28,7 +28,7 @@ use rand::{Rng, SeedableRng};
 
 use super::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, RESULT_ROW_BYTES, SetOp,
-    binary_vectors, binary_vectors_with_reservation, set_vectors,
+    binary_vectors, binary_vectors_with_reservation, set_vectors, set_vectors_with_reservation,
 };
 use crate::grid_series::reference::{
     Dense, OwnedHistogram, Points, assert_histogram_close, assert_result_eq, golden_cases,
@@ -3402,5 +3402,43 @@ fn a_set_operation_keeps_the_payload_of_the_sample_it_keeps() {
             ("r".to_string(), 2, 5.0, 8.0, Some(RHS_START)),
         ],
         "`or` did not hand back each side's own sample: {or:?}"
+    );
+}
+
+/// A set operation reserves the rows it keeps where they are filed, the way a binary operation
+/// does: `and` keeps every left point here and `unless` none, and the two operations differ in
+/// nothing else, so what the results hold once the field's tables are released differs by at least
+/// one filed row per kept point.
+#[test]
+fn a_set_operation_holds_the_rows_it_keeps() {
+    const POINTS: usize = 64;
+    let grid = budget_grid(POINTS);
+    let schema = Arc::new(schema(1, &grid));
+    let all: Vec<usize> = (0..POINTS).collect();
+    let lhs = vec![budget_operand(&schema, "a", &all)];
+    let rhs = vec![budget_operand(&schema, "b", &all)];
+    let retained = |op: SetOp| {
+        let mut seen = Vec::new();
+        let output = set_vectors_with_reservation(
+            op,
+            &MatchingLabels::Ignoring(Vec::new()),
+            &schema,
+            &lhs,
+            &schema,
+            &rhs,
+            &mut |total| {
+                seen.push(total);
+                Ok(())
+            },
+        )
+        .unwrap();
+        (output.len(), retained_total(&seen))
+    };
+    let (kept, and) = retained(SetOp::And);
+    let (dropped, unless) = retained(SetOp::Unless);
+    assert_eq!((kept, dropped), (1, 0));
+    assert!(
+        and >= unless + POINTS * FILED_ROW,
+        "`and` holds {and} bytes and `unless` {unless}"
     );
 }
