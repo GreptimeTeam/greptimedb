@@ -131,6 +131,16 @@ impl TableData {
         (self.schema, self.rows)
     }
 
+    pub(crate) fn into_rows(self) -> Rows {
+        let (schema, mut rows) = self.into_schema_and_rows();
+        for row in &mut rows {
+            if row.values.len() < schema.len() {
+                row.values.resize(schema.len(), Value::default());
+            }
+        }
+        Rows { schema, rows }
+    }
+
     /// Writes a field value without enforcing that later writes use the same datatype
     /// as the first-seen schema entry.
     ///
@@ -207,6 +217,29 @@ impl MultiTableData {
             .insert(table_name.to_string(), table_data);
     }
 
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, &TableData)> {
+        self.table_data_map
+            .iter()
+            .map(|(name, table)| (name.as_str(), table))
+    }
+
+    /// Retains schemas and row capacity for the next point with the same attributes.
+    pub(crate) fn drain_rows(
+        &mut self,
+    ) -> impl Iterator<Item = (&str, &[ColumnSchema], std::vec::Drain<'_, Row>)> {
+        self.table_data_map.iter_mut().filter_map(|(name, table)| {
+            if table.rows.is_empty() {
+                return None;
+            }
+            for row in &mut table.rows {
+                if row.values.len() < table.schema.len() {
+                    row.values.resize(table.schema.len(), Value::default());
+                }
+            }
+            Some((name.as_str(), table.schema.as_slice(), table.rows.drain(..)))
+        })
+    }
+
     #[allow(dead_code)]
     pub fn num_tables(&self) -> usize {
         self.table_data_map.len()
@@ -220,17 +253,9 @@ impl MultiTableData {
             .into_iter()
             .map(|(table_name, table_data)| {
                 total_rows += table_data.num_rows();
-                let num_columns = table_data.num_columns();
-                let (schema, mut rows) = table_data.into_schema_and_rows();
-                for row in &mut rows {
-                    if num_columns > row.values.len() {
-                        row.values.resize(num_columns, Value { value_data: None });
-                    }
-                }
-
                 RowInsertRequest {
                     table_name,
-                    rows: Some(Rows { schema, rows }),
+                    rows: Some(table_data.into_rows()),
                 }
             })
             .collect::<Vec<_>>();

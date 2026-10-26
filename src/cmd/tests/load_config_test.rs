@@ -902,3 +902,216 @@ fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
         Duration::from_secs(30)
     );
 }
+
+/// Returns the mito engine config of a loaded `region_engine` sequence.
+fn find_mito(region_engine: &[RegionEngineConfig]) -> &MitoConfig {
+    region_engine
+        .iter()
+        .find_map(|engine| match engine {
+            RegionEngineConfig::Mito(config) => Some(config),
+            _ => None,
+        })
+        .expect("the mito engine config")
+}
+
+#[test]
+fn test_load_region_engine_mito_field_from_env() {
+    let env_prefix = "REGION_ENGINE_MITO_FIELD_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let options =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        // The addressed field wins, the fields next to it keep their default value.
+        let mito = find_mito(&options.component.region_engine);
+        assert_eq!(mito.global_write_buffer_reject_size, ReadableSize::gb(4));
+        assert_eq!(
+            mito.global_write_buffer_size,
+            MitoConfig::default().global_write_buffer_size
+        );
+        assert_eq!(mito.index, MitoConfig::default().index);
+
+        // The other entries of the default sequence are intact.
+        assert!(
+            options
+                .component
+                .region_engine
+                .iter()
+                .any(|engine| matches!(engine, RegionEngineConfig::File(_))),
+            "the file engine config should survive an env override of the mito engine"
+        );
+    });
+}
+
+#[test]
+fn test_load_region_engine_mito_field_from_env_standalone() {
+    let env_prefix = "REGION_ENGINE_MITO_FIELD_STANDALONE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let options =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        let mito = find_mito(&options.component.region_engine);
+        assert_eq!(mito.global_write_buffer_reject_size, ReadableSize::gb(4));
+        assert_eq!(
+            mito.global_write_buffer_size,
+            MitoConfig::default().global_write_buffer_size
+        );
+        assert!(
+            options
+                .component
+                .region_engine
+                .iter()
+                .any(|engine| matches!(engine, RegionEngineConfig::File(_))),
+            "the file engine config should survive an env override of the mito engine"
+        );
+    });
+}
+
+#[test]
+fn test_load_region_engine_metric_entry_from_env() {
+    let env_prefix = "REGION_ENGINE_METRIC_FIELD_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "METRIC",
+        "FLUSH_METADATA_REGION_INTERVAL",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("1m"), || {
+        let options =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        // `metric` is not in the default sequence, so it is appended instead of replacing
+        // the whole sequence.
+        assert_eq!(
+            options.component.region_engine.len(),
+            DatanodeOptions::default().region_engine.len() + 1
+        );
+        let metric = options
+            .component
+            .region_engine
+            .iter()
+            .find_map(|engine| match engine {
+                RegionEngineConfig::Metric(config) => Some(config),
+                _ => None,
+            })
+            .expect("the metric engine config");
+        assert_eq!(
+            metric.flush_metadata_region_interval,
+            Duration::from_secs(60)
+        );
+
+        // The engines of the default sequence keep their default options.
+        let mito = find_mito(&options.component.region_engine);
+        assert_eq!(
+            mito.global_write_buffer_reject_size,
+            MitoConfig::default().global_write_buffer_reject_size
+        );
+        assert!(
+            options
+                .component
+                .region_engine
+                .iter()
+                .any(|engine| matches!(engine, RegionEngineConfig::File(_)))
+        );
+    });
+}
+
+#[test]
+fn test_load_region_engine_env_patch_is_replaced_by_config_file() {
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        config.path(),
+        "[[region_engine]]\n[region_engine.metric]\nflush_metadata_region_interval = \"2m\"\n",
+    )
+    .unwrap();
+
+    let env_prefix = "REGION_ENGINE_FILE_WINS_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let options = GreptimeOptions::<DatanodeOptions>::load_layered_options(
+            config.path().to_str(),
+            env_prefix,
+        )
+        .unwrap();
+
+        // A sequence is a single value: the config file replaces the whole value produced by
+        // the environment, so the environment patch (which is merged onto the default
+        // entries) is dropped. That keeps the precedence file > env > default of every other
+        // option, and means a config file has to spell out every engine it wants.
+        assert_eq!(
+            options.component.region_engine,
+            vec![RegionEngineConfig::Metric(MetricEngineConfig {
+                flush_metadata_region_interval: Duration::from_secs(120),
+            })]
+        );
+    });
+}
+
+#[test]
+fn test_load_region_engine_env_patch_with_config_file_lacking_region_engine() {
+    // The usual deployment shape: a config file that sets other options, plus an environment
+    // variable patching one region engine. The file says nothing about `region_engine`, so
+    // there is nothing that could replace the patched sequence.
+    let config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(config.path(), "node_id = 7\n").unwrap();
+
+    let env_prefix = "REGION_ENGINE_FILE_NO_ENGINE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let options = GreptimeOptions::<DatanodeOptions>::load_layered_options(
+            config.path().to_str(),
+            env_prefix,
+        )
+        .unwrap();
+
+        // The option of the file is applied...
+        assert_eq!(options.component.node_id, Some(7));
+        // ...the environment patch applies on top of the default engine entries...
+        let mito = find_mito(&options.component.region_engine);
+        assert_eq!(mito.global_write_buffer_reject_size, ReadableSize::gb(4));
+        assert_eq!(
+            mito.global_write_buffer_size,
+            MitoConfig::default().global_write_buffer_size
+        );
+        // ...and the rest of the default sequence is still configured.
+        assert!(
+            options
+                .component
+                .region_engine
+                .iter()
+                .any(|engine| matches!(engine, RegionEngineConfig::File(_))),
+            "the file engine entry should survive"
+        );
+    });
+}

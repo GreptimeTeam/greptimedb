@@ -246,8 +246,8 @@ max_inflight_requests = 3000
 ## Maximum number of queued table Flow notifications.
 flow_notification_queue_capacity = 1024
 
-## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
-## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
+## Metric-engine logical-table batching for Prom remote write and OTLP metrics.
+## Requires prom_store.with_metric_engine. Logs and traces are not eligible.
 ## Enable independently with protocols and a nonzero flush interval.
 ## Omitted fields use independent defaults, not parent settings.
 ## Empty protocols or a zero interval disables logical batching without fallback.
@@ -729,6 +729,8 @@ skip_ssl_validation = false
 
 ## The region engine options. You can configure multiple region engines.
 ## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
+## The default configuration lists `mito` and `file`; `metric` is always registered, so naming
+## it only supplies its options rather than enabling the engine.
 [[region_engine]]
 
 ## The Mito engine options.
