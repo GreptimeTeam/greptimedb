@@ -678,6 +678,8 @@ mod tests {
             .build();
         let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
+        test_remote_read_metric_names(instance, &client).await;
+
         // Cover missing schemas/catalogs and each database label alias.
         for (selector, database) in [
             ("__schema__", "unknown_schema"),
@@ -776,6 +778,134 @@ mod tests {
             let sql = format!("DESC TABLE {physical_table};");
             instance.do_query(&sql, ctx).await[0].as_ref().unwrap();
         }
+    }
+
+    async fn test_remote_read_metric_names(instance: &Arc<Instance>, client: &TestClient) {
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "name_matches"));
+        for sql in [
+            "CREATE DATABASE name_matches",
+            "CREATE TABLE cpu (ts TIMESTAMP TIME INDEX, sample_value DOUBLE, job STRING, PRIMARY KEY(job)) ENGINE=mito",
+            "CREATE TABLE memory (ts TIMESTAMP TIME INDEX, sample_value DOUBLE, label_zone STRING, PRIMARY KEY(label_zone)) ENGINE=mito",
+            "INSERT INTO cpu VALUES (999, 0, 'api'), (1000, 1, 'api'), (2000, 2, 'api'), (2001, 3, 'api')",
+            "INSERT INTO memory VALUES (1000, 10, 'us'), (2000, 20, 'us')",
+        ] {
+            instance.do_query(sql, ctx.clone()).await[0]
+                .as_ref()
+                .unwrap();
+        }
+        let matcher = |name: &str, op: MatcherType, value: &str| LabelMatcher {
+            name: name.into(),
+            value: value.into(),
+            r#type: op as i32,
+        };
+        let name = |op, value| matcher(prom_store::METRIC_NAME_LABEL, op, value);
+        let cases = [
+            (
+                vec![name(MatcherType::Re, "cpu|memory")],
+                vec!["cpu", "memory"],
+            ),
+            (vec![name(MatcherType::Eq, "")], vec![]),
+            (vec![name(MatcherType::Eq, "cpu")], vec!["cpu"]),
+            (vec![], vec!["cpu", "memory"]),
+            (vec![matcher("job", MatcherType::Eq, "api")], vec!["cpu"]),
+            (vec![matcher("job", MatcherType::Eq, "")], vec!["memory"]),
+        ];
+        let queries = cases
+            .iter()
+            .map(|(matchers, _)| {
+                let mut matchers = matchers.clone();
+                // The HTTP request defaults to another database; discovery must use this selector.
+                matchers.push(matcher("__database__", MatcherType::Eq, "name_matches"));
+                Query {
+                    start_timestamp_ms: 1000,
+                    end_timestamp_ms: 2000,
+                    matchers,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        let response = post_remote_read(client, queries).await;
+        assert_eq!(response.status(), 200, "{}", response.text().await);
+        let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+        let response = ReadResponse::decode(&body[..]).unwrap();
+        assert_eq!(cases.len(), response.results.len());
+        for ((matchers, expected), result) in cases.iter().zip(&response.results) {
+            let mut names = Vec::new();
+            for series in &result.timeseries {
+                let metric = &series
+                    .labels
+                    .iter()
+                    .find(|label| label.name == prom_store::METRIC_NAME_LABEL)
+                    .unwrap()
+                    .value;
+                names.push(metric.as_str());
+                let factor = if metric == "cpu" { 1.0 } else { 10.0 };
+                assert_eq!(
+                    series.samples,
+                    vec![
+                        Sample {
+                            timestamp: 1000,
+                            value: factor
+                        },
+                        Sample {
+                            timestamp: 2000,
+                            value: 2.0 * factor
+                        },
+                    ]
+                );
+            }
+            names.sort_unstable();
+            assert_eq!(*expected, names, "{matchers:?}");
+        }
+
+        // Discovery includes logical metrics but excludes their internal physical table.
+        let mut query = remote_query("metric1");
+        query.matchers = vec![name(MatcherType::Nre, "invalid_metric")];
+        let response = post_remote_read(client, vec![query]).await;
+        assert_eq!(response.status(), 200, "{}", response.text().await);
+        let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+        let response = ReadResponse::decode(&body[..]).unwrap();
+        assert_eq!(response.results.len(), 1);
+        assert_eq!(response.results[0].timeseries.len(), 3);
+
+        // An empty EQ must not bypass matcher validation.
+        let mut query = remote_query("");
+        query.matchers.push(name(MatcherType::Re, "["));
+        assert_eq!(post_remote_read(client, vec![query]).await.status(), 400);
+        for database in ["unknown_schema", "unknown_catalog-name_matches"] {
+            let query = Query {
+                matchers: vec![
+                    name(MatcherType::Re, ".*"),
+                    matcher("__database__", MatcherType::Eq, database),
+                ],
+                ..Default::default()
+            };
+            let response = post_remote_read(client, vec![query]).await;
+            assert_eq!(response.status(), 200, "{}", response.text().await);
+            let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+            let response = ReadResponse::decode(&body[..]).unwrap();
+            assert!(response.results[0].timeseries.is_empty());
+        }
+
+        // Broad selectors must propagate incompatible-table errors, not return partial success.
+        instance
+            .do_query(
+                "CREATE TABLE invalid (ts TIMESTAMP TIME INDEX, a DOUBLE, b DOUBLE)",
+                ctx.clone(),
+            )
+            .await[0]
+            .as_ref()
+            .unwrap();
+        let query = Query {
+            matchers: vec![
+                name(MatcherType::Re, "cpu|invalid"),
+                matcher("__database__", MatcherType::Eq, "name_matches"),
+            ],
+            ..Default::default()
+        };
+        let response = post_remote_read(client, vec![query]).await;
+        assert!(!response.status().is_success());
+        assert!(response.text().await.contains("Ambiguous value column"));
     }
 
     fn remote_query(metric: &str) -> Query {
