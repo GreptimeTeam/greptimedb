@@ -3390,6 +3390,7 @@ pub async fn test_config_api(store_type: StorageType) {
     let storage = if store_type != StorageType::File {
         format!(
             r#"[storage]
+self_test_on_startup = true
 type = "{}"
 providers = []
 
@@ -3404,6 +3405,7 @@ skip_ssl_validation = false"#,
     } else {
         format!(
             r#"[storage]
+self_test_on_startup = true
 type = "{}"
 providers = []"#,
             store_type

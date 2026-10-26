@@ -14,7 +14,7 @@
 
 //! object storage utilities
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_telemetry::{info, warn};
 use futures::TryStreamExt;
@@ -91,8 +91,19 @@ pub async fn new_object_store(store: ObjectStoreConfig, data_home: &str) -> Resu
 /// The content written by [`self_test_object_store`].
 const SELF_TEST_CONTENT: &[u8] = b"greptimedb object store self-test";
 
+/// The content appended by [`self_test_object_store`] to exercise read-modify-write.
+const SELF_TEST_SUFFIX: &[u8] = b" - read-modify-write";
+
 /// The directory that holds the objects created by [`self_test_object_store`].
 const SELF_TEST_DIR: &str = ".greptime_self_test";
+
+/// The budget of one [`self_test_object_store`] call, including the retries an object
+/// store makes on top of its 30s request timeout.
+pub const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The budget of the best-effort cleanup after a timed-out self-test, kept short so an
+/// unresponsive store cannot block startup a second time.
+const SELF_TEST_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Returns a unique key prefix for [`self_test_object_store`], so datanodes sharing
 /// the same bucket and root do not collide.
@@ -104,37 +115,45 @@ pub fn self_test_key_prefix(node_id: u64) -> String {
     format!("{SELF_TEST_DIR}/{node_id}-{}-{nanos}", std::process::id())
 }
 
-/// Checks that `store` supports write, read, list and delete, the operations the
-/// storage engines and the WAL rely on.
-///
-/// The probe object is removed before returning; after a failed step the removal is
-/// best effort and the original error is returned.
-pub async fn self_test_object_store(store: &ObjectStore, name: &str, prefix: &str) -> Result<()> {
-    let key = format!("{prefix}/probe");
+/// Returns the object key [`self_test_object_store`] probes under `prefix`.
+fn self_test_probe_key(prefix: &str) -> String {
+    format!("{prefix}/probe")
+}
 
-    store
-        .write(&key, SELF_TEST_CONTENT)
-        .await
-        .context(error::ObjectStoreSelfTestSnafu {
-            name,
-            step: "write",
-        })?;
+/// Checks that `store` supports the operations the storage engines and the WAL rely
+/// on: write, read, read-modify-write, list and delete.
+///
+/// The probe object is removed before returning, after a failed step too. A caller
+/// that abandons the check early must call [`remove_self_test_probe`].
+pub async fn self_test_object_store(store: &ObjectStore, name: &str, prefix: &str) -> Result<()> {
+    let key = self_test_probe_key(prefix);
 
     let check = async {
-        let got = store
+        store
+            .write(&key, SELF_TEST_CONTENT)
+            .await
+            .context(error::ObjectStoreSelfTestSnafu {
+                name,
+                step: "write",
+            })?;
+        verify_content(store, name, &key, SELF_TEST_CONTENT).await?;
+
+        // Object stores cannot append in place, so the engines and the WAL read the
+        // object, append to it and overwrite it; this exercises that path.
+        let mut content = store
             .read(&key)
             .await
-            .context(error::ObjectStoreSelfTestSnafu { name, step: "read" })?;
-        if got.to_vec() != SELF_TEST_CONTENT {
-            return Err(
-                error::ObjectStoreSelfTestSnafu { name, step: "read" }.into_error(
-                    ObjectStoreError::new(
-                        ErrorKind::Unexpected,
-                        format!("content of '{key}' differs from what was written"),
-                    ),
-                ),
-            );
-        }
+            .context(error::ObjectStoreSelfTestSnafu { name, step: "read" })?
+            .to_vec();
+        content.extend_from_slice(SELF_TEST_SUFFIX);
+        store
+            .write(&key, content.clone())
+            .await
+            .context(error::ObjectStoreSelfTestSnafu {
+                name,
+                step: "overwrite",
+            })?;
+        verify_content(store, name, &key, &content).await?;
 
         let mut lister = store
             .lister_with(&format!("{prefix}/"))
@@ -176,6 +195,42 @@ pub async fn self_test_object_store(store: &ObjectStore, name: &str, prefix: &st
             name,
             step: "delete",
         }),
+    }
+}
+
+async fn verify_content(store: &ObjectStore, name: &str, key: &str, expected: &[u8]) -> Result<()> {
+    let got = store
+        .read(key)
+        .await
+        .context(error::ObjectStoreSelfTestSnafu { name, step: "read" })?;
+    if got.to_vec() != expected {
+        return Err(
+            error::ObjectStoreSelfTestSnafu { name, step: "read" }.into_error(
+                ObjectStoreError::new(
+                    ErrorKind::Unexpected,
+                    format!("content of '{key}' differs from what was written"),
+                ),
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Removes the probe object of a self-test that did not finish.
+///
+/// It has its own short budget, and failures only log: the caller reports the timeout.
+pub async fn remove_self_test_probe(store: &ObjectStore, prefix: &str) {
+    let key = self_test_probe_key(prefix);
+    match tokio::time::timeout(SELF_TEST_CLEANUP_TIMEOUT, store.delete(&key)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => warn!(
+            err;
+            "Failed to remove the object storage self-test object '{}'", key
+        ),
+        Err(_) => warn!(
+            "Timed out removing the object storage self-test object '{}'",
+            key
+        ),
     }
 }
 
@@ -223,6 +278,19 @@ mod tests {
             err.to_string()
                 .contains("self-test for provider 'broken' at step 'write'")
         );
+    }
+
+    #[tokio::test]
+    async fn test_remove_self_test_probe() {
+        let dir = create_temp_dir("object-store-self-test-cleanup");
+        let store = new_fs_store(dir.path().to_str().unwrap());
+        let prefix = self_test_key_prefix(1);
+        let key = self_test_probe_key(&prefix);
+        store.write(&key, SELF_TEST_CONTENT).await.unwrap();
+
+        remove_self_test_probe(&store, &prefix).await;
+
+        assert!(store.read(&key).await.is_err());
     }
 
     #[test]

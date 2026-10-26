@@ -490,15 +490,46 @@ impl DatanodeBuilder {
 
         if cfg.self_test_on_startup && !checks.is_empty() {
             let prefix = store::self_test_key_prefix(node_id);
-            let checks = checks.iter().map(|(name, object_store)| {
-                store::self_test_object_store(object_store, name, &prefix)
-            });
-            for result in join_all(checks).await {
-                result?;
-            }
+            Self::run_self_tests(&checks, &prefix).await?;
         }
 
         Ok(Arc::new(object_store_manager))
+    }
+
+    /// Self-tests every store in `checks` under its own key prefix.
+    ///
+    /// Each check is bounded by [`store::SELF_TEST_TIMEOUT`], so a store that accepts
+    /// connections but never answers fails startup instead of blocking it, after a
+    /// best-effort removal of its probe.
+    async fn run_self_tests(checks: &[(String, ObjectStore)], prefix: &str) -> Result<()> {
+        let checks = checks
+            .iter()
+            .enumerate()
+            .map(|(index, (name, object_store))| {
+                let prefix = format!("{prefix}/{index}");
+                async move {
+                    match tokio::time::timeout(
+                        store::SELF_TEST_TIMEOUT,
+                        store::self_test_object_store(object_store, name, &prefix),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            store::remove_self_test_probe(object_store, &prefix).await;
+                            error::ObjectStoreSelfTestTimeoutSnafu {
+                                name,
+                                timeout: store::SELF_TEST_TIMEOUT,
+                            }
+                            .fail()
+                        }
+                    }
+                }
+            });
+        for result in join_all(checks).await {
+            result?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1510,6 +1541,38 @@ mod tests {
         DatanodeBuilder::build_object_store_manager(&storage, 1)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_object_store_self_test_failure_aborts_build() {
+        // The endpoint does not accept connections, so the probe write fails and the
+        // build must fail with it.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err,
+            Error::ObjectStoreSelfTest {
+                name,
+                step: "write",
+                ..
+            } if name == storage.store.config_name()
+        );
     }
 
     struct CountingRegionQueryHandlerFactory(Arc<AtomicUsize>);

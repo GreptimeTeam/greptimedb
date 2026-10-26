@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
@@ -484,6 +485,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Object storage self-test for provider '{name}' timed out after {timeout:?}"))]
+    ObjectStoreSelfTestTimeout {
+        name: String,
+        timeout: Duration,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -566,7 +575,9 @@ impl ErrorExt for Error {
             SerializeJson { .. } => StatusCode::Internal,
 
             ObjectStore { source, .. } => source.status_code(),
-            ObjectStoreSelfTest { .. } => StatusCode::StorageUnavailable,
+            ObjectStoreSelfTest { .. } | ObjectStoreSelfTestTimeout { .. } => {
+                StatusCode::StorageUnavailable
+            }
         }
     }
 
@@ -582,7 +593,8 @@ impl ErrorExt for Error {
             RegionNotReady { .. } | RegionNotFound { .. } => RetryHint::RetryAfterRouteRefresh,
             RegionBusy { .. }
             | ConcurrentQueryLimiterClosed { .. }
-            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            | ConcurrentQueryLimiterTimeout { .. }
+            | ObjectStoreSelfTestTimeout { .. } => RetryHint::Retryable,
             NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
                 source.retry_hint()
             }

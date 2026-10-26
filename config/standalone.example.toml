@@ -604,9 +604,11 @@ data_home = "./greptimedb_data"
 #+ copy_root = "./greptimedb_data/copy"
 
 ## Whether to self-test every remote object storage when the datanode starts.
-## The self-test writes, reads, lists and deletes a probe object under `.greptime_self_test/`,
-## and a failure aborts startup. Disable it when the storage may be unavailable at startup
-## or when the credentials are scoped to prefixes other than `.greptime_self_test/`.
+## The self-test writes, reads, overwrites, lists and deletes a probe object under
+## `.greptime_self_test/`, and a failure aborts startup. The probe lives at the storage
+## root, so the credentials must allow writes and deletes below the root. Disable it
+## when the credentials are scoped to narrower prefixes or when the storage may be
+## unavailable at startup.
 self_test_on_startup = true
 
 ## The storage type used to store the data.
