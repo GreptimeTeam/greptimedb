@@ -428,7 +428,7 @@ jobs:
             .github/workflows/query-regression.yml
           git add .github/workflows/query-regression.yml
           git commit -s -m "ci(query-regression): bump RUNNER_IMAGE_EPOCH to ${new_epoch} for image ${image_id}"
-          git push origin "${BRANCH}"
+          git push --no-verify origin "${BRANCH}"
 
           gh pr create \
             --title "ci(query-regression): bump RUNNER_IMAGE_EPOCH to ${new_epoch}" \
