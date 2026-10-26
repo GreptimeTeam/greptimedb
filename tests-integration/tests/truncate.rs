@@ -312,18 +312,22 @@ async fn test_procedure_state_prepared_and_admin(
     let url = format!("{protocol}://{}/public", servers.addr(server_name).unwrap());
     let mut connection = sqlx::AnyConnection::connect(&url).await.unwrap();
     for table in ["prepared_async", "prepared_sync"] {
+        // Safety: the table names are fixed test-local identifiers.
         connection
-            .execute(format!("CREATE TABLE {table} (ts TIMESTAMP TIME INDEX)").as_str())
+            .execute(sqlx::AssertSqlSafe(format!(
+                "CREATE TABLE {table} (ts TIMESTAMP TIME INDEX)"
+            )))
             .await
             .unwrap();
     }
 
     // Prepare once, before any ID exists, and reuse the same statement below.
     let statement = connection
-        .prepare("SELECT procedure_state() AS state")
+        .prepare(sqlx::SqlStr::from_static(
+            "SELECT procedure_state() AS state",
+        ))
         .await
-        .unwrap()
-        .to_owned();
+        .unwrap();
     let manager = &instance.procedure_manager;
     let id: String = connection
         .fetch_one("TRUNCATE TABLE prepared_async WITH (wait=false)")
@@ -347,7 +351,8 @@ async fn test_procedure_state_prepared_and_admin(
         } else {
             "ADMIN procedure_state()".to_string()
         };
-        let result = sqlx::query(sql.as_str())
+        // Safety: the SQL contains only a procedure ID returned by this test.
+        let result = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
             .fetch_one(&mut other_connection)
             .await;
         if explicit {
@@ -403,7 +408,12 @@ async fn test_procedure_state_prepared_and_admin(
         (format!("ADMIN procedure_state('{id}')"), "Done"),
         ("ADMIN procedure_state()".to_string(), "Running"),
     ] {
-        let state: String = connection.fetch_one(sql.as_str()).await.unwrap().get(0);
+        // Safety: the SQL contains only a procedure ID returned by this test.
+        let state: String = connection
+            .fetch_one(sqlx::AssertSqlSafe(sql.as_str()))
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(state, format!(r#"{{"status":"{expected}"}}"#), "{sql}");
     }
     for sql in [
@@ -435,7 +445,7 @@ async fn test_procedure_state_prepared_and_admin(
 
 async fn prepared_state(
     connection: &mut sqlx::AnyConnection,
-    statement: &sqlx::any::AnyStatement<'_>,
+    statement: &sqlx::any::AnyStatement,
 ) -> String {
     let state: String = statement
         .query()

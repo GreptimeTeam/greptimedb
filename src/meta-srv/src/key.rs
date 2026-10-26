@@ -14,12 +14,14 @@
 
 mod datanode;
 mod flownode;
+mod node_scheduling;
 
 use std::str::FromStr;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 pub use datanode::*;
 pub use flownode::*;
+pub use node_scheduling::*;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 

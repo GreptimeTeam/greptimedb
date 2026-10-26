@@ -1489,6 +1489,198 @@ async fn test_series_scan_with_format(flat_format: bool) {
     );
 }
 
+/// Cross-range merges split long series but preserve larger batches for short series.
+#[tokio::test]
+async fn test_series_scan_single_source_range_batches() {
+    for rows_per_series in [16, 49, 50, 64] {
+        check_series_scan_single_source_range_batches(rows_per_series).await;
+    }
+}
+
+async fn check_series_scan_single_source_range_batches(rows_per_series: usize) {
+    let mut env = TestEnv::with_prefix("test_series_scan_single_source_range_batches").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            range_result_cache_size: ReadableSize::mb(64),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.time_window", "1h")
+        .build();
+    let schema = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    let mut expected = Vec::new();
+    for start in [0, 3600] {
+        let mut rows = Vec::new();
+        for key in ["a", "b", "c", "d"] {
+            rows.extend(test_util::build_rows_for_key(
+                key,
+                start,
+                start + rows_per_series,
+                0,
+            ));
+            expected.extend(
+                (0..rows_per_series)
+                    .map(|i| (key.to_string(), i as f64, (start + i) as i64 * 1000)),
+            );
+        }
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: schema.clone(),
+                rows,
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, None).await;
+    }
+    expected.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
+
+    // Exercise both newly read and cached range streams at the same merge boundary.
+    for last_row in [false, true] {
+        let expected = if last_row {
+            expected
+                .iter()
+                .filter(|(_, _, ts)| *ts == (3600 + rows_per_series as i64 - 1) * 1000)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            expected.clone()
+        };
+        for with_cache in [false, true] {
+            let request = ScanRequest {
+                series_row_selector: last_row
+                    .then_some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                // Range caching requires a tag predicate; this one retains every row.
+                filters: if with_cache {
+                    vec![col("tag_0").gt_eq(lit("a"))]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            };
+            // Populate the ordinary scan cache first. Its unsplit batches must not
+            // replace the batches prepared for a later cross-range merge.
+            if with_cache {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    loop {
+                        let Scanner::Seq(scanner) =
+                            engine.scanner(region_id, request.clone()).await.unwrap()
+                        else {
+                            panic!("expected sequential scan");
+                        };
+                        let ctx = store_api::region_engine::QueryScanContext {
+                            explain_verbose: true,
+                            ..Default::default()
+                        };
+                        let stream = scanner
+                            .scan_partition(&ctx, &ExecutionPlanMetricsSet::default(), 0)
+                            .unwrap();
+                        RecordBatches::try_collect(stream).await.unwrap();
+                        if format!("{}", VerboseDisplay(scanner)).contains("\"range_cache_hit\":") {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+            }
+            let mut first_scan = true;
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let scanner = engine
+                        .scanner(
+                            region_id,
+                            ScanRequest {
+                                distribution: Some(TimeSeriesDistribution::PerSeries),
+                                ..request.clone()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let Scanner::Series(scanner) = scanner else {
+                        panic!("expected series scan");
+                    };
+                    assert_eq!(2, scanner.properties().partitions[0].len());
+
+                    let ctx = store_api::region_engine::QueryScanContext {
+                        explain_verbose: true,
+                        ..Default::default()
+                    };
+                    let metrics = ExecutionPlanMetricsSet::default();
+                    let stream = scanner.scan_partition(&ctx, &metrics, 0).unwrap();
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    let actual = collect_and_assert_partition_rows(
+                        batches.schema(),
+                        vec![batches.iter().cloned().collect()],
+                    );
+                    assert_eq!(expected, actual);
+                    let display = format!("{}", VerboseDisplay(scanner));
+                    let details: serde_json::Value =
+                        serde_json::from_str(&display[display.find('{').unwrap()..]).unwrap();
+                    let partitions = details["metrics_per_partition"].as_array().unwrap();
+                    let rows: u64 = partitions
+                        .iter()
+                        .map(|p| {
+                            p["metrics"]["merge_metrics"]["num_fetch_by_rows"]
+                                .as_u64()
+                                .unwrap_or(0)
+                        })
+                        .sum();
+                    if last_row {
+                        // LastRow coalesces the source splits before the cross-range
+                        // merge. Do not turn its output into one batch per series.
+                        let batches: u64 = partitions
+                            .iter()
+                            .map(|p| {
+                                p["metrics"]["merge_metrics"]["num_fetch_by_batches"]
+                                    .as_u64()
+                                    .unwrap_or(0)
+                            })
+                            .sum();
+                        assert!(batches <= 2, "{display}");
+                    } else if rows_per_series >= 50 {
+                        assert_eq!(0, rows, "{display}");
+                    } else {
+                        // Short series retain batches spanning multiple series instead
+                        // of sending one tiny batch per series through the distributor.
+                        assert!(rows > 0, "{display}");
+                    }
+                    if with_cache && first_scan {
+                        assert!(
+                            partitions.iter().all(|p| {
+                                p["metrics"]["range_cache_hit"].as_u64().unwrap_or(0) == 0
+                            }),
+                            "ordinary scan cache was reused: {display}"
+                        );
+                    }
+                    first_scan = false;
+                    if !with_cache
+                        || partitions
+                            .iter()
+                            .any(|p| p["metrics"]["range_cache_hit"].as_u64().unwrap_or(0) > 0)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_two_phase_series_scan() {
     for use_index in [false, true] {

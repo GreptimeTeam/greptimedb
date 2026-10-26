@@ -15,9 +15,14 @@
 //! Object store access for WAL objects: a deterministic key layout and
 //! conditional creates that make a retry of the same object a no-op.
 
+use async_stream::try_stream;
 use bytes::Bytes;
-use object_store::{ErrorKind, ObjectStore};
+use futures::TryStreamExt;
+use futures::stream::BoxStream;
+use object_store::{Entry, ErrorKind, ObjectStore};
 use snafu::{OptionExt, ResultExt, ensure};
+use tokio::sync::mpsc;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::error::{
     CorruptedWalObjectSnafu, InvalidWalObjectStoreSnafu, Result, WalObjectConflictSnafu,
@@ -28,6 +33,10 @@ use crate::error::{
 /// [`u64::MAX`] so that lexicographic and numeric order agree.
 const OBJECT_SEQ_WIDTH: usize = 20;
 const OBJECT_SUFFIX: &str = ".wal";
+/// Objects a listing may hold ahead of the reads that take them, four LIST
+/// pages of S3, so the listing stays pages ahead of the reads while what it
+/// holds is bounded.
+const LISTING_AHEAD_OBJECTS: usize = 4096;
 
 /// Outcome of a conditional create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +57,7 @@ pub(crate) struct ListedObject {
 }
 
 /// Reads and writes the WAL objects under one prefix.
+#[derive(Clone)]
 pub(crate) struct ObjectStoreIo {
     store: ObjectStore,
     object_prefix: String,
@@ -160,18 +170,48 @@ impl ObjectStoreIo {
                 path: self.object_prefix.clone(),
             })?;
         let mut objects = entries
-            .into_iter()
-            .filter_map(|entry| {
-                self.parse_object_seq(entry.path())
-                    .map(|object_seq| ListedObject {
-                        object_seq,
-                        path: entry.path().to_string(),
-                        size: entry.metadata().content_length(),
-                    })
-            })
+            .iter()
+            .filter_map(|entry| self.listed_object(entry))
             .collect::<Vec<_>>();
         objects.sort_unstable_by_key(|object| object.object_seq);
         Ok(objects)
+    }
+
+    /// Lists the objects under the prefix like [`list`](Self::list), but from
+    /// a task of its own and in the order the object store returns them, so
+    /// the listing goes on while the caller consumes the objects listed so
+    /// far. A listing that fails, however it fails, ends the stream with an
+    /// error, before any object it listed that the caller has not taken yet;
+    /// dropping the stream stops the listing.
+    pub(crate) fn list_ahead(&self) -> BoxStream<'static, Result<ListedObject>> {
+        let (listing, rx) = self.clone().listing();
+        let listing = AbortOnDropHandle::new(common_runtime::spawn_global(listing));
+        settle_listing(rx, listing, self.object_prefix.clone())
+    }
+
+    /// Returns the listing of the objects under the prefix and the receiver it
+    /// sends them to; it waits while the receiver holds
+    /// [`LISTING_AHEAD_OBJECTS`] of them.
+    fn listing(
+        self,
+    ) -> (
+        impl Future<Output = object_store::Result<()>> + Send + 'static,
+        mpsc::Receiver<ListedObject>,
+    ) {
+        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
+        let listing = async move {
+            let mut lister = self.store.lister(&self.object_prefix).await?;
+            while let Some(entry) = lister.try_next().await? {
+                // The receiver is gone only once the stream was dropped.
+                if let Some(object) = self.listed_object(&entry)
+                    && tx.send(object).await.is_err()
+                {
+                    break;
+                }
+            }
+            Ok::<_, object_store::Error>(())
+        };
+        (listing, rx)
     }
 
     pub(crate) fn object_path(&self, object_seq: u64) -> String {
@@ -193,6 +233,15 @@ impl ObjectStoreIo {
         }
     }
 
+    fn listed_object(&self, entry: &Entry) -> Option<ListedObject> {
+        self.parse_object_seq(entry.path())
+            .map(|object_seq| ListedObject {
+                object_seq,
+                path: entry.path().to_string(),
+                size: entry.metadata().content_length(),
+            })
+    }
+
     fn parse_object_seq(&self, path: &str) -> Option<u64> {
         let value = path
             .strip_prefix(&self.object_prefix)?
@@ -202,6 +251,38 @@ impl ObjectStoreIo {
         }
         value.parse().ok()
     }
+}
+
+/// Yields the objects `listing` sends over `rx`. Once the listing finished it
+/// is settled before any further object is yielded, so its failure goes
+/// before the objects it listed that the caller has not taken yet.
+fn settle_listing(
+    mut rx: mpsc::Receiver<ListedObject>,
+    listing: AbortOnDropHandle<object_store::Result<()>>,
+    path: String,
+) -> BoxStream<'static, Result<ListedObject>> {
+    let mut listing = Some(listing);
+    Box::pin(try_stream! {
+        loop {
+            let object = rx.recv().await;
+            if let Some(listing) =
+                listing.take_if(|listing| object.is_none() || listing.is_finished())
+            {
+                listing
+                    .await
+                    .unwrap_or_else(|error| {
+                        let stopped = "the listing task did not complete";
+                        Err(object_store::Error::new(ErrorKind::Unexpected, stopped)
+                            .set_source(error))
+                    })
+                    .context(WalObjectStoreSnafu { operation: "list", path: &path })?;
+            }
+            let Some(object) = object else {
+                break;
+            };
+            yield object;
+        }
+    })
 }
 
 /// Returns true when a conditional create failed because the object exists.
@@ -233,10 +314,13 @@ fn normalize_prefix(prefix: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use common_error::ext::{ErrorExt, RetryHint};
     use common_test_util::temp_dir::create_temp_dir;
+    use futures::poll;
     use object_store::layers::mock::{self, MockLayerBuilder, oio};
     use object_store::secure_fs::SecureFsRoot;
     use object_store::services::Memory;
@@ -509,6 +593,129 @@ mod tests {
         let error = io.get(7).await.unwrap_err();
         assert!(
             matches!(error, Error::WalObjectStore { operation: "read", ref path, .. } if path == &io.object_path(7)),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_io_list_ahead_yields_the_objects_list_returns() {
+        let io = memory_io();
+        assert!(
+            io.list_ahead()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        io.store
+            .write(
+                "datanodes/1/epochs/2/objects/not-a-sequence.wal",
+                "malformed",
+            )
+            .await
+            .unwrap();
+        for object_seq in [10, 2, 1] {
+            io.put_if_absent(object_seq, Bytes::from(object_seq.to_string()))
+                .await
+                .unwrap();
+        }
+        let mut listed = io.list_ahead().try_collect::<Vec<_>>().await.unwrap();
+        listed.sort_unstable_by_key(|object| object.object_seq);
+        assert_eq!(io.list().await.unwrap(), listed);
+    }
+
+    struct CountingLister {
+        inner: oio::Lister,
+        listed: Arc<AtomicUsize>,
+    }
+
+    impl oio::List for CountingLister {
+        async fn next(&mut self) -> mock::Result<Option<oio::Entry>> {
+            self.listed.fetch_add(1, Ordering::SeqCst);
+            self.inner.next().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_io_listing_waits_while_the_backlog_is_full() {
+        let store = memory_store();
+        let objects = LISTING_AHEAD_OBJECTS + 100;
+        let io = ObjectStoreIo::new(store.clone(), "datanodes/1/epochs/2/").unwrap();
+        for object_seq in 0..objects as u64 {
+            io.put_if_absent(object_seq, Bytes::from_static(b"wal"))
+                .await
+                .unwrap();
+        }
+        let listed = Arc::new(AtomicUsize::new(0));
+        let lister_listed = listed.clone();
+        let mock = MockLayerBuilder::default()
+            .lister_factory(Arc::new(move |_, _, inner| {
+                let listed = lister_listed.clone();
+                Box::new(CountingLister { inner, listed })
+            }))
+            .build()
+            .unwrap();
+        let io = ObjectStoreIo::new(store.layer(mock), "datanodes/1/epochs/2/").unwrap();
+        let (listing, mut rx) = io.listing();
+        // Out of the cooperative budget, so it waits only on a full channel.
+        let mut listing = pin!(tokio::task::unconstrained(listing));
+
+        // Nothing takes the objects, so the listing waits once the backlog is
+        // full, with the directory entry and the object waiting to be sent
+        // listed on top of it.
+        for _ in 0..100 {
+            assert!(poll!(listing.as_mut()).is_pending());
+        }
+        let ahead = listed.load(Ordering::SeqCst);
+        assert!(
+            (LISTING_AHEAD_OBJECTS + 1..=LISTING_AHEAD_OBJECTS + 2).contains(&ahead),
+            "{ahead} entries listed"
+        );
+
+        let taken = async {
+            let mut taken = 0;
+            while rx.recv().await.is_some() {
+                taken += 1;
+            }
+            taken
+        };
+        let (listed, taken) = futures::join!(listing, taken);
+        listed.unwrap();
+        assert_eq!(objects, taken);
+    }
+
+    #[tokio::test]
+    async fn test_io_failed_listing_goes_before_the_objects_it_listed() {
+        let io = memory_io();
+        let (tx, rx) = mpsc::channel(LISTING_AHEAD_OBJECTS);
+        for object_seq in 0..1000 {
+            let path = io.object_path(object_seq);
+            tx.try_send(ListedObject {
+                object_seq,
+                path,
+                size: 0,
+            })
+            .unwrap();
+        }
+        let listing = AbortOnDropHandle::new(tokio::spawn(async move {
+            drop(tx);
+            Err(injected_failure("list"))
+        }));
+        while !listing.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let mut objects = settle_listing(rx, listing, io.object_prefix.clone());
+        let error = objects.try_next().await.unwrap_err();
+        assert!(
+            matches!(
+                error,
+                Error::WalObjectStore {
+                    operation: "list",
+                    ..
+                }
+            ),
             "unexpected error: {error:?}"
         );
     }

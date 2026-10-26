@@ -1569,7 +1569,7 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
             Ok(JsonTypeHint {
                 path: hint.path,
                 data_type,
-                inverted_index: false,
+                inverted_index: hint.inverted_index,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -2440,6 +2440,44 @@ mod tests {
     }
 
     #[test]
+    fn test_json_settings_path_validation_from_proto() {
+        for (path, valid_path) in [
+            (vec!["nested", "leaf"], true),
+            (vec![""], false),
+            (vec!["nested", ""], false),
+            (
+                vec!["nested", datatypes::json::JSON2_REMAINDER_FIELD_NAME],
+                false,
+            ),
+        ] {
+            for inverted_index in [false, true] {
+                let settings = api::v1::SetJsonSettings {
+                    column_name: "payload".into(),
+                    settings: Some(api::v1::JsonSettings {
+                        type_hints: vec![api::v1::JsonTypeHint {
+                            path: path.iter().map(|part| (*part).to_string()).collect(),
+                            data_type: ColumnDataType::String as i32,
+                            inverted_index,
+                            ..Default::default()
+                        }],
+                        max_auto_expanded_paths: Some(0),
+                    }),
+                };
+                let result = RegionAlterRequest::try_from(AlterRequest {
+                    region_id: 0,
+                    schema_version: 1,
+                    kind: Some(alter_request::Kind::SetJsonSettings(settings)),
+                });
+                assert_eq!(
+                    result.is_ok(),
+                    valid_path,
+                    "path: {path:?}, inverted_index: {inverted_index}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_from_proto_alter_request() {
         RegionAlterRequest::try_from(AlterRequest {
             region_id: 0,
@@ -2504,6 +2542,7 @@ mod tests {
                         path: vec!["service".to_string()],
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
+                        inverted_index: true,
                     }],
                     max_auto_expanded_paths: Some(10),
                 }),
@@ -2521,6 +2560,7 @@ mod tests {
         assert_eq!("payload", column_name);
         assert_eq!(Some(10), settings.max_auto_expanded_paths());
         assert_eq!(1, settings.type_hints().len());
+        assert!(settings.type_hints()[0].inverted_index);
     }
 
     #[test]
