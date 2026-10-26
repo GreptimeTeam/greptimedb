@@ -13,17 +13,18 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Instant;
 
 use catalog::CatalogManagerRef;
 use common_batcher::flush_limiter::FlushLimiter;
-use common_query::prelude;
+use common_error::ext::BoxedError;
+use common_query::{WriteProgress, prelude};
 use common_telemetry::{debug, warn};
+use operator::write_dispatcher::TrackedWrite;
 use operator::write_dispatcher::WriteDispatcherRef;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
-use snafu::OptionExt;
+use snafu::{IntoError, OptionExt, ensure};
 
 use crate::batcher::flow_notifier::FlowNotifier;
 use crate::batcher::logical_table;
@@ -129,13 +130,21 @@ pub(crate) async fn flush_batch(
         .extension(logical_table::PHYSICAL_TABLE_KEY)
         .unwrap_or(prelude::GREPTIME_PHYSICAL_TABLE)
         .to_string();
-    let result = flush_batch_physical(
+    let result = flush_batch_physical_tracked(
         &table_batches,
         &physical_table_name,
         &ctx,
         partition_manager,
         write_dispatcher,
         catalog_manager,
+        waiters.len().max(
+            table_batches
+                .iter()
+                .flat_map(|table| &table.batches)
+                .map(|batch| batch.owner + 1)
+                .max()
+                .unwrap_or(0),
+        ),
     )
     .await;
 
@@ -148,15 +157,41 @@ pub(crate) async fn flush_batch(
     );
 
     match result {
-        Ok(affected_rows) => {
+        Ok(progress) => {
             metrics::FLUSH_TOTAL.inc();
-            metrics::FLUSH_ROWS.observe(total_row_count as f64);
-            operator::metrics::DIST_INGEST_ROW_COUNT
-                .with_label_values(&[db_string.as_str()])
-                .inc_by(affected_rows as u64);
-
-            notify_waiters(waiters, Ok(()));
-            flow_notifier::enqueue_flow_notifications(table_batches, &flow_notification_tx);
+            let affected_rows = progress.iter().map(|result| result.affected_rows).sum();
+            metrics::FLUSH_DROPPED_ROWS
+                .inc_by(total_row_count.saturating_sub(affected_rows) as u64);
+            let successful = progress
+                .iter()
+                .enumerate()
+                .filter_map(|(owner, result)| result.error.is_none().then_some(owner))
+                .collect::<HashSet<_>>();
+            for (waiter, result) in waiters.into_iter().zip(progress) {
+                metrics::FLUSH_ROWS.observe(result.affected_rows as f64);
+                operator::metrics::DIST_INGEST_ROW_COUNT
+                    .with_label_values(&[db_string.as_str()])
+                    .inc_by(result.affected_rows as u64);
+                if result.error.is_some() {
+                    metrics::FLUSH_FAILURES.inc();
+                }
+                let _ = waiter.response_tx.send(result);
+            }
+            let accepted = table_batches
+                .into_iter()
+                .filter_map(|mut table| {
+                    table
+                        .batches
+                        .retain(|batch| successful.contains(&batch.owner));
+                    table.row_count = table
+                        .batches
+                        .iter()
+                        .map(|batch| batch.batch.num_rows())
+                        .sum();
+                    (!table.batches.is_empty()).then_some(table)
+                })
+                .collect();
+            flow_notifier::enqueue_flow_notifications(accepted, &flow_notification_tx);
         }
         Err(err) => {
             metrics::FLUSH_FAILURES.inc();
@@ -184,6 +219,40 @@ pub async fn flush_batch_physical(
     write_dispatcher: &(impl PhysicalFlushWriteDispatcher + ?Sized),
     catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
 ) -> Result<usize> {
+    let inputs = table_batches
+        .iter()
+        .flat_map(|table| &table.batches)
+        .map(|batch| batch.owner + 1)
+        .max()
+        .unwrap_or(1);
+    let progress = flush_batch_physical_tracked(
+        table_batches,
+        physical_table_name,
+        ctx,
+        partition_manager,
+        write_dispatcher,
+        catalog_manager,
+        inputs,
+    )
+    .await?;
+    let mut result = WriteProgress::default();
+    for part in progress {
+        result.merge(part);
+    }
+    result
+        .into_result()
+        .map_err(|source| error::ExecuteGrpcQuerySnafu.into_error(source))
+}
+
+async fn flush_batch_physical_tracked(
+    table_batches: &[TableBatch],
+    physical_table_name: &str,
+    ctx: &QueryContextRef,
+    partition_manager: &(impl PhysicalFlushPartitionProvider + ?Sized),
+    write_dispatcher: &(impl PhysicalFlushWriteDispatcher + ?Sized),
+    catalog_manager: &(impl PhysicalFlushCatalogProvider + ?Sized),
+    inputs: usize,
+) -> Result<Vec<WriteProgress>> {
     // 1. Resolve the physical table and get column ID mapping
     let physical_table = {
         let _timer = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
@@ -240,31 +309,54 @@ pub async fn flush_batch_physical(
 
     // 5. Split by physical partition rule and send to regions
     let physical_table_id = physical_table_info.table_id();
-    let planned_batches = region_write::plan_region_batches(
-        combined_batch,
-        physical_table_id,
-        partition_rule.as_ref(),
-    )?;
-
-    let region_writes = region_write::encode_region_write_requests(
-        planned_batches,
-        ctx.skip_wal(),
-        &partition_versions,
-    )?;
-    write_dispatcher.dispatch(region_writes).await
+    let owners = table_batches
+        .iter()
+        .flat_map(|table| &table.batches)
+        .flat_map(|batch| std::iter::repeat_n(batch.owner, batch.batch.num_rows()))
+        .collect::<Vec<_>>();
+    ensure!(
+        owners.len() == combined_batch.num_rows(),
+        error::InternalSnafu {
+            err_msg: "Physical transformation changed row ownership"
+        }
+    );
+    let masks =
+        region_write::split_combined_batch_by_region(&combined_batch, partition_rule.as_ref())?;
+    let mut writes = Vec::new();
+    for (region, mask) in masks {
+        let selected = owners
+            .iter()
+            .enumerate()
+            .filter_map(|(index, owner)| mask.array().value(index).then_some(*owner))
+            .collect::<Vec<_>>();
+        if let Some(batch) =
+            region_write::plan_region_batch(&combined_batch, physical_table_id, region, &mask)?
+        {
+            for request in region_write::encode_region_write_requests(
+                vec![batch],
+                ctx.skip_wal(),
+                &partition_versions,
+            )? {
+                writes.push(TrackedWrite {
+                    request,
+                    owners: selected.clone(),
+                });
+            }
+        }
+    }
+    Ok(write_dispatcher.dispatch_tracked(writes, inputs).await)
 }
 
 pub(in crate::batcher::logical_table) fn notify_waiters(
     waiters: Vec<FlushWaiter>,
     result: Result<()>,
 ) {
-    let shared_result = result.map_err(Arc::new);
+    let progress = match result {
+        Ok(()) => WriteProgress::default(),
+        Err(error) => WriteProgress::failed(BoxedError::new(error)),
+    };
     for waiter in waiters {
-        let _ = waiter.response_tx.send(match &shared_result {
-            Ok(()) => Ok(()),
-            Err(error) => Err(Arc::clone(error)),
-        });
-        // waiter._permit is dropped here, releasing the inflight semaphore slot
+        let _ = waiter.response_tx.send(progress.clone());
     }
 }
 
@@ -308,7 +400,7 @@ mod tests {
     use crate::batcher::test_util::mock_table_flownode_cache;
     use crate::error;
     use crate::error::Error;
-    use crate::metrics::FLOW_NOTIFICATION_DROPPED;
+    use crate::metrics::{self, FLOW_NOTIFICATION_DROPPED};
 
     #[tokio::test]
     async fn test_flush_batch_notifies_flownode_after_successful_physical_write() {
@@ -471,7 +563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_flush_batch_physical_returns_actual_affected_rows() {
+    async fn test_flush_batch_physical_rejects_unattributable_affected_rows() {
         let table_batches = vec![TableBatch {
             table_name: "t1".to_string(),
             table_id: 11,
@@ -480,7 +572,7 @@ mod tests {
         }];
         let ctx = session::context::QueryContext::arc();
 
-        let affected_rows = flush_batch_physical(
+        let error = flush_batch_physical(
             &table_batches,
             "phy",
             &ctx,
@@ -493,9 +585,106 @@ mod tests {
             },
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(7, affected_rows);
+        assert!(format!("{error:?}").contains("Unattributable"));
+    }
+
+    #[tokio::test]
+    async fn test_exemplar_coalesced_logical_flush_retains_each_requests_progress() {
+        use common_error::ext::BoxedError;
+        use common_query::WriteProgress;
+        use operator::write_dispatcher::TrackedWrite;
+
+        struct PartialDispatcher;
+        #[async_trait]
+        impl PhysicalFlushWriteDispatcher for PartialDispatcher {
+            async fn dispatch(&self, _: Vec<RegionRequest>) -> error::Result<usize> {
+                unreachable!()
+            }
+            async fn dispatch_tracked(
+                &self,
+                requests: Vec<TrackedWrite>,
+                inputs: usize,
+            ) -> Vec<WriteProgress> {
+                assert_eq!(inputs, 2);
+                assert_eq!(
+                    requests
+                        .iter()
+                        .flat_map(|r| &r.owners)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    vec![0, 1, 1]
+                );
+                vec![
+                    WriteProgress {
+                        affected_rows: 1,
+                        error: None,
+                    },
+                    WriteProgress {
+                        affected_rows: 1,
+                        error: Some(Arc::new(BoxedError::new(
+                            error::InternalSnafu {
+                                err_msg: "lost acknowledgement",
+                            }
+                            .build(),
+                        ))),
+                    },
+                ]
+            }
+        }
+        let ctx = session::context::QueryContext::arc();
+        let limiter = RequestLimiter::try_new(2).unwrap();
+        let mut waiters = Vec::new();
+        let mut receivers = Vec::new();
+        for _ in 0..2 {
+            let (response_tx, response_rx) = oneshot::channel();
+            waiters.push(FlushWaiter {
+                response_tx,
+                _permit: limiter.acquire().await.unwrap(),
+            });
+            receivers.push(response_rx);
+        }
+        let batches = [0, 1, 1]
+            .into_iter()
+            .map(|owner| {
+                let mut batch = mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0);
+                batch.owner = owner;
+                batch
+            })
+            .collect();
+        let (notifier, _receiver) =
+            FlowNotifier::try_new(16, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+        let dropped = metrics::FLUSH_DROPPED_ROWS.get();
+        flush_batch(
+            Batch {
+                table_batches: vec![TableBatch {
+                    table_name: "cpu".into(),
+                    table_id: 42,
+                    batches,
+                    row_count: 3,
+                }],
+                total_row_count: 3,
+                db_string: ctx.get_db_string(),
+                ctx,
+                waiters,
+            },
+            &MockFlushPartitionProvider {
+                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+            },
+            &PartialDispatcher,
+            &MockFlushCatalogProvider {
+                table: Some(mock_physical_table_metadata(1024)),
+            },
+            notifier,
+        )
+        .await;
+        assert_eq!(metrics::FLUSH_DROPPED_ROWS.get(), dropped + 1);
+        for (owner, receiver) in receivers.into_iter().enumerate() {
+            let result = receiver.await.unwrap();
+            assert_eq!(result.affected_rows, 1);
+            assert_eq!(result.error.is_some(), owner == 1);
+        }
     }
 
     #[tokio::test]
@@ -686,7 +875,7 @@ mod tests {
                     err_msg: "physical write failed".to_string(),
                 });
             }
-            Ok(0)
+            Ok(1)
         }
     }
 

@@ -2468,3 +2468,76 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
 }
+
+#[apply(both_deployment_cases)]
+async fn test_exemplar_otel_arrow_metrics(distributed: bool) {
+    use datatypes::arrow::array::BinaryArray;
+    use servers::exemplar::query::Query as ExemplarQuery;
+    use servers::prometheus_handler::PrometheusHandler;
+    use session::context::QueryContext;
+
+    let env = MockInstanceImpl::new("exemplar_otel_arrow", distributed).await;
+    let frontend = env.frontend();
+    let server = setup_grpc_server_for_frontend_instance(frontend.clone(), None).await;
+    let mut client =
+        ArrowMetricsServiceClient::connect(format!("http://{}", server.bind_addr().unwrap()))
+            .await
+            .unwrap();
+    let exemplars = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt32Array::from(vec![0])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![1_123_456_789])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![0.25])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TRACE_ID,
+            Arc::new(BinaryArray::from(vec![&[0xab; 16][..]])) as ArrayRef,
+        ),
+        (
+            arrow_consts::SPAN_ID,
+            Arc::new(BinaryArray::from(vec![&[0xcd; 8][..]])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let mut batch = gauge_arrow_batch(1, false);
+    batch.arrow_payloads.push(ArrowPayload {
+        schema_id: "exemplars-1".into(),
+        r#type: ArrowPayloadType::NumberDpExemplars as i32,
+        record: serialize_arrow_record_batch(&exemplars),
+    });
+    let mut response = client
+        .arrow_metrics(Request::new(futures::stream::iter([batch])))
+        .await
+        .unwrap()
+        .into_inner();
+    let status = response.message().await.unwrap().unwrap();
+    assert_eq!(
+        status.status_code,
+        ArrowStatusCode::Ok as i32,
+        "{}",
+        status.status_message
+    );
+    assert!(response.message().await.unwrap().is_none());
+    let result = frontend
+        .query_exemplars(
+            ExemplarQuery::parse("otel_arrow_gauge".into(), "1", "2", "public").unwrap(),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].exemplars.len(), 1);
+    let exemplar = &result[0].exemplars[0];
+    assert_eq!(exemplar.timestamp.0, 1_123_456_789);
+    assert_eq!(exemplar.value, "0.25");
+    assert_eq!(exemplar.labels["trace_id"], "ab".repeat(16));
+    assert_eq!(exemplar.labels["span_id"], "cd".repeat(8));
+    server.shutdown().await.unwrap();
+}

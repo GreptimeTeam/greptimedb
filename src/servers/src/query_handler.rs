@@ -109,6 +109,29 @@ pub struct PromStoreResponse {
 
 #[async_trait]
 pub trait PromStoreProtocolHandler {
+    /// Authorizes source series, including inputs with no metric samples.
+    async fn check_exemplar_sources(
+        &self,
+        _sources: &std::collections::BTreeSet<String>,
+        _ctx: QueryContextRef,
+    ) -> Result<()> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar source authorization",
+        }
+        .fail()
+    }
+
+    async fn write_exemplars_prepared(
+        &self,
+        _request: RowInsertRequests,
+        _ctx: QueryContextRef,
+    ) -> Result<Output> {
+        crate::error::NotSupportedSnafu {
+            feat: "exemplar ingestion",
+        }
+        .fail()
+    }
+
     /// Runs pre-write checks/hooks for prometheus remote write requests.
     async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()>;
 
