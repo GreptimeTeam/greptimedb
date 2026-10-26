@@ -31,6 +31,7 @@ use crate::grpc::{TonicResult, cancellation};
 
 #[async_trait]
 pub trait RegionServerHandler: Send + Sync {
+    /// Handles a complete request, allowing implementations to inspect request headers.
     async fn handle_region_request(&self, request: RegionRequest) -> Result<RegionResponse> {
         let body = request.body.context(InvalidQuerySnafu {
             reason: "Expecting non-empty region request body.",

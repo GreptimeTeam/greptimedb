@@ -2121,6 +2121,17 @@ fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usi
         .inc_by(count as u64);
 }
 
+fn record_ingest_result(request_type: &str, count: usize, result: &Result<RegionResponse>) {
+    match result {
+        Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
+            .with_label_values(&[request_type])
+            .inc_by(response.affected_rows as u64),
+        Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+            .with_label_values(&[request_type, err.status_code().as_ref()])
+            .inc_by(count as u64),
+    }
+}
+
 fn parse_region_attribute(
     engine: &str,
     options: &HashMap<String, String>,
@@ -2173,7 +2184,7 @@ mod tests {
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
     use mito2::config::MitoConfig;
-    use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use mito2::test_util::{CreateRequestBuilder, TestEnv, rows_schema};
     use query::options::FLOW_RETURN_REGION_SEQ;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
