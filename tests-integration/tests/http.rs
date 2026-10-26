@@ -46,15 +46,20 @@ use common_frontend::slow_query_event::{
 };
 use common_memory_manager::OnExhaustedPolicy;
 use common_options::plugin_options::StandaloneFlag;
+use datafusion::common::{DFSchema, ToDFSchema};
+use datafusion::logical_expr::{EmptyRelation, LogicalPlan};
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::{ExecutionPlan, ExecutionPlanProperties};
 use datatypes::arrow::array::{
     Array as _, Float64Array, StringArray, StringViewArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datatypes::series::samples::{SampleRef, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use frontend::instance::Instance;
+use futures::TryStreamExt;
 use log_query::{AggFunc, Context, Limit, LogExpr, LogQuery, TimeFilter};
 use loki_proto::logproto::{EntryAdapter, LabelPairAdapter, PushRequest, StreamAdapter};
 use loki_proto::prost_types::Timestamp;
@@ -1855,6 +1860,211 @@ fn fixture_rows(value: impl Fn(f64) -> f64) -> Vec<PromqlRow> {
         .collect()
 }
 
+/// Replays the captured raw scan through both public FusedSeries output formats.
+async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend: &Arc<Instance>) {
+    let table_id = frontend
+        .catalog_manager()
+        .table("greptime", "public", "native_demo", None)
+        .await
+        .unwrap()
+        .expect("fixture table exists")
+        .table_info()
+        .table_id();
+    let (_, route) = frontend
+        .table_metadata_manager()
+        .table_route_manager()
+        .get_physical_table_route(table_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        route.region_routes.len(),
+        1,
+        "fixture has exactly one physical region"
+    );
+
+    observer.clear();
+    let (_, row_schema, _) = promql_output(frontend, "native_demo", true, "0", "2").await;
+    let origin = observer.take("native_demo");
+    let children = origin.children();
+    assert_eq!(children.len(), 1, "the fused origin has exactly one child");
+    let mut scan_plan = children[0].clone();
+    if scan_plan
+        .downcast_ref::<table::table::scan::SeriesScanExec>()
+        .is_none()
+    {
+        let wrapper_children = scan_plan.children();
+        assert_eq!(
+            wrapper_children.len(),
+            1,
+            "the optional scan wrapper has one child"
+        );
+        scan_plan = wrapper_children[0].clone();
+    }
+    let scan = scan_plan
+        .downcast_ref::<table::table::scan::SeriesScanExec>()
+        .expect("the fused input is a real SeriesScanExec");
+    assert_eq!(scan.properties().output_partitioning().partition_count(), 4);
+    let raw_schema = Arc::clone(scan.series_schema());
+    let label_source = scan.label_source().clone();
+    let ordering = scan.raw_series_ordering();
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1_000, 3).unwrap()).unwrap());
+    let output_schema = Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw_schema.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let raw_type = promql::native::plan::NativeType::Samples(Arc::clone(&raw_schema));
+    let root = promql::native::plan::NativeNode {
+        expr: promql::native::plan::NativeExpr::Instant {
+            input: Box::new(promql::native::plan::NativeNode {
+                expr: promql::native::plan::NativeExpr::Input(promql::native::plan::BoundInput {
+                    source_index: 0,
+                    output: raw_type.clone(),
+                    ordering,
+                }),
+                output: raw_type,
+            }),
+            op: promql::native::plan::BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: promql::native::plan::NativeType::Samples(Arc::clone(&output_schema)),
+    };
+    let tree = promql::native::plan::NativeTree::try_new(root).unwrap();
+    let binding = promql::extension_plan::FusedSeriesBinding {
+        grid,
+        metric_name: Some(Arc::from("native_demo")),
+        time_index: row_schema
+            .fields()
+            .iter()
+            .find(|field| {
+                matches!(
+                    field.data_type(),
+                    DataType::Timestamp(TimeUnit::Millisecond, _)
+                )
+            })
+            .expect("PromQL result has a millisecond timestamp field")
+            .name()
+            .clone(),
+        tags: vec!["host".to_string()],
+    };
+    let logical_child = LogicalPlan::EmptyRelation(EmptyRelation {
+        produce_one_row: false,
+        schema: DFSchema::try_from(scan.schema()).unwrap().into(),
+    });
+    let expected = fixture_rows(|value| value);
+    for format in [
+        promql::extension_plan::FusedOutputFormat::PlainRows,
+        promql::extension_plan::FusedOutputFormat::SeriesFrame,
+    ] {
+        scan_plan.clone().reset_state().unwrap();
+        let exec = promql::extension_plan::FusedSeries::try_new_with_format(
+            Arc::from("native_demo"),
+            tree.clone(),
+            binding.clone(),
+            vec![logical_child.clone()],
+            row_schema.clone().to_dfschema_ref().unwrap(),
+            format,
+        )
+        .unwrap()
+        .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
+        .unwrap();
+        let context = "standalone raw SeriesScanExec replay";
+        let mut actual = Vec::new();
+        let mut closed = 0;
+        let mut partition_counts = Vec::new();
+        for partition in 0..4 {
+            let stream = exec
+                .execute(
+                    partition,
+                    datafusion::prelude::SessionContext::new().task_ctx(),
+                )
+                .unwrap();
+            if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+                let series = common_query::series_frame::unpack_evaluated_series(stream, None)
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap();
+                assert!(
+                    !series.is_empty(),
+                    "partition {partition} emitted no series frames"
+                );
+                partition_counts.push(
+                    series
+                        .iter()
+                        .map(|(s, _)| s.time.timestamps().unwrap().len())
+                        .sum::<usize>(),
+                );
+                for (series, last) in series {
+                    assert_eq!(series.metric.name(), Some("native_demo"));
+                    assert_eq!(series.metric.tags().len(), 1);
+                    assert_eq!(series.fields.len(), 1);
+                    let host = series.metric.get("host").unwrap().to_string();
+                    let timestamps = series.time.timestamps().unwrap();
+                    let samples = series.fields.get(0).unwrap();
+                    for (i, timestamp) in timestamps.iter().enumerate() {
+                        let SampleRef::Float(value) = samples.iter().nth(i).unwrap() else {
+                            panic!("expected float sample")
+                        };
+                        actual.push((vec![("host".to_string(), host.clone())], *timestamp, value));
+                    }
+                    closed += usize::from(last);
+                }
+            } else {
+                let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+                let mut count = 0;
+                for batch in batches {
+                    let ts = batch
+                        .column_by_name(&binding.time_index)
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .unwrap();
+                    let host = batch
+                        .column_by_name("host")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    let values = batch
+                        .column_by_name("val")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    for i in 0..batch.num_rows() {
+                        actual.push((
+                            vec![("host".to_string(), host.value(i).to_string())],
+                            ts.value(i),
+                            values.value(i),
+                        ));
+                        count += 1;
+                    }
+                }
+                assert_eq!(row_schema.fields().len(), 3);
+                assert!(count > 0, "partition {partition} emitted no rows");
+                partition_counts.push(count);
+            }
+        }
+        assert_eq!(partition_counts.len(), 4);
+        assert!(
+            partition_counts.iter().all(|count| *count > 0),
+            "all four partitions emitted output: {partition_counts:?}"
+        );
+        assert_eq!(partition_counts.iter().sum::<usize>(), 24);
+        if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+            assert_eq!(closed, 8, "one closing frame per host series");
+        }
+        actual.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        assert_rows_eq(&actual, &expected, context);
+        assert_native_partition_output(&exec, Some(4), 24, context);
+    }
+}
+
 /// Runs one PromQL query through the public frontend handler and returns the plan it executed, the
 /// schema it answered with and every row it reported.
 async fn promql_output(
@@ -2205,6 +2415,8 @@ pub async fn test_native_promql_route_plans_the_query(store_type: StorageType) {
         tests_integration::test_util::execute_sql(frontend, "ADMIN FLUSH_TABLE('native_rate')")
             .await;
     }
+
+    assert_raw_scan_fused_formats(&observer, frontend).await;
 
     for (query, start, end, expected, scan_partitions) in [
         (

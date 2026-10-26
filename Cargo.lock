@@ -15119,6 +15119,7 @@ dependencies = [
  "paste",
  "pipeline",
  "plugins",
+ "promql",
  "prost 0.14.1",
  "query",
  "rand 0.9.4",
