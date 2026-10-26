@@ -23,9 +23,8 @@
 //! operation states about its input, which is what lets a new combination of supported operations
 //! be an ordinary tree instead of another hand-written shape.
 //!
-//! What the tree cannot express yet is deliberate for this stage: [`NativeExpr::Binary`] holds an
-//! arithmetic or comparison operation, so `and`, `or` and `unless` have no node. The legality below
-//! is therefore about the operations that exist, not about PromQL's whole surface.
+//! What the tree cannot express yet is deliberate for this stage: the legality below is about the
+//! operations that exist, not about PromQL's whole surface.
 
 use std::sync::Arc;
 
@@ -40,7 +39,7 @@ use crate::map_label::LabelRewrite;
 use crate::map_time::DateFunction;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::BinaryMatching;
+use crate::vector_match::{BinaryMatching, MatchingLabels, SetOp};
 
 /// What one node produces.
 ///
@@ -309,6 +308,18 @@ pub enum BoundVectorOp {
     CountValues { label: Arc<str>, group: Grouping },
 }
 
+/// A set operator and the labels its two vectors are matched by.
+///
+/// It has no cardinality, `bool` or fill: PromQL matches a set operator many-to-many and refuses
+/// the other modifiers on it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundSetOp {
+    /// `and`, `or` or `unless`.
+    pub op: SetOp,
+    /// The labels a sample's match group is read from on either side.
+    pub labels: MatchingLabels,
+}
+
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
 #[derive(Clone, Debug)]
 pub enum NativeExpr {
@@ -363,6 +374,12 @@ pub enum NativeExpr {
         right: Box<NativeNode>,
         matching: BinaryMatching,
     },
+    /// A set operation between two vectors, which keeps samples of either side as they are.
+    Set {
+        left: Box<NativeNode>,
+        right: Box<NativeNode>,
+        op: BoundSetOp,
+    },
 }
 
 /// One node of a bound tree.
@@ -376,8 +393,8 @@ pub struct NativeNode {
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// Three kinds do: an `Aggregate` folds every series of its group, a `Binary` pairs two vectors'
-/// series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
+/// Four kinds do: an `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two
+/// vectors' series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
 /// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
 /// an input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
 /// side, whose broadcast reaches each series the other side answers - answers one series from one
@@ -405,9 +422,10 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
                 true
             }
         }
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::ScalarOf { .. } => {
-            true
-        }
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::ScalarOf { .. }
+        | NativeExpr::Set { .. } => true,
     }
 }
 
@@ -740,6 +758,39 @@ impl NativeNode {
                         ));
                     }
                 }
+            }
+            NativeExpr::Set { left, right, .. } => {
+                left.validate()?;
+                right.validate()?;
+                // A set operation keeps samples of whole vectors on the grid both share: a scalar
+                // has no labels to match, and PromQL refuses it on either side.
+                let Some((left_schema, left_grid)) = evaluated_vector(&left.output) else {
+                    return Err(invalid(&format!(
+                        "a set operation consumes evaluated vectors, not {} on its left",
+                        left.output.describe()
+                    )));
+                };
+                let Some((right_schema, right_grid)) = evaluated_vector(&right.output) else {
+                    return Err(invalid(&format!(
+                        "a set operation consumes evaluated vectors, not {} on its right",
+                        right.output.describe()
+                    )));
+                };
+                if left_grid.spec() != right_grid.spec() {
+                    return Err(invalid("a set operation aligns two different grids"));
+                }
+                // `or` hands the right side's samples on under the left side's fields, so the
+                // kernel pairs every field by position and refuses sides of different counts.
+                if left_schema.fields.len() != right_schema.fields.len() {
+                    return Err(invalid(&format!(
+                        "a set operation pairs fields by position, and its sides carry {} and {}",
+                        left_schema.fields.len(),
+                        right_schema.fields.len()
+                    )));
+                }
+                ensure_samples(&self.output, "a set operation")?;
+                ensure_same_fields(&left.output, &self.output, "a set operation")?;
+                ensure_grid(&self.output, left_grid, "a set operation")?;
             }
         }
         Ok(())

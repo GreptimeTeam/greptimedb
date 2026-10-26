@@ -28,11 +28,11 @@ use promql::map::MathOp;
 use promql::map_time::DateFunction;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundWindow,
-    Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundSetOp,
+    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
-use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels};
+use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
 use promql_parser::parser::{
     AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
     VectorMatchFillValues,
@@ -231,6 +231,14 @@ fn binary_parts(node: &NativeNode) -> (&NativeNode, &NativeNode, &BinaryMatching
         panic!("the node is not a binary operation: {:?}", node.expr);
     };
     (left, right, matching)
+}
+
+/// The two operands and the binding of a `Set` node.
+fn set_parts(node: &NativeNode) -> (&NativeNode, &NativeNode, &BoundSetOp) {
+    let NativeExpr::Set { left, right, op } = &node.expr else {
+        panic!("the node is not a set operation: {:?}", node.expr);
+    };
+    (left, right, op)
 }
 
 /// The constant a `Scalar` node binds, if it is one.
@@ -1824,37 +1832,94 @@ fn vector_binary_matching_keeps_ignoring_and_group_left_separate() {
     );
 }
 
+/// A set operator binds as a set node over its two operands, with the labels the query wrote, and
+/// nests like any other expression: on either side of it and above it.
 #[test]
-fn vector_binary_set_operators_remain_rejected_explicitly() {
-    let error = compile_selectors(
-        &eval_stmt("a and b"),
+fn set_operators_bind_their_operator_and_labels() {
+    for (query, op, on, labels) in [
+        ("a and b", SetOp::And, false, vec![]),
+        ("a or on(job) b", SetOp::Or, true, vec!["job"]),
+        (
+            "a unless ignoring(pod) b",
+            SetOp::Unless,
+            false,
+            vec!["pod"],
+        ),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        assert_eq!(compiled.inputs.len(), 2, "{query}");
+        let (left, right, bound) = set_parts(compiled.tree.root());
+        assert_eq!(bound.op, op, "{query}");
+        assert_eq!(matching_labels(&bound.labels), (on, labels), "{query}");
+        assert!(matches!(left.expr, NativeExpr::Instant { .. }), "{query}");
+        assert!(matches!(right.expr, NativeExpr::Instant { .. }), "{query}");
+    }
+
+    let compiled = compile_selectors(
+        &eval_stmt("abs(rate(x[5m]) and on(job) sum by (job) (up)) * 2"),
         &|_| Ok(raw_schema()),
         SeriesOrdering::KeyThenTime,
     )
-    .expect_err("set operators have no binary value node");
-    assert!(error.to_string().contains("set operator `and`"), "{error}");
+    .unwrap();
+    let (vector, _, _) = binary_parts(compiled.tree.root());
+    let NativeExpr::Map { input, .. } = &vector.expr else {
+        panic!(
+            "the multiplication does not read the `abs`: {:?}",
+            vector.expr
+        );
+    };
+    let (left, right, _) = set_parts(input);
+    assert!(
+        matches!(left.expr, NativeExpr::Window { .. }),
+        "{:?}",
+        left.expr
+    );
+    assert!(
+        matches!(right.expr, NativeExpr::Aggregate { .. }),
+        "{:?}",
+        right.expr
+    );
 }
 
-/// A set operator has no node at all, so it is refused as the set operator it is rather than as an
-/// arithmetic operation the compiler could not bind: `and`, `or` and `unless` combine two vectors'
-/// series, which is not what a binary value node does.
+/// What a set operator cannot carry is refused rather than dropped: Prometheus refuses a fill value
+/// on a set operator, which this parser accepts, and a side of several fields has no reference
+/// semantics, even when both sides carry the same number.
 #[test]
-fn a_set_operator_is_refused_as_a_set_operator() {
-    for (query, name) in [
-        ("a and b", "and"),
-        ("a or b", "or"),
-        ("a unless b", "unless"),
-    ] {
-        let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
-            .expect_err(&format!("`{query}` compiled, and it should not have"));
+fn a_set_operation_refuses_a_fill_value_and_several_fields() {
+    let error = compile_selectors(
+        &with_binary_modifier("a and b", |modifier| {
+            modifier.fill_values = VectorMatchFillValues::new(0.0, 0.0);
+        }),
+        &|_| Ok(raw_schema()),
+        SeriesOrdering::KeyThenTime,
+    )
+    .expect_err("a fill value on `and` compiled");
+    assert!(
+        matches!(&error, DataFusionError::NotImplemented(message) if message.contains("no fill")),
+        "{error}"
+    );
+
+    for (query, fields) in [("a or b", (2, 1)), ("a and b", (2, 2))] {
+        let error = compile_selectors(
+            &eval_stmt(query),
+            &|requirement| {
+                Ok(match requirement.metric.as_deref() {
+                    Some("a") => raw_schema_with_fields(fields.0),
+                    _ => raw_schema_with_fields(fields.1),
+                })
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect_err(&format!("`{query}` over {fields:?} fields compiled"));
+        let expected = format!("{} and {} fields", fields.0, fields.1);
         assert!(
-            matches!(error, DataFusionError::NotImplemented(_)),
-            "`{query}` did not report NotImplemented: {error}"
-        );
-        let message = error.to_string();
-        assert!(
-            message.contains(&format!("set operator `{name}`")),
-            "`{query}` did not name the operator it found: {message}"
+            matches!(&error, DataFusionError::NotImplemented(message) if message.contains(&expected)),
+            "{query}: {error}"
         );
     }
 }
@@ -4849,7 +4914,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => set_input_source(input, source),
-            NativeExpr::Binary { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 set_input_source(left, source);
                 set_input_source(right, source);
             }

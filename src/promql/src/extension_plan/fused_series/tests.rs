@@ -362,7 +362,7 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             | NativeExpr::VectorOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
-            NativeExpr::Binary { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
             }

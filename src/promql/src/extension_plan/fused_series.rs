@@ -617,7 +617,7 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
             | NativeExpr::Vector { input, .. }
             | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => collect(input, inputs),
-            NativeExpr::Binary { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
                 collect(left, inputs);
                 collect(right, inputs);
             }
@@ -640,7 +640,9 @@ fn reads_scalar_of(node: &NativeNode) -> bool {
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. }
         | NativeExpr::VectorOf { input } => reads_scalar_of(input),
-        NativeExpr::Binary { left, right, .. } => reads_scalar_of(left) || reads_scalar_of(right),
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            reads_scalar_of(left) || reads_scalar_of(right)
+        }
     }
 }
 
