@@ -40,7 +40,7 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
+use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
@@ -51,7 +51,8 @@ use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
+    BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
+    VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -109,7 +110,102 @@ type PreparedInput = (
     Vec<String>,
 );
 
+pub(crate) fn hybrid_binary_admitted(
+    op: token::TokenType,
+    modifier: &Option<BinModifier>,
+    lhs: &PromExpr,
+    rhs: &PromExpr,
+) -> bool {
+    let supported_op = matches!(
+        op.id(),
+        token::T_ADD
+            | token::T_SUB
+            | token::T_MUL
+            | token::T_DIV
+            | token::T_MOD
+            | token::T_POW
+            | token::T_ATAN2
+    );
+    let supported_matching = match modifier {
+        None => true,
+        Some(modifier) => {
+            matches!(&modifier.card, VectorMatchCardinality::OneToOne)
+                && (matches!(&modifier.matching, Some(LabelModifier::Include(labels)) if !labels.labels.is_empty())
+                    || matches!(&modifier.matching, Some(LabelModifier::Exclude(labels)) if labels.labels.is_empty()))
+        }
+    };
+    let has_aggregate = |expr: &PromExpr| {
+        fn visit(expr: &PromExpr) -> bool {
+            match expr {
+                PromExpr::Aggregate(_) => true,
+                PromExpr::Paren(x) => visit(&x.expr),
+                PromExpr::Unary(x) => visit(&x.expr),
+                PromExpr::Binary(x) => visit(&x.lhs) || visit(&x.rhs),
+                PromExpr::Call(x) => x.args.args.iter().any(|arg| visit(arg)),
+                _ => false,
+            }
+        }
+        visit(expr)
+    };
+    let one_selector = |expr: &PromExpr| {
+        let mut selectors = Vec::new();
+        collect_selectors(expr, &mut selectors) && selectors.len() == 1
+    };
+    supported_op
+        && supported_matching
+        && lhs.value_type() == ValueType::Vector
+        && rhs.value_type() == ValueType::Vector
+        && admitted_single_selector(lhs)
+        && admitted_single_selector(rhs)
+        && !has_aggregate(lhs)
+        && !has_aggregate(rhs)
+        && one_selector(lhs)
+        && one_selector(rhs)
+}
+
 impl PromPlanner {
+    pub(super) async fn try_plan_native_operand(
+        &mut self,
+        expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
+        let mut selectors = Vec::new();
+        if !collect_selectors(expr, &mut selectors)
+            || selectors.len() != 1
+            || !admitted_single_selector(expr)
+        {
+            return Ok(None);
+        }
+        let selector = selectors[0];
+        let saved = self.ctx.clone();
+        let plan = match self.try_plan_native_fused(expr, query_engine_state).await? {
+            Some(plan) => plan,
+            None => return Ok(None),
+        };
+        self.ctx = saved.clone();
+        if self
+            .preprocess_label_matchers(&selector.matchers, &selector.name)
+            .is_err()
+        {
+            self.ctx = saved;
+            return Ok(None);
+        }
+        if self.setup_context().await?.is_some() {
+            self.ctx = saved;
+            return Ok(None);
+        }
+        let mut operand_ctx = self.ctx.clone();
+        operand_ctx.use_tsid = false;
+        let table_ref = self.table_ref()?;
+        self.ctx = saved;
+        let plan = LogicalPlanBuilder::from(plan)
+            .alias(table_ref)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        Ok(Some((plan, operand_ctx)))
+    }
+
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
     /// `query_engine_state` is only read to build the *existing* plan of an aggregate query, whose
@@ -895,8 +991,8 @@ mod tests {
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
-        collect_selectors, fused_output_tags, independent_scan_pair, native_promql_requested,
-        scan_time_filter,
+        collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
+        native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -1023,6 +1119,32 @@ mod tests {
         for query in ["sum(x)", "sum by (job) (rate(x[5m]))"] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_single_selector(&expression), "{query}");
+        }
+    }
+
+    fn hybrid_admission(query: &str) -> bool {
+        let expression = promql_parser::parser::parse(query).unwrap();
+        let promql_parser::parser::Expr::Binary(binary) = expression else {
+            panic!("expected binary expression: {query}");
+        };
+        hybrid_binary_admitted(binary.op, &binary.modifier, &binary.lhs, &binary.rhs)
+    }
+
+    #[test]
+    fn hybrid_binary_admission_is_narrow() {
+        for query in ["A / B", "rate(A[1m]) / rate(B[1m])"] {
+            assert!(hybrid_admission(query), "{query}");
+        }
+        assert!(hybrid_admission("A + on(job) B"));
+        for query in [
+            "A and B",
+            "A + on() B",
+            "A + on(job) group_left B",
+            "sum(A) / B",
+            "100 / B",
+            "A / (B + C)",
+        ] {
+            assert!(!hybrid_admission(query), "{query}");
         }
     }
 
