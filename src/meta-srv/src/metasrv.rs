@@ -76,6 +76,7 @@ use crate::gc::{GcSchedulerOptions, GcTickerRef};
 use crate::handler::{HeartbeatHandlerGroupBuilder, HeartbeatHandlerGroupRef};
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::ProcedureManagerListenerAdapter;
+use crate::procedure::drain_datanode::manager::DrainDatanodeManagerRef;
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 use crate::procedure::repartition::gc_requirement::RepartitionGcRequirementManagerRef;
 use crate::procedure::wal_prune::manager::WalPruneTickerRef;
@@ -601,6 +602,7 @@ pub struct Metasrv {
     memory_region_keeper: MemoryRegionKeeperRef,
     greptimedb_telemetry_task: Arc<GreptimeDBTelemetryTask>,
     region_migration_manager: RegionMigrationManagerRef,
+    drain_datanode_manager: DrainDatanodeManagerRef,
     region_supervisor_ticker: Option<RegionSupervisorTickerRef>,
     cache_invalidator: CacheInvalidatorRef,
     leader_region_registry: LeaderRegionRegistryRef,
@@ -909,6 +911,11 @@ impl Metasrv {
 
     pub fn region_migration_manager(&self) -> &RegionMigrationManagerRef {
         &self.region_migration_manager
+    }
+
+    /// Returns the [`DrainDatanodeManagerRef`].
+    pub fn drain_datanode_manager(&self) -> &DrainDatanodeManagerRef {
+        &self.drain_datanode_manager
     }
 
     pub fn publish(&self) -> Option<PublisherRef> {
