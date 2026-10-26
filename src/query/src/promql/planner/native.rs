@@ -45,9 +45,9 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
 use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
-use promql::vector_match::{Cardinality, MatchingLabels};
+use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -367,8 +367,11 @@ impl PromPlanner {
         let Some(mut prepared) = preparation? else {
             return Ok(None);
         };
-        // The time index, the raw tag list and metric name are shared binding properties. The
-        // output tags may be narrower for a PromQL `on(...)` vector match.
+        // Two selectors over one table share one region, so the node runs there over both scans.
+        // Over two tables each scan answers from its own region and the node runs above them; see
+        // `RawSeriesSource`.
+        let cross_table = prepared.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0);
+        // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
         };
@@ -378,14 +381,6 @@ impl PromPlanner {
             time.clone(),
             tags.clone(),
         );
-        if prepared
-            .iter()
-            .any(|(_, _, other_metric, other_time, other_tags)| {
-                *other_metric != metric || *other_time != time || *other_tags != tags
-            })
-        {
-            return Ok(None);
-        }
         // The compiler binds one input per selector in the same pre-order `collect_selectors`
         // walks, so position i of both lists is the same occurrence. This is the guard that the
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
@@ -450,7 +445,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, _, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -465,7 +460,7 @@ impl PromPlanner {
                 .requirement
                 .raw_scan_bounds()
                 .context(DataFusionPlanningSnafu)?;
-            let filter = scan_time_filter(start, end, inclusive, &time);
+            let filter = scan_time_filter(start, end, inclusive, time);
             if let LogicalPlan::TableScan(table_scan) = &mut *scan {
                 table_scan.filters.push(filter);
             } else {
@@ -475,15 +470,34 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
             }
         }
-        if selectors.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0) {
-            return Ok(None);
-        }
+        let source_tags = prepared
+            .iter()
+            .map(|(_, _, _, _, tags)| tags.clone())
+            .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, _, _, _, _)| scan)
-            .collect::<Vec<_>>();
-        // Ordinary pointwise trees and the existing two-occurrence same-source route keep their
-        // current admission unchanged. Aggregate splits are restricted to one raw scan child.
+            .map(|(scan, schema, metric, _, tags)| {
+                if !cross_table {
+                    return Ok(scan);
+                }
+                let Some(metric) = metric else {
+                    return Err(DataFusionError::Internal(
+                        "a prepared selector has no metric name".into(),
+                    ));
+                };
+                let fields = schema
+                    .fields
+                    .iter()
+                    .map(|field| field.name.to_string())
+                    .collect();
+                Ok(LogicalPlan::Extension(Extension {
+                    node: Arc::new(RawSeriesSource::try_new(metric, tags, fields, scan)?),
+                }))
+            })
+            .collect::<std::result::Result<Vec<_>, DataFusionError>>()
+            .context(DataFusionPlanningSnafu)?;
+        // Ordinary pointwise trees and two-occurrence pairs, on one table or across two, are
+        // answered per partition. Aggregate splits are restricted to one raw scan child.
         let root = compiled.tree.root();
         let per_partition = !reads_across_series(root)
             || pointwise_operand(root)
@@ -545,8 +559,14 @@ impl PromPlanner {
         }) {
             return Ok(None);
         }
-        let output_tags = fused_output_tags(tree.root(), &tags);
+        let output_tags = fused_output_tags(tree.root(), &source_tags);
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
+        // Over two tables the region scans are bound by their `RawSeriesSource` children.
+        let (tags, metric) = if cross_table {
+            (Vec::new(), None)
+        } else {
+            (tags, metric)
+        };
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -651,14 +671,23 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 }
 
 /// Whether `root` is a supported one-to-one match or set operation between two independent scan
-/// occurrences.
+/// occurrences, under any number of point-wise wrappers.
+///
+/// A wrapper, a function of each value or an operation with a constant as in `100 * (1 - a / b)`,
+/// maps each series of the match on its own, so the tree still reads both scans whole exactly once.
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     let (left, right, matching) = match &root.expr {
         NativeExpr::Binary {
             left,
             right,
             matching,
-        } => (left, right, matching),
+        } => match (&left.expr, &right.expr) {
+            (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => return false,
+            (NativeExpr::Scalar(_), _) => return independent_scan_pair(right),
+            (_, NativeExpr::Scalar(_)) => return independent_scan_pair(left),
+            _ => (left, right, matching),
+        },
+        NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
             return pointwise_operand(left) && pointwise_operand(right);
         }
@@ -695,26 +724,60 @@ pub(crate) fn same_table_scan(left: &LogicalPlan, right: &LogicalPlan) -> bool {
     left.table_name == right.table_name
 }
 
-/// Tags exposed by a binary PromQL match. The binding retains all raw tags for decoding.
-fn fused_output_tags(root: &NativeNode, tags: &[String]) -> Vec<String> {
-    let NativeExpr::Binary { matching, .. } = &root.expr else {
-        return tags.to_vec();
-    };
-    if matching.cardinality != Cardinality::OneToOne {
-        return tags.to_vec();
-    }
-    match &matching.labels {
-        MatchingLabels::On(names) if !names.is_empty() => tags
-            .iter()
-            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+/// The label columns `node` reports, from the tags of the scan each input reads.
+///
+/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
+/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
+/// side's; an operation with a constant or a function of each value keeps its operand's.
+fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Vec<String> {
+    match &node.expr {
+        NativeExpr::Input(input) => source_tags
+            .get(input.source_index)
             .cloned()
-            .collect(),
-        MatchingLabels::Ignoring(names) => tags
-            .iter()
-            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
-            .cloned()
-            .collect(),
-        MatchingLabels::On(_) => tags.to_vec(),
+            .unwrap_or_default(),
+        NativeExpr::Scalar(_) => Vec::new(),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => fused_output_tags(input, source_tags),
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => match (&left.expr, &right.expr) {
+            (NativeExpr::Scalar(_), _) => fused_output_tags(right, source_tags),
+            (_, NativeExpr::Scalar(_)) => fused_output_tags(left, source_tags),
+            _ => {
+                let tags = fused_output_tags(left, source_tags);
+                if matching.cardinality != Cardinality::OneToOne {
+                    return tags;
+                }
+                match &matching.labels {
+                    MatchingLabels::On(names) if !names.is_empty() => tags
+                        .into_iter()
+                        .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+                        .collect(),
+                    MatchingLabels::Ignoring(names) => tags
+                        .into_iter()
+                        .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
+                        .collect(),
+                    MatchingLabels::On(_) => tags,
+                }
+            }
+        },
+        NativeExpr::Set { left, right, op } => {
+            let mut tags = fused_output_tags(left, source_tags);
+            if op.op == SetOp::Or {
+                for tag in fused_output_tags(right, source_tags) {
+                    if !tags.contains(&tag) {
+                        tags.push(tag);
+                    }
+                }
+            }
+            tags
+        }
     }
 }
 
@@ -997,17 +1060,38 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("x == on(host) x").root()
         ));
+        // A wrapper does not admit a core the pair itself refuses.
+        assert!(!independent_scan_pair(
+            compiled_test_tree("2 * (x == on(host) x)").root()
+        ));
     }
 
     #[test]
     fn match_output_tags_follow_promql_vector_matching() {
         let tags = vec!["host".to_string(), "kind".to_string()];
+        let sources = [tags.clone(), tags.clone()];
         let on = compiled_test_tree("x + on(host) x");
-        assert_eq!(vec!["host"], fused_output_tags(on.root(), &tags));
+        assert_eq!(vec!["host"], fused_output_tags(on.root(), &sources));
         let ignoring = compiled_test_tree("x + x");
-        assert_eq!(tags, fused_output_tags(ignoring.root(), &tags));
+        assert_eq!(tags, fused_output_tags(ignoring.root(), &sources));
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(tags, fused_output_tags(empty_on.root(), &tags));
+        assert_eq!(tags, fused_output_tags(empty_on.root(), &sources));
+
+        // Two tables with different tags: the left side's labels pass through a wrapper and a
+        // match, and `or` adds the labels only the right side carries.
+        let sources = [
+            vec!["host".to_string(), "kind".to_string()],
+            vec!["host".to_string(), "zone".to_string()],
+        ];
+        let wrapped = compiled_test_tree("100 * (1 - x / ignoring(kind) y)");
+        assert_eq!(vec!["host"], fused_output_tags(wrapped.root(), &sources));
+        let and = compiled_test_tree("x and on(host) y");
+        assert_eq!(sources[0], fused_output_tags(and.root(), &sources));
+        let or = compiled_test_tree("x or y");
+        assert_eq!(
+            vec!["host", "kind", "zone"],
+            fused_output_tags(or.root(), &sources)
+        );
     }
 
     #[test]

@@ -57,10 +57,14 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
 - Distributed extension operators need matching handling in the Substrait
   serializer (`src/common/substrait/src/extension_serializer.rs`), the physical
   `PromExtensionPlanner`, and `check_extension_plan`
-  (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` is
-  the exception: it is not serialized to a datanode. Its distributed placement
-  is restricted to a direct table scan, a bound metric name and trees that read
-  one series at a time. Native admission requires partition columns to be tags,
+  (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` and
+  `RawSeriesSource` are the exception: they are not serialized to a datanode. A
+  `FusedSeries` is placed in the region only over direct scans of one table, with
+  a bound metric name and a tree that reads one series at a time. A tree over two
+  tables stays on the frontend over one merge scan per table, each carrying a
+  `RawSeriesSource` that answers explicit-label raw frames; the frame schema is
+  compared exactly at the merge scan, so its declaration and the region's output
+  change together. Native admission requires partition columns to be tags,
   but region/partition-local execution does not merge a logical series across
   regions or scan partitions; do not treat that placement guard as a global
   series-merge or final-label guarantee.

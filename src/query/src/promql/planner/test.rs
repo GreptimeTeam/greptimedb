@@ -42,7 +42,7 @@ use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::SeriesOrdering;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold, RawSeriesSource};
 use promql::native::plan::NativeExpr;
 use promql_parser::label::Labels;
 use promql_parser::parser;
@@ -2567,6 +2567,127 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
             }
             _ => {}
         }
+    }
+}
+
+/// Two tables, `some_metric` and `other_metric`, each with one tag `tag_0` and one field `field_0`.
+async fn native_two_table_provider(partition_key_indices: Vec<usize>) -> DfTableSourceProvider {
+    build_test_table_provider_with_options(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+        ],
+        1,
+        1,
+        partition_key_indices,
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await
+}
+
+/// A pair over two tables reads each table through its own raw source, bound to that table's
+/// metric, and the node itself binds no scan: it runs above both tables' regions.
+#[tokio::test]
+async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source() {
+    for query in [
+        "some_metric / other_metric",
+        "rate(some_metric[5m]) / on(tag_0) rate(other_metric[5m])",
+        "100 * (1 - some_metric{tag_0=\"a\"} / other_metric)",
+        "some_metric unless on(tag_0) other_metric",
+        "some_metric or other_metric",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert_eq!(None, fused.binding().metric_name, "{query}");
+        let sources = fused
+            .inputs()
+            .iter()
+            .map(|input| {
+                let LogicalPlan::Extension(Extension { node }) = input else {
+                    panic!("{query}: expected a raw source, got {input}");
+                };
+                let source = node
+                    .as_any()
+                    .downcast_ref::<RawSeriesSource>()
+                    .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
+                let [LogicalPlan::TableScan(scan)] = UserDefinedLogicalNodeCore::inputs(source)[..]
+                else {
+                    panic!("{query}: the raw source reads its table scan directly");
+                };
+                (
+                    source.metric_name().to_string(),
+                    scan.table_name.table().to_string(),
+                    source.tags().to_vec(),
+                    source.fields().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                (
+                    "some_metric".to_string(),
+                    "some_metric".to_string(),
+                    vec!["tag_0".to_string()],
+                    vec!["field_0".to_string()]
+                ),
+                (
+                    "other_metric".to_string(),
+                    "other_metric".to_string(),
+                    vec!["tag_0".to_string()],
+                    vec!["field_0".to_string()]
+                ),
+            ],
+            sources,
+            "{query}"
+        );
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{query}"
+        );
+    }
+}
+
+/// Two selectors over tables split into regions keep the existing plan, across tables as on one.
+#[tokio::test]
+async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
+    let plan = build_native_fused_plan_with_provider(
+        "some_metric / other_metric",
+        true,
+        native_two_table_provider(vec![0]).await,
+    )
+    .await;
+    assert!(find_fused_series(&plan).is_none(), "{plan}");
+}
+
+/// A function of each value or an operation with a constant around a pair keeps the pair native,
+/// on one table with both scans under the node.
+#[tokio::test]
+async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
+    for query in [
+        "100 * (1 - some_metric / some_metric)",
+        "1 - some_metric / some_metric",
+        "(some_metric / some_metric) * 100",
+        "abs(some_metric - on(tag_0) some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert!(
+            fused
+                .inputs()
+                .iter()
+                .all(|input| matches!(input, LogicalPlan::TableScan(_))),
+            "{query}"
+        );
+        assert_eq!(2, fused.inputs().len(), "{query}");
     }
 }
 

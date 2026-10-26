@@ -101,9 +101,13 @@ const POLL_BUDGET: usize = 64;
 /// The statement grid and output naming that travel with a compiled tree.
 ///
 /// Source schemas belong to the tree's input nodes. This binding supplies the grid that addresses
-/// evaluated chunks, the time column and the full raw tag names needed by the scanner. Binary
-/// matching may reduce the output tags. The logical node checks that the root produces values on
-/// that grid; frames carry each series' actual labels and timestamps.
+/// evaluated chunks, the time column and the metric and full raw tag names a region scan child is
+/// bound with. A child that already produces raw frames, a [`RawSeriesSource`] per table of a
+/// cross-table tree, carries its own binding instead. The output tags are the output schema's. The
+/// logical node checks that the root produces values on that grid; frames carry each series'
+/// actual labels and timestamps.
+///
+/// [`RawSeriesSource`]: super::RawSeriesSource
 #[derive(Clone, Debug)]
 pub struct FusedSeriesBinding {
     /// The statement's grid, which is the grid every evaluated chunk is addressed on.
@@ -116,7 +120,7 @@ pub struct FusedSeriesBinding {
     pub metric_name: Option<Arc<str>>,
     /// The output column holding the grid timestamps.
     pub time_index: String,
-    /// The full logical tag names used to bind raw scans, before binary output-label projection.
+    /// The full logical tag names used to bind region scan children, before output-label projection.
     ///
     /// [`METRIC_NAME`] is special: it is resolved to the series' metric name instead of a column,
     /// which is how a reader sees that a range function dropped it.
@@ -359,16 +363,45 @@ impl FusedSeries {
                 self.children.len()
             )));
         }
+        let tags = if self.partial_fold.is_some() {
+            self.binding.tags.clone()
+        } else {
+            self.output_tags()
+        };
         Ok(Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
             output_schema,
             self.binding.time_index.clone(),
-            self.binding.tags.clone(),
+            tags,
             self.partial_fold.clone(),
             self.format,
         )?))
+    }
+
+    /// The label columns of the output: every column that is neither the time index nor a field of
+    /// the root. A scalar root has no labels; its one other column is the value.
+    ///
+    /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
+    /// and a wrapper around either keeps them - and the output schema is where it records that.
+    fn output_tags(&self) -> Vec<String> {
+        let Some(root) = self.tree.root().output.samples() else {
+            return Vec::new();
+        };
+        self.output_schema
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .filter(|name| {
+                *name != &self.binding.time_index
+                    && !root
+                        .fields
+                        .iter()
+                        .any(|field| field.name.as_ref() == name.as_str())
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -938,20 +971,6 @@ impl FusedSeriesExec {
                 "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
             ));
         }
-        let mut output_tags = tags.clone();
-        if partial_fold.is_none()
-            && let NativeExpr::Binary { matching, .. } = &tree.root().expr
-            && matching.cardinality == crate::vector_match::Cardinality::OneToOne
-        {
-            match &matching.labels {
-                crate::vector_match::MatchingLabels::On(labels) => {
-                    output_tags.retain(|tag| labels.iter().any(|label| label.as_ref() == tag));
-                }
-                crate::vector_match::MatchingLabels::Ignoring(labels) => {
-                    output_tags.retain(|tag| !labels.iter().any(|label| label.as_ref() == tag));
-                }
-            }
-        }
         let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
             let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
             if declared != output_schema {
@@ -967,8 +986,8 @@ impl FusedSeriesExec {
         let classification = if partial_fold.is_some() || frame_schema {
             Vec::new()
         } else if scalar_root {
-            let scalar_fields = scalar_root_fields(&output_schema, &output_tags, &time_column)?;
-            classify_output(&output_schema, &scalar_fields, &output_tags, &time_column)?
+            let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
+            classify_output(&output_schema, &scalar_fields, &tags, &time_column)?
         } else {
             classify_output(
                 &output_schema,
@@ -977,7 +996,7 @@ impl FusedSeriesExec {
                         DataFusionError::Plan("FusedSeries output is not samples".into())
                     })?
                     .fields,
-                &output_tags,
+                &tags,
                 &time_column,
             )?
         };
@@ -1037,7 +1056,7 @@ impl FusedSeriesExec {
             inputs,
             classification: classification.into(),
             time_column,
-            tags: output_tags.into(),
+            tags: tags.into(),
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,

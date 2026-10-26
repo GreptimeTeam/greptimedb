@@ -20,6 +20,7 @@ use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use common_base::Plugins;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
@@ -33,6 +34,7 @@ use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
+use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
@@ -1768,12 +1770,21 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
     }
 }
 
+/// The fused node of the last wrapped plan that held one, and every region-side raw source.
 #[derive(Default)]
-struct NativePlanObserver(Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>);
+struct NativePlanObserver(
+    Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+);
 
 impl NativePlanObserver {
     fn clear(&self) {
         *self.0.lock().unwrap() = None;
+        self.1.lock().unwrap().clear();
+    }
+
+    fn take_raw_sources(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        std::mem::take(&mut *self.1.lock().unwrap())
     }
 
     fn take(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
@@ -1801,6 +1812,13 @@ impl PhysicalPlanWrapper for NativePlanObserver {
             if node.name() == "FusedSeriesExec" {
                 *self.0.lock().unwrap() = Some(node);
                 break;
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        let mut stack = vec![origin.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "RawSeriesSourceExec" {
+                self.1.lock().unwrap().push(node.clone());
             }
             stack.extend(node.children().into_iter().cloned());
         }
@@ -2594,6 +2612,29 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
         native_result_rows(native_tql_output(&instance, &instant_sql, false).await).await;
     assert_eq!(instant_rows, instant_legacy);
 
+    // A constant wrapper keeps the pair native, and the output keeps only the labels the inner
+    // `on(host)` match reports.
+    let wrapped_sql = format!(
+        "TQL EVAL (5, 5, '1s') 100 * (1 - {table}{{kind=\"a\"}} / on(host) {table}{{kind=\"b\"}})"
+    );
+    observer.clear();
+    let wrapped_rows =
+        native_result_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+    assert_two_source_native_plan(&observer.take(), true);
+    let wrapped_expected = (0..HOSTS)
+        .map(|host| {
+            (
+                5_000,
+                format!("h{host:04}"),
+                100.0 * (1.0 - 110.0 / 1_025.0),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wrapped_rows, wrapped_expected);
+    let wrapped_legacy =
+        native_result_rows(native_tql_output(&instance, &wrapped_sql, false).await).await;
+    assert_eq!(wrapped_rows, wrapped_legacy);
+
     // Independent range windows: left reads (1, 5], right (1, 3] after offset.
     // Positive, distinct counter slopes make the exact binary result 2 - 5 = -3 per host.
     let sql = format!(
@@ -2936,6 +2977,213 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     assert_eq!(native, expected);
     let legacy = native_kind_rows(native_tql_output(&instance, &sql, false).await).await;
     assert_eq!(native, legacy);
+}
+
+/// Two selectors over two single-region tables run above both regions: each region answers its
+/// table's raw series through its own merge scan, read across every scan partition, and the node
+/// matches them on the frontend.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_pairs_run_above_both_regions() {
+    const HOSTS: usize = 4_608;
+    const POINTS: i64 = 6;
+    const BATCH_ROWS: usize = 512;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_e2e").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let host = |host: usize| format!("h{host:04}");
+    // Two counters per host: `used` grows by 2 a second from `10 + host % 3`, `total` by 5 from 100.
+    fn used(host: usize, point: i64) -> f64 {
+        10.0 + (host % 3) as f64 + 2.0 * point as f64
+    }
+    fn total(_: usize, point: i64) -> f64 {
+        100.0 + 5.0 * point as f64
+    }
+    let tables = [
+        ("native_xt_used", used as fn(usize, i64) -> f64),
+        ("native_xt_total", total),
+    ];
+    let mut table_ids = Vec::new();
+    for (table, value) in tables {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+                 PRIMARY KEY(host))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        let rows = (0..HOSTS)
+            .flat_map(|index| {
+                (0..POINTS).map(move |point| Row {
+                    values: vec![
+                        ValueData::StringValue(host(index)).into(),
+                        ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                        ValueData::F64Value(value(index, point)).into(),
+                    ],
+                })
+            })
+            .collect::<Vec<_>>();
+        for rows in rows.chunks(BATCH_ROWS) {
+            instance
+                .handle_row_inserts(
+                    RowInsertRequests {
+                        inserts: vec![RowInsertRequest {
+                            table_name: table.to_string(),
+                            rows: Some(Rows {
+                                schema: schema.clone(),
+                                rows: rows.to_vec(),
+                            }),
+                        }],
+                    },
+                    QueryContext::arc(),
+                    false,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_TABLE('{table}')"),
+            QueryContext::arc(),
+        )
+        .await;
+        let table = instance
+            .catalog_manager()
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table, None)
+            .await
+            .unwrap()
+            .unwrap();
+        table_ids.push(table.table_info().table_id());
+    }
+
+    let at_five = |value: &dyn Fn(usize) -> f64, hosts: std::ops::Range<usize>| {
+        hosts
+            .map(|index| (5_000, host(index), value(index)))
+            .collect::<Vec<_>>()
+    };
+    // `spread` is how many of the two sources read every host, which a scan spreads over several
+    // partitions; a source narrowed to a hundred hosts may sit in one.
+    for (query, spread, expected) in [
+        (
+            "native_xt_used / native_xt_total",
+            2,
+            at_five(&|index| used(index, 5) / total(index, 5), 0..HOSTS),
+        ),
+        (
+            // Both counters are sampled at the same instants, so the extrapolated rates keep the
+            // ratio of their slopes.
+            "rate(native_xt_used[4s]) / on(host) rate(native_xt_total[4s])",
+            2,
+            at_five(&|_| 2.0 / 5.0, 0..HOSTS),
+        ),
+        (
+            "100 * (1 - native_xt_used / native_xt_total)",
+            2,
+            at_five(
+                &|index| 100.0 * (1.0 - used(index, 5) / total(index, 5)),
+                0..HOSTS,
+            ),
+        ),
+        (
+            "native_xt_used and on(host) native_xt_total{host=~\"h00..\"}",
+            1,
+            at_five(&|index| used(index, 5), 0..100),
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        let children = plan.children();
+        assert_eq!(children.len(), 2, "{query}");
+        let read_tables = children
+            .iter()
+            .map(|child| {
+                let mut node = Arc::clone(child);
+                while node.downcast_ref::<MergeScanExec>().is_none() {
+                    let [input] = node.children()[..] else {
+                        panic!("{query}: no merge scan below the fused node: {plan:?}");
+                    };
+                    node = Arc::clone(input);
+                }
+                let merge_scan = node.downcast_ref::<MergeScanExec>().unwrap();
+                let [region] = merge_scan.regions() else {
+                    panic!("{query}: a single-region table reads one region");
+                };
+                region.table_id()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(read_tables, table_ids, "{query}");
+        let raw_sources = observer.take_raw_sources();
+        assert_eq!(raw_sources.len(), 2, "{query}");
+        let mut spread_sources = 0;
+        for source in raw_sources {
+            let scan = source.children()[0];
+            let scan = scan
+                .downcast_ref::<CooperativeExec>()
+                .map_or(scan, |cooperative| cooperative.input());
+            let scan = scan.downcast_ref::<SeriesScanExec>().unwrap();
+            let nonempty = scan
+                .metrics()
+                .unwrap()
+                .iter()
+                .filter(|metric| {
+                    matches!(
+                        metric.value(),
+                        datafusion::physical_plan::metrics::MetricValue::OutputRows(count)
+                            if count.value() > 0
+                    )
+                })
+                .filter_map(|metric| metric.partition())
+                .collect::<std::collections::HashSet<_>>();
+            spread_sources += usize::from(nonempty.len() > 1);
+        }
+        assert_eq!(
+            spread_sources, spread,
+            "{query}: sources reading several scan partitions"
+        );
+        assert_eq!(native.len(), expected.len(), "{query}");
+        for (actual, expected) in native.iter().zip(&expected) {
+            assert_eq!((actual.0, &actual.1), (expected.0, &expected.1), "{query}");
+            assert!(
+                (actual.2 - expected.2).abs() <= 1e-12 * expected.2.abs().max(1.0),
+                "{query}: {actual:?} != {expected:?}"
+            );
+        }
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "legacy: {query}");
+    }
 }
 
 /// A two-selector query over a table split into regions keeps the existing plan: the two-scan
