@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{Semaphore, mpsc};
@@ -58,7 +58,7 @@ fn unit(bytes: u64, id: u64, started: &mpsc::UnboundedSender<u64>) -> ReadyUnit 
     let started = started.clone();
     ReadyUnit::new(
         CancellableTaskState::new(),
-        Arc::new(CompactionCost::new(bytes)),
+        bytes,
         Box::pin(async move {
             started.send(id).unwrap();
         }),
@@ -91,7 +91,7 @@ async fn test_single_region_borrows_all_slots_without_exceeding_global_capacity(
                 RegionId::from_u64(1),
                 ReadyUnit::new(
                     CancellableTaskState::new(),
-                    Arc::new(CompactionCost::new(100)),
+                    100,
                     Box::pin(async move {
                         assert!(running.fetch_add(1, Ordering::SeqCst) < 4);
                         started.send(id).unwrap();
@@ -165,20 +165,22 @@ async fn test_fairness_accounts_for_bytes_instead_of_task_counts() {
 }
 
 #[tokio::test]
-async fn test_actual_cost_reconciliation_changes_subsequent_admission() {
+async fn test_unpolled_cancellation_refunds_service_before_next_admission() {
     let executor = Arc::new(ManualExecutor::default());
     let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let a = RegionId::from_u64(1);
     let b = RegionId::from_u64(2);
     let first = unit(1000, 1, &tx);
-    let cost = first.cost.clone();
+    let cancelled = first.state.clone();
     coordinator.schedule(a, first).unwrap();
     coordinator.schedule(a, unit(10, 2, &tx)).unwrap();
     coordinator.schedule(b, unit(10, 10, &tx)).unwrap();
     coordinator.schedule(b, unit(10, 11, &tx)).unwrap();
-    cost.record_actual(1);
-    for expected in [1, 10, 2, 11] {
+    cancelled.request_cancel();
+    executor.run_next().await;
+    assert!(rx.try_recv().is_err());
+    for expected in [10, 2, 11] {
         executor.run_next().await;
         assert_eq!(expected, recv(&mut rx).await);
     }
@@ -222,7 +224,7 @@ async fn test_cancelled_unit_releases_resources_before_notification_without_runn
             b,
             ReadyUnit::new(
                 state.clone(),
-                Arc::new(CompactionCost::new(100)),
+                100,
                 Box::pin(async move {
                     let _guard = guard;
                     started.send(2).unwrap();
@@ -254,19 +256,21 @@ async fn test_executor_rejection_drains_queued_work_without_recursion_or_credit_
     let region = RegionId::from_u64(1);
     coordinator.schedule(region, unit(1, 0, &tx)).unwrap();
     let dropped = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicUsize::new(0));
     let (completed, mut completions) = mpsc::unbounded_channel();
     for id in 0..128 {
         let guard = DropCount(dropped.clone());
         let completed = completed.clone();
+        let polled = polled.clone();
         coordinator
             .schedule(
                 region,
                 ReadyUnit::new(
                     CancellableTaskState::new(),
-                    Arc::new(CompactionCost::new(1)),
+                    1,
                     Box::pin(async move {
                         let _guard = guard;
-                        panic!("rejected job ran");
+                        polled.fetch_add(1, Ordering::SeqCst);
                     }),
                     Box::pin(async move {
                         completed.send(id).unwrap();
@@ -281,6 +285,7 @@ async fn test_executor_rejection_drains_queued_work_without_recursion_or_credit_
         recv(&mut completions).await;
     }
     assert_eq!(128, dropped.load(Ordering::SeqCst));
+    assert_eq!(0, polled.load(Ordering::SeqCst));
     assert_eq!(0, executor.len());
     assert_eq!(0, coordinator.lock().running);
     coordinator.stop().await.unwrap();
@@ -299,7 +304,7 @@ async fn test_job_panic_does_not_lose_completion_or_the_executor_slot() {
             RegionId::from_u64(1),
             ReadyUnit::new(
                 CancellableTaskState::new(),
-                Arc::new(CompactionCost::new(1)),
+                1,
                 Box::pin(async {
                     panic!("executor panic fixture");
                 }),
@@ -369,5 +374,68 @@ async fn test_old_cancellation_does_not_withdraw_a_reopened_regions_unit() {
         assert_eq!(expected, recv(&mut rx).await);
     }
     assert_eq!(0, executor.len());
+    coordinator.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_expiration_only_work_does_not_charge_removed_sst_bytes() {
+    use crate::compaction::picker::PickerOutput;
+    use crate::compaction::test_util::new_file_handle_with_size_and_sequence;
+    use crate::compaction::unit::CompactionUnit;
+    use store_api::storage::FileId;
+
+    let file = new_file_handle_with_size_and_sequence(FileId::random(), 0, 1, 1, 0, 1 << 40);
+    let expiration = CompactionUnit::from_picker(PickerOutput {
+        expired_ssts: vec![file],
+        ..Default::default()
+    })
+    .unwrap()
+    .pop()
+    .unwrap();
+    let executor = Arc::new(ManualExecutor::default());
+    let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let a = RegionId::from_u64(1);
+    let b = RegionId::from_u64(2);
+    coordinator
+        .schedule(a, unit(expiration.estimated_input_bytes(), 1, &tx))
+        .unwrap();
+    coordinator.schedule(a, unit(10, 2, &tx)).unwrap();
+    coordinator.schedule(b, unit(10, 10, &tx)).unwrap();
+    coordinator.schedule(b, unit(10, 11, &tx)).unwrap();
+    // Removing a TB of expired files must not defer A behind all of B's merges.
+    for expected in [1, 10, 2, 11] {
+        executor.run_next().await;
+        assert_eq!(expected, recv(&mut rx).await);
+    }
+    coordinator.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_cancelled_empty_queue_can_reenter_admission_without_losing_debt() {
+    let executor = Arc::new(ManualExecutor::default());
+    let coordinator = Arc::new(CompactionCoordinator::new(executor.clone(), 1));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let a = RegionId::from_u64(1);
+    let b = RegionId::from_u64(2);
+    coordinator.schedule(a, unit(100, 1, &tx)).unwrap();
+    let queued = unit(100, 2, &tx);
+    let state = queued.state.clone();
+    coordinator.schedule(a, queued).unwrap();
+    state.request_cancel();
+    coordinator.cancel_pending(a);
+    coordinator.schedule(b, unit(1, 10, &tx)).unwrap();
+    executor.run_next().await;
+    assert_eq!(1, recv(&mut rx).await);
+    coordinator.schedule(a, unit(100, 3, &tx)).unwrap();
+    coordinator.schedule(b, unit(1, 11, &tx)).unwrap();
+    for expected in [10, 11, 3] {
+        executor.run_next().await;
+        assert_eq!(expected, recv(&mut rx).await);
+    }
+    coordinator.forget_region(a);
+    coordinator.forget_region(b);
+    assert!(coordinator.lock().ready_regions.is_empty());
+    assert!(coordinator.lock().regions.is_empty());
     coordinator.stop().await.unwrap();
 }

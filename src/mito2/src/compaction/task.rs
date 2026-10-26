@@ -24,7 +24,6 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::compaction::compactor::{CompactionContext, DefaultCompactor, MergeOutput};
 use crate::compaction::memory_manager::CompactionMemoryManager;
-use crate::compaction::scheduler::CompactionCost;
 use crate::compaction::unit::CompactionUnit;
 use crate::compaction::{CompactionExecution, format_panic_reason};
 use crate::error::{self, CompactionCancelledSnafu, CompactionMemoryExhaustedSnafu, Result};
@@ -42,7 +41,6 @@ use crate::worker::WorkerListener;
 
 /// One local atomic unit. The scheduler owns request waiters and sibling units.
 pub(crate) struct CompactionTask {
-    pub(crate) cost: Arc<CompactionCost>,
     pub(crate) state: CancellableTaskState,
     pub(crate) execution: CompactionExecution,
     pub(crate) compaction_context: CompactionContext,
@@ -121,7 +119,6 @@ impl CompactionTask {
             )
             .await
             .context(error::JoinSnafu)??;
-        self.cost.record_actual(output.input_file_size());
         COMPACTION_INPUT_BYTES.inc_by(output.input_file_size() as f64);
         COMPACTION_OUTPUT_BYTES.inc_by(output.output_file_size() as f64);
         self.listener.on_merge_ssts_finished(region_id).await;
@@ -242,7 +239,6 @@ mod tests {
         let region = new_test_compaction_region().await;
         let (request_sender, mut requests) = mpsc::channel(1);
         let mut task = CompactionTask {
-            cost: Arc::new(CompactionCost::new(0)),
             state: CancellableTaskState::new(),
             execution: CompactionExecution::for_test(7),
             compaction_context: CompactionContext::from(&region),

@@ -27,7 +27,7 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_meta::key::SchemaMetadataManagerRef;
 use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
-pub(crate) use coordinator::{CompactionCoordinator, CompactionCost, ReadyUnit};
+pub(crate) use coordinator::{CompactionCoordinator, ReadyUnit};
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
 #[cfg(test)]
