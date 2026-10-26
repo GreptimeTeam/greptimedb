@@ -323,6 +323,12 @@ impl PromPlanner {
                 {
                     return Ok(None);
                 }
+                // A two-scan plan has no placement over a table split into several regions: the
+                // dist analyzer refuses a multi-child node there, so such a query keeps the
+                // existing plan instead of failing.
+                if selectors.len() == 2 && table_meta.partition_column_names().next().is_some() {
+                    return Ok(None);
+                }
                 // The region's columnar series-index samples, one of the readers this scan may be
                 // served by, store `Float64` fields only, and the logical plan cannot tell which
                 // reader arrives. So every field has to be `Float64`: an integer, a `Float32`, a

@@ -2876,6 +2876,52 @@ async fn native_promql_set_operators_read_both_scans_whole() {
     }
 }
 
+/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
+/// native node has no placement there, and the query used to fail in the dist analyzer.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_partitioned_pair",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_partitioned_pair (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host, kind)) PARTITION ON COLUMNS (host) (host < 'h1', host >= 'h1')",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "INSERT INTO native_partitioned_pair VALUES ('h0', 'a', 5000, 1), ('h0', 'b', 5000, 2), \
+         ('h2', 'a', 5000, 3), ('h2', 'b', 5000, 4)",
+        QueryContext::arc(),
+    )
+    .await;
+    for (query, expected) in [
+        (
+            "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
+            vec![(5_000, "h0".to_string(), 1.0)],
+        ),
+        (
+            "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
+            vec![
+                (5_000, "h0".to_string(), -1.0),
+                (5_000, "h2".to_string(), -1.0),
+            ],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        assert_eq!(native, expected, "{query}");
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "{query}");
+    }
+}
+
 /// Repeated selectors retain correct binary results while using independent physical scans.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_repeated_selector_binary_uses_independent_scans() {
