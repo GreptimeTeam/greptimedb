@@ -331,6 +331,8 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundInstant,
     },
+    /// Canonicalizes evaluated fragments that share a label set.
+    Merge { input: Box<NativeNode> },
     /// A window function over its input.
     Window {
         input: Box<NativeNode>,
@@ -407,7 +409,20 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
             // Two vectors are matched by label, which pairs series of the whole vector.
             (_, _) => true,
         },
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Set { .. } => true,
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::Set { .. }
+        | NativeExpr::Merge { .. } => true,
+    }
+}
+
+fn merge_shape_supported(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Window { input, .. } | NativeExpr::Map { input, .. } => {
+            merge_shape_supported(input)
+        }
+        _ => false,
     }
 }
 
@@ -479,6 +494,23 @@ impl NativeNode {
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
+            }
+            NativeExpr::Merge { input } => {
+                input.validate()?;
+                if !merge_shape_supported(input) {
+                    return Err(invalid(
+                        "a merge is only supported over input/window/map trees",
+                    ));
+                }
+                let Some((input_schema, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a merge consumes an evaluated vector"));
+                };
+                let output = ensure_samples(&self.output, "a merge")?;
+                ensure_same_fields(&input.output, &self.output, "a merge")?;
+                ensure_grid(&self.output, input_grid, "a merge")?;
+                if output.fields.len() != input_schema.fields.len() {
+                    return Err(invalid("a merge changes its input fields"));
+                }
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;

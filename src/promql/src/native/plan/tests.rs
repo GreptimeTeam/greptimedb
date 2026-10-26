@@ -278,6 +278,23 @@ fn adding_a_map_only_changes_the_tree() {
 
 /// A map is point-wise over values, so raw samples are not something it can consume.
 #[test]
+fn merge_is_a_whole_series_barrier_over_supported_shapes() {
+    let grid = grid(0, 60_000, 4);
+    let merge = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map_over(input_on(Arc::clone(&grid)))),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&grid)),
+    };
+    assert!(
+        merge.validate().is_ok(),
+        "{}",
+        merge.validate().unwrap_err()
+    );
+    assert!(reads_across_series(&merge));
+}
+
+#[test]
 fn a_map_cannot_consume_raw_samples() {
     let node = NativeNode {
         expr: NativeExpr::Map {

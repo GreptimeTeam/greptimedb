@@ -265,6 +265,16 @@ fn instant(
     }
 }
 
+fn merge(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
 fn map(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
     map_ops(inner, ops.into_iter().map(MapOp::Math).collect())
 }
@@ -956,6 +966,7 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Merge { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
@@ -3031,6 +3042,84 @@ fn a_merge_across_two_closed_series_is_the_root_piece_stream() {
             .collect::<Vec<_>>(),
         vec![Some(1.0), Some(3.0)],
         "the merged series does not hold both pieces' values at their positions"
+    );
+}
+
+#[test]
+fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0), None], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![None, Some(2.0)], true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "merge exposed output before EOF"
+    );
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert!(output.is_last);
+    let values = output
+        .series
+        .fields
+        .get(0)
+        .unwrap()
+        .iter()
+        .map(|v| match v {
+            SampleRef::Float(x) => Some(x),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![Some(1.0), Some(2.0)]);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn merge_rejects_overlapping_occupancy_and_raw_inputs() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(f64::NAN), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution.end_of_input().unwrap();
+    assert!(
+        execution.next_chunk().is_err(),
+        "NaN occupancy overlap was accepted"
     );
 }
 

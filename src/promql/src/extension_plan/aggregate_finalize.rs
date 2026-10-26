@@ -435,6 +435,7 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
             };
             Ok(Some(inner))
         }
+        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
@@ -522,6 +523,7 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. } => raw_fields(input),
