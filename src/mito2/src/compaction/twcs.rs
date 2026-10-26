@@ -3370,6 +3370,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_overdue_candidates_alternate_without_completion() {
+        // A plan that is accepted but never completes must still consume the
+        // fairness turn. Otherwise an older candidate that keeps failing keeps
+        // the first slot and starves every other eligible window.
+        let files = priority_test_files(0, 0, 40, false)
+            .into_iter()
+            .chain(priority_test_files(10, 0, 40, false))
+            .collect::<Vec<_>>();
+        let picker = priority_test_picker(1);
+        let mut history = PickHistory::default();
+        let start = Instant::now();
+        history.seed_for_test(
+            PickKey {
+                window: 0,
+                class: PickClass::L0Merge,
+            },
+            start - Duration::from_secs(120),
+        );
+        history.seed_for_test(
+            PickKey {
+                window: 10,
+                class: PickClass::L0Merge,
+            },
+            start - Duration::from_secs(90),
+        );
+
+        let first = picker
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
+            .await
+            .unwrap();
+        assert_eq!(1, first.len());
+        assert_eq!(0, output_window(&first[0]));
+
+        // No completion acknowledgement: selecting the older window already
+        // consumed its turn, so the younger overdue window must go next.
+        let second = picker
+            .build_output_with_history(assign_to_windows(files.iter(), 1), Some(10), &mut history)
+            .await
+            .unwrap();
+        assert_eq!(1, second.len());
+        assert_eq!(10, output_window(&second[0]));
+    }
+
     #[rstest::rstest]
     #[case::stateless_early_exit(false, false, true)]
     #[case::fair_full_scan(true, false, true)]

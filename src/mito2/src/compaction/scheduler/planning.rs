@@ -354,10 +354,8 @@ impl CompactionScheduler {
             );
         }
 
-        // Manual/error results retain the resident history, but must not credit
-        // an earlier failed selection. Automatic snapshots replace this cleared
-        // selection below after passing the same lifecycle fence.
-        status.pick_history.discard_selection();
+        // Manual/error results retain the resident history. Automatic snapshots
+        // replace it below only after passing the same lifecycle fence.
         match finished.result {
             CompactionPlanningResult::Prepared(mut prepared) => {
                 if let Some(history) = prepared.pick_history.take() {
@@ -386,12 +384,6 @@ impl CompactionScheduler {
                         )
                         .await;
                 };
-                status.pick_history.accept_inputs(
-                    picker_output
-                        .outputs
-                        .iter()
-                        .flat_map(|output| output.inputs.iter().map(FileHandle::file_id)),
-                );
                 prepared.picker_output = picker_output;
                 let Some(status) = self.region_status.get_mut(&region_id) else {
                     return CompactionTransition::NoAction;
@@ -601,13 +593,6 @@ impl CompactionScheduler {
             );
             false
         });
-        if let Some(status) = self.region_status.get_mut(&region_id) {
-            status.pick_history.accept_inputs(
-                units
-                    .iter()
-                    .flat_map(|unit| unit.inputs.iter().map(FileHandle::file_id)),
-            );
-        }
         if units.is_empty() {
             return Ok(None);
         }

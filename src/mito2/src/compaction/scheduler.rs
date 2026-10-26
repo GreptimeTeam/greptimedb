@@ -642,15 +642,6 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         made_progress: bool,
     ) -> CompactionTransition {
-        let Some(status) = self.region_status.get_mut(&region_id) else {
-            return CompactionTransition::NoAction;
-        };
-        if made_progress {
-            status
-                .pick_history
-                .finish_success(std::time::Instant::now());
-        }
-
         if let Some(ddls) = self.take_ready_ddls(region_id) {
             return CompactionTransition::DdlReady(ddls);
         }

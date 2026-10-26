@@ -18,8 +18,6 @@ use std::time::{Duration, Instant};
 
 use crate::compaction::twcs::{PickClass, WindowCandidate};
 use crate::metrics::TWCS_SELECTED_CANDIDATES;
-use crate::sst::file::FileHandle;
-use crate::sst::file::RegionFileId;
 
 /// Waiting compensation starts after one minute. This is a promotion threshold,
 /// not a deadline: an executing batch is never preempted to run an overdue pick.
@@ -37,16 +35,13 @@ pub(crate) struct PickKey {
 }
 
 /// Region-resident scheduling metadata. It owns no file handles or reservations.
-/// Planning only discovers/selects work; the owner acknowledges service after a
-/// successful execution. Cancelled, stale and failed plans do not reset ages.
+/// Planning works on a private snapshot; the accepted plan consumes one fairness
+/// turn per selected key. Execution success or failure does not rewrite ages.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PickHistory {
-    /// First observation or last successful service time for each eligible key.
-    /// Repeated picks preserve this timestamp until service is acknowledged.
+    /// First observation or last fairness turn for each eligible key.
+    /// Repeated picks preserve this timestamp until the key is selected.
     waiting: HashMap<PickKey, Instant>,
-    /// Selected seeds and their original input IDs, pending service acknowledgement.
-    /// Input validation may remove seeds without resetting their waiting ages.
-    selected: Vec<(PickKey, Vec<RegionFileId>)>,
 }
 
 impl PickHistory {
@@ -76,21 +71,23 @@ impl PickHistory {
         (overdue.is_none(), overdue, key.class, Reverse(key.window))
     }
 
-    /// Records a seed for later service acknowledgement without resetting its age.
-    fn select(&mut self, key: PickKey, inputs: Vec<RegionFileId>) {
-        self.selected.push((key, inputs));
+    /// Consumes the fairness turn for `key`. Only an accepted plan installs the
+    /// private snapshot, so rejected or stale plans never advance resident ages.
+    fn serve(&mut self, key: PickKey, now: Instant) {
+        self.waiting.insert(key, now);
     }
 
     /// Applies region fairness to a complete discovery result. Planning uses a
     /// private snapshot; the worker installs it only after validating the plan ID.
-    /// Keeps at most one alternative per window, then applies `max_outputs`.
+    /// Each selected key consumes its fairness turn here, so a plan that never
+    /// completes cannot keep a promoted key at the front. Keeps at most one
+    /// alternative per window, then applies `max_outputs`.
     pub(crate) fn select_candidates(
         &mut self,
         mut candidates: Vec<WindowCandidate>,
         max_outputs: Option<usize>,
         now: Instant,
     ) -> Vec<WindowCandidate> {
-        self.selected.clear();
         let key = |candidate: &WindowCandidate| PickKey {
             window: candidate.window,
             class: candidate.pick.class,
@@ -111,41 +108,9 @@ impl PickHistory {
             TWCS_SELECTED_CANDIDATES
                 .with_label_values(&[key.class.as_str(), priority])
                 .inc();
-            self.select(
-                key,
-                candidate
-                    .pick
-                    .inputs
-                    .iter()
-                    .map(FileHandle::file_id)
-                    .collect(),
-            );
+            self.serve(key, now);
         }
         candidates
-    }
-
-    /// Closure expansion, stale-plan validation and memory admission can discard
-    /// seeds. Only wholly accepted seeds may receive service acknowledgement.
-    pub(crate) fn accept_inputs(&mut self, inputs: impl Iterator<Item = RegionFileId>) {
-        let inputs: HashSet<_> = inputs.collect();
-        self.selected
-            .retain(|(_, files)| files.iter().all(|id| inputs.contains(id)));
-    }
-
-    /// Resets ages only for accepted seeds after a successful batch makes progress.
-    /// Drains the selection so later completions cannot acknowledge it again.
-    pub(crate) fn finish_success(&mut self, now: Instant) {
-        for (key, _) in self.selected.drain(..) {
-            if let Some(since) = self.waiting.get_mut(&key) {
-                *since = now;
-            }
-        }
-    }
-
-    /// A manual request does not use automatic selection and cannot acknowledge
-    /// the selection of a previously failed automatic cycle. Waiting ages survive.
-    pub(crate) fn discard_selection(&mut self) {
-        self.selected.clear();
     }
 }
 
@@ -154,6 +119,11 @@ impl PickHistory {
     /// Seeds waiting ages for cross-module scheduling tests.
     pub(crate) fn observe_for_test(&mut self, keys: impl Iterator<Item = PickKey>, now: Instant) {
         self.observe(keys, now);
+    }
+
+    /// Seeds one waiting age without pruning unrelated keys.
+    pub(crate) fn seed_for_test(&mut self, key: PickKey, now: Instant) {
+        self.serve(key, now);
     }
 
     /// Inspects ordering without exposing the production policy helper.
@@ -175,24 +145,6 @@ mod tests {
     }
 
     #[test]
-    fn test_observation_preserves_selection_until_next_pick() {
-        let start = Instant::now();
-        let key = key(0, PickClass::FileReduction);
-        let mut history = PickHistory::default();
-        history.observe([key].into_iter(), start);
-        history.select(key, Vec::new());
-
-        let now = start + PROMOTION_DELAY;
-        history.observe([key].into_iter(), now);
-        assert_eq!(start, history.waiting[&key]);
-        assert_eq!(vec![(key, Vec::new())], history.selected);
-
-        assert!(history.select_candidates(Vec::new(), None, now).is_empty());
-        assert!(history.selected.is_empty());
-        assert!(history.waiting.is_empty());
-    }
-
-    #[test]
     fn test_aging_survives_repicks_and_other_service() {
         let start = Instant::now();
         let l0 = key(100, PickClass::L0Merge);
@@ -204,13 +156,11 @@ mod tests {
         for seconds in 1..=60 {
             let now = start + Duration::from_secs(seconds);
             history.observe([l0, old, overlap].into_iter(), now);
-            history.select(l0, Vec::new());
-            history.finish_success(now);
+            history.serve(l0, now);
         }
         let now = start + PROMOTION_DELAY;
         assert!(history.priority(old, now) < history.priority(l0, now));
-        history.select(old, Vec::new());
-        history.finish_success(now);
+        history.serve(old, now);
         assert!(history.priority(overlap, now) < history.priority(old, now));
     }
 
@@ -229,25 +179,5 @@ mod tests {
         assert!(!history.waiting.contains_key(&old));
         history.observe(std::iter::empty(), now);
         assert!(history.waiting.is_empty());
-    }
-
-    #[test]
-    fn test_unaccepted_and_cancelled_seeds_keep_their_age() {
-        use crate::compaction::test_util::new_file_handle;
-        use store_api::storage::FileId;
-
-        let start = Instant::now();
-        let key = key(0, PickClass::FileReduction);
-        let file = new_file_handle(FileId::random(), 0, 10, 1);
-        let mut history = PickHistory::default();
-        history.observe([key].into_iter(), start);
-        history.select(key, vec![file.file_id()]);
-        history.accept_inputs(std::iter::empty());
-        history.finish_success(start + PROMOTION_DELAY);
-        assert_eq!(start, history.waiting[&key]);
-        history.select(key, vec![file.file_id()]);
-        history.discard_selection();
-        history.finish_success(start + PROMOTION_DELAY);
-        assert_eq!(start, history.waiting[&key]);
     }
 }
