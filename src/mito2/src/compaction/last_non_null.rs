@@ -105,8 +105,8 @@ pub(crate) async fn close_outputs(
             },
         );
         all_seeds.outputs = outputs;
-        let output =
-            (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty()).then_some(all_seeds);
+        let output = (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty())
+            .then_some(all_seeds);
         (output, attempted_seeds)
     })
     .await
@@ -443,7 +443,12 @@ mod tests {
                 .unwrap();
             assert_eq!(1, picked.outputs.len());
             assert_eq!(4, picked.outputs[0].inputs.len());
-            assert!(picked.outputs[0].inputs.iter().all(|file| file.level() == 0));
+            assert!(
+                picked.outputs[0]
+                    .inputs
+                    .iter()
+                    .all(|file| file.level() == 0)
+            );
             assert_eq!(
                 Some(start),
                 history
@@ -461,7 +466,12 @@ mod tests {
             .unwrap();
         assert_eq!(1, picked.outputs.len());
         assert_eq!(4, picked.outputs[0].inputs.len());
-        assert!(picked.outputs[0].inputs.iter().all(|file| file.level() == 1));
+        assert!(
+            picked.outputs[0]
+                .inputs
+                .iter()
+                .all(|file| file.level() == 1)
+        );
         assert!(history.priority_for_test(old, Instant::now()).1.is_none());
     }
 
@@ -552,7 +562,10 @@ mod tests {
         assert_eq!(expected_groups.len(), outputs.len());
         // Compare in execution priority order: the compactor pops from the end.
         for (output, indices) in outputs.iter().rev().zip(expected_groups) {
-            let expected: HashSet<_> = indices.iter().map(|&index| files[index].file_id()).collect();
+            let expected: HashSet<_> = indices
+                .iter()
+                .map(|&index| files[index].file_id())
+                .collect();
             assert_eq!(indices.len(), output.inputs.len());
             assert_eq!(expected, file_ids(&output.inputs));
             // Preserve the absorbed seed's conservative tombstone policy.
