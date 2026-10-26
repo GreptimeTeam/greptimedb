@@ -296,20 +296,39 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("stale-leader-grant").await;
     let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
+    engine.renew_node_lease(Instant::now() + 2 * LEASE, 2 * LEASE);
     let sent_before = Instant::now() - Duration::from_millis(1);
     engine
         .set_region_role_state_gracefully(REGION_ID, demoted_to)
         .await
         .unwrap();
     let demoted = engine.get_region(REGION_ID).unwrap().state();
+    // A later reply shortens the lease.
+    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
 
     // The grant for a heartbeat sent before the downgrade arrives late.
-    grant(&engine, RegionRole::Leader, sent_before + LEASE);
+    grant(&engine, RegionRole::Leader, sent_before + 2 * LEASE);
     assert_eq!(demoted, engine.get_region(REGION_ID).unwrap().state());
 
-    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    grant(&engine, RegionRole::Leader, Instant::now() + 2 * LEASE);
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
+}
+
+#[tokio::test]
+async fn test_lease_too_long_for_nanos_is_stale() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("lease-too-long").await;
+    let (_listener, engine, _schema) = create_region(&mut env, None).await;
+    // One nanosecond more than a u64 of nanoseconds holds.
+    let lease = Duration::from_nanos(u64::MAX) + Duration::from_nanos(1);
+    engine.renew_node_lease(Instant::now() + LEASE, lease);
+    engine
+        .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
+        .await
+        .unwrap();
+
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
 #[tokio::test]

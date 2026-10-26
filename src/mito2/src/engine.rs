@@ -1611,8 +1611,7 @@ impl RegionEngine for MitoEngine {
             region.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            let lease = self.inner.workers.node_lease().max_lease();
-            region.grant_leader(deadline.checked_sub(lease).unwrap_or(deadline));
+            region.grant_leader(deadline, self.inner.workers.node_lease());
         } else {
             region.set_role(role);
         }

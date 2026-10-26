@@ -273,8 +273,8 @@ impl NodeLease {
 
     pub(crate) fn renew(&self, deadline: Instant, lease: Duration) {
         self.deadline.extend(deadline);
-        self.max_lease
-            .fetch_max(lease.as_nanos() as u64, Ordering::Relaxed);
+        let lease = u64::try_from(lease.as_nanos()).unwrap_or(u64::MAX);
+        self.max_lease.fetch_max(lease, Ordering::Relaxed);
     }
 
     /// Returns the longest lease length seen, so a deadline minus it is never later than the
@@ -516,15 +516,17 @@ impl MitoRegion {
         self.set_role(role);
     }
 
-    /// Applies a Leader grant for a heartbeat sent at `sent_at`, unless the region was demoted
-    /// after that heartbeat.
-    pub(crate) fn grant_leader(&self, sent_at: Instant) {
+    /// Applies a Leader grant that lasts until `deadline`, unless the region was demoted after
+    /// the heartbeat behind it was sent.
+    pub(crate) fn grant_leader(&self, deadline: Instant, node_lease: &NodeLease) {
         // A writable region needs no change. Staging still leaves staging below.
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             return;
         }
+        // An unrepresentable send time is earlier than any gate.
+        let sent_at = deadline.checked_sub(node_lease.max_lease());
         let gate = self.grant_gate.lock().unwrap();
-        if gate.is_none_or(|gate| sent_at >= gate) {
+        if gate.is_none_or(|gate| sent_at.is_some_and(|sent_at| sent_at >= gate)) {
             self.set_role(RegionRole::Leader);
         }
     }
