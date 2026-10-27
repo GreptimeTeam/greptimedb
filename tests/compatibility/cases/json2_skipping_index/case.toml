@@ -1,8 +1,0 @@
-name = "json2_skipping_index"
-reason = "JSON2 metadata without skipping options remains readable; enabling path indexes preserves old SST rows."
-introduced_by = "JSON2 skipping index"
-topologies = ["standalone", "distributed"]
-from_range = [">=v1.3.0"]
-to_range = ["*"]
-features = ["json2", "metadata", "index"]
-owner = "storage"
