@@ -1382,7 +1382,7 @@ pub(crate) mod tests {
         /// A batch of regions with their excluded peers.
         type Batch = (Vec<RegionId>, HashMap<RegionId, BTreeSet<u64>>);
 
-        /// Records each batch, and places every region on datanode 3.
+        /// Records each batch, and places every region on datanode 9, which no region excludes.
         struct StatAwareRecorder(Mutex<Vec<Batch>>);
 
         #[async_trait::async_trait]
@@ -1406,7 +1406,7 @@ pub(crate) mod tests {
                     .push((region_ids.to_vec(), exclude_peer_ids_by_region.clone()));
                 Ok(region_ids
                     .iter()
-                    .map(|region_id| (*region_id, Peer::empty(3)))
+                    .map(|region_id| (*region_id, Peer::empty(9)))
                     .collect())
             }
         }
