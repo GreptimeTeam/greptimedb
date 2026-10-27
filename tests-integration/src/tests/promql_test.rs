@@ -2938,10 +2938,16 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     assert_eq!(native, legacy);
 }
 
-/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
-/// native node has no placement there, and the query used to fail in the dist analyzer.
+/// A two-selector query over a table split into regions never fuses the binary itself.
+///
+/// A fused node with more than one input has no placement on such a table — the dist analyzer
+/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
+/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
+/// single-input node over a region-local scan, which places fine, and it is what the hybrid
+/// operand route does. What must never appear is a fused node with two children, so that is what
+/// is asserted rather than "no fused node at all".
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
+async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -2977,7 +2983,14 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        if let Some(fused) = observer.fused() {
+            assert_eq!(
+                fused.children().len(),
+                1,
+                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
+                 table: {fused:?}"
+            );
+        }
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
