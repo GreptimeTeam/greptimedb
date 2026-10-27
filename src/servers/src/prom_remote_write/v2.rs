@@ -373,7 +373,7 @@ fn convert_remote_write_v2(
                 tags.iter()
                     .map(|(key, value)| ((*key).to_string(), value.clone())),
                 false,
-                validate_label_name,
+                |name| !name.is_empty(),
             )?
         } else {
             Default::default()
@@ -544,7 +544,7 @@ fn convert_remote_write_v2(
                     series_labels: inherited.clone(),
                     timestamp: crate::exemplar::timestamp_from_millis(exemplar.timestamp)?,
                     value: exemplar.value,
-                    labels: crate::exemplar::labels(labels, true, validate_label_name)?,
+                    labels: crate::exemplar::labels(labels, true, |name| !name.is_empty())?,
                 })
             })();
             let observation = match observation {
@@ -1944,7 +1944,17 @@ mod tests {
             ("区域", "西"),
             ("has-dash", "value"),
         ];
-        let sample = request_with_sample(labels.clone());
+        let mut sample = request_with_sample(labels.clone());
+        let name = push_test_symbol(&mut sample.symbols, "trace.id");
+        let value = push_test_symbol(&mut sample.symbols, "abc");
+        sample.timeseries[0].exemplars = vec![Exemplar {
+            labels_refs: vec![name, value],
+            ..Default::default()
+        }];
+        let decoded = decode_test_request(sample.clone()).unwrap();
+        assert_eq!(decoded.exemplar_count, 1);
+        assert_eq!(decoded.exemplars[&None][0].series_labels["区域"], "西");
+        assert_eq!(decoded.exemplars[&None][0].labels["trace.id"], "abc");
         let (requests, _, _, _) = test_util::write_requests(sample).unwrap();
         let sample_rows = requests[0].rows.as_ref().unwrap();
         assert_eq!(sample_rows.schema[3].column_name, "区域");

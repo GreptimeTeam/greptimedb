@@ -23,7 +23,11 @@ use common_query::prelude::{
     EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
     greptime_value,
 };
+use metric_engine::row_modifier::TsidGenerator;
 use snafu::{OptionExt, ensure};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use store_api::storage::consts::is_internal_column;
 
 use crate::error::{InvalidPromRemoteRequestSnafu, Result};
@@ -66,7 +70,9 @@ where
                     greptime_timestamp(),
                     greptime_value(),
                     EXEMPLAR_METRIC_COLUMN,
-                    EXEMPLAR_LABELS_COLUMN
+                    EXEMPLAR_LABELS_COLUMN,
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
                 ]
                 .contains(&name.as_str())
                     && !is_internal_column(&name),
@@ -120,10 +126,27 @@ pub fn into_rows(exemplars: Vec<Exemplar>) -> Result<(RowInsertRequests, BTreeSe
         sources.insert(exemplar.metric.clone());
         let table = tables.get_or_default_table_data(
             METRICS_EXEMPLARS_TABLE,
-            exemplar.series_labels.len() + 4,
+            exemplar.series_labels.len() + 6,
             1,
         );
         let mut row = table.alloc_one_row();
+        let tsid = TsidGenerator::from_sorted_tags(
+            exemplar
+                .series_labels
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
+        row_writer::write_by_schema(
+            table,
+            std::iter::once((
+                api::v1::helper::tag_column_schema(
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                    ColumnDataType::Uint64,
+                ),
+                Some(ValueData::U64Value(tsid)),
+            )),
+            &mut row,
+        )?;
         row_writer::write_tag(table, EXEMPLAR_METRIC_COLUMN, &exemplar.metric, &mut row)?;
         row_writer::write_tags(table, exemplar.series_labels.into_iter(), &mut row)?;
         row_writer::write_fields(
@@ -193,7 +216,42 @@ mod tests {
         for name in ["", "request.method", "请求"] {
             assert!(labels([(name.into(), "x".into())], true, validate_label_name).is_err());
         }
+        for name in [
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+        ] {
+            assert!(labels([(name.into(), "x".into())], false, validate_label_name).is_err());
+        }
         assert_eq!(timestamp_from_millis(-1).unwrap(), -1_000_000);
         assert!(timestamp_from_millis(i64::MAX).is_err());
+    }
+
+    #[test]
+    fn test_exemplar_tsid_uses_only_source_labels() {
+        let exemplar = Exemplar {
+            metric: "cpu".into(),
+            series_labels: BTreeMap::from([("job".into(), "api".into())]),
+            timestamp: 1,
+            value: 2.0,
+            labels: BTreeMap::from([("trace_id".into(), "a".into())]),
+        };
+        let mut other = exemplar.clone();
+        other.metric = "memory".into();
+        other.labels.insert("trace_id".into(), "b".into());
+        let (requests, _) = into_rows(vec![exemplar, other]).unwrap();
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        let index = rows
+            .schema
+            .iter()
+            .position(|c| c.column_name == DATA_SCHEMA_TSID_COLUMN_NAME)
+            .unwrap();
+        let expected = ValueData::U64Value(TsidGenerator::from_sorted_tags(
+            [("job", "api")].into_iter(),
+        ));
+        assert!(
+            rows.rows
+                .iter()
+                .all(|row| row.values[index].value_data.as_ref() == Some(&expected))
+        );
     }
 }
