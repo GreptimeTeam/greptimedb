@@ -97,7 +97,7 @@ impl IcebergHash {
     }
 
     pub fn to_logical_expr(&self) -> Expr {
-        let column = datafusion_expr::col(format!(r#""{}""#, self.column()));
+        let column = Expr::Column(datafusion_common::Column::from_name(self.column()));
         ScalarUDF::new_from_impl(IcebergHashUdf::default()).call(vec![column])
     }
 }

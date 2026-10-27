@@ -72,7 +72,7 @@ impl From<Value> for Operand {
 impl Operand {
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
         match self {
-            Self::Column(c) => Ok(datafusion_expr::col(format!(r#""{}""#, c))),
+            Self::Column(c) => Ok(Expr::Column(datafusion_common::Column::from_name(c))),
             Self::Value(v) => {
                 let scalar_value = match v {
                     Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
@@ -864,6 +864,22 @@ mod tests {
             expr
         );
         assert_eq!(expr.to_string(), "iceberg_hash(host) < 0");
+    }
+
+    #[test]
+    fn test_logical_expr_keeps_quotes_in_column_names() {
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+
+        // Declared as `"a""b"`; the stored name contains the quote.
+        let name = r#"a"b"#;
+        let schema = Arc::new(Schema::new(vec![Field::new(name, DataType::Utf8, true)]));
+        for expr in [
+            col(name).lt(Value::from("m")),
+            Operand::IcebergHash(IcebergHash::new(name)).lt(Value::Int32(0)),
+        ] {
+            expr.try_as_physical_expr(&schema)
+                .unwrap_or_else(|e| panic!("{expr}: {e}"));
+        }
     }
 
     #[test]
