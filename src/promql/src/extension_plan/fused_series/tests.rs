@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::{unpack_evaluated_series, unpack_raw_series};
+use common_query::series_frame::unpack_evaluated_series;
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -67,28 +67,29 @@ use datafusion::prelude::SessionContext;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::series::frame::{
     FrameContent, FrameLabelMode, LABEL_DECODE_VERSION, LabelDecodeColumn, LabelDecodeEncoding,
-    LabelDecodeSpec, LabelDecodeTag, SeriesFrameBuilder, SeriesFrameDeclaration,
-    pack_raw_series_chunk, raw_series_frame_schema, series_frame_schema,
+    LabelDecodeSpec, LabelDecodeTag, SeriesFrameDeclaration, pack_raw_series_chunk,
+    raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
-use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
+use store_api::region_engine::RawLabelSource;
 
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesStream, OutputColumn,
-    POLL_BUDGET, series_to_record_batch,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
+    series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
+    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -354,6 +355,7 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
@@ -540,6 +542,12 @@ fn host_label_decode() -> LabelDecodeSpec {
 fn keyed_frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
     series_frame_schema(schema, FrameLabelMode::Key, Some(&host_label_decode()))
         .expect("key labels are a frame")
+}
+
+fn canonical_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef {
+    let evaluated = super::evaluated_output(tree).unwrap();
+    let schema = super::series_frame_output_schema(evaluated.as_ref()).unwrap();
+    Arc::new(datafusion::common::DFSchema::try_from(schema).unwrap())
 }
 
 /// The columns this node produces: the field, the tags and the grid timestamps.
@@ -1729,9 +1737,9 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     }
 }
 
-/// Independent sources execute in source order and gather all child partitions, without zipping.
+/// Independent sources gather all child partitions, without zipping.
 #[tokio::test]
-async fn independent_sources_execute_all_partitions_sequentially() {
+async fn independent_sources_execute_all_partitions() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), other_field_schema(), 0, 1);
     let left_calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect());
     let right_calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect());
@@ -1791,6 +1799,72 @@ async fn independent_sources_execute_all_partitions_sequentially() {
             .map(|c| c.load(Ordering::SeqCst))
             .collect::<Vec<_>>()
     );
+}
+
+/// One producer feeding both inputs, as a region's two scans for one query are fed, stalls a node
+/// that drains one input before it polls the other: the producer waits on the unread input.
+#[tokio::test]
+async fn both_inputs_are_read_concurrently() {
+    const SERIES: usize = 64;
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let (left_tx, left_rx) = tokio::sync::mpsc::channel(1);
+    let (right_tx, right_rx) = tokio::sync::mpsc::channel(1);
+    let fed = |receiver: tokio::sync::mpsc::Receiver<RecordBatch>| {
+        let receiver = Mutex::new(Some(receiver));
+        staged(frame_schema(), move || {
+            let receiver = receiver.lock().unwrap().take().expect("executed once");
+            Box::pin(RecordBatchStreamAdapter::new(
+                frame_schema(),
+                futures::stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|batch| (Ok(batch), receiver))
+                }),
+            ))
+        })
+    };
+    let producer = tokio::spawn(async move {
+        for series in 0..SERIES {
+            let host = format!("web-{series}");
+            left_tx
+                .send(frame(&series_chunk(&host, &[(GRID_START, 10.0)], true)))
+                .await
+                .unwrap();
+            right_tx
+                .send(frame(&series_chunk(&host, &[(GRID_START, 3.0)], true)))
+                .await
+                .unwrap();
+        }
+    });
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                fed(left_rx),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                fed(right_rx),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .unwrap();
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collect(exec, SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("the node stalled on an input it did not poll")
+    .unwrap();
+    producer.await.unwrap();
+    assert_eq!(vec![7.0; SERIES], binary_values(&results));
 }
 
 /// On-label matching projects binary output tags while retaining all raw tags for frame decoding.
@@ -1953,7 +2027,105 @@ async fn later_source_error_drops_all_gathered_inputs() {
     assert_eq!(0, pool.reserved());
 }
 
-/// A literal scalar runs as one schema-checked, one-partition output without scan children.
+/// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map
+/// to one rewritten label set.
+#[tokio::test]
+async fn hand_bound_fused_merge_canonicalizes_shared_labels() {
+    let grid = grid();
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&schema));
+    let raw = NativeType::Samples(raw_schema());
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw,
+    };
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 1,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace("host", "web-1", "host", "web-.*").unwrap(),
+                ))]),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map),
+        },
+        output: evaluated,
+    })
+    .unwrap();
+    let points = grid_timestamps();
+    let exec = plan(
+        tree,
+        memory_exec(frames(&[
+            series_chunk("web-1", &[(points[0], 1.0), (points[2], 3.0)], true),
+            series_chunk("web-2", &[(points[1], 2.0), (points[3], 4.0)], true),
+        ])),
+    )
+    .unwrap();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![
+            (
+                points[0],
+                Some(1.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[1],
+                Some(2.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[2],
+                Some(3.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[3],
+                Some(4.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+        ],
+        rows(&batches),
+        "Merge must combine complementary mapped window outputs under one canonical label set"
+    );
+}
+
+/// A scalar root needs no source child and can be evaluated directly on its bound grid.
 #[tokio::test]
 async fn physical_plan_accepts_scalar_root_without_sources() {
     let statement_grid = grid();
@@ -2512,215 +2684,6 @@ async fn a_ready_batch_is_returned_before_later_input_is_read() {
         "the answer waited for input behind the series it reports"
     );
     assert!(total > 1, "the fixture has to outlast the first answer");
-}
-
-fn direct_frame_stream(
-    schema: Arc<SeriesSchema>,
-    input: Option<SendableRawSeriesStream>,
-) -> FusedSeriesStream {
-    let output_schema = series_frame_schema(&schema, FrameLabelMode::Explicit, None).unwrap();
-    let builder = SeriesFrameBuilder::try_new(
-        &schema,
-        FrameLabelMode::Explicit,
-        None,
-        SeriesFrameBuilder::DEFAULT_MAX_ROWS,
-        SeriesFrameBuilder::DEFAULT_MAX_BYTES,
-    )
-    .unwrap();
-    FusedSeriesStream {
-        inputs: input.into_iter().map(|input| (0, input)).collect(),
-        executor: None,
-        input_ids: Vec::new(),
-        classification: Arc::from([]),
-        tags: Arc::from([]),
-        output_schema,
-        partial_fold: None,
-        frame_builder: Some(builder),
-        eval_schema: Some(schema),
-        frame_cursor: None,
-        _export_budget: Arc::new(Mutex::new(None)),
-        ready: VecDeque::new(),
-        done: false,
-    }
-}
-
-fn sparse_eval_chunk(rows: usize, value: f64) -> (Arc<SeriesSchema>, EvaluatedChunk) {
-    let grid =
-        Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 1, (rows * 2) as u64).unwrap()).unwrap());
-    let schema = Arc::new(SeriesSchema {
-        fields: Arc::from([FieldSpec { name: VALUE.into() }]),
-        eval_grid: Some(Arc::clone(&grid)),
-    });
-    let axis =
-        TimeAxis::from_grid_spans(grid, (0..rows).map(|i| GridSpan::new(i * 2, 1)).collect())
-            .unwrap();
-    let chunk = EvaluatedChunk::try_new(
-        Series {
-            metric: SeriesLabels::try_new(Some(Arc::from(METRIC)), Vec::new()).unwrap(),
-            time: axis,
-            fields: SeriesFields::one(Samples::from_float(Float64Array::from(vec![value; rows]))),
-        },
-        true,
-    )
-    .unwrap();
-    (schema, chunk)
-}
-
-/// A large evaluated chunk is encoded over successive polls rather than queued as all of its
-/// physical frame batches at once.
-#[tokio::test]
-async fn a_large_evaluated_chunk_keeps_a_cursor_between_polls() {
-    const ROWS: usize = 800;
-    let value = f64::from_bits(0x4009_21fb_5444_2d18);
-    let (schema, chunk) = sparse_eval_chunk(ROWS, value);
-    let mut stream = direct_frame_stream(Arc::clone(&schema), None);
-    stream
-        .convert(chunk)
-        .expect("the evaluated chunk becomes a cursor");
-    assert!(
-        stream.ready.is_empty(),
-        "conversion must not eagerly queue frame batches"
-    );
-    assert!(
-        stream.frame_cursor.is_some(),
-        "unencoded rows remain owned by the cursor"
-    );
-
-    let first = stream.next().await.unwrap().unwrap();
-    assert!(first.num_rows() <= SeriesFrameBuilder::DEFAULT_MAX_ROWS);
-    assert!(
-        stream.frame_cursor.is_some(),
-        "the first batch cannot drain 800 rows"
-    );
-    assert!(stream.ready.is_empty());
-
-    let mut batches = vec![first];
-    while let Some(batch) = stream.next().await {
-        batches.push(batch.unwrap());
-    }
-    assert!(batches.len() > 1);
-    let decoded = unpack_evaluated_series(
-        Box::pin(RecordBatchStreamAdapter::new(
-            batches[0].schema(),
-            futures::stream::iter(batches.into_iter().map(Ok)),
-        )),
-        None,
-    )
-    .unwrap()
-    .try_collect::<Vec<_>>()
-    .await
-    .unwrap();
-    let mut decoded_rows = Vec::new();
-    let mut closing_chunks = 0;
-    for (series, last) in &decoded {
-        if *last {
-            closing_chunks += 1;
-        }
-        assert_eq!(Some(METRIC), series.metric.name());
-        for (position, row) in series.time.positions() {
-            let value = match series.fields.as_slice()[0].sample(row) {
-                datatypes::series::samples::SampleRef::Float(value) => value,
-                _ => panic!("the decoded field remains a present Float64"),
-            };
-            decoded_rows.push((position, value.to_bits()));
-        }
-    }
-    decoded_rows.sort_unstable_by_key(|(position, _)| *position);
-    assert_eq!(1, closing_chunks, "the chunk closes exactly once");
-    assert_eq!(
-        (0..ROWS)
-            .map(|i| (i * 2, 0x4009_21fb_5444_2d18))
-            .collect::<Vec<_>>(),
-        decoded_rows,
-        "every sparse position carries the exact expected float bits",
-    );
-
-    assert!(stream.next().await.is_none(), "EOF remains stable");
-    assert!(stream.next().await.is_none(), "repeated EOF remains stable");
-}
-
-/// The cursor and its input are both released when the consumer drops an unfinished frame.
-#[tokio::test]
-async fn dropping_a_partly_emitted_frame_releases_its_input() {
-    const ROWS: usize = 800;
-    let (schema, mut chunk) = sparse_eval_chunk(ROWS, 3.0);
-    let name = Arc::<str>::from(METRIC);
-    let name_weak = Arc::downgrade(&name);
-    chunk
-        .series
-        .metric
-        .set("__name__", Arc::clone(&name))
-        .unwrap();
-    drop(name);
-    let raw = raw_schema();
-    let raw_chunk = series_chunk("cursor-source", &[(0, 1.0)], true);
-    let raw_frame = frame_of(&raw, &raw_chunk);
-    let dropped = Arc::new(AtomicBool::new(false));
-    let raw_input = Box::pin(StagedStream::new(frame_schema(), vec![raw_frame]).dropped(&dropped));
-    let input = unpack_raw_series(raw_input, Some(Arc::clone(&raw))).unwrap();
-    let mut stream = direct_frame_stream(Arc::clone(&schema), Some(input));
-    stream.convert(chunk).unwrap();
-    assert!(stream.next().await.unwrap().unwrap().num_rows() > 0);
-    assert!(stream.frame_cursor.is_some());
-    assert!(
-        name_weak.upgrade().is_some(),
-        "the cursor retains its unencoded label identity"
-    );
-    assert!(!dropped.load(Ordering::SeqCst));
-    assert_eq!(1, stream.inputs.len());
-    drop(stream);
-    assert!(dropped.load(Ordering::SeqCst));
-    assert!(
-        name_weak.upgrade().is_none(),
-        "dropping the cursor releases its label identity"
-    );
-}
-
-/// An upstream error clears rows buffered in the frame builder before any batch is delivered.
-#[tokio::test]
-async fn frame_upstream_error_discards_buffered_rows_and_terminates() {
-    let (schema, chunk) = sparse_eval_chunk(2, 5.0);
-    let raw = raw_schema();
-    let dropped = Arc::new(AtomicBool::new(false));
-    let input = unpack_raw_series(
-        Box::pin(
-            StagedStream::new(frame_schema(), Vec::new())
-                .error("frame input failed")
-                .dropped(&dropped),
-        ),
-        Some(Arc::clone(&raw)),
-    )
-    .unwrap();
-    let mut stream = direct_frame_stream(schema, Some(input));
-    stream.convert(chunk).unwrap();
-    assert!(stream.advance_frame_cursor().unwrap().is_none());
-    assert!(
-        stream.frame_cursor.is_none(),
-        "small rows sit buffered in the builder"
-    );
-    assert!(stream.ready.is_empty());
-
-    let error = stream
-        .next()
-        .await
-        .expect("the upstream error is yielded")
-        .expect_err("buffered frame rows cannot hide the source error");
-    assert!(error.to_string().contains("frame input failed"));
-    assert!(
-        stream.next().await.is_none(),
-        "the failed stream terminates once"
-    );
-    assert!(
-        stream.next().await.is_none(),
-        "EOF after failure remains stable"
-    );
-    assert!(
-        dropped.load(Ordering::SeqCst),
-        "failure releases the source"
-    );
-    assert!(stream.frame_builder.is_none());
-    assert!(stream.frame_cursor.is_none());
-    assert!(stream.ready.is_empty());
 }
 
 /// A chunk whose rows form several runs is converted row by row from the rows it carries.
@@ -3678,6 +3641,11 @@ async fn a_partial_fold_exports_state_from_every_partition() {
     .expect("a rate tree with a partial count is executable");
 
     assert_eq!(
+        datafusion::physical_plan::execution_plan::EmissionType::Final,
+        exec.properties().emission_type,
+        "the partial state is emitted only after the input reaches EOF"
+    );
+    assert_eq!(
         2,
         exec.properties().output_partitioning().partition_count(),
         "the node's partition count is its input's"
@@ -3968,7 +3936,7 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("evaluated samples have a frame schema");
@@ -3980,6 +3948,16 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
             .all(|field| field.name() != "ts"),
         "frame schema comes from the codec rather than the row output"
     );
+    let wrong_schema = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect_err("the caller's incorrect output schema is rejected");
+    assert!(wrong_schema.to_string().contains("schema does not match"));
     assert!(format!("{frame_node:?}").contains("FusedSeries"));
     let exec = plan_of(frame_node, memory_exec(one_series_frames())).unwrap();
     assert_eq!(1, exec.properties().partitioning.partition_count());
@@ -4000,7 +3978,7 @@ fn series_frame_rejects_multiple_sources_during_planning() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema()), input_plan(frame_schema())],
-        binary_output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .unwrap_err();
@@ -4025,7 +4003,7 @@ async fn series_frame_preserves_four_input_partitions() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .unwrap();
@@ -4076,7 +4054,7 @@ async fn series_frame_rate_matches_plain_rows_bitwise() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .unwrap();
@@ -4161,7 +4139,7 @@ fn the_explain_text_names_the_frame_format_only() {
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
+        canonical_frame_schema(rows.tree()),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
@@ -4196,7 +4174,7 @@ fn the_logical_schema_follows_the_output_format() {
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
+        canonical_frame_schema(rows.tree()),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
@@ -4225,7 +4203,7 @@ fn rebuilding_a_frame_node_keeps_its_output_format() {
         rows.tree().clone(),
         rows.binding().clone(),
         rows.inputs().into_iter().cloned().collect(),
-        Arc::clone(rows.schema()),
+        canonical_frame_schema(rows.tree()),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
@@ -4316,7 +4294,7 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(schema)],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
@@ -4397,6 +4375,56 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     );
 }
 
+/// Errors from a fused frame input terminate once and release its upstream immediately.
+#[tokio::test]
+async fn fused_frame_input_error_terminates_and_releases_input() {
+    let schema = frame_schema();
+    let partial = frame(&series_chunk(
+        "web-1",
+        &[(GRID_START + RANGE_MS + SAMPLE_STEP, 1.0)],
+        false,
+    ));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let staged_schema = Arc::clone(&schema);
+    let staged_dropped = Arc::clone(&dropped);
+    let source = staged(Arc::clone(&schema), move || {
+        Box::pin(
+            StagedStream::new(Arc::clone(&staged_schema), vec![partial.clone()])
+                .error("fused frame input failed")
+                .dropped(&staged_dropped),
+        )
+    });
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(schema)],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let exec = plan_of(node, source).unwrap();
+    let mut output = exec
+        .execute(0, SessionContext::default().task_ctx())
+        .unwrap();
+    let error = match output.next().await {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("unexpected output before the upstream failure"),
+        None => panic!("the upstream failure was swallowed"),
+    };
+    assert!(error.to_string().contains("fused frame input failed"));
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the failed adapter releases input"
+    );
+    assert!(output.next().await.is_none(), "failure is yielded once");
+    assert!(
+        output.next().await.is_none(),
+        "EOF remains stable after failure"
+    );
+}
+
 /// A closed chain that holds no value still reaches the consumer of a frame.
 ///
 /// The last sample sits past the grid, so no evaluation point has a sample in its window and the
@@ -4422,7 +4450,7 @@ async fn a_frame_carries_the_closing_chunk_a_row_table_drops() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");
@@ -4507,7 +4535,7 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
         tree.clone(),
         binding(&tree),
         vec![input_plan(frame_schema())],
-        output_schema().to_dfschema_ref().unwrap(),
+        canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
     .expect("a rate tree is evaluated on a grid");

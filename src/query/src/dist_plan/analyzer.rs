@@ -287,8 +287,9 @@ impl DistPlannerAnalyzer {
         let plan = plan.transform_with_subqueries(&|plan| {
             Self::inspect_plan_with_subquery(plan, in_process_region_transport)
         })?;
-        let mut rewriter = PlanRewriter::new(&plan.data, in_process_region_transport);
-        let result = plan.data.rewrite(&mut rewriter)?.data;
+        let plan = rewrite_hybrid_binary_operands(plan.data, in_process_region_transport)?;
+        let mut rewriter = PlanRewriter::new(&plan, in_process_region_transport);
+        let result = plan.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)
     }
 
@@ -506,6 +507,56 @@ struct PlanRewriter {
     /// so that we can push down the `Sort` plan as much as possible.
     expand_on_next_part_cond_trans_commutative: bool,
     new_child_plan: Option<LogicalPlan>,
+}
+
+fn native_operand_wrapper_child(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    match plan {
+        LogicalPlan::SubqueryAlias(alias) => Some(alias.input.as_ref()),
+        LogicalPlan::Projection(projection) => Some(projection.input.as_ref()),
+        LogicalPlan::Filter(filter) => Some(filter.input.as_ref()),
+        LogicalPlan::Window(window) => Some(window.input.as_ref()),
+        _ => None,
+    }
+}
+
+fn native_operand_fused(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+    let mut node = plan;
+    while let Some(child) = native_operand_wrapper_child(node) {
+        node = child;
+    }
+    (is_fused_series_plan(node) && matches!(node.inputs().as_slice(), [LogicalPlan::TableScan(_)]))
+        .then_some(node)
+}
+
+fn is_native_operand_subtree(plan: &LogicalPlan) -> bool {
+    native_operand_fused(plan).is_some()
+}
+
+fn rewrite_hybrid_binary_operands(plan: LogicalPlan, transport: bool) -> DfResult<LogicalPlan> {
+    plan.transform_up(|plan| {
+        let LogicalPlan::Join(join) = &plan else {
+            return Ok(Transformed::no(plan));
+        };
+        if !is_native_operand_subtree(&join.left) || !is_native_operand_subtree(&join.right) {
+            return Ok(Transformed::no(plan));
+        }
+        fn rewrite_side(side: &LogicalPlan, transport: bool) -> DfResult<LogicalPlan> {
+            if let Some(child) = native_operand_wrapper_child(side) {
+                let rewritten_child = rewrite_side(child, transport)?;
+                return side
+                    .clone()
+                    .with_new_exprs(side.expressions(), vec![rewritten_child]);
+            }
+            let mut rw = PlanRewriter::new(side, transport);
+            Ok(side.clone().rewrite(&mut rw)?.data)
+        }
+        let left = rewrite_side(&join.left, transport)?;
+        let right = rewrite_side(&join.right, transport)?;
+        let mut rebuilt = LogicalPlan::Join(join.clone());
+        rebuilt = rebuilt.with_new_exprs(rebuilt.expressions(), vec![left, right])?;
+        Ok(Transformed::yes(rebuilt))
+    })
+    .map(|transformed| transformed.data)
 }
 
 fn is_admitted_pair_plan(plan: &LogicalPlan) -> bool {

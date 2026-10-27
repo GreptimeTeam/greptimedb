@@ -276,6 +276,68 @@ fn adding_a_map_only_changes_the_tree() {
     );
 }
 
+#[test]
+fn merge_rejects_raw_and_mismatched_input_shapes() {
+    let raw_merge = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(input()),
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert!(raw_merge.validate().is_err());
+
+    let output_grid = grid(0, 60_000, 4);
+    let supported = [
+        input_on(Arc::clone(&output_grid)),
+        window_over(
+            input_on(Arc::clone(&output_grid)),
+            Some(Arc::clone(&output_grid)),
+        ),
+        map_over(input_on(Arc::clone(&output_grid))),
+    ];
+    for inner in supported {
+        let merge = NativeNode {
+            expr: NativeExpr::Merge {
+                input: Box::new(inner),
+            },
+            output: evaluated(Arc::new([]), Arc::clone(&output_grid)),
+        };
+        assert!(
+            merge.validate().is_ok(),
+            "{}",
+            merge.validate().unwrap_err()
+        );
+        assert!(reads_across_series(&merge));
+    }
+
+    let inner = window_over(
+        input_on(Arc::clone(&output_grid)),
+        Some(Arc::clone(&output_grid)),
+    );
+    assert!(
+        inner.validate().is_ok(),
+        "{}",
+        inner.validate().unwrap_err()
+    );
+    let wrong_grid = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner.clone()),
+        },
+        output: evaluated(Arc::new([]), grid(1, 60_000, 4)),
+    };
+    let grid_error = wrong_grid.validate().unwrap_err();
+    assert!(grid_error.to_string().contains("grid"), "{grid_error}");
+
+    let wrong_fields = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output: evaluated(fields(1), output_grid),
+    };
+    let fields_error = wrong_fields.validate().unwrap_err();
+    assert!(fields_error.to_string().contains("field"), "{fields_error}");
+}
+
 /// A map is point-wise over values, so raw samples are not something it can consume.
 #[test]
 fn a_map_cannot_consume_raw_samples() {

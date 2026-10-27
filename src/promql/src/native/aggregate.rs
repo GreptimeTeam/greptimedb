@@ -160,11 +160,9 @@ impl AggregateRuntime {
         // chunk of another field count or another grid would be folded into the wrong places.
         validate_float_series(&self.schema, &chunk.series)
             .map_err(|error| folded_chunk(&self.describe(), error))?;
-        let aggregate = self.describe();
-        let accumulator = self
-            .accumulator
-            .as_mut()
-            .ok_or_else(|| no_fold(&aggregate))?;
+        let Some(accumulator) = self.accumulator.as_mut() else {
+            return Err(no_fold(&self.describe()));
+        };
         // Keep the chunk covered while the fold decides whether it needs a new group or block.
         accumulator.update_budgeted(&chunk.series, |fold_bytes| {
             buffer.resize(pending.saturating_add(fold_bytes))

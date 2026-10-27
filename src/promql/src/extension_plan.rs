@@ -22,8 +22,10 @@ mod instant_manipulate;
 mod normalize;
 mod planner;
 mod range_manipulate;
+mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
+mod series_gather;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
@@ -51,6 +53,7 @@ pub use instant_manipulate::{InstantManipulate, InstantManipulateExec, InstantMa
 pub use normalize::{SeriesNormalize, SeriesNormalizeExec, SeriesNormalizeStream};
 pub use planner::PromExtensionPlanner;
 pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulateStream};
+pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};

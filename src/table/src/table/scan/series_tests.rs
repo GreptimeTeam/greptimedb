@@ -19,7 +19,6 @@ use std::task::{Context, Poll};
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_query::request::RawSeriesRequest;
 use common_query::series_frame::series_frame_ordering;
 use common_recordbatch::{
     QueryMemoryTracker, RecordBatch, RecordBatches, SendableRecordBatchStream,
@@ -170,12 +169,13 @@ impl RegionScanner for TestScanner {
     fn metadata(&self) -> store_api::metadata::RegionMetadataRef {
         self.metadata.clone()
     }
-    fn raw_series_ordering(&self) -> SeriesOrdering {
-        self.state
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        Ok(self
+            .state
             .lock()
             .unwrap()
             .planned_ordering
-            .unwrap_or(SeriesOrdering::KeyThenTime)
+            .unwrap_or(SeriesOrdering::KeyThenTime))
     }
     fn prepare(&mut self, request: PrepareRequest) -> Result<(), BoxedError> {
         self.properties.prepare(request);
@@ -504,9 +504,11 @@ fn named_series_scan_declines_invalid_names_before_raw_preflight() {
         (vec!["aux"], vec!["value"]),
         (vec!["ts"], vec!["value"]),
         (vec!["host", "host"], vec!["value"]),
+        (vec!["__name__"], vec!["value"]),
         (vec!["__sequence"], vec!["value"]),
         (vec!["__table_id"], vec!["value"]),
         (vec!["host"], vec!["missing"]),
+        (vec![], vec!["__name__"]),
         (vec!["host"], vec!["ts"]),
         (vec!["host"], vec!["value", "value"]),
     ] {
@@ -518,118 +520,9 @@ fn named_series_scan_declines_invalid_names_before_raw_preflight() {
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            scan.clone()
-                .try_to_named_series_binding("cpu", &tags, &fields)
-                .unwrap()
-                .is_none()
-        );
     }
     let state = state.lock().unwrap();
     assert_eq!(state.preflights, 0);
-    assert_eq!(state.raw_calls, 0);
-    assert_eq!(state.legacy_calls, 0);
-}
-
-#[test]
-fn named_series_binding_reports_the_binding_of_the_actual_metadata() {
-    let (scan, state, metadata) = named_fixture();
-    state.lock().unwrap().planned_ordering = Some(SeriesOrdering::Contiguous);
-    let scan = Arc::new(scan.with_new_partitions(vec![vec![]], 1).unwrap());
-    let (binding, native) = scan
-        .try_to_named_series_binding(
-            "cpu",
-            &["host".to_string()],
-            &["aux".to_string(), "value".to_string()],
-        )
-        .unwrap()
-        .expect("complete logical names must resolve against the actual metadata");
-    assert_eq!(binding.version, 1);
-    assert_eq!(binding.metric_name, "cpu");
-    assert_eq!(binding.physical_metadata.region_id, metadata.region_id);
-    assert_eq!(
-        binding.physical_metadata.schema_version,
-        metadata.schema_version
-    );
-    assert_eq!(
-        binding
-            .physical_metadata
-            .column_metadatas
-            .iter()
-            .map(|column| column.column_id)
-            .collect::<Vec<_>>(),
-        metadata
-            .column_metadatas
-            .iter()
-            .map(|column| column.column_id)
-            .collect::<Vec<_>>()
-    );
-    assert_eq!(binding.logical_tags.len(), 1);
-    assert_eq!(binding.logical_tags[0].name, "host");
-    assert_eq!(binding.logical_tags[0].column_id, 7);
-    assert_eq!(binding.field_ids, [11, 12]);
-    assert_eq!(native.raw_series_ordering(), SeriesOrdering::Contiguous);
-    assert_eq!(
-        native
-            .series_schema
-            .fields
-            .iter()
-            .map(|field| field.name.as_ref())
-            .collect::<Vec<_>>(),
-        ["aux", "value"]
-    );
-    let RawLabelSource::PrimaryKey {
-        physical_metadata, ..
-    } = native.label_source()
-    else {
-        panic!("expected primary-key label source");
-    };
-    assert!(Arc::ptr_eq(&metadata, physical_metadata));
-    let state = state.lock().unwrap();
-    assert_eq!(state.preflights, 1);
-    assert_eq!(state.raw_calls, 0);
-    assert_eq!(state.legacy_calls, 0);
-}
-
-#[test]
-fn named_series_binding_never_reorders_or_omits_requested_fields() {
-    let (scan, state, _) = named_fixture();
-    let scan = Arc::new(scan.with_new_partitions(vec![vec![]], 1).unwrap());
-    let (binding, native) = scan
-        .clone()
-        .try_to_named_series_binding(
-            "cpu",
-            &["host".to_string()],
-            &["aux".to_string(), "value".to_string()],
-        )
-        .unwrap()
-        .expect("the requested fields are the projected fields");
-    assert_eq!(binding.field_ids, [11, 12]);
-    assert_eq!(
-        native
-            .series_schema
-            .fields
-            .iter()
-            .map(|field| field.name.as_ref())
-            .collect::<Vec<_>>(),
-        ["aux", "value"]
-    );
-    for fields in [
-        vec!["value", "aux"],
-        vec!["aux"],
-        vec!["value"],
-        vec!["aux", "value", "value"],
-    ] {
-        let fields = fields.into_iter().map(str::to_string).collect::<Vec<_>>();
-        assert!(
-            scan.clone()
-                .try_to_named_series_binding("cpu", &["host".to_string()], &fields)
-                .unwrap()
-                .is_none()
-        );
-    }
-    let state = state.lock().unwrap();
-    assert_eq!(state.preflights, 1);
     assert_eq!(state.raw_calls, 0);
     assert_eq!(state.legacy_calls, 0);
 }
@@ -1448,58 +1341,6 @@ fn native_series_scan_forwards_query_load_region_id() {
         plan.name(),
         common_recordbatch::adapter::SERIES_SCAN_EXEC_NAME
     );
-}
-
-#[test]
-fn bound_series_scan_uses_open_scanner_metadata_without_execution() {
-    let schema = Arc::new(SeriesSchema {
-        fields: vec![FieldSpec {
-            name: Arc::from("value"),
-        }]
-        .into(),
-        eval_grid: None,
-    });
-    let (scan, state) = fixture(Some(schema), vec![]);
-    let actual = scan.scanner.lock().unwrap().metadata();
-    let request = RawSeriesRequest {
-        version: 1,
-        physical_metadata: (*actual).clone(),
-        metric_name: "cpu".to_string(),
-        logical_tags: vec![],
-        field_ids: vec![1],
-    };
-    let native = scan
-        .clone()
-        .try_to_bound_series_scan(&request)
-        .unwrap()
-        .unwrap();
-    assert_eq!(native.series_schema.fields[0].name.as_ref(), "value");
-    let RawLabelSource::PrimaryKey {
-        physical_metadata, ..
-    } = native.label_source()
-    else {
-        panic!("expected key labels")
-    };
-    assert!(Arc::ptr_eq(&actual, physical_metadata));
-    assert_eq!(state.lock().unwrap().preflights, 1);
-    let mut wrong_projection = request.clone();
-    wrong_projection.field_ids = vec![2];
-    assert!(
-        scan.clone()
-            .try_to_bound_series_scan(&wrong_projection)
-            .unwrap()
-            .is_none()
-    );
-    let mut wrong_metadata = request.clone();
-    wrong_metadata.physical_metadata.schema_version += 1;
-    assert!(
-        scan.clone()
-            .try_to_bound_series_scan(&wrong_metadata)
-            .is_err()
-    );
-    assert_eq!(state.lock().unwrap().preflights, 1);
-    assert_eq!(state.lock().unwrap().raw_calls, 0);
-    assert_eq!(state.lock().unwrap().legacy_calls, 0);
 }
 
 #[tokio::test]

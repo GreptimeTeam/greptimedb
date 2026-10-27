@@ -32,6 +32,14 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
+fn is_resources_exhausted(error: &DataFusionError) -> bool {
+    match error {
+        DataFusionError::ResourcesExhausted(_) => true,
+        DataFusionError::Context(_, inner) => is_resources_exhausted(inner),
+        _ => false,
+    }
+}
+
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
     NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
@@ -263,6 +271,45 @@ fn instant(
             fields,
             eval_grid: Some(output_grid),
         })),
+    }
+}
+
+#[test]
+fn timestamp_instant_rejects_negative_lookback() {
+    let output_grid = grid(500, 1_000, 1);
+    let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
+    let NativeExpr::Instant { op, .. } = &mut root.expr else {
+        unreachable!();
+    };
+    op.timestamp = true;
+    op.at_ms = Some(500);
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[500], &[1.0], true),
+        )
+        .unwrap();
+
+    let error = execution
+        .finish()
+        .expect_err("negative lookback was accepted");
+    assert!(
+        error.to_string().contains("lookback must be non-negative"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+fn merge(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
     }
 }
 
@@ -512,7 +559,11 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
         source_index: 0,
         schema: raw_schema(),
         open_source_series: false,
-        state: NodeState::new("native.input", Arc::new(NodeMetrics::default()), pool),
+        state: NodeState::new(
+            "native.input at root (source_index=0)",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
     }
 }
 
@@ -526,7 +577,11 @@ fn binary_runtime(
     schema: &Arc<SeriesSchema>,
 ) -> (NodeState, BinaryRuntime) {
     (
-        NodeState::new("native.binary", Arc::new(NodeMetrics::default()), pool),
+        NodeState::new(
+            "native.binary at root",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
         BinaryRuntime::new(
             PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
@@ -1304,6 +1359,7 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
             RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Merge { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
@@ -1485,10 +1541,11 @@ fn timestamp_projection_workspace_failure_releases_runtime() {
             evaluated_chunk(&evaluated_schema(grid(0, 1, 10_000)), 0, vec![1.0], true),
         )
         .unwrap();
-    assert!(matches!(
-        execution.next_chunk(),
-        Err(DataFusionError::ResourcesExhausted(_))
-    ));
+    assert!(
+        execution
+            .next_chunk()
+            .is_err_and(|error| is_resources_exhausted(&error))
+    );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
@@ -2071,6 +2128,10 @@ fn an_error_releases_the_reservation() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(error.to_string().contains("not increasing"), "{error}");
+    assert!(
+        error.to_string().contains("native.window at root"),
+        "{error}"
+    );
     // Everything went back to the pool while the execution is alive: waiting for the drop would
     // keep the query's bytes in use for as long as the caller holds the executor.
     assert_eq!(pool.reserved(), 0);
@@ -2161,13 +2222,60 @@ fn a_fanout_enqueue_failure_releases_every_recipient() {
     let pool = bounded_pool(first_charge);
     let mut execution = executor(&tree, Arc::clone(&pool));
     let ids: Vec<_> = execution.state().input_ids(0).collect();
+    let names = &execution.state().inputs;
+    assert_ne!(
+        names[0].state.buffer.reservation.consumer().name(),
+        names[1].state.buffer.reservation.consumer().name()
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.left.input")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.right.input")
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
     let first = ids[0];
     let second = ids[1];
     let error = execution
         .push_raw(first, chunk.clone())
         .and_then(|()| execution.push_raw(second, chunk))
         .expect_err("second fanout recipient exceeded the shared pool");
-    assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+    match &error {
+        DataFusionError::Context(context, inner) => {
+            assert_eq!(context, "native.input at root.right.input (source_index=0)");
+            assert!(is_resources_exhausted(inner), "{inner}");
+        }
+        other => panic!("expected input context around resource exhaustion, got {other}"),
+    }
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
     assert!(
@@ -2216,10 +2324,7 @@ fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
             raw_chunk(&schema, &timestamps, &values, true),
         )
         .expect_err("a chunk larger than the pool was admitted");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
 
     // The chunk never entered the queue, and everything the execution held went back to the pool
     // while the executor is still alive.
@@ -2435,6 +2540,12 @@ fn an_input_that_ends_inside_a_collected_series_is_reported() {
             .to_string()
             .contains("ended before the last chunk of a series"),
         "the truncation was reported as {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("native.input at root.input.input (source_index=0)"),
+        "{error}"
     );
     // Nothing was merged and nothing was answered, and everything went back while the executor is
     // alive.
@@ -3031,10 +3142,7 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
     let error = execution
         .next_chunk()
         .expect_err("the chain was admitted by a pool that cannot hold what it makes of the chunk");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
     assert!(
@@ -3108,10 +3216,7 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     let error = execution
         .finish()
         .expect_err("the merge ran without its workspace admitted");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
     // Everything the chain held went back while the executor is alive: the fragments, the
     // evaluator and both queues.
     assert_eq!(execution.state().reserved_bytes(), 0);
@@ -3388,6 +3493,458 @@ fn a_merge_across_two_closed_series_is_the_root_piece_stream() {
             .collect::<Vec<_>>(),
         vec![Some(1.0), Some(3.0)],
         "the merged series does not hold both pieces' values at their positions"
+    );
+}
+
+#[test]
+fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0), None], true),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![None, Some(2.0)], true),
+        )
+        .unwrap();
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "merge exposed output before EOF"
+    );
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert!(output.is_last);
+    let values = output
+        .series
+        .fields
+        .get(0)
+        .unwrap()
+        .iter()
+        .map(|v| match v {
+            SampleRef::Float(x) => Some(x),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(values, vec![Some(1.0), Some(2.0)]);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+/// A parent reads a merge's answer only once the merge has flushed.
+///
+/// `Merge` is the only node that answers nothing until its input ends, so a parent that treats it
+/// as settled would compute over an empty vector. The tree here is the shape that exposes it: two
+/// merges over complementary pieces of one label set, combined by a binary operation. Each side
+/// answers 3 once merged, and the parent answers only at EOF.
+#[test]
+fn a_parent_of_a_merge_waits_for_the_flush() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 0)),
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metric = named_metric("same", "x");
+    // Each side hands its label set over in two complementary pieces, so nothing can be answered
+    // until both arrive and the flush merges them.
+    for source in 0..2 {
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    0,
+                    vec![Some(1.0), Some(1.0)],
+                    false,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(&schema, metric.clone(), 2, vec![Some(1.0), Some(1.0)], true),
+            )
+            .unwrap();
+    }
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a merge owes its answer until its input ends, so its parent owes its own"
+    );
+    execution.end_of_input().unwrap();
+    let chunk = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the parent answers once both merges flushed");
+    // A binary operation drops `__name__`, as Prometheus does, so the answer carries the tag both
+    // merged sides shared and no metric name.
+    let mut expected_metric = metric.clone();
+    expected_metric.remove("__name__");
+    assert_eq!(chunk.series.metric, expected_metric);
+    let values = chunk
+        .series
+        .fields
+        .get(0)
+        .expect("one field")
+        .iter()
+        .map(|sample| match sample {
+            SampleRef::Float(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![Some(2.0), Some(2.0), Some(2.0), Some(2.0)],
+        "each merged side answers 1 at every position, so their sum is 2"
+    );
+    assert!(chunk.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
+    const SERIES: usize = 64;
+    const LABEL_BYTES: usize = 4 * 1024;
+
+    let grid = grid(0, 1, 1);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for index in 0..SERIES {
+        let metric = SeriesLabels::try_new(
+            Some("same".into()),
+            vec![Label {
+                name: "large".into(),
+                value: format!("{index:04}{}", "x".repeat(LABEL_BYTES - 4)).into(),
+            }],
+        )
+        .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, metric, 0, vec![Some(index as f64)], true),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() >= (SERIES - 1) * LABEL_BYTES,
+        "remaining canonical outputs' labels are not fully reserved: {} bytes",
+        pool.reserved()
+    );
+    for _ in 1..SERIES {
+        assert!(execution.next_chunk().unwrap().is_some());
+    }
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert_eq!(
+        pool.reserved(),
+        0,
+        "draining outputs must release reservations"
+    );
+}
+
+#[test]
+fn standalone_merge_accepts_empty_closing_chunk_and_canonical_empty_input() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let label = named_metric("same", "x");
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 0, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 2, Vec::new(), true),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(1.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+
+    let mut empty = executor(&tree, pool());
+    empty.end_of_input().unwrap();
+    assert!(empty.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_malformed_grid_and_field_shapes() {
+    let merge_grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&merge_grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&merge_grid));
+
+    let mut wrong_grid = executor(&tree, pool());
+    wrong_grid
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &evaluated_schema(grid(1, 1, 2)),
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                true,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        wrong_grid.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
+
+    let mut wrong_fields = executor(&tree, pool());
+    let series = Series {
+        metric: named_metric("same", "x"),
+        time: TimeAxis::Grid(GridRange::try_new(Arc::clone(&merge_grid), 0, 1).unwrap()),
+        fields: SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![Some(1.0)])),
+            Samples::from_float(Float64Array::from(vec![Some(2.0)])),
+        ])
+        .unwrap(),
+    };
+    wrong_fields
+        .push_evaluated(
+            InputId::new(0),
+            EvaluatedChunk::try_new(series, true).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        wrong_fields.next_chunk().unwrap_err().to_string(),
+        "Execution error: merge input does not match its input schema"
+    );
+
+    let mut open_at_eof = executor(&tree, pool());
+    open_at_eof
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0)],
+                false,
+            ),
+        )
+        .unwrap();
+    assert!(open_at_eof.next_chunk().unwrap().is_none());
+    assert!(open_at_eof.finish().is_err());
+    assert_eq!(open_at_eof.state().reserved_bytes(), 0);
+}
+
+#[test]
+fn standalone_merge_feeds_a_downstream_window_only_after_complete_canonicalization() {
+    let input_grid = grid(0, 1, 2);
+    let output_grid = grid(1, 1, 1);
+    let tree = NativeTree::try_new(window_with(
+        merge(evaluated_input(Arc::clone(&input_grid))),
+        RangeFunction::SumOverTime,
+        2,
+        Some(Arc::clone(&input_grid)),
+        output_grid,
+    ))
+    .unwrap();
+    let schema = evaluated_schema(input_grid);
+    let mut execution = executor(&tree, pool());
+    for (name, values) in [("a", vec![Some(1.0), None]), ("a", vec![None, Some(2.0)])] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(&schema, named_metric(name, "x"), 0, values, true),
+            )
+            .unwrap();
+        assert!(execution.next_chunk().unwrap().is_none());
+    }
+    execution.end_of_input().unwrap();
+    let output = execution.next_chunk().unwrap().unwrap();
+    assert_eq!(sample_values(&output), vec![Some(3.0)]);
+    assert!(output.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
+#[test]
+fn standalone_merge_rejects_non_increasing_continuations() {
+    let grid = grid(0, 1, 3);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let mut execution = executor(&tree, pool());
+    let label = named_metric("same", "x");
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label.clone(), 1, vec![Some(1.0)], false),
+        )
+        .unwrap();
+    assert!(execution.next_chunk().unwrap().is_none());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(&schema, label, 0, vec![Some(2.0)], true),
+        )
+        .unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(error.to_string().contains("not increasing"), "{error}");
+}
+
+#[test]
+fn standalone_merge_collection_budget_failure_releases_input_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    // The input queue is drained before collection grows the merge buffer; this budget admits that
+    // queue entry but not the larger retained-fragment estimate made by the collector.
+    let pool = bounded_pool(evaluated_bytes(&chunk) + 1);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("input queue admits the incoming fragment");
+    let error = execution
+        .next_chunk()
+        .expect_err("collection requires its own reservation while the input is queued");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    assert!(
+        execution
+            .next_chunk()
+            .unwrap_err()
+            .to_string()
+            .contains("stopped after an earlier error")
+    );
+}
+
+#[test]
+fn standalone_merge_flush_budget_failure_releases_fragments_and_stops() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("same", "x"),
+        0,
+        vec![Some(1.0), None],
+        true,
+    );
+    let bytes = evaluated_bytes(&chunk);
+    let pool = bounded_pool(bytes * 2);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_evaluated(InputId::new(0), chunk)
+        .expect("source queue admits the input fragment");
+    assert!(execution.next_chunk().unwrap().is_none());
+    assert!(pool.reserved() > 0, "collected fragment was not reserved");
+    execution.end_of_input().unwrap();
+    let error = execution
+        .next_chunk()
+        .expect_err("the merge flush must not exceed the pool");
+    assert!(
+        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let again = execution.next_chunk().unwrap_err();
+    assert!(
+        again.to_string().contains("stopped after an earlier error"),
+        "{again}"
+    );
+}
+
+#[test]
+fn standalone_merge_partial_drain_and_drop_release_queued_output() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(grid);
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    for name in ["a", "b"] {
+        execution
+            .push_evaluated(
+                InputId::new(0),
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric(name, "x"),
+                    0,
+                    vec![Some(1.0), None],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let first = execution.next_chunk().unwrap().unwrap();
+    assert!(first.is_last);
+    assert!(
+        pool.reserved() > 0,
+        "the undrained canonical output was not charged"
+    );
+    drop(execution);
+    assert_eq!(pool.reserved(), 0);
+}
+
+#[test]
+fn merge_rejects_overlapping_occupancy() {
+    let grid = grid(0, 1, 2);
+    let tree = NativeTree::try_new(merge(evaluated_input(Arc::clone(&grid)))).unwrap();
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(f64::NAN), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_evaluated(
+            InputId::new(0),
+            evaluated_chunk_of(
+                &schema,
+                named_metric("same", "x"),
+                0,
+                vec![Some(1.0), None],
+                true,
+            ),
+        )
+        .unwrap();
+    execution.end_of_input().unwrap();
+    assert!(
+        execution.next_chunk().is_err(),
+        "NaN occupancy overlap was accepted"
     );
 }
 
@@ -5060,7 +5617,7 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
 
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the gather's workspace was taken without asking the pool: {error}"
     );
     assert!(
@@ -5168,7 +5725,7 @@ fn a_selection_reserves_the_points_it_decides() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a series covering the grid was gathered without asking the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -5200,7 +5757,7 @@ fn an_oversized_selection_is_refused_by_the_pool() {
 
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the gather's workspace was taken without asking the pool: {error}"
     );
     assert!(
@@ -5972,7 +6529,7 @@ fn an_oversized_binary_workspace_is_refused_by_the_pool() {
         .unwrap();
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a point limit answered in the pool's place: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -5999,7 +6556,7 @@ fn an_oversized_binary_operand_is_refused_by_the_pool() {
         .push_evaluated(right, evaluated_chunk(&schema, 0, values, true))
         .unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "an operand limit answered in the pool's place: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -6283,7 +6840,7 @@ fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
         .retain_binary(&mut refused_binary, 0, NativeChunk::Evaluated(second_own))
         .unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a second chunk holding a table of its own was admitted beside the first: {error}"
     );
     assert_eq!(
@@ -6570,7 +7127,7 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
     assert_eq!(state.buffer.reservation.size(), retained);
     let error = state.compute_binary(&mut binary).unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the assembly was not reserved before it allocated: {error}"
     );
     // The assembly never ran, so its charge is gone: what the node holds is what it retained, and
@@ -6639,7 +7196,7 @@ fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
 
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the assembly was not reserved before it allocated: {error}"
     );
     assert_eq!(
@@ -7707,7 +8264,7 @@ fn an_oversized_set_workspace_is_refused_by_the_pool() {
     }
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
         "the set workspace was not refused by the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -7733,6 +8290,13 @@ fn queued_set_results_hold_their_labels_until_handed_on() {
     .unwrap();
     let start = |pool: &Arc<dyn MemoryPool>| {
         let mut execution = executor(&tree, Arc::clone(pool));
+        match &execution.state().root.op {
+            RuntimeOp::Binary { state, .. } => assert_eq!(
+                state.buffer.reservation.consumer().name(),
+                "native.set at root"
+            ),
+            _ => panic!("expected set binary runtime"),
+        }
         let (left, right) = (
             execution.state().input_ids(0).next().unwrap(),
             execution.state().input_ids(1).next().unwrap(),
@@ -9175,10 +9739,16 @@ fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() 
     let error = execution
         .next_chunk()
         .expect_err("a chunk of another field count was folded");
-    assert!(
-        matches!(error, DataFusionError::Execution(_)),
-        "the refusal is not an execution error: {error}"
-    );
+    match &error {
+        DataFusionError::Context(context, inner) => {
+            assert_eq!(context, "native.aggregate at root");
+            assert!(
+                matches!(inner.as_ref(), DataFusionError::Execution(_)),
+                "{inner}"
+            );
+        }
+        other => panic!("the refusal is not aggregate-contextualized: {other}"),
+    }
     let message = error.to_string();
     assert!(
         message.contains("the `Sum` aggregate"),

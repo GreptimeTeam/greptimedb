@@ -20,6 +20,7 @@ use api::v1::{
     ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use common_base::Plugins;
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_query::prelude::{GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL};
 use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
@@ -33,6 +34,7 @@ use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
 use query::datafusion::{QUERY_FALLBACK_HINT, QUERY_PARALLELISM_HINT};
+use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use query::physical_wrapper::{PhysicalPlanWrapper, PhysicalPlanWrapperRef};
@@ -1768,12 +1770,21 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
     }
 }
 
+/// The fused node of the last wrapped plan that held one, and every region-side raw source.
 #[derive(Default)]
-struct NativePlanObserver(Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>);
+struct NativePlanObserver(
+    Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+);
 
 impl NativePlanObserver {
     fn clear(&self) {
         *self.0.lock().unwrap() = None;
+        self.1.lock().unwrap().clear();
+    }
+
+    fn take_raw_sources(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        std::mem::take(&mut *self.1.lock().unwrap())
     }
 
     fn take(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
@@ -1801,6 +1812,13 @@ impl PhysicalPlanWrapper for NativePlanObserver {
             if node.name() == "FusedSeriesExec" {
                 *self.0.lock().unwrap() = Some(node);
                 break;
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        let mut stack = vec![origin.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "RawSeriesSourceExec" {
+                self.1.lock().unwrap().push(node.clone());
             }
             stack.extend(node.children().into_iter().cloned());
         }
@@ -2135,6 +2153,65 @@ async fn native_promql_executes_fused_node_and_matches_legacy() {
     .await;
     assert_eq!(native_rows, expected);
     assert_eq!(native_rows, legacy_rows);
+
+    // Exercise the split aggregate's fixed-width min, group and stdvar states through the same
+    // native/legacy comparison harness. Sorting is part of the statement output contract.
+    for aggregate in [
+        "min by (host)(native_e2e)",
+        "group by (host)(native_e2e)",
+        "stdvar by (host)(native_e2e)",
+    ] {
+        let query = PromQuery {
+            query: aggregate.to_string(),
+            start: "0".to_string(),
+            end: "0".to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        };
+        let native_rows = native_result_rows(
+            instance
+                .do_promql_query(&query, native_query_context(true, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        let legacy_rows = native_result_rows(
+            instance
+                .do_promql_query(&query, native_query_context(false, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(native_rows, legacy_rows, "{aggregate}");
+        let expected_value = if aggregate.starts_with("min") {
+            None
+        } else if aggregate.starts_with("group") {
+            Some(1.0)
+        } else {
+            Some(0.0)
+        };
+        assert_eq!(native_rows.len(), 16, "{aggregate}");
+        for (index, (time, host, value)) in native_rows.iter().enumerate() {
+            assert_eq!(*time, 0, "{aggregate}");
+            assert_eq!(
+                host,
+                &char::from(b'a' + index as u8).to_string(),
+                "{aggregate}"
+            );
+            if let Some(expected) = expected_value {
+                assert_eq!(*value, expected, "{aggregate}, host={host}");
+            }
+        }
+        if aggregate.starts_with("min") {
+            assert_eq!(
+                native_rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+                (1..=16).map(|value| value as f64 * 2.0).collect::<Vec<_>>(),
+                "{aggregate}"
+            );
+        }
+    }
 }
 
 /// Native instant selectors preserve anchored evaluation and sample timestamps in standalone.
@@ -2148,7 +2225,7 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
     let instance = standalone.fe_instance().clone();
     execute_all(
         &instance,
-        "CREATE TABLE native_at (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_at (host, ts, val) VALUES ('a', -1500, 1), ('a', 500, 2), ('a', 1500, 3), ('a', 3500, 4), ('b', -1500, 9), ('missing', 500, 8), ('missing', 1500, NULL), ('stale', 500, 7)",
+        "CREATE TABLE native_at (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); INSERT INTO native_at (host, ts, val) VALUES ('a', -1500, 1), ('a', 500, 2), ('a', 1500, 3), ('a', 3500, 4), ('neg', 10500, 10), ('neg', 11500, 11), ('b', -1500, 9), ('missing', 500, 8), ('missing', 1500, NULL), ('stale', 500, 7)",
         QueryContext::arc(),
     )
     .await;
@@ -2360,6 +2437,63 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
             "a",
             vec![1.5],
         ),
+        (
+            "timestamp(native_at{host=\"neg\"} @ 11 offset -2s)",
+            11_000,
+            11_000,
+            5_000,
+            "neg",
+            vec![10.5],
+        ),
+        // The anchored and offset-adjusted selector windows are disjoint here.
+        (
+            "timestamp(native_at{host=\"a\"} @ 2 offset 2s)",
+            2_000,
+            2_000,
+            750,
+            "a",
+            vec![],
+        ),
+        (
+            "timestamp((native_at{host=\"a\"} @ 2 offset -1s))",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![1.5],
+        ),
+        (
+            "abs(timestamp(native_at{host=\"a\"} @ 2 offset -1s))",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![1.5],
+        ),
+        (
+            "timestamp(native_at{host=\"a\"} @ end() offset -1s)",
+            0,
+            2_000,
+            5_000,
+            "a",
+            vec![1.5; 3],
+        ),
+        (
+            "timestamp(native_at{host=\"a\"} @ 2 offset 1s) + native_at{host=\"a\"} @ 2 offset 1s",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![2.5],
+        ),
+        (
+            "timestamp(native_at{host=\"a\"} offset 1s)",
+            2_000,
+            2_000,
+            5_000,
+            "a",
+            vec![0.5],
+        ),
     ];
 
     for (expr, start_ms, end_ms, lookback_ms, host, values) in cases {
@@ -2457,6 +2591,14 @@ async fn native_promql_instant_at_uses_sample_time_and_anchor() {
                 assert_eq!(timestamps.value(0), 2_000);
                 assert_eq!(hosts.value(0), "missing");
             }
+        } else if expr == "timestamp(native_at{host=\"neg\"} @ 11 offset -2s)" {
+            // Legacy uses the shifted instant for its lookback window and selects 11.5s; the
+            // anchored native selection intersects that window with the unshifted anchor.
+            assert_eq!(
+                native_result_rows(legacy).await,
+                expected_rows(11_000, "neg", &[11.5]),
+                "legacy known mismatch: {expr}"
+            );
         } else {
             assert_eq!(
                 native_rows,
@@ -2593,6 +2735,29 @@ async fn native_promql_binary_join_uses_two_independent_scans() {
     let instant_legacy =
         native_result_rows(native_tql_output(&instance, &instant_sql, false).await).await;
     assert_eq!(instant_rows, instant_legacy);
+
+    // A constant wrapper keeps the pair native, and the output keeps only the labels the inner
+    // `on(host)` match reports.
+    let wrapped_sql = format!(
+        "TQL EVAL (5, 5, '1s') 100 * (1 - {table}{{kind=\"a\"}} / on(host) {table}{{kind=\"b\"}})"
+    );
+    observer.clear();
+    let wrapped_rows =
+        native_result_rows(native_tql_output(&instance, &wrapped_sql, true).await).await;
+    assert_two_source_native_plan(&observer.take(), true);
+    let wrapped_expected = (0..HOSTS)
+        .map(|host| {
+            (
+                5_000,
+                format!("h{host:04}"),
+                100.0 * (1.0 - 110.0 / 1_025.0),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(wrapped_rows, wrapped_expected);
+    let wrapped_legacy =
+        native_result_rows(native_tql_output(&instance, &wrapped_sql, false).await).await;
+    assert_eq!(wrapped_rows, wrapped_legacy);
 
     // Independent range windows: left reads (1, 5], right (1, 3] after offset.
     // Positive, distinct counter slopes make the exact binary result 2 - 5 = -3 per host.
@@ -2938,10 +3103,526 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     assert_eq!(native, legacy);
 }
 
-/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
-/// native node has no placement there, and the query used to fail in the dist analyzer.
+/// Two selectors over two single-region tables run above both regions: each region answers its
+/// table's raw series through its own merge scan, read across every scan partition, and the node
+/// matches them on the frontend.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
+async fn native_promql_cross_table_pairs_run_above_both_regions() {
+    const HOSTS: usize = 4_608;
+    const POINTS: i64 = 6;
+    const BATCH_ROWS: usize = 512;
+
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_e2e").with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let schema = vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let host = |host: usize| format!("h{host:04}");
+    // Two counters per host: `used` grows by 2 a second from `10 + host % 3`, `total` by 5 from 100.
+    fn used(host: usize, point: i64) -> f64 {
+        10.0 + (host % 3) as f64 + 2.0 * point as f64
+    }
+    fn total(_: usize, point: i64) -> f64 {
+        100.0 + 5.0 * point as f64
+    }
+    let tables = [
+        ("native_xt_used", used as fn(usize, i64) -> f64),
+        ("native_xt_total", total),
+    ];
+    let mut table_ids = Vec::new();
+    for (table, value) in tables {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+                 PRIMARY KEY(host))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        let rows = (0..HOSTS)
+            .flat_map(|index| {
+                (0..POINTS).map(move |point| Row {
+                    values: vec![
+                        ValueData::StringValue(host(index)).into(),
+                        ValueData::TimestampMillisecondValue(point * 1_000).into(),
+                        ValueData::F64Value(value(index, point)).into(),
+                    ],
+                })
+            })
+            .collect::<Vec<_>>();
+        for rows in rows.chunks(BATCH_ROWS) {
+            instance
+                .handle_row_inserts(
+                    RowInsertRequests {
+                        inserts: vec![RowInsertRequest {
+                            table_name: table.to_string(),
+                            rows: Some(Rows {
+                                schema: schema.clone(),
+                                rows: rows.to_vec(),
+                            }),
+                        }],
+                    },
+                    QueryContext::arc(),
+                    false,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        execute_all(
+            &instance,
+            &format!("ADMIN FLUSH_TABLE('{table}')"),
+            QueryContext::arc(),
+        )
+        .await;
+        let table = instance
+            .catalog_manager()
+            .table(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, table, None)
+            .await
+            .unwrap()
+            .unwrap();
+        table_ids.push(table.table_info().table_id());
+    }
+
+    let at_five = |value: &dyn Fn(usize) -> f64, hosts: std::ops::Range<usize>| {
+        hosts
+            .map(|index| (5_000, host(index), value(index)))
+            .collect::<Vec<_>>()
+    };
+    // `spread` is how many of the two sources read every host, which a scan spreads over several
+    // partitions; a source narrowed to a hundred hosts may sit in one.
+    for (query, spread, expected) in [
+        (
+            "native_xt_used / native_xt_total",
+            2,
+            at_five(&|index| used(index, 5) / total(index, 5), 0..HOSTS),
+        ),
+        (
+            // Both counters are sampled at the same instants, so the extrapolated rates keep the
+            // ratio of their slopes.
+            "rate(native_xt_used[4s]) / on(host) rate(native_xt_total[4s])",
+            2,
+            at_five(&|_| 2.0 / 5.0, 0..HOSTS),
+        ),
+        (
+            "100 * (1 - native_xt_used / native_xt_total)",
+            2,
+            at_five(
+                &|index| 100.0 * (1.0 - used(index, 5) / total(index, 5)),
+                0..HOSTS,
+            ),
+        ),
+        (
+            "native_xt_used and on(host) native_xt_total{host=~\"h00..\"}",
+            1,
+            at_five(&|index| used(index, 5), 0..100),
+        ),
+        (
+            "native_xt_used * scalar(native_xt_total{host=\"h0000\"})",
+            1,
+            at_five(&|index| used(index, 5) * total(0, 5), 0..HOSTS),
+        ),
+        (
+            // A scalar on the left still reports the vector side's labels.
+            "scalar(native_xt_used{host=\"h0000\"}) - native_xt_total",
+            1,
+            at_five(&|index| used(0, 5) - total(index, 5), 0..HOSTS),
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        let children = plan.children();
+        assert_eq!(children.len(), 2, "{query}");
+        let read_tables = children
+            .iter()
+            .map(|child| {
+                let mut node = Arc::clone(child);
+                while node.downcast_ref::<MergeScanExec>().is_none() {
+                    let [input] = node.children()[..] else {
+                        panic!("{query}: no merge scan below the fused node: {plan:?}");
+                    };
+                    node = Arc::clone(input);
+                }
+                let merge_scan = node.downcast_ref::<MergeScanExec>().unwrap();
+                let [region] = merge_scan.regions() else {
+                    panic!("{query}: a single-region table reads one region");
+                };
+                region.table_id()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(read_tables, table_ids, "{query}");
+        let raw_sources = observer.take_raw_sources();
+        assert_eq!(raw_sources.len(), 2, "{query}");
+        let mut spread_sources = 0;
+        for source in raw_sources {
+            let scan = source.children()[0];
+            let scan = scan
+                .downcast_ref::<CooperativeExec>()
+                .map_or(scan, |cooperative| cooperative.input());
+            let scan = scan.downcast_ref::<SeriesScanExec>().unwrap();
+            let nonempty = scan
+                .metrics()
+                .unwrap()
+                .iter()
+                .filter(|metric| {
+                    matches!(
+                        metric.value(),
+                        datafusion::physical_plan::metrics::MetricValue::OutputRows(count)
+                            if count.value() > 0
+                    )
+                })
+                .filter_map(|metric| metric.partition())
+                .collect::<std::collections::HashSet<_>>();
+            spread_sources += usize::from(nonempty.len() > 1);
+        }
+        assert_eq!(
+            spread_sources, spread,
+            "{query}: sources reading several scan partitions"
+        );
+        assert_eq!(native.len(), expected.len(), "{query}");
+        for (actual, expected) in native.iter().zip(&expected) {
+            assert_eq!((actual.0, &actual.1), (expected.0, &expected.1), "{query}");
+            assert!(
+                (actual.2 - expected.2).abs() <= 1e-12 * expected.2.abs().max(1.0),
+                "{query}: {actual:?} != {expected:?}"
+            );
+        }
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "legacy: {query}");
+    }
+}
+
+/// `(time, labels, value)` of every row, sorted, whatever the columns are named: the time index is
+/// the timestamp column, the value the one `Float64` column, and every other column a label that a
+/// NULL or empty value leaves out. Also returns the column names.
+async fn native_labelled_rows(
+    output: Output,
+) -> (
+    Vec<String>,
+    Vec<(i64, std::collections::BTreeMap<String, String>, f64)>,
+) {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut columns = batches
+        .schema()
+        .arrow_schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    columns.sort();
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let batch = batch.df_record_batch();
+        let schema = batch.schema();
+        let mut time = None;
+        let mut value = None;
+        let mut labels = Vec::new();
+        for (field, column) in schema.fields().iter().zip(batch.columns()) {
+            match field.data_type() {
+                DataType::Timestamp(..) => {
+                    time = Some(cast(column.as_ref(), &DataType::Int64).unwrap());
+                }
+                DataType::Float64 => {
+                    assert!(value.is_none(), "one value column: {schema:?}");
+                    value = Some(column.clone());
+                }
+                _ => labels.push((
+                    field.name().clone(),
+                    cast(column.as_ref(), &DataType::Utf8).unwrap(),
+                )),
+            }
+        }
+        let time = time.expect("a time index");
+        let time = time.as_any().downcast_ref::<Int64Array>().unwrap();
+        let value = value.expect("a value column");
+        let value = value.as_any().downcast_ref::<Float64Array>().unwrap();
+        for row in 0..batch.num_rows() {
+            let labels = labels
+                .iter()
+                .filter_map(|(name, column)| {
+                    let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+                    (column.is_valid(row) && !column.value(row).is_empty())
+                        .then(|| (name.clone(), column.value(row).to_string()))
+                })
+                .collect();
+            rows.push((time.value(row), labels, value.value(row)));
+        }
+    }
+    rows.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+    (columns, rows)
+}
+
+/// Two tables whose tags, field and time index are named differently, partly flushed and partly
+/// still in the memtable, under both series scan modes: `or` reports the union of both tables'
+/// tags with NULL where a series lacks one, and a match reports only the labels it matches on.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_pairs_over_different_schemas() {
+    common_telemetry::init_default_ut_logging();
+    for series_scan_v2 in [true, false] {
+        let config = mito2::config::MitoConfig {
+            experimental_series_scan_v2: series_scan_v2,
+            ..Default::default()
+        };
+        let (standalone, observer) = native_test_instance(
+            GreptimeDbStandaloneBuilder::new(&format!(
+                "native_promql_cross_table_schemas_{series_scan_v2}"
+            ))
+            .with_mito_config(config),
+        )
+        .await;
+        let instance = standalone.fe_instance().clone();
+        execute_all(
+            &instance,
+            "CREATE TABLE native_xs_a (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+             val DOUBLE, PRIMARY KEY(host, kind))",
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            "CREATE TABLE native_xs_b (host STRING, az STRING, \
+             greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
+             PRIMARY KEY(host, az))",
+            QueryContext::arc(),
+        )
+        .await;
+        // `a` is `10 * host + second`, `b` is `100 + second`. Seconds 0..5 are flushed, the rest
+        // stays in the memtable.
+        for (seconds, flush) in [(0..5, true), (5..10, false)] {
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            for second in seconds {
+                for host in 0..2 {
+                    a.push(format!(
+                        "('h{host}', 'x', {}, {})",
+                        second * 1_000,
+                        10 * host + second
+                    ));
+                    b.push(format!(
+                        "('h{host}', 'z', {}, {})",
+                        second * 1_000,
+                        100 + second
+                    ));
+                }
+            }
+            for (table, values) in [("native_xs_a", a), ("native_xs_b", b)] {
+                execute_all(
+                    &instance,
+                    &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+                    QueryContext::arc(),
+                )
+                .await;
+                if flush {
+                    execute_all(
+                        &instance,
+                        &format!("ADMIN FLUSH_TABLE('{table}')"),
+                        QueryContext::arc(),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        let labels = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let mut union = Vec::new();
+        let mut ratio = Vec::new();
+        let mut filled = Vec::new();
+        for host in 0..2_i64 {
+            let name = format!("h{host}");
+            for second in 3..10_i64 {
+                let a = (10 * host + second) as f64;
+                let b = (100 + second) as f64;
+                union.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
+                union.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
+                ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
+                filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
+            }
+        }
+        union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        // The existing plan fails to execute the match over two differently named time indexes
+        // (it reads a tag column as the time index), so only the native answer is checked there.
+        for (query, legacy_answers, columns, expected) in [
+            (
+                "native_xs_a or native_xs_b",
+                true,
+                vec!["az", "host", "kind", "ts", "val"],
+                union,
+            ),
+            (
+                "native_xs_a / on(host) native_xs_b",
+                false,
+                vec!["host", "ts", "val"],
+                ratio,
+            ),
+            // `kind` and `az` keep every pair apart, so each result is a filled right series and
+            // carries `az`.
+            (
+                "native_xs_a + fill_left(0) native_xs_b",
+                false,
+                vec!["az", "host", "kind", "ts", "val"],
+                filled,
+            ),
+        ] {
+            let context = format!("{query} (series_scan_v2={series_scan_v2})");
+            let sql = format!("TQL EVAL (3, 9, '1s', '1s') {query}");
+            observer.clear();
+            let (native_columns, native) =
+                native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+            let plan = observer.take();
+            assert_eq!(plan.name(), "FusedSeriesExec", "{context}");
+            assert_eq!(plan.children().len(), 2, "{context}");
+            assert_eq!(observer.take_raw_sources().len(), 2, "{context}");
+            assert_eq!(native_columns, columns, "{context}");
+            assert_eq!(native.len(), expected.len(), "{context}: {native:?}");
+            for (actual, expected) in native.iter().zip(&expected) {
+                assert_eq!(
+                    (actual.0, &actual.1),
+                    (expected.0, &expected.1),
+                    "{context}"
+                );
+                assert!(
+                    (actual.2 - expected.2).abs() <= 1e-12 * expected.2.abs().max(1.0),
+                    "{context}: {actual:?} != {expected:?}"
+                );
+            }
+            if legacy_answers {
+                let (_, legacy) =
+                    native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+                assert_eq!(native, legacy, "legacy: {context}");
+            }
+        }
+    }
+}
+
+/// A comparison between two tables runs above both regions: without `bool` it keeps the left
+/// sample where the comparison holds, with `bool` it reports 1 or 0 at every matched point, and
+/// `on(host)` narrows the labels to `host` either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_comparisons() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_comparisons",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xc_a (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host, kind))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xc_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host))",
+        QueryContext::arc(),
+    )
+    .await;
+    // `a` is the second, `b` is `2 + host`: `a` passes `b` at second 3 on h0 and 4 on h1.
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for second in 0..6 {
+        for host in 0..2 {
+            a.push(format!("('h{host}', 'x', {}, {second})", second * 1_000));
+            b.push(format!("('h{host}', {}, {})", second * 1_000, 2 + host));
+        }
+    }
+    for (table, values) in [("native_xc_a", a), ("native_xc_b", b)] {
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let mut filtered = Vec::new();
+    let mut bools = Vec::new();
+    for host in 0..2_i64 {
+        let labels = std::collections::BTreeMap::from([("host".to_string(), format!("h{host}"))]);
+        for second in 0..6_i64 {
+            let holds = second > 2 + host;
+            if holds {
+                filtered.push((second * 1_000, labels.clone(), second as f64));
+            }
+            let equal = second == 2 + host;
+            bools.push((
+                second * 1_000,
+                labels.clone(),
+                if equal { 1.0 } else { 0.0 },
+            ));
+        }
+    }
+    for (query, expected) in [
+        ("native_xc_a > on(host) native_xc_b", filtered),
+        ("native_xc_a == bool on(host) native_xc_b", bools),
+    ] {
+        let sql = format!("TQL EVAL (0, 5, '1s') {query}");
+        observer.clear();
+        let (_, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), 2, "{query}");
+        assert_eq!(native, expected, "{query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(legacy, expected, "legacy: {query}");
+    }
+}
+
+/// A two-selector query over a table split into regions never fuses the binary itself.
+///
+/// A fused node with more than one input has no placement on such a table — the dist analyzer
+/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
+/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
+/// single-input node over a region-local scan, which places fine, and it is what the hybrid
+/// operand route does. What must never appear is a fused node with two children, so that is what
+/// is asserted rather than "no fused node at all".
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -2977,7 +3658,14 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        if let Some(fused) = observer.fused() {
+            assert_eq!(
+                fused.children().len(),
+                1,
+                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
+                 table: {fused:?}"
+            );
+        }
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");

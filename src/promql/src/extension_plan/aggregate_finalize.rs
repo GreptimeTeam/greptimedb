@@ -187,7 +187,8 @@ impl AggregateFinalize {
     /// its binding: its `Utf8` columns are the labels it writes, and its `Float64` columns name the
     /// merged fields by position, since the merge folds the cut aggregate's fields in the order the
     /// statement declares them. Building rejects an input that is not state, a suffix the runtime
-    /// does not execute and a schema [`classify_output`] cannot convert.
+    /// does not execute (the supported suffix operations are maps, aggregates, TopK and
+    /// constant-sided binary operations) and a schema [`classify_output`] cannot convert.
     pub fn to_execution_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
@@ -346,12 +347,18 @@ struct Split {
 
 /// Splits the innermost aggregate out of `node`.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. Only a map, an aggregate and a binary operation with
-/// a constant on one side may sit above the cut: a map is point-wise and so is the same operation over
-/// merged values, an aggregate runs over the complete merge, and a constant is broadcast over whatever
-/// the other side answers - while an instant selection, a window, a vector-wide operation or a binary
-/// operation between two vectors would read evaluated values, the whole vector or a matched pair,
-/// shapes the merge does not produce.
+/// `Ok(None)` is a subtree holding no aggregate. The currently verified suffix operations are maps,
+/// aggregates, TopK/BottomK and binary operations with a constant on one side. TopK/BottomK run once
+/// in the suffix over the fully merged aggregate series, per evaluation timestamp, and never in the
+/// partition-local producer. A map is point-wise and an aggregate runs over the complete merge.
+/// LimitK is declined because it selects the first `k` series in input order
+/// ([`crate::select::limitk`]), while this merge does not preserve the storage input order. Other
+/// vector operations have not yet been verified/supported by this split.
+///
+/// An instant selection or window above the cut cannot be applied to the merged values under the
+/// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
+/// A binary operation between two vectors would require matching the cut's merged output against a
+/// vector sibling, but this merge only gathers the cut's state.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(None),
@@ -412,6 +419,23 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
                 }
             }
         }
+        NativeExpr::Vector {
+            input,
+            op: op @ crate::native::plan::BoundVectorOp::TopK { .. },
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Vector {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
+        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
@@ -502,6 +526,7 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
@@ -628,9 +653,9 @@ const STRING_CAPACITY: usize = 1024;
 /// first item rather than a row the error invalidates after it. What the answer holds is charged to
 /// that stream, which is the only owner it has: the plan answers once.
 ///
-/// The cut is the innermost aggregate of a tree of inputs, maps and aggregates, so the suffix the
-/// runtime is asked to build is one of those; [`ExecutionPlan::execute`] builds its state and is
-/// where a shape the runtime cannot run is refused.
+/// The suffix above the cut is built from the aggregate's output and may contain maps, aggregates,
+/// TopK/BottomK or a binary operation with a constant on one side. [`ExecutionPlan::execute`]
+/// builds its state and is where a shape the runtime cannot run is refused.
 ///
 /// The plain state-batch input is temporary. The final design consumes series frames directly
 /// from FusedSeries instead of decoding and rebuilding this intermediate state-row layout.
@@ -909,7 +934,10 @@ async fn merge_into_batches(
         reservation.try_resize(merger.state_bytes())?;
     }
     // Only a successful end of the input answers: a failed read dropped the state above instead.
-    let series = merger.finish_budgeted(|total| reservation.try_resize(total))?;
+    let mut series = merger.finish_budgeted(|total| reservation.try_resize(total))?;
+    // Partition arrival order is not a statement-level output order. Match Prometheus label
+    // comparison before presenting the finalized groups so equivalent executions answer alike.
+    series.sort_by(compare_series_labels);
     // The merge is consumed by its answer, which replaces what it kept. The whole answer is charged at
     // once and held until the loop ends: the vector and every series still waiting in it stay live
     // while the loop folds them one by one, so releasing them one at a time would leave the rest
@@ -957,6 +985,31 @@ async fn merge_into_batches(
     // The rows are what stays held once the series they came from are gone.
     answer.try_resize(batches.iter().map(RecordBatch::get_array_memory_size).sum())?;
     Ok(batches)
+}
+
+/// Compares the complete Prometheus label sets in label-name order, with no temporary allocation.
+fn compare_series_labels(a: &Series, b: &Series) -> Ordering {
+    fn labels(series: &Series) -> impl Iterator<Item = (&str, &str)> {
+        let tags = series.metric.tags();
+        let name_index = tags.partition_point(|tag| tag.name.as_ref() < "__name__");
+        tags[..name_index]
+            .iter()
+            .map(|tag| (tag.name.as_ref(), tag.value.as_ref()))
+            .chain(
+                series
+                    .metric
+                    .name()
+                    .into_iter()
+                    .map(|name| ("__name__", name)),
+            )
+            .chain(
+                tags[name_index..]
+                    .iter()
+                    .map(|tag| (tag.name.as_ref(), tag.value.as_ref())),
+            )
+    }
+
+    labels(a).cmp(labels(b))
 }
 
 /// Hands over every chunk the suffix has settled, as rows.

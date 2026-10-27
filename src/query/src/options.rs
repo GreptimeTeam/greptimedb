@@ -110,8 +110,10 @@ pub struct QueryOptions {
     /// - `fair`: Fair divides memory available after unspillable reservations
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
-    /// Enables the experimental native PromQL execution path for compatible
-    /// instant queries over shared Metric raw series. Default: `false`.
+    /// Enables the experimental native PromQL execution path for compatible queries. This
+    /// path currently applies only to standalone queries using in-process region transport,
+    /// and also requires the per-request `query.experimental_native_promql=true` extension.
+    /// Default: `false`.
     pub experimental_native_promql: bool,
 }
 
