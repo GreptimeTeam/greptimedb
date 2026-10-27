@@ -3467,8 +3467,9 @@ async fn native_promql_cross_table_comparisons() {
     }
 }
 
-/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
-/// native node has no placement there, and the query used to fail in the dist analyzer.
+/// A two-selector query over a table split into regions is not planned as one two-scan native node:
+/// that node has no placement there, and the query used to fail in the dist analyzer. The hybrid
+/// route may still run each operand natively under the existing join.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
@@ -3506,7 +3507,12 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        assert!(
+            observer
+                .fused()
+                .is_none_or(|plan| plan.children().len() < 2),
+            "`{query}` was planned as one two-scan native node"
+        );
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");

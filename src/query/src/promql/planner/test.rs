@@ -2662,16 +2662,26 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
-/// Two selectors over tables split into regions keep the existing plan, across tables as on one.
+/// Two selectors over tables split into regions are not one two-input node, across tables as on
+/// one; the hybrid route may still plan each operand natively under the existing join.
 #[tokio::test]
 async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
+    fn has_pair_node(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+            && fused.inputs().len() > 1
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(has_pair_node)
+    }
     let plan = build_native_fused_plan_with_provider(
         "some_metric / other_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert!(!has_pair_node(&plan), "{plan}");
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
