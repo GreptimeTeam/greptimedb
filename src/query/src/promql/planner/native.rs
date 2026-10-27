@@ -47,7 +47,11 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
-use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
+use promql::native::canonicalize::insert_native_merge_inside_current_fused;
+use promql::native::plan::{
+    NativeExpr, NativeNode, NativeProperties, NativeTree, needs_single_execution,
+    reads_across_series,
+};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
@@ -579,18 +583,24 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
-        // Ordinary pointwise trees and trees of one-to-one matches, on one table or across
-        // several, are answered per partition. Aggregate splits are restricted to one raw scan
-        // child.
-        let root = compiled.tree.root();
-        let per_partition =
-            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
-        if !per_partition {
-            if selectors.len() != 1
-                || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
-            {
-                return Ok(None);
-            }
+        // Where the tree is placed is decided on the tree exactly as the compiler produced it, and
+        // before anything is inserted into it. A merge reads across series, so a decision taken
+        // afterwards would answer for the rewrite rather than for the query: the prefix of `sum(x)`
+        // would sit over a merge, which the split's `admit_prefix` refuses, and `rate(x[5m])` would
+        // report that it reads across series. What the insertion pass below does is therefore a
+        // consequence of this placement and can never change which placement is taken.
+        let Some(placement) = NativePlacement::of(
+            &compiled.tree,
+            selectors.len(),
+            &series_schema.fields,
+            &time,
+        ) else {
+            return Ok(None);
+        };
+        if let NativePlacement::SplitAggregate = placement {
+            // A split inserts nothing. Its prefix is per-partition per-series work and its finalize
+            // already merges the state every partition exports, so a canonical merge would both
+            // break the prefix contract and repeat what the finalize does.
             let saved = self.ctx.clone();
             let planned = self
                 .prom_root_expr_to_plan(prom_expr, query_engine_state)
@@ -626,7 +636,23 @@ impl PromPlanner {
                 single_input_context,
             )));
         }
-        let tree = compiled.tree;
+        // What a merge may be inserted for is a property of the placement, so this is where the
+        // pass runs and nowhere else. A single execution reads every input partition at once, so
+        // the pieces of one label set arrive together and a consumer that needs the whole series
+        // can be handed a merge. A per-partition execution reads one of them, so the tree is handed
+        // over exactly as compiled: a merge there could only collect that partition's fragments and
+        // would present them as a canonical series, which is worse than no merge at all.
+        // Cross-partition aliasing therefore stays unsolved on a per-partition placement until a
+        // repartition node makes more placements single-execution.
+        let tree = if let NativePlacement::SingleExecution = placement {
+            // What the route knows about each fused input: one scan partition's pieces of the
+            // metric, read by the pass at the leaf the compiler bound to that source index.
+            let boundary = vec![NativeProperties::source_pieces(NATIVE_ORDERING); children.len()];
+            insert_native_merge_inside_current_fused(&compiled.tree, &boundary)
+                .context(DataFusionPlanningSnafu)?
+        } else {
+            compiled.tree
+        };
         let root_fields = tree
             .root()
             .output
@@ -923,6 +949,72 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
     }
 }
 
+/// How the route places a tree on the scan partitions, decided on the tree as it was compiled.
+///
+/// The placement is what an inserted canonical merge means, so it is read off the compiled tree and
+/// never off a rewritten one: [`reads_across_series`] and [`AggregateFinalize::can_split`] both
+/// answer differently for a tree the insertion pass already put a merge into, and both answers would
+/// then describe the rewrite instead of the query.
+///
+/// A scan keeps each whole series in one of its output partitions (`SeriesGather`'s contract), so a
+/// tree that answers one series from one series' rows is answered correctly one partition at a time;
+/// that is [`Self::PerPartition`]. A tree that folds across series needs more than one partition's
+/// series, which it gets either by folding each partition's state in a finalize
+/// ([`Self::SplitAggregate`]) or by seeing every partition in one execution
+/// ([`Self::SingleExecution`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePlacement {
+    /// One execution per scan partition. Every series' rows are in the partition that holds it, so
+    /// one execution sees each series whole.
+    PerPartition,
+    /// A per-partition per-series prefix, and a finalize that merges the state every partition
+    /// exports.
+    SplitAggregate,
+    /// One execution over every input partition, so every partition's pieces arrive together. This
+    /// is the one placement an inserted merge has anything to collect.
+    SingleExecution,
+}
+
+impl NativePlacement {
+    /// How `tree` is placed, or `None` when the route has no placement for it.
+    ///
+    /// `selectors` is how many occurrences the statement has. `fields` and `time_index` are the raw
+    /// layout the aggregate split is offered its cut against.
+    ///
+    /// Per-series work is decided first: a tree that answers each series from its own rows is
+    /// correct one partition at a time, and a two-occurrence pair reads each of its sides the same
+    /// way. Of what is left, the aggregate split carries one cut over one raw scan child, and a
+    /// one-selector tree the split refuses that nonetheless reads the whole vector at a point is a
+    /// single execution.
+    ///
+    /// `None` is the route having no placement for the tree, and it is the same set the route
+    /// declined before this decision was named: a two-occurrence statement outside the admitted pair
+    /// is left to the existing planner, because no partition holds the whole of what it folds, and a
+    /// one-selector tree that reads across series without needing a single execution is not a shape
+    /// the compiler builds. Naming the placement does not widen what the route plans.
+    fn of(
+        tree: &NativeTree,
+        selectors: usize,
+        fields: &[FieldSpec],
+        time_index: &str,
+    ) -> Option<Self> {
+        let root = tree.root();
+        if !reads_across_series(root)
+            || pointwise_operand(root)
+            || (selectors == 2 && independent_scan_pair(root))
+        {
+            return Some(Self::PerPartition);
+        }
+        if selectors != 1 {
+            return None;
+        }
+        if AggregateFinalize::can_split(tree, fields, time_index) {
+            return Some(Self::SplitAggregate);
+        }
+        needs_single_execution(root).then_some(Self::SingleExecution)
+    }
+}
+
 /// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
 ///
 /// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
@@ -1120,24 +1212,39 @@ fn calls_rate_or_increase(expr: &PromExpr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use std::time::{Duration, UNIX_EPOCH};
 
-    use datatypes::series::SeriesOrdering;
-    use datatypes::series::samples::{FieldSpec, SeriesSchema};
+    use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
+    use datatypes::arrow::array::Float64Array;
+    use datatypes::arrow::buffer::{Buffer, ScalarBuffer};
+    use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+    use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, SeriesSchema};
+    use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
     use promql::extension_plan::AggregateFinalize;
     use promql::native::canonicalize::insert_native_merge_inside_current_fused;
+    use promql::native::execute::{NativeExecutionState, NativeExecutor};
     use promql::native::plan::{
-        NativeExpr, NativeNode, NativeProperties, NativeTree, reads_across_series,
+        NativeExpr, NativeNode, NativeProperties, NativeTree, needs_single_execution,
+        reads_across_series,
     };
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
+        NATIVE_PROMQL_EXTENSION_KEY, NativePlacement, admitted_selector, admitted_single_selector,
         collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
-        native_promql_requested, pointwise_operand, scan_time_filter,
+        native_promql_requested, scan_time_filter,
     };
+
+    /// The raw layout [`compiled_test_tree`] binds every selector to: one float field, no grid.
+    fn raw_test_schema() -> Arc<SeriesSchema> {
+        Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec { name: "v0".into() }]),
+            eval_grid: None,
+        })
+    }
 
     fn compiled_test_tree(query: &str) -> NativeTree {
         let statement = promql_parser::parser::EvalStmt {
@@ -1147,10 +1254,7 @@ mod tests {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(5),
         };
-        let schema = Arc::new(SeriesSchema {
-            fields: Arc::from([FieldSpec { name: "v0".into() }]),
-            eval_grid: None,
-        });
+        let schema = raw_test_schema();
         crate::promql::native_compile::compile_selectors(
             &statement,
             &|_| Ok(Arc::clone(&schema)),
@@ -1385,7 +1489,9 @@ mod tests {
     /// `query`'s tree with the canonical merges the insertion pass puts in it.
     ///
     /// The facts are the ones the planner holds for its scans, one per selector occurrence, so this
-    /// is the tree the route would decide on if the pass ran where `compiled.tree` is read today.
+    /// is the tree the route hands over when its placement is a single execution - and, for the
+    /// tests that show what the other placements avoid, the tree it would hand over had the pass run
+    /// for every placement.
     fn passed_tree(query: &str, selectors: usize) -> NativeTree {
         insert_native_merge_inside_current_fused(
             &compiled_test_tree(query),
@@ -1394,76 +1500,427 @@ mod tests {
         .expect("the pass keeps the tree legal")
     }
 
-    /// Whether the route answers `tree` at all, which is the guard chain
-    /// [`PromPlanner::try_plan_native_fused_with_context`] applies in this order: a tree that reads
-    /// across series is offered to the aggregate split, and one the split cannot carry is declined.
+    /// The placement the route gives `tree`, asked of the same function the planner asks.
     ///
-    /// `selectors` is how many occurrences the statement has; the raw field layout is the one
-    /// [`compiled_test_tree`] binds.
-    fn native_route_answer(tree: &NativeTree, selectors: usize) -> &'static str {
-        let fields = [FieldSpec { name: "v0".into() }];
-        let per_partition = !reads_across_series(tree.root()) || pointwise_operand(tree.root());
-        if per_partition {
-            return "per-partition";
-        }
-        if selectors == 1 && AggregateFinalize::can_split(tree, &fields, "ts") {
-            return "split aggregate";
-        }
-        "legacy plan"
+    /// The raw field layout is the one [`compiled_test_tree`] binds, and `selectors` is how many
+    /// occurrences the statement has.
+    fn placement_of(tree: &NativeTree, selectors: usize) -> Option<NativePlacement> {
+        NativePlacement::of(tree, selectors, &[FieldSpec { name: "v0".into() }], "ts")
     }
 
-    /// A tree the pass rewrote still has to keep the route it had.
+    /// What the route answers for `tree`, in the order
+    /// [`PromPlanner::try_plan_native_fused_with_context`] applies it: the placement first, then
+    /// whether the labels the fused node declares can be derived for the tree's root.
     ///
-    /// This is the conflict the pass can introduce: a merge reads across series, a tree that reads
-    /// across series is offered to the aggregate split, and the split cuts at the innermost
-    /// aggregate. `Merge(Aggregate(..))` above the cut is carried - the split descends through a
-    /// merge and re-wraps the suffix with it - so only what the pass puts *below* the cut can take
-    /// the route away. It must not.
+    /// `sources` holds the tags of each selector's scan, which the label walk reads.
+    fn route_answer(tree: &NativeTree, selectors: usize, sources: &[Vec<String>]) -> &'static str {
+        match placement_of(tree, selectors) {
+            Some(NativePlacement::PerPartition) => "per-partition",
+            Some(NativePlacement::SplitAggregate) => "split aggregate",
+            // A single execution is handed to the fused node like any other tree, so the labels that
+            // node declares have to be derivable for its root. Nothing has taught the walk to name
+            // them for a whole-vector root, so a tree rooted at one is declined there.
+            Some(NativePlacement::SingleExecution) => match fused_output_tags(tree.root(), sources)
+            {
+                Some(_) => "single execution",
+                None => "legacy plan",
+            },
+            None => "legacy plan",
+        }
+    }
+
+    /// The tree [`PromPlanner::try_plan_native_fused_with_context`] hands to the node it builds: the
+    /// compiled tree, or - when the placement is a single execution - the one the insertion pass
+    /// canonicalized.
+    fn routed_tree(query: &str) -> NativeTree {
+        let selectors = collected_selectors(query).len();
+        let tree = compiled_test_tree(query);
+        if placement_of(&tree, selectors) == Some(NativePlacement::SingleExecution) {
+            return passed_tree(query, selectors);
+        }
+        tree
+    }
+
+    /// The labels a one-selector statement's scan reports, for the label walk.
+    fn one_source_tags() -> Vec<Vec<String>> {
+        vec![vec!["host".to_string()]]
+    }
+
+    /// An aggregate tree still takes the split route, because the placement is decided before the
+    /// insertion pass runs.
     ///
-    /// Ignored because it does not hold yet: the pass wraps the child every stateful consumer reads,
-    /// and the cut aggregate's child is exactly that, so the prefix becomes `Merge(Window(..))`,
-    /// which [`AggregateFinalize`]'s `admit_prefix` refuses with "a per-series prefix across a
-    /// canonical merge, which reads the whole vector". Wiring the pass into the route before that is
-    /// fixed turns every `sum(..)`, `avg(..)`, `count(..)`, ... query the split answers today into a
-    /// fallback.
+    /// The two facts are one test on purpose: the placement of these shapes is a split only for the
+    /// tree the compiler produced. A merge reads across series, and the split cuts at the innermost
+    /// aggregate, so a pass that ran first would put a merge below the cut and its prefix would
+    /// become `Merge(Window(..))`, which `admit_prefix` refuses with "a per-series prefix across a
+    /// canonical merge, which reads the whole vector". The second half of each case is that tree, so
+    /// the order is what the test holds.
     #[test]
-    #[ignore = "the pass puts a merge below the cut aggregate, which the split's admit_prefix refuses"]
     fn an_admitted_aggregate_still_splits_after_the_insertion_pass() {
+        let fields = [FieldSpec { name: "v0".into() }];
         for query in ["sum(rate(x[5m]))", "sum(x)", "avg by (host) (rate(x[5m]))"] {
-            let passed = passed_tree(query, 1);
-            let answer = native_route_answer(&passed, 1);
+            // The placement is read off the compiled tree, so it is a split.
+            let compiled = compiled_test_tree(query);
             assert_eq!(
-                "split aggregate", answer,
-                "`{query}` no longer takes the native route after the pass:\n{passed}"
+                Some(NativePlacement::SplitAggregate),
+                placement_of(&compiled, 1),
+                "`{query}` no longer takes the split route:\n{compiled}"
+            );
+            assert_eq!(
+                "split aggregate",
+                route_answer(&compiled, 1, &one_source_tags()),
+                "`{query}`"
+            );
+            // A split inserts nothing, so the finalize is handed the tree as compiled.
+            let routed = routed_tree(query);
+            assert_eq!(
+                0,
+                routed.to_string().matches("Merge").count(),
+                "`{query}`: the split route was handed a merge:\n{routed}"
+            );
+            assert!(
+                AggregateFinalize::can_split(&routed, &fields, "ts"),
+                "`{query}`: the split route was handed a tree it cannot cut:\n{routed}"
+            );
+
+            // What the pass would have done to this tree is exactly what takes the split away: with
+            // it, no placement is a split any more, so the route could not offer one.
+            let passed = passed_tree(query, 1);
+            assert!(
+                !AggregateFinalize::can_split(&passed, &fields, "ts"),
+                "`{query}`: the pass left the split intact, so this test no longer guards the order:\n{passed}"
+            );
+            assert_ne!(
+                Some(NativePlacement::SplitAggregate),
+                placement_of(&passed, 1),
+                "`{query}`: a passed tree still reads as a split"
             );
         }
     }
 
-    /// The per-series counterpart of the test above, and the other half of the same conflict.
+    /// The per-series counterpart: a tree that answers each series from its own rows keeps the
+    /// per-partition placement, and that placement inserts nothing.
     ///
-    /// Ignored for the same reason: the pass canonicalizes the root of *every* tree, because a scan's
-    /// pieces prove neither fact and the route supplies no canonical boundary facts. A tree whose
-    /// root is a merge reads across series, so [`reads_across_series`] sends it to the aggregate
-    /// split, which a tree holding no aggregate cannot carry, and the route answers `Ok(None)`.
+    /// One execution reads one scan partition, and a scan keeps each series whole in one of them, so
+    /// per-series work is already answered correctly there. A merge inserted on this placement could
+    /// only collect the fragments of the partition it happens to run on - a partial merge presented
+    /// as a canonical series - so the tree is handed over as compiled and cross-partition aliasing
+    /// stays unsolved until a repartition node exists.
     #[test]
-    #[ignore = "the pass wraps the root, which reads_across_series sends to the aggregate split"]
     fn the_insertion_pass_does_not_take_a_per_series_tree_off_the_route() {
         for query in ["rate(x[5m])", "x", "abs(x)", "x * 2"] {
-            let passed = passed_tree(query, 1);
+            let compiled = compiled_test_tree(query);
+            assert_eq!(
+                Some(NativePlacement::PerPartition),
+                placement_of(&compiled, 1),
+                "`{query}` is not per-series work:\n{compiled}"
+            );
             assert_eq!(
                 "per-partition",
-                native_route_answer(&passed, 1),
-                "`{query}` no longer takes the native route after the pass:\n{passed}"
+                route_answer(&compiled, 1, &one_source_tags()),
+                "`{query}`"
+            );
+            // The placement inserts nothing, so what the node is handed is the compiled tree.
+            let routed = routed_tree(query);
+            assert_eq!(
+                0,
+                routed.to_string().matches("Merge").count(),
+                "`{query}`: the per-partition route was handed a merge:\n{routed}"
+            );
+            assert!(
+                !reads_across_series(routed.root()),
+                "`{query}`: the per-partition route was handed a tree that reads across series:\n{routed}"
+            );
+
+            // And the pass would take this tree off the per-partition placement, which is the other
+            // half of why the order matters: a merge reads across series.
+            let passed = passed_tree(query, 1);
+            assert_ne!(
+                Some(NativePlacement::PerPartition),
+                placement_of(&passed, 1),
+                "`{query}`: a passed tree still reads as per-partition:\n{passed}"
             );
         }
     }
 
-    /// A per-series tree the pass leaves its shape's route: the window still reads its raw input,
-    /// and what the pass adds is one merge above it.
+    /// A tree whose single execution reads every input partition is the one placement the pass
+    /// inserts into, and no shape the route plans today gets that far.
     ///
-    /// The pass does insert a merge here - a scan's pieces prove neither that a label set is one
-    /// series nor that duplicates were checked, so the root, which is a consumer too, gains one -
-    /// and a merge writes no label of its own, so the tags the node declares are unchanged.
+    /// `topk`, `sort`, `absent` and an aggregate the split refuses all read the whole vector, so the
+    /// route decides a single execution for them and runs the pass, which puts a merge below every
+    /// consumer that needs a whole canonical series - here under the vector operation and again at
+    /// the root. The tree stays a single execution holding the labels it held, so the placement and
+    /// the shape survive the rewrite.
+    ///
+    /// The route then declines the tree anyway, and for a reason the pass cannot reach: the labels
+    /// the fused node must declare are derived by [`fused_output_tags`], which names none for an
+    /// aggregate or a vector root. So the merge is inserted into a tree that is then not built, which
+    /// is why no plan the route produces today carries one.
+    #[test]
+    fn a_single_execution_tree_gains_a_merge_and_the_route_declines_it() {
+        for query in ["topk(1, x)", "sort(x)", "absent(x)", "quantile(0.9, x)"] {
+            let compiled = compiled_test_tree(query);
+            assert_eq!(
+                Some(NativePlacement::SingleExecution),
+                placement_of(&compiled, 1),
+                "`{query}` is not a single execution:\n{compiled}"
+            );
+            assert!(
+                needs_single_execution(compiled.root()),
+                "`{query}`: the placement and the tree disagree"
+            );
+            // The pass runs for this placement, and it is the only one it runs for.
+            let routed = routed_tree(query);
+            assert!(
+                routed.to_string().matches("Merge").count() >= 2,
+                "`{query}`: the single-execution tree gained no merge:\n{routed}"
+            );
+            assert_ne!(
+                compiled.to_string(),
+                routed.to_string(),
+                "`{query}`: the route handed over the tree as compiled"
+            );
+            // The insertion leaves the placement and the labels alone.
+            assert!(
+                needs_single_execution(routed.root()),
+                "`{query}`: the merge took the single execution away:\n{routed}"
+            );
+            assert_eq!(
+                fused_output_tags(compiled.root(), &one_source_tags()),
+                fused_output_tags(routed.root(), &one_source_tags()),
+                "`{query}`: the pass changed the labels the node declares"
+            );
+            // And the route still leaves it to the existing planner, because the labels a root of
+            // this shape reports are not the ones the fused node can declare.
+            assert_eq!(
+                "legacy plan",
+                route_answer(&compiled, 1, &one_source_tags()),
+                "`{query}`"
+            );
+            assert_eq!(
+                "legacy plan",
+                route_answer(&routed, 1, &one_source_tags()),
+                "`{query}`: the insertion changed the route's answer:\n{routed}"
+            );
+        }
+    }
+
+    /// The rows a native tree answers when `pushes` are fed to its one input, as each output
+    /// series' label set and the values it holds at each grid position.
+    ///
+    /// A series may arrive as one chunk or as several - a chunk says which series it carries and
+    /// closes it - so rows are appended to the entry for their label set and a series split over two
+    /// chunks reads as one. That is what makes the map comparable between a tree that answers
+    /// fragments and one whose inserted merge collected them.
+    fn native_rows(
+        tree: &NativeTree,
+        pushes: Vec<RawSeriesChunk>,
+    ) -> BTreeMap<String, Vec<(usize, f64)>> {
+        let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+        let state = NativeExecutionState::try_new(tree, Arc::clone(&pool))
+            .expect("the runtime executes this tree");
+        let ids = state.input_ids(0).collect::<Vec<_>>();
+        assert_eq!(ids.len(), 1, "a one-selector tree has one runtime input");
+        let mut executor = NativeExecutor::new(state);
+        for chunk in pushes {
+            executor
+                .push_raw(ids[0], chunk)
+                .expect("the chunk is pushed to the tree's input");
+        }
+        let chunks = executor.finish().expect("every series closed");
+        assert_eq!(pool.reserved(), 0, "a finished execution reserves nothing");
+
+        let mut rows: BTreeMap<String, Vec<(usize, f64)>> = BTreeMap::new();
+        for chunk in &chunks {
+            let metric = &chunk.series.metric;
+            let mut parts = Vec::new();
+            if let Some(name) = metric.name() {
+                parts.push(format!("__name__=\"{name}\""));
+            }
+            for label in metric.tags() {
+                parts.push(format!("{}=\"{}\"", label.name, label.value));
+            }
+            let field = chunk
+                .series
+                .fields
+                .as_slice()
+                .first()
+                .expect("the result carries the one field it was bound to");
+            let entry = rows.entry(format!("{{{}}}", parts.join(", "))).or_default();
+            for (position, row) in chunk.series.time.positions() {
+                match field.sample(row) {
+                    SampleRef::Float(value) => entry.push((position, value)),
+                    _ => panic!("the row at {row} holds no float"),
+                }
+            }
+        }
+        rows
+    }
+
+    /// One raw chunk of the series `x{host=<host>}`, holding `rows` at their source timestamps.
+    ///
+    /// `is_last` says this chunk closes the series, so one label set can be handed over as two
+    /// fragments - which is what one scan partition's pieces of a series look like.
+    fn raw_chunk_of(host: &str, key: &[u8], rows: &[(i64, f64)], is_last: bool) -> RawSeriesChunk {
+        let timestamps = rows.iter().map(|&(time, _)| time).collect::<Vec<_>>();
+        let values = rows.iter().map(|&(_, value)| value).collect::<Vec<_>>();
+        RawSeriesChunk::try_new(
+            &raw_test_schema(),
+            Buffer::from_slice_ref(key),
+            Some(
+                SeriesLabels::try_new(
+                    Some("x".into()),
+                    vec![Label {
+                        name: "host".into(),
+                        value: host.into(),
+                    }],
+                )
+                .expect("distinct label names"),
+            ),
+            RawTimestamps::try_new(ScalarBuffer::from(timestamps)).expect("increasing timestamps"),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(values))])
+                .expect("one field"),
+            is_last,
+        )
+        .expect("the chunk is bound to the schema it is built against")
+    }
+
+    /// The input a single-execution test reads: `x{host="h1"}` in two fragments, and a second series
+    /// `x{host="h2"}` that the `topk` below drops.
+    ///
+    /// `h1` holds 1, 2 and 3 on the three grid points and `h2` holds a smaller value on each of them,
+    /// so `topk(1, x)` keeps the whole of `h1` - which is what makes that series' fragments show up
+    /// in the answer rather than being lost.
+    fn fragmented_single_execution_input() -> Vec<RawSeriesChunk> {
+        vec![
+            // One label set handed over as two pieces: the same encoded key, the first chunk not
+            // closing the series and the second one closing it, which is what one scan partition's
+            // pieces of a series look like.
+            raw_chunk_of("h1", b"h1", &[(0, 1.0), (5_000, 2.0)], false),
+            raw_chunk_of("h1", b"h1", &[(10_000, 3.0)], true),
+            raw_chunk_of(
+                "h2",
+                b"h2",
+                &[(0, 0.25), (5_000, 0.5), (10_000, 0.75)],
+                true,
+            ),
+        ]
+    }
+
+    /// The one shape that carries an inserted merge answers the rows the unmerged tree answered.
+    ///
+    /// [`NativePlacement::SingleExecution`] is the only placement the insertion pass runs on, and
+    /// `topk(1, x)` is that placement: one execution reads every scan partition, so the pieces of
+    /// one label set arrive together and a merge can collect them. What it may not do is change the
+    /// answer, so both trees are executed here over the same input - a series arriving as two
+    /// fragments, which is what one partition's pieces of it look like - and the rows are compared.
+    /// A merge collects pieces by canonical label set; the operation above it then reads one series
+    /// where the unmerged tree read two, and the value at each grid position is the same.
+    #[test]
+    fn a_single_execution_merge_answers_the_rows_the_unmerged_tree_answered() {
+        let query = "topk(1, x)";
+        let compiled = compiled_test_tree(query);
+        assert_eq!(
+            Some(NativePlacement::SingleExecution),
+            placement_of(&compiled, 1),
+            "{compiled}"
+        );
+        let inserted = routed_tree(query);
+        assert!(
+            inserted.to_string().matches("Merge").count() > 0,
+            "the single execution did not gain a merge:\n{inserted}"
+        );
+
+        let without = native_rows(&compiled, fragmented_single_execution_input());
+        let with = native_rows(&inserted, fragmented_single_execution_input());
+        assert_eq!(
+            without, with,
+            "`{query}`: the inserted merge answered different rows:\n{inserted}"
+        );
+        // The fixture's point: `topk(1, x)` keeps the whole of the one series it picks and drops the
+        // other, so the answer is that series' three values.
+        assert_eq!(
+            vec![vec![(0, 1.0), (1, 2.0), (2, 3.0)]],
+            with.into_values().collect::<Vec<_>>(),
+            "`{query}`: the answer is not the collected series"
+        );
+    }
+
+    /// The route's table for the shapes it answers today: the placement each one gets, and whether
+    /// that placement inserts anything.
+    ///
+    /// This is the invariant the order exists for, stated one shape at a time. A merge may only be
+    /// inserted where one execution sees every partition, so the shapes that reach a plan today -
+    /// per-series work and the aggregate split - carry none, and the one shape that would carry one
+    /// is not planned at all. A plan the route returns therefore runs exactly the tree the compiler
+    /// produced, and the insertion pass is wired to a placement that no reachable shape takes.
+    #[test]
+    fn no_shape_the_route_plans_carries_an_inserted_merge() {
+        let one = one_source_tags();
+        let two = || {
+            let mut sources = one.clone();
+            sources.push(vec!["host".to_string(), "kind".to_string()]);
+            sources
+        };
+        for (query, selectors, placement, sources) in [
+            ("x", 1, NativePlacement::PerPartition, one.clone()),
+            ("rate(x[5m])", 1, NativePlacement::PerPartition, one.clone()),
+            ("abs(x)", 1, NativePlacement::PerPartition, one.clone()),
+            ("x * 2", 1, NativePlacement::PerPartition, one.clone()),
+            ("sum(x)", 1, NativePlacement::SplitAggregate, one.clone()),
+            (
+                "sum(rate(x[5m]))",
+                1,
+                NativePlacement::SplitAggregate,
+                one.clone(),
+            ),
+            (
+                "topk(1, x)",
+                1,
+                NativePlacement::SingleExecution,
+                one.clone(),
+            ),
+            ("x + on(job) y", 2, NativePlacement::PerPartition, two()),
+        ] {
+            let compiled = compiled_test_tree(query);
+            assert_eq!(
+                Some(placement),
+                placement_of(&compiled, selectors),
+                "`{query}`: the placement changed\n{compiled}"
+            );
+            let routed = routed_tree(query);
+            let merges = routed.to_string().matches("Merge").count();
+            let answer = route_answer(&compiled, selectors, &sources);
+            if placement == NativePlacement::SingleExecution {
+                // The only placement that inserts, and it is not built.
+                assert!(
+                    merges > 0,
+                    "`{query}`: a single execution gained no merge:\n{routed}"
+                );
+                assert_eq!(
+                    "legacy plan", answer,
+                    "`{query}`: a single execution is planned, so a plan can carry an inserted \
+                     merge"
+                );
+            } else {
+                assert_eq!(
+                    0, merges,
+                    "`{query}`: the {placement:?} placement inserted a merge:\n{routed}"
+                );
+                assert_ne!(
+                    "legacy plan", answer,
+                    "`{query}`: the route builds no plan, so the table row above is vacuous"
+                );
+            }
+        }
+    }
+
+    /// The pass's own insertion, kept in view from the planner's side: the window still reads its
+    /// raw input and what the pass adds above it is one merge, but a per-partition placement does not
+    /// run the pass, so the route hands over the window.
+    ///
+    /// A merge writes no label of its own, so the shape the pass would produce declares the same tags
+    /// the compiled tree declares - which is what lets the walk above stay a function of the tree.
     #[test]
     fn the_insertion_pass_wraps_a_per_series_tree_and_keeps_its_tags() {
         let query = "rate(x[5m])";
@@ -1486,11 +1943,18 @@ mod tests {
         };
         assert!(matches!(input.expr, NativeExpr::Input(_)), "{passed}");
 
-        let sources = [vec!["host".to_string()]];
+        let sources = one_source_tags();
         assert_eq!(
             fused_output_tags(unpassed.root(), &sources),
             fused_output_tags(passed.root(), &sources),
             "`{query}`: the pass changed the labels the node declares"
+        );
+        // What the route hands over is the window, not the wrapped tree: a per-partition execution
+        // would present one partition's fragments as a canonical series.
+        assert_eq!(
+            unpassed.to_string(),
+            routed_tree(query).to_string(),
+            "`{query}`: the route handed over a passed tree"
         );
     }
 
