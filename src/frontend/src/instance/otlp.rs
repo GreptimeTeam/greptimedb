@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use api::v1::value::ValueData;
 use async_trait::async_trait;
 use auth::{
     OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
@@ -28,7 +29,9 @@ use auth::{
 use client::Output;
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
-use common_query::prelude::{GREPTIME_PHYSICAL_TABLE, METRICS_EXEMPLARS_TABLE};
+use common_query::prelude::{
+    EXEMPLAR_METRIC_COLUMN, GREPTIME_PHYSICAL_TABLE, METRICS_EXEMPLARS_TABLE,
+};
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -204,21 +207,93 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         if exemplar_rows > 0 {
             let confirmed = Arc::new(ctx.with_confirmed_writes());
-            let (metric_output, exemplar_output) = tokio::join!(
-                self.handle_otlp_metric_row_inserts(requests, confirmed.clone(), &metric_ctx),
-                self.inserter.handle_exemplar_inserts(
-                    exemplars,
-                    confirmed,
-                    &self.statement_executor
-                ),
+            let source_names = exemplars
+                .inserts
+                .iter()
+                .filter_map(|request| request.rows.as_ref())
+                .flat_map(|rows| {
+                    let index = rows
+                        .schema
+                        .iter()
+                        .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN);
+                    rows.rows.iter().filter_map(move |row| {
+                        match &row.values.get(index?)?.value_data {
+                            Some(ValueData::StringValue(name)) => Some(name.as_str()),
+                            _ => None,
+                        }
+                    })
+                })
+                .collect::<HashSet<_>>();
+            let (source_requests, other): (Vec<_>, Vec<_>) =
+                requests.inserts.into_iter().partition(|request| {
+                    metric_ctx.with_metric_engine
+                        && source_names.contains(request.table_name.as_str())
+                });
+            let prepared = if metric_ctx.with_metric_engine {
+                self.inserter
+                    .prepare_metric_row_inserts(
+                        RowInsertRequests {
+                            inserts: source_requests,
+                        },
+                        confirmed.clone(),
+                        &self.statement_executor,
+                        ctx.extension(PHYSICAL_TABLE_PARAM)
+                            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                            .to_string(),
+                    )
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)
+            } else {
+                error::NotSupportedSnafu {
+                    feat: "exemplars require metric-engine ingestion",
+                }
+                .fail()
+            };
+            let source_ready = prepared.is_ok();
+            let sources = prepared
+                .as_ref()
+                .map(|request| request.source_tables().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (metric_output, other_output, exemplar_output) = tokio::join!(
+                async {
+                    self.inserter
+                        .handle_prepared_metric_inserts(prepared?, confirmed.clone())
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteGrpcQuerySnafu)
+                },
+                async {
+                    if other.is_empty() {
+                        Ok(Output::new_with_affected_rows(0))
+                    } else {
+                        self.handle_otlp_metric_row_inserts(
+                            RowInsertRequests { inserts: other },
+                            confirmed.clone(),
+                            &metric_ctx,
+                        )
+                        .await
+                    }
+                },
+                async {
+                    // Failed source preparation must not bind exemplars to a later replacement table.
+                    if !source_ready {
+                        return Ok(Output::new_with_affected_rows(0));
+                    }
+                    self.inserter
+                        .handle_exemplar_inserts(
+                            exemplars,
+                            confirmed.clone(),
+                            &self.statement_executor,
+                            &sources,
+                        )
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteGrpcQuerySnafu)
+                },
             );
             let mut progress = common_query::WriteProgress::default();
-            for output in [
-                metric_output,
-                exemplar_output
-                    .map_err(BoxedError::new)
-                    .context(error::ExecuteGrpcQuerySnafu),
-            ] {
+            for output in [metric_output, other_output, exemplar_output] {
                 match output {
                     Ok(output) => {
                         outcome.write_cost += output.meta.cost;

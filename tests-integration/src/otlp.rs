@@ -1576,6 +1576,84 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_exemplar_otlp_source_identity() {
+        use common_error::ext::ErrorExt;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
+
+        for (with_metric_engine, batching) in [(false, false), (true, false), (true, true)] {
+            let standalone = GreptimeDbStandaloneBuilder::new("exemplar_otlp_identity")
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(batching);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine,
+                promote_all_resource_attrs: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let mut request = build_histogram_request(
+                "latency",
+                vec![HistogramDataPoint {
+                    attributes: vec![keyvalue("job", "point"), keyvalue("zone", "")],
+                    time_unix_nano: 10_000_000_000,
+                    count: 3,
+                    sum: Some(5.0),
+                    explicit_bounds: vec![1.0, 2.0],
+                    bucket_counts: vec![1, 1, 1],
+                    exemplars: [1.5, 3.0]
+                        .into_iter()
+                        .map(|value| Exemplar {
+                            filtered_attributes: vec![keyvalue("trace_id", "observation")],
+                            time_unix_nano: 9_123_456_789,
+                            value: Some(exemplar::Value::AsDouble(value)),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+            );
+            request.resource_metrics[0].resource = Some(Resource {
+                attributes: vec![keyvalue("job", "resource"), keyvalue("service.name", "api")],
+                ..Default::default()
+            });
+            let result = instance.metrics(request, ctx.clone()).await;
+            if !with_metric_engine {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .output_msg()
+                        .contains("require metric-engine ingestion")
+                );
+                assert_trace_v2_query(
+                    instance,
+                    "SELECT COUNT(*)=3 FROM latency_bucket",
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+                assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='metrics_exemplars'", ctx).await.unwrap();
+                continue;
+            }
+            assert_eq!(result.unwrap().accepted_data_points, 1);
+            assert_trace_v2_query(
+                instance,
+                "SELECT COUNT(*)=2 FROM metrics_exemplars",
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            assert_trace_v2_query(instance, "SELECT COUNT(*)=2 FROM metrics_exemplars e JOIN greptime_physical_table m ON e.__table_id=m.__table_id AND e.__tsid=m.__tsid AND e.le=m.le AND e.job=m.job AND e.zone=m.zone WHERE e.greptime_metric='latency_bucket'", ctx).await.unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_otlp_schema_failure_isolation() {
         use otel_arrow_rust::proto::opentelemetry::metrics::v1::{Exemplar, exemplar};
 
@@ -1584,7 +1662,12 @@ WITH(
                 .build()
                 .await;
             let instance = standalone.fe_instance();
-            let ctx = QueryContext::arc();
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
             let (failed, retained) = if metric_fails {
                 ("exemplar_partial_total", "metrics_exemplars")
             } else {
