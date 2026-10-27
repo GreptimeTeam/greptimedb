@@ -630,13 +630,13 @@ impl Context {
         Ok(datanode_table_value)
     }
 
-    /// Notifies the RegionSupervisor to register failure detectors of failed region.
+    /// Notifies the RegionSupervisor to register failure detectors of the given regions on the
+    /// source peer.
     ///
     /// The original failure detector was removed once the procedure was triggered.
     /// Now, we need to register the failure detector for the failed region again.
-    pub async fn register_failure_detectors(&self) {
+    pub async fn register_failure_detectors(&self, region_ids: &[RegionId]) {
         let datanode_id = self.persistent_ctx.from_peer.id;
-        let region_ids = &self.persistent_ctx.region_ids;
         let detecting_regions = region_ids
             .iter()
             .map(|region_id| (datanode_id, *region_id))
@@ -928,7 +928,17 @@ impl RegionMigrationProcedure {
         self.context
             .deregister_failure_detectors_for_candidate_regions()
             .await;
-        self.context.register_failure_detectors().await;
+        // The switched regions are served by the target, so they are monitored there instead.
+        let unswitched_regions = ctx
+            .persistent_ctx
+            .region_ids
+            .iter()
+            .filter(|region_id| !switched_regions.contains(region_id))
+            .copied()
+            .collect::<Vec<_>>();
+        self.context
+            .register_failure_detectors(&unswitched_regions)
+            .await;
         // The target's next heartbeat would register these detectors again, but nothing would if
         // the target stopped before sending one.
         if !switched_regions.is_empty() {
@@ -1089,10 +1099,10 @@ mod tests {
             .await
             .unwrap();
 
-        // The target's detectors are replaced by the source's, and set again for `switched`.
-        let regions = [switched, unswitched, dropped];
-        let target = regions.map(|region_id| (2, region_id));
-        let source = regions.map(|region_id| (1, region_id));
+        // The target's detectors are replaced by the source's, except for `switched`, which stays
+        // monitored on the target.
+        let target = [switched, unswitched, dropped].map(|region_id| (2, region_id));
+        let source = [unswitched, dropped].map(|region_id| (1, region_id));
         assert_matches!(rx.try_recv(), Ok(Event::DeregisterFailureDetectors(r)) if r == target);
         assert_matches!(rx.try_recv(), Ok(Event::RegisterFailureDetectors(r)) if r == source);
         assert_matches!(rx.try_recv(), Ok(Event::ResetFailureDetectors(r)) if r == [(2, switched)]);
