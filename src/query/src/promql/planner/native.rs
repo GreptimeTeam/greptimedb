@@ -589,7 +589,6 @@ impl PromPlanner {
             || (selectors.len() == 2 && independent_scan_pair(root));
         if !per_partition {
             if selectors.len() != 1
-                || !query_engine_state.in_process_region_transport()
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
                 return Ok(None);

@@ -248,15 +248,26 @@ async fn distributed_native_promql_rate_uses_fe_raw_fan_in() {
         ),
         ("distributed_rate_unpartitioned", ""),
     ] {
+        let (columns, rows) = if table == "distributed_rate" {
+            (
+                "host STRING, kind STRING, ts TIMESTAMP(3) NOT NULL, val DOUBLE, TIME INDEX (ts), PRIMARY KEY(host, kind)",
+                "('same', 'a', '1970-01-01 00:03:00', 180), ('same', 'a', '1970-01-01 00:04:00', 240), ('same', 'a', '1970-01-01 00:06:00', 360), ('same', 'a', '1970-01-01 00:07:00', 420), ('second-only', 'a', '1970-01-01 00:06:00', 360), ('second-only', 'a', '1970-01-01 00:07:00', 420), ('same', 'b', '1970-01-01 00:03:00', 100), ('same', 'b', '1970-01-01 00:04:00', 140), ('same', 'b', '1970-01-01 00:06:00', 260), ('same', 'b', '1970-01-01 00:07:00', 300)",
+            )
+        } else {
+            (
+                "host STRING, ts TIMESTAMP(3) NOT NULL, val DOUBLE, TIME INDEX (ts), PRIMARY KEY(host)",
+                "('same', '1970-01-01 00:03:00', 180), ('same', '1970-01-01 00:04:00', 240), ('same', '1970-01-01 00:06:00', 360), ('same', '1970-01-01 00:07:00', 420), ('second-only', '1970-01-01 00:06:00', 360), ('second-only', '1970-01-01 00:07:00', 420)",
+            )
+        };
         execute_all(
             &instance,
-            &format!("CREATE TABLE {table} (host STRING, ts TIMESTAMP(3) NOT NULL, val DOUBLE, TIME INDEX (ts), PRIMARY KEY(host)) {partition} ENGINE=mito"),
+            &format!("CREATE TABLE {table} ({columns}) {partition} ENGINE=mito"),
             QueryContext::arc(),
         )
         .await;
         execute_all(
             &instance,
-            &format!("INSERT INTO {table} VALUES ('same', '1970-01-01 00:03:00', 180), ('same', '1970-01-01 00:04:00', 240), ('same', '1970-01-01 00:06:00', 360), ('same', '1970-01-01 00:07:00', 420), ('second-only', '1970-01-01 00:06:00', 360), ('second-only', '1970-01-01 00:07:00', 420)"),
+            &format!("INSERT INTO {table} VALUES {rows}"),
             QueryContext::arc(),
         )
         .await;
@@ -338,13 +349,86 @@ async fn distributed_native_promql_rate_uses_fe_raw_fan_in() {
         .unwrap();
         let legacy_rows = native_result_rows(legacy).await;
         assert_eq!(native_rows, legacy_rows);
-        assert_eq!(native_rows.len(), 2);
-        assert_eq!(native_rows[0].0, 420_000);
-        assert_eq!(native_rows[0].1, "same");
-        assert!((native_rows[0].2 - 1.0).abs() < 1e-10);
-        assert_eq!(native_rows[1].0, 420_000);
-        assert_eq!(native_rows[1].1, "second-only");
-        assert!((native_rows[1].2 - 0.3).abs() < 1e-10);
+        if table == "distributed_rate" {
+            assert_eq!(native_rows.len(), 3);
+            assert!(
+                native_rows
+                    .iter()
+                    .any(|row| row.0 == 420_000 && row.1 == "same" && (row.2 - 1.0).abs() < 1e-10)
+            );
+            assert!(native_rows.iter().any(|row| row.0 == 420_000
+                && row.1 == "same"
+                && (row.2 - (5.0 / 6.0)).abs() < 1e-10));
+            assert!(native_rows.iter().any(|row| row.0 == 420_000
+                && row.1 == "second-only"
+                && (row.2 - 0.3).abs() < 1e-10));
+        } else {
+            assert_eq!(native_rows.len(), 2);
+            assert_eq!(native_rows[0].0, 420_000);
+            assert_eq!(native_rows[0].1, "same");
+            assert!((native_rows[0].2 - 1.0).abs() < 1e-10);
+            assert_eq!(native_rows[1].0, 420_000);
+            assert_eq!(native_rows[1].1, "second-only");
+            assert!((native_rows[1].2 - 0.3).abs() < 1e-10);
+        }
+
+        if table == "distributed_rate" {
+            observer.clear();
+            let aggregate_query = format!("sum by (host) (rate({table}[5m]))");
+            let aggregate_native = promql_query(
+                instance.clone(),
+                &aggregate_query,
+                None,
+                native_query_context(true, 4),
+                start,
+                start,
+                Duration::from_secs(1),
+                Duration::from_secs(5 * 60),
+            )
+            .await
+            .unwrap();
+            let aggregate_rows = native_result_rows(aggregate_native).await;
+            let aggregate_plan = observer.take();
+            let aggregate_display = datafusion::physical_plan::displayable(aggregate_plan.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(
+                aggregate_display.contains("NativeRawFanInExec: regions=3"),
+                "{aggregate_display}"
+            );
+            assert!(
+                aggregate_display.contains("AggregateFinalizeExec"),
+                "{aggregate_display}"
+            );
+            assert_eq!(aggregate_plan.output_partitioning().partition_count(), 1);
+
+            let aggregate_legacy = promql_query(
+                instance.clone(),
+                &aggregate_query,
+                None,
+                native_query_context(false, 4),
+                start,
+                start,
+                Duration::from_secs(1),
+                Duration::from_secs(5 * 60),
+            )
+            .await
+            .unwrap();
+            let aggregate_legacy_rows = native_result_rows(aggregate_legacy).await;
+            // At 00:07, 'same'/'a' rises by 240 across 240s, giving 1.0/s after
+            // extrapolation. 'same'/'b' rises by 200 across 240s; its 60s leading gap is
+            // below the 1.1*80s clamp, so its rate is 200/240 = 5/6/s. Their grouped sum
+            // is 1 + 5/6 = 11/6 = 1.8333333333333333. 'second-only' rises by 60 across
+            // 60s; its 240s leading gap clamps to 30s, yielding 60*(60+30)/60/300 = 0.3/s.
+            assert_eq!(aggregate_rows.len(), 2);
+            assert_eq!(aggregate_rows[0].0, 420_000);
+            assert_eq!(aggregate_rows[0].1, "same");
+            assert!((aggregate_rows[0].2 - (11.0 / 6.0)).abs() < 1e-10);
+            assert_eq!(aggregate_rows[1].0, 420_000);
+            assert_eq!(aggregate_rows[1].1, "second-only");
+            assert!((aggregate_rows[1].2 - 0.3).abs() < 1e-10);
+            assert_eq!(aggregate_rows, aggregate_legacy_rows);
+        }
     }
 }
 
@@ -2030,7 +2114,13 @@ async fn native_result_rows(output: Output) -> Vec<(i64, String, f64)> {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    // Series are compared as values, so ties on (timestamp, host) need a deterministic
+    // tiebreak: two series can now share both and differ only in the sample.
+    rows.sort_by(|left, right| {
+        (left.0, &left.1)
+            .cmp(&(right.0, &right.1))
+            .then(left.2.total_cmp(&right.2))
+    });
     rows
 }
 
