@@ -2363,10 +2363,8 @@ mod tests {
         struct CountingPurger(AtomicUsize);
 
         impl FilePurger for CountingPurger {
-            fn remove_file(&self, _: FileMeta, is_delete: bool, _: bool) {
-                if is_delete {
-                    self.0.fetch_add(1, Ordering::SeqCst);
-                }
+            fn purge_file(&self, _: FileMeta) {
+                self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
 
