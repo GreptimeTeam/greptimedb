@@ -5286,6 +5286,15 @@ async fn test_compaction_tasks_empty_and_node_pruning(instance: Arc<dyn MockInst
     }
 }
 
+async fn create_exemplar_source(frontend: &Arc<Instance>, schema: &str, name: &str) {
+    execute_sql(frontend, &format!(
+        "CREATE TABLE IF NOT EXISTS {schema}.exemplar_sources (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')"
+    )).await;
+    execute_sql(frontend, &format!(
+        "CREATE TABLE {schema}.{name} (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('on_physical_table'='exemplar_sources')"
+    )).await;
+}
+
 #[rstest]
 #[case::standalone(false, false, false, false)]
 #[case::standalone_batched(false, true, false, false)]
@@ -5362,12 +5371,17 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
     if precreated {
         execute_sql(
             &context.frontend(),
-            "CREATE TABLE metrics_exemplars (
+            &format!(
+                "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (
+            __table_id INT UNSIGNED NOT NULL,
+            __tsid BIGINT UNSIGNED NOT NULL,
             greptime_timestamp TIMESTAMP(6) TIME INDEX,
-            greptime_metric STRING PRIMARY KEY,
+            greptime_metric STRING,
             greptime_value DOUBLE,
-            exemplar_labels JSON2(max_auto_expanded_paths = 0, trace_id STRING)
-        ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse', 'sst_format'='primary_key')",
+            exemplar_labels JSON2(max_auto_expanded_paths = 0, trace_id STRING),
+            PRIMARY KEY (__table_id, __tsid, greptime_metric)
+        ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse', 'sst_format'='primary_key')"
+            ),
         )
         .await;
     }
@@ -5380,14 +5394,14 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
                 .with_prom_handler(
                     frontend.clone(),
                     None,
-                    false,
+                    true,
                     PromValidationMode::Strict,
                     None,
                 )
         };
         let server = builder
             .with_batching_protocols(protocols.clone())
-            .with_otlp_handler(frontend, batching)
+            .with_otlp_handler(frontend, true)
             .build();
         server.build(server.make_app()).unwrap()
     };
@@ -5448,7 +5462,8 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
             to_bytes(response.into_body(), usize::MAX).await.unwrap()
         );
     }
-    // Exemplar-only series must not create a metric table or register a sample kind.
+    // Exemplar-only series require an existing source and must not register a sample kind.
+    create_exemplar_source(&context.frontend(), "public", "retained_exemplar").await;
     let mut request = v2::request_with_labels_and_samples(
         vec![("__name__", "retained_exemplar"), ("zone", "east")],
         vec![],
@@ -5503,15 +5518,16 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         "{:?}",
         to_bytes(response.into_body(), usize::MAX).await.unwrap()
     );
-    assert!(
-        context
-            .frontend()
-            .catalog_manager()
-            .table("greptime", "public", "retained_exemplar", None)
-            .await
-            .unwrap()
-            .is_none()
-    );
+    let output = execute_sql(
+        &context.frontend(),
+        "SELECT COUNT(*) FROM retained_exemplar",
+    )
+    .await;
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+",
+    )
+    .await;
 
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::metrics::v1 as otlp;
@@ -5577,14 +5593,14 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
             "sst" => {
                 execute_sql(
                     &context.frontend(),
-                    "admin flush_table('metrics_exemplars')",
+                    &format!("admin flush_table('{METRICS_EXEMPLARS_TABLE}')"),
                 )
                 .await;
             }
             "compaction" => {
                 execute_sql(
                     &context.frontend(),
-                    "admin compact_table('metrics_exemplars', 'strict_window', 'window=3600')",
+                    &format!("admin compact_table('{METRICS_EXEMPLARS_TABLE}', 'strict_window', 'window=3600')"),
                 )
                 .await;
             }
@@ -5600,6 +5616,10 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         assert_eq!(status, 200, "{phase}: {}", String::from_utf8_lossy(&bytes));
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["status"], "success", "{phase}: {value}");
+        for series in value["data"].as_array().unwrap() {
+            assert!(series["seriesLabels"].get("__table_id").is_none());
+            assert!(series["seriesLabels"].get("__tsid").is_none());
+        }
         assert_eq!(
             value["data"].as_array().unwrap().len(),
             3,
@@ -5629,12 +5649,16 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
         }
     }
     execute_sql(&context.frontend(), "DROP TABLE exemplar_metric").await;
-    // Fixed fields are absent labels; ordinary null tags have empty-label semantics.
-    for expression in [
-        "exemplar_metric{zone=\"\"}",
-        "exemplar_metric{zone!~\".+\"}",
-        "exemplar_metric{greptime_value=\"\"}",
-        "exemplar_metric{greptime_metric=\"\"}",
+    // Storage columns are absent labels; ordinary null tags have empty-label semantics.
+    for (expression, count) in [
+        ("exemplar_metric{zone=\"\"}", 1),
+        ("exemplar_metric{zone!~\".+\"}", 1),
+        ("exemplar_metric{greptime_value=\"\"}", 1),
+        ("exemplar_metric{greptime_metric=\"\"}", 1),
+        ("exemplar_metric{__table_id=\"\"}", 1),
+        ("exemplar_metric{__tsid=\"\"}", 1),
+        ("exemplar_metric{__table_id!=\"\"}", 0),
+        ("exemplar_metric{__tsid=~\".+\"}", 0),
     ] {
         let form = format!(
             "query={}&start=1720000000.123&end=1720000000.123",
@@ -5655,7 +5679,7 @@ async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, 
                 .unwrap();
         assert_eq!(
             value["data"].as_array().unwrap().len(),
-            1,
+            count,
             "{expression}: {value}"
         );
     }
@@ -5674,16 +5698,18 @@ async fn test_exemplar_query_skips_malformed_rows_with_warning() {
         .build()
         .await;
     let frontend = instance.fe_instance();
-    execute_sql(frontend, "CREATE TABLE metrics_exemplars (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')").await;
+    execute_sql(frontend, &format!("CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')")).await;
     execute_sql(
         frontend,
-        r#"INSERT INTO metrics_exemplars VALUES
-        (1, 'metric', 'api', 1, '{"trace_id":"good"}'),
-        (2, 'metric', 'api', 2, '{"trace_id":42}'),
-        (3, 'metric', 'api', NULL, '{}'),
-        (4, 'metric', 'api', 4, NULL),
-        (5, NULL, 'api', 5, '{}'),
-        (6, 'bad_only', 'api', NULL, '{}')"#,
+        &format!(
+            r#"INSERT INTO {METRICS_EXEMPLARS_TABLE} VALUES
+        (42, 7, 1, 'metric', 'api', 1, '{{"trace_id":"good"}}'),
+        (42, 7, 2, 'metric', 'api', 2, '{{"trace_id":42}}'),
+        (42, 7, 3, 'metric', 'api', NULL, '{{}}'),
+        (42, 7, 4, 'metric', 'api', 4, NULL),
+        (42, 7, 5, NULL, 'api', 5, '{{}}'),
+        (42, 7, 6, 'bad_only', 'api', NULL, '{{}}')"#
+        ),
     )
     .await;
     let server = HttpServerBuilder::new(HttpOptions::default())
@@ -5752,10 +5778,11 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
         .build()
         .await;
     let frontend = instance.fe_instance();
+    create_exemplar_source(frontend, "public", "concurrent").await;
     let request = |tag: String, timestamp: i64| {
         into_rows(vec![Exemplar {
             metric: "concurrent".into(),
-            series_labels: BTreeMap::from([(tag, "present".into())]),
+            series_labels: BTreeMap::from([(tag, "present".into())]).into(),
             timestamp,
             value: 1.0,
             labels: BTreeMap::from([("trace_id".into(), "abc".into())]),
@@ -5795,12 +5822,12 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     }
     let info = frontend
         .catalog_manager()
-        .table("greptime", "public", "metrics_exemplars", None)
+        .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
         .await
         .unwrap()
         .unwrap()
         .table_info();
-    assert_eq!(info.meta.primary_key_indices.len(), 10);
+    assert_eq!(info.meta.primary_key_indices.len(), 12);
     operator::insert::validate_exemplar_table(&info).unwrap();
     let response = frontend
         .query_exemplars(
@@ -5815,21 +5842,20 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     );
 
     // Incompatible pre-created tables must be rejected before adding inherited tags.
-    let definition = "CREATE TABLE metrics_exemplars (greptime_timestamp TIMESTAMP(6) TIME INDEX, greptime_metric STRING PRIMARY KEY, greptime_value DOUBLE, exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')";
-    for (from, to) in [
-        ("greptime_value DOUBLE", "greptime_value BIGINT"),
-        (
-            "greptime_metric STRING PRIMARY KEY",
-            "greptime_metric STRING",
-        ),
-        ("JSON2(max_auto_expanded_paths=0, trace_id STRING)", "JSON"),
-        ("trace_id STRING", "trace_id BIGINT"),
+    let definition = format!(
+        "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(6) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING), PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
+    );
+    for definition in [
+        definition.replace("greptime_value DOUBLE", "greptime_value BIGINT"),
+        definition.replace("__tsid, greptime_metric)", "__tsid)"),
+        definition.replace("JSON2(max_auto_expanded_paths=0, trace_id STRING)", "JSON"),
+        definition.replace("trace_id STRING", "trace_id BIGINT"),
     ] {
-        execute_sql(frontend, "DROP TABLE metrics_exemplars").await;
-        execute_sql(frontend, &definition.replace(from, to)).await;
+        execute_sql(frontend, &format!("DROP TABLE {METRICS_EXEMPLARS_TABLE}")).await;
+        execute_sql(frontend, &definition).await;
         let before = frontend
             .catalog_manager()
-            .table("greptime", "public", "metrics_exemplars", None)
+            .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
             .await
             .unwrap()
             .unwrap()
@@ -5839,11 +5865,11 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
                 .write_exemplars_prepared(request("must_not_add".into(), 0), QueryContext::arc())
                 .await
                 .is_err(),
-            "{to}"
+            "{definition}"
         );
         let after = frontend
             .catalog_manager()
-            .table("greptime", "public", "metrics_exemplars", None)
+            .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
             .await
             .unwrap()
             .unwrap()
@@ -5856,6 +5882,7 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
         .build()
         .await;
     let frontend = disabled.fe_instance();
+    create_exemplar_source(frontend, "public", "concurrent").await;
     assert!(
         frontend
             .write_exemplars_prepared(request("tag".into(), 0), QueryContext::arc())
@@ -5865,7 +5892,7 @@ async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
     assert!(
         frontend
             .catalog_manager()
-            .table("greptime", "public", "metrics_exemplars", None)
+            .table("greptime", "public", METRICS_EXEMPLARS_TABLE, None)
             .await
             .unwrap()
             .is_none()
@@ -5908,6 +5935,7 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
     }
     let instance = builder.build().await;
     let frontend = instance.fe_instance();
+    create_exemplar_source(frontend, "public", "metric").await;
     let mut ctx = QueryContext::arc().with_confirmed_writes();
     ctx.set_batching_enabled(batching);
     if hint_disabled {
@@ -5918,18 +5946,20 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
         execute_sql(
             frontend,
             &format!(
-                "CREATE TABLE metrics_exemplars (
+                "CREATE TABLE {METRICS_EXEMPLARS_TABLE} (
+                    __table_id INT UNSIGNED NOT NULL,
+                    __tsid BIGINT UNSIGNED NOT NULL,
                     greptime_timestamp TIMESTAMP(6) TIME INDEX,
                     greptime_metric STRING, site STRING {default},
                     greptime_value DOUBLE, exemplar_labels JSON2,
-                    PRIMARY KEY (greptime_metric, site)
+                    PRIMARY KEY (__table_id, __tsid, greptime_metric, site)
                 ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
             ),
         )
         .await;
         let request = into_rows(vec![Exemplar {
             metric: "metric".into(),
-            series_labels: BTreeMap::new(),
+            series_labels: BTreeMap::new().into(),
             timestamp: -1,
             value: 1.0,
             labels: BTreeMap::new(),
@@ -5966,7 +5996,7 @@ async fn test_exemplar_precreated_precision_and_label_defaults(
             assert!(!series[0].series_labels.contains_key("site"));
             assert_eq!(series[0].exemplars[0].timestamp.0, -1000);
         }
-        execute_sql(frontend, "DROP TABLE metrics_exemplars").await;
+        execute_sql(frontend, &format!("DROP TABLE {METRICS_EXEMPLARS_TABLE}")).await;
     }
 }
 
@@ -5995,12 +6025,13 @@ async fn test_exemplar_cross_schema_exact_identity() {
         f64::NEG_INFINITY,
     ];
     for schema in ["public", "exemplar_other"] {
+        create_exemplar_source(frontend, schema, "identity").await;
         let observations = values
             .into_iter()
             .flat_map(|value| {
                 (0..2).map(move |_| Exemplar {
                     metric: "identity".into(),
-                    series_labels: BTreeMap::new(),
+                    series_labels: BTreeMap::new().into(),
                     timestamp: -1,
                     value,
                     labels: BTreeMap::from([
