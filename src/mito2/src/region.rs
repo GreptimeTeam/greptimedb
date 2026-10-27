@@ -188,10 +188,6 @@ pub struct MitoRegion {
     pub(crate) topic_latest_entry_id: AtomicU64,
     /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv.
     pub(crate) leader_deadline: Deadline,
-    /// When the region last began to downgrade. Leader grants for heartbeats sent before do not
-    /// make it a leader again. The lock covers updating it or comparing with it, and the role
-    /// change.
-    downgrade_started_at: Mutex<Option<Instant>>,
     /// Region stats.
     pub(crate) region_stats: RegionStats,
     /// manifest stats
@@ -498,50 +494,6 @@ impl MitoRegion {
     /// Sets the region role state.
     pub(crate) fn set_role(&self, next_role: RegionRole) {
         self.manifest_ctx.set_role(next_role, self.region_id);
-    }
-
-    /// Records that the region begins to downgrade now, then marks it downgrading.
-    pub(crate) fn begin_downgrade(&self) {
-        let mut started_at = self.downgrade_started_at.lock().unwrap();
-        *started_at = Some(Instant::now());
-        self.set_role(RegionRole::DowngradingLeader);
-    }
-
-    /// Takes over when `region` began to downgrade, for a region that replaces it.
-    pub(crate) fn inherit_downgrade_state_from(&self, region: &MitoRegion) {
-        let started_at = *region.downgrade_started_at.lock().unwrap();
-        *self.downgrade_started_at.lock().unwrap() = started_at;
-    }
-
-    /// Applies a grant of `role` until `deadline`, for a heartbeat sent at `sent_at`. Returns
-    /// whether the role was applied.
-    ///
-    /// The grant always renews the lease of a Leader or StagingLeader role. A Leader grant only
-    /// changes the role if its heartbeat was sent after the region last began to downgrade.
-    pub(crate) fn apply_role_grant(
-        &self,
-        role: RegionRole,
-        sent_at: Instant,
-        deadline: Instant,
-    ) -> bool {
-        // Before the role, and even if the role leaves the region's state unchanged.
-        if role.writable() {
-            self.leader_deadline.extend(deadline);
-        }
-        if role != RegionRole::Leader {
-            self.set_role(role);
-            return true;
-        }
-        // A writable region needs no change. Staging still leaves staging below.
-        if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            return true;
-        }
-        let downgrade_started_at = self.downgrade_started_at.lock().unwrap();
-        if downgrade_started_at.is_some_and(|started_at| sent_at < started_at) {
-            return false;
-        }
-        self.set_role(RegionRole::Leader);
-        true
     }
 
     pub(crate) fn region_role(&self) -> RegionRole {
@@ -1338,6 +1290,12 @@ pub(crate) struct ManifestContext {
     /// The state of the region. The region checks the state before updating
     /// manifest.
     state: AtomicCell<RegionRoleState>,
+    /// When the role was last demoted. A promotion issued before it does not apply. The lock
+    /// covers comparing or raising it and the role change.
+    ///
+    /// It starts at creation time. Demotions and reopens both run in the region's worker loop, so
+    /// a context that replaces this one is created after its last demotion.
+    demoted_at: Mutex<Instant>,
     /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
@@ -1356,6 +1314,7 @@ impl ManifestContext {
         ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
+            demoted_at: Mutex::new(Instant::now()),
             staging_partition_info: Mutex::new(None),
             hook,
         }
@@ -1712,6 +1671,32 @@ impl ManifestContext {
         }
 
         self.update_and_fire(manager, action_list, is_staging).await
+    }
+
+    /// Raises the demotion time to now, then marks the region downgrading.
+    pub(crate) fn demote(&self, region_id: RegionId) {
+        let mut demoted_at = self.demoted_at.lock().unwrap();
+        *demoted_at = Instant::now();
+        self.set_role(RegionRole::DowngradingLeader, region_id);
+    }
+
+    /// Promotes the region to a writable leader unless it was demoted after `issued_at`. Returns
+    /// whether the region is a writable leader afterwards.
+    pub(crate) fn promote_unless_demoted_after(
+        &self,
+        issued_at: Instant,
+        region_id: RegionId,
+    ) -> bool {
+        // A writable leader needs no change. Staging still leaves staging below.
+        if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
+            return true;
+        }
+        let demoted_at = self.demoted_at.lock().unwrap();
+        if issued_at < *demoted_at {
+            return false;
+        }
+        self.set_role(RegionRole::Leader, region_id);
+        true
     }
 
     /// Sets the [`RegionRole`].
@@ -2390,7 +2375,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             leader_deadline: Default::default(),
-            downgrade_started_at: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         }
@@ -2509,15 +2493,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_leader_grant_to_writable_region_takes_no_lock() {
+    async fn test_promoting_writable_leader_takes_no_lock() {
         let env = SchedulerEnv::new().await;
         let region = Arc::new(build_test_region(&env).await);
-        let _downgrade_started_at = region.downgrade_started_at.lock().unwrap();
+        let _demoted_at = region.manifest_ctx.demoted_at.lock().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
-        let granted = region.clone();
+        let promoted = region.clone();
         std::thread::spawn(move || {
-            let now = std::time::Instant::now();
-            tx.send(granted.apply_role_grant(RegionRole::Leader, now, now))
+            let manifest_ctx = &promoted.manifest_ctx;
+            let issued_at = std::time::Instant::now();
+            tx.send(manifest_ctx.promote_unless_demoted_after(issued_at, promoted.region_id))
                 .unwrap();
         });
         assert!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap());
@@ -3012,7 +2997,6 @@ mod tests {
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
             leader_deadline: Default::default(),
-            downgrade_started_at: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         };

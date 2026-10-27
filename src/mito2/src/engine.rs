@@ -1607,7 +1607,17 @@ impl RegionEngine for MitoEngine {
         deadline: Instant,
     ) -> Result<bool, BoxedError> {
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
-        Ok(region.apply_role_grant(role, sent_at, deadline))
+        // Before the role, and even if the role leaves the region's state unchanged.
+        if role.writable() {
+            region.leader_deadline.extend(deadline);
+        }
+        if role == RegionRole::Leader {
+            return Ok(region
+                .manifest_ctx
+                .promote_unless_demoted_after(sent_at, region_id));
+        }
+        region.set_role(role);
+        Ok(true)
     }
 
     async fn set_region_role_state_gracefully(

@@ -460,7 +460,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
             leader_deadline: Default::default(),
-            downgrade_started_at: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats,
         }))
@@ -700,7 +699,6 @@ impl RegionOpener {
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
             leader_deadline: Default::default(),
-            downgrade_started_at: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats.clone(),
         };

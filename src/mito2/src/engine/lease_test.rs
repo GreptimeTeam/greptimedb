@@ -16,6 +16,7 @@
 //! lease, and that Leader grants for heartbeats sent before a downgrade do not make it writable
 //! again.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,7 +43,7 @@ use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, kafka_log_store_factory,
     multiple_log_store_factories, prepare_test_for_kafka_log_store, raft_engine_log_store_factory,
-    rows_schema,
+    reopen_region, rows_schema,
 };
 
 const LEASE: Duration = Duration::from_secs(10);
@@ -326,27 +327,30 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
+#[rstest]
+#[case::catchup(false)]
+#[case::close_and_open(true)]
 #[tokio::test]
-async fn test_downgrade_start_survives_reopen() {
+async fn test_reopened_region_ignores_earlier_grants(#[case] close: bool) {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("downgrade-start-reopen").await;
+    let mut env = TestEnv::with_prefix("reopened-region-grant").await;
     let (_listener, engine, schema) = create_region(&mut env, None).await;
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
     // The memtable is not empty, so the catchup below reopens the region.
     put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
     let sent_before = Instant::now() - Duration::from_millis(1);
-    engine
-        .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
-        .await
-        .unwrap();
     let region = engine.get_region(REGION_ID).unwrap();
-    engine
-        .handle_request(
-            REGION_ID,
-            RegionRequest::Catchup(RegionCatchupRequest::default()),
-        )
-        .await
-        .unwrap();
+    if close {
+        let table_dir = CreateRequestBuilder::new().build().table_dir;
+        reopen_region(&engine, REGION_ID, table_dir, false, HashMap::new()).await;
+    } else {
+        engine
+            .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        let request = RegionRequest::Catchup(RegionCatchupRequest::default());
+        engine.handle_request(REGION_ID, request).await.unwrap();
+    }
     assert!(!Arc::ptr_eq(
         &region,
         &engine.get_region(REGION_ID).unwrap()

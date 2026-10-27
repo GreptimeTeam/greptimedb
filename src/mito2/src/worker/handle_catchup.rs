@@ -153,8 +153,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
-        // Leader grants queued before the reopen still arrive.
-        reopened_region.inherit_downgrade_state_from(region);
         self.register_region(reopened_region.clone());
         if let Some(state) = &self.series_index_task_state {
             state.wake();
