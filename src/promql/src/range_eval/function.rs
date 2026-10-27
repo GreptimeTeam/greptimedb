@@ -46,17 +46,22 @@ pub enum RangeFunction {
     Deriv,
     /// `predict_linear` with a constant horizon in seconds.
     PredictLinear(f64),
-    /// `double_exponential_smoothing` (`holt_winters`) with constant factors in `(0, 1)`.
+    /// Experimental in Prometheus: `double_exponential_smoothing` (`holt_winters`) with constant
+    /// factors in `(0, 1)`.
     DoubleExponentialSmoothing {
         smoothing: f64,
         trend: f64,
     },
-    // Prometheus marks the following as experimental.
     FirstOverTime,
+    /// Experimental in Prometheus.
     MadOverTime,
+    /// Experimental in Prometheus.
     TsOfFirstOverTime,
+    /// Experimental in Prometheus.
     TsOfLastOverTime,
+    /// Experimental in Prometheus.
     TsOfMinOverTime,
+    /// Experimental in Prometheus.
     TsOfMaxOverTime,
 }
 

@@ -388,7 +388,16 @@ async fn evaluated_pack_drains_large_sparse_chunk_before_polling_again() {
     let expected: Vec<Option<f64>> = (0..positions.len())
         .map(|index| Some(index as f64))
         .collect();
-    let chunk = series_on(&schema, &spans, expected.clone(), labels("large"));
+    let mut chunk = series_on(&schema, &spans, expected.clone(), labels("large"));
+    chunk.fields = SeriesFields::one(
+        Samples::try_from_chunks(
+            expected
+                .iter()
+                .map(|value| Samples::from_float(Float64Array::from(vec![*value])))
+                .collect(),
+        )
+        .unwrap(),
+    );
     let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let upstream = observed_source(vec![Ok((chunk, true))], polls.clone(), dropped.clone());
@@ -430,7 +439,15 @@ async fn evaluated_pack_drop_releases_unfinished_large_chunk() {
     let schema = large_evaluated_schema();
     let positions: Vec<usize> = (0..1600).step_by(2).collect();
     let spans: Vec<(usize, usize)> = positions.iter().map(|position| (*position, 1)).collect();
-    let chunk = series_on(&schema, &spans, vec![Some(1.0); spans.len()], metric);
+    let mut chunk = series_on(&schema, &spans, vec![Some(1.0); spans.len()], metric);
+    chunk.fields = SeriesFields::one(
+        Samples::try_from_chunks(
+            (0..positions.len())
+                .map(|_| Samples::from_float(Float64Array::from(vec![Some(1.0)])))
+                .collect(),
+        )
+        .unwrap(),
+    );
     drop(identity);
     let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -475,8 +492,7 @@ async fn evaluated_pack_error_discards_buffer_and_releases_source() {
     assert!(stream.next().await.is_none());
 }
 
-/// Rows split across batches keep their order and finality: every position appears once and in
-/// order, and only the last row of the source's final chunk closes the chain.
+/// Dense source chunks coalesce to one frame row each while preserving order and finality across batches.
 #[tokio::test]
 async fn multi_chunk_multi_batch_stream_preserves_order_and_finality() {
     let metric = labels("d");
@@ -493,13 +509,11 @@ async fn multi_chunk_multi_batch_stream_preserves_order_and_finality() {
         ),
     ])
     .await;
-    assert!(
-        batches.len() > 1,
-        "the default row bound splits 310 rows into several batches"
-    );
+    assert_eq!(batches.len(), 1, "both dense chunks fit in one batch");
     assert_eq!(
         batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
-        310
+        2,
+        "one frame row per dense chunk"
     );
 
     let declared = batches[0].schema();
@@ -1045,10 +1059,10 @@ async fn multi_field_partial_nulls_are_not_nan() {
         )],
     )
     .await;
-    // One row per carried run, so the hole between the runs is not what the frame trades away.
+    // Sparse runs share one frame row; the grid hole is still represented by separate spans.
     assert_eq!(batches.len(), 1);
-    assert_eq!(batches[0].num_rows(), 2);
-    // Both fields are columns of every row, and both carry float values of their own.
+    assert_eq!(batches[0].num_rows(), 1);
+    // Both fields are columns of the row, and both carry float values of their own.
     for row in 0..batches[0].num_rows() {
         for field in [0, 1] {
             let payload = frame_field_payload(&batches[0], field);
@@ -1061,13 +1075,12 @@ async fn multi_field_partial_nulls_are_not_nan() {
 
     let declared = batches[0].schema();
     let rows = drain(unpack_as(batches, declared, schema)).await;
-    assert_eq!(rows.len(), 2, "one decoded chunk per frame row");
+    assert_eq!(rows.len(), 1, "one decoded chunk per frame row");
     assert!(
         rows.iter().all(|(row, _)| row.metric == metric),
-        "both rows name the same series"
+        "the row names the same series"
     );
-    assert!(!rows[0].1, "only the last row closes the chain");
-    assert!(rows[1].1);
+    assert!(rows[0].1, "the sole coalesced row closes the chain");
     // Concatenated in stream order, exactly as the producer's single chunk was laid out.
     let decoded_positions: Vec<usize> = rows.iter().flat_map(|(row, _)| positions(row)).collect();
     assert_eq!(

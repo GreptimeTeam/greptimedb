@@ -45,9 +45,9 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
+use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
 use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
-use promql::vector_match::{Cardinality, MatchingLabels};
+use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -449,8 +449,11 @@ impl PromPlanner {
         let Some((mut prepared, single_input_context)) = preparation? else {
             return Ok(None);
         };
-        // The time index, the raw tag list and metric name are shared binding properties. The
-        // output tags may be narrower for a PromQL `on(...)` vector match.
+        // Two selectors over one table share one region, so the node runs there over both scans.
+        // Over two tables each scan answers from its own region and the node runs above them; see
+        // `RawSeriesSource`.
+        let cross_table = prepared.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0);
+        // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
         };
@@ -460,14 +463,6 @@ impl PromPlanner {
             time.clone(),
             tags.clone(),
         );
-        if prepared
-            .iter()
-            .any(|(_, _, other_metric, other_time, other_tags)| {
-                *other_metric != metric || *other_time != time || *other_tags != tags
-            })
-        {
-            return Ok(None);
-        }
         // The compiler binds one input per selector in the same pre-order `collect_selectors`
         // walks, so position i of both lists is the same occurrence. This is the guard that the
         // two walks agree: a mismatch is a compiler defect, not a query this route can plan.
@@ -532,7 +527,7 @@ impl PromPlanner {
             ))
             .context(DataFusionPlanningSnafu);
         }
-        for (index, (compiled_input, (scan, _, _, _, _))) in
+        for (index, (compiled_input, (scan, _, _, time, _))) in
             compiled.inputs.iter().zip(prepared.iter_mut()).enumerate()
         {
             if compiled_input.source_index != index {
@@ -547,7 +542,7 @@ impl PromPlanner {
                 .requirement
                 .raw_scan_bounds()
                 .context(DataFusionPlanningSnafu)?;
-            let filter = scan_time_filter(start, end, inclusive, &time);
+            let filter = scan_time_filter(start, end, inclusive, time);
             if let LogicalPlan::TableScan(table_scan) = &mut *scan {
                 table_scan.filters.push(filter);
             } else {
@@ -557,15 +552,34 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
             }
         }
-        if selectors.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0) {
-            return Ok(None);
-        }
+        let source_tags = prepared
+            .iter()
+            .map(|(_, _, _, _, tags)| tags.clone())
+            .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
-            .map(|(scan, _, _, _, _)| scan)
-            .collect::<Vec<_>>();
-        // Ordinary pointwise trees and the existing two-occurrence same-source route keep their
-        // current admission unchanged. Aggregate splits are restricted to one raw scan child.
+            .map(|(scan, schema, metric, _, tags)| {
+                if !cross_table {
+                    return Ok(scan);
+                }
+                let Some(metric) = metric else {
+                    return Err(DataFusionError::Internal(
+                        "a prepared selector has no metric name".into(),
+                    ));
+                };
+                let fields = schema
+                    .fields
+                    .iter()
+                    .map(|field| field.name.to_string())
+                    .collect();
+                Ok(LogicalPlan::Extension(Extension {
+                    node: Arc::new(RawSeriesSource::try_new(metric, tags, fields, scan)?),
+                }))
+            })
+            .collect::<std::result::Result<Vec<_>, DataFusionError>>()
+            .context(DataFusionPlanningSnafu)?;
+        // Ordinary pointwise trees and two-occurrence pairs, on one table or across two, are
+        // answered per partition. Aggregate splits are restricted to one raw scan child.
         let root = compiled.tree.root();
         let per_partition = !reads_across_series(root)
             || pointwise_operand(root)
@@ -630,8 +644,27 @@ impl PromPlanner {
         }) {
             return Ok(None);
         }
-        let output_tags = fused_output_tags(tree.root(), &tags);
+        let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
+            return Ok(None);
+        };
+        // Under `or` the right table's tags join the left table's columns, and one of them can
+        // share a name with the left side's field or time index. The output names each column
+        // once, so such a union is left to the existing plan.
+        let mut column_names = std::collections::HashSet::new();
+        if !std::iter::once(&time)
+            .chain(&root_fields)
+            .chain(&output_tags)
+            .all(|name| column_names.insert(name.as_str()))
+        {
+            return Ok(None);
+        }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
+        // Over two tables the region scans are bound by their `RawSeriesSource` children.
+        let (tags, metric) = if cross_table {
+            (Vec::new(), None)
+        } else {
+            (tags, metric)
+        };
         let node = FusedSeries::try_new(
             Arc::from(prom_expr.to_string()),
             tree,
@@ -739,36 +772,37 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 }
 
 /// Whether `root` is a supported one-to-one match or set operation between two independent scan
-/// occurrences.
+/// occurrences, under any number of point-wise wrappers.
+///
+/// Any arithmetic or comparison operator qualifies: they pair series by the same matching rules,
+/// and a comparison only changes which value a matched pair keeps.
+///
+/// A wrapper, a function of each value or an operation with a constant as in `100 * (1 - a / b)`,
+/// maps each series of the match on its own, so the tree still reads both scans whole exactly once.
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     let (left, right, matching) = match &root.expr {
         NativeExpr::Binary {
             left,
             right,
             matching,
-        } => (left, right, matching),
+        } => match (&left.expr, &right.expr) {
+            (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => return false,
+            (NativeExpr::Scalar(_), _) => return independent_scan_pair(right),
+            (_, NativeExpr::Scalar(_)) => return independent_scan_pair(left),
+            _ => (left, right, matching),
+        },
+        NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
             return pointwise_operand(left) && pointwise_operand(right);
         }
         _ => return false,
     };
 
-    let supported_operator = matches!(
-        matching.op,
-        promql::vector_match::BinaryOp::Add
-            | promql::vector_match::BinaryOp::Sub
-            | promql::vector_match::BinaryOp::Mul
-            | promql::vector_match::BinaryOp::Div
-            | promql::vector_match::BinaryOp::Mod
-            | promql::vector_match::BinaryOp::Pow
-            | promql::vector_match::BinaryOp::Atan2
-    );
     let supported_labels = match &matching.labels {
         MatchingLabels::On(names) => !names.is_empty(),
         MatchingLabels::Ignoring(names) => names.is_empty(),
     };
     matching.cardinality == Cardinality::OneToOne
-        && supported_operator
         && supported_labels
         && pointwise_operand(left)
         && pointwise_operand(right)
@@ -783,26 +817,70 @@ pub(crate) fn same_table_scan(left: &LogicalPlan, right: &LogicalPlan) -> bool {
     left.table_name == right.table_name
 }
 
-/// Tags exposed by a binary PromQL match. The binding retains all raw tags for decoding.
-fn fused_output_tags(root: &NativeNode, tags: &[String]) -> Vec<String> {
-    let NativeExpr::Binary { matching, .. } = &root.expr else {
-        return tags.to_vec();
-    };
-    if matching.cardinality != Cardinality::OneToOne {
-        return tags.to_vec();
-    }
-    match &matching.labels {
-        MatchingLabels::On(names) if !names.is_empty() => tags
-            .iter()
-            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
-            .cloned()
-            .collect(),
-        MatchingLabels::Ignoring(names) => tags
-            .iter()
-            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
-            .cloned()
-            .collect(),
-        MatchingLabels::On(_) => tags.to_vec(),
+/// The label columns `node` reports, from the tags of the scan each input reads.
+///
+/// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
+/// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
+/// side's; an operation with a constant or a function of each value keeps its operand's. `None` for
+/// a node whose labels this walk does not derive - an aggregate's groups, or a whole-vector
+/// operation - so a tree holding one is declined rather than given its input's labels.
+fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
+    match &node.expr {
+        NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
+        NativeExpr::Scalar(_) => Some(Vec::new()),
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => match (&left.expr, &right.expr) {
+            (NativeExpr::Scalar(_), _) => fused_output_tags(right, source_tags),
+            (_, NativeExpr::Scalar(_)) => fused_output_tags(left, source_tags),
+            _ => {
+                if matching.cardinality != Cardinality::OneToOne {
+                    return None;
+                }
+                let kept = |tags: Vec<String>| -> Vec<String> {
+                    match &matching.labels {
+                        MatchingLabels::On(names) if !names.is_empty() => tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+                            .collect(),
+                        MatchingLabels::Ignoring(names) => tags
+                            .into_iter()
+                            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
+                            .collect(),
+                        MatchingLabels::On(_) => tags,
+                    }
+                };
+                let mut tags = kept(fused_output_tags(left, source_tags)?);
+                // A filled left side takes an unmatched right series' matching labels, so those
+                // results carry the right side's tags.
+                if matching.fill.lhs.is_some() {
+                    for tag in kept(fused_output_tags(right, source_tags)?) {
+                        if !tags.contains(&tag) {
+                            tags.push(tag);
+                        }
+                    }
+                }
+                Some(tags)
+            }
+        },
+        NativeExpr::Set { left, right, op } => {
+            let mut tags = fused_output_tags(left, source_tags)?;
+            if op.op == SetOp::Or {
+                for tag in fused_output_tags(right, source_tags)? {
+                    if !tags.contains(&tag) {
+                        tags.push(tag);
+                    }
+                }
+            }
+            Some(tags)
+        }
     }
 }
 
@@ -891,11 +969,13 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
     match expr {
         PromExpr::VectorSelector(selector) => out.push(selector),
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
-        PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(expr, out),
+        PromExpr::Paren(ParenExpr { expr }) => {
+            return collect_selectors(expr, out);
+        }
         PromExpr::Call(call)
             if matches!(
                 call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs"
+                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
             ) && call.args.args.len() == 1 =>
         {
             return collect_selectors(&call.args.args[0], out);
@@ -905,7 +985,9 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
         }
         // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
         PromExpr::NumberLiteral(_) => return true,
-        PromExpr::Unary(unary) => return collect_selectors(&unary.expr, out),
+        PromExpr::Unary(unary) => {
+            return collect_selectors(&unary.expr, out);
+        }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
                 return false;
@@ -916,7 +998,9 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
                 }
             }
         }
-        PromExpr::Aggregate(aggregate) => return collect_selectors(&aggregate.expr, out),
+        PromExpr::Aggregate(aggregate) => {
+            return collect_selectors(&aggregate.expr, out);
+        }
         PromExpr::Subquery(_) => return false,
         _ => {}
     }
@@ -1056,6 +1140,32 @@ mod tests {
     }
 
     #[test]
+    fn selector_walk_keeps_plain_selector_identity() {
+        for (query, expected) in [
+            ("timestamp((x @ 2 offset -1s))", vec!["x"]),
+            ("abs(timestamp(x @ 2 offset -1s))", vec!["x"]),
+            ("timestamp(x @ start() offset 1s)", vec!["x"]),
+            ("timestamp(x @ end() offset -1s)", vec!["x"]),
+            (
+                "timestamp(x @ 2 offset 1s) + y @ 2 offset 1s",
+                vec!["x", "y"],
+            ),
+        ] {
+            let expr = promql_parser::parser::parse(query).unwrap();
+            let mut selectors = Vec::new();
+            assert!(collect_selectors(&expr, &mut selectors));
+            assert_eq!(
+                selectors
+                    .iter()
+                    .map(|s| s.name.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{query}"
+            );
+        }
+    }
+
+    #[test]
     fn collect_selectors_descends_into_aggregate_inputs() {
         for query in [
             "sum(x)",
@@ -1073,6 +1183,9 @@ mod tests {
             "x + on(host) x",
             "x - (x * 2)",
             "rate(x[5s]) + rate(x[10s] offset 2s)",
+            "x == on(host) x",
+            "x > bool x",
+            "2 * (x != on(host) x)",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1], "{query}");
@@ -1084,20 +1197,75 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("x + on() x").root()
         ));
+        // A wrapper does not admit a core the pair itself refuses.
         assert!(!independent_scan_pair(
-            compiled_test_tree("x == on(host) x").root()
+            compiled_test_tree("2 * (x > on() x)").root()
         ));
     }
 
     #[test]
     fn match_output_tags_follow_promql_vector_matching() {
         let tags = vec!["host".to_string(), "kind".to_string()];
+        let sources = [tags.clone(), tags.clone()];
         let on = compiled_test_tree("x + on(host) x");
-        assert_eq!(vec!["host"], fused_output_tags(on.root(), &tags));
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(on.root(), &sources)
+        );
         let ignoring = compiled_test_tree("x + x");
-        assert_eq!(tags, fused_output_tags(ignoring.root(), &tags));
+        assert_eq!(
+            Some(tags.clone()),
+            fused_output_tags(ignoring.root(), &sources)
+        );
         let empty_on = compiled_test_tree("x + on() x");
-        assert_eq!(tags, fused_output_tags(empty_on.root(), &tags));
+        assert_eq!(
+            Some(tags.clone()),
+            fused_output_tags(empty_on.root(), &sources)
+        );
+
+        // Two tables with different tags: the left side's labels pass through a wrapper and a
+        // match, and `or` adds the labels only the right side carries.
+        let sources = [
+            vec!["host".to_string(), "kind".to_string()],
+            vec!["host".to_string(), "zone".to_string()],
+        ];
+        let wrapped = compiled_test_tree("100 * (1 - x / on(host) y)");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(wrapped.root(), &sources)
+        );
+        let and = compiled_test_tree("x and on(host) y");
+        assert_eq!(
+            Some(sources[0].clone()),
+            fused_output_tags(and.root(), &sources)
+        );
+        let or = compiled_test_tree("x or y");
+        assert_eq!(
+            Some(vec![
+                "host".to_string(),
+                "kind".to_string(),
+                "zone".to_string()
+            ]),
+            fused_output_tags(or.root(), &sources)
+        );
+        // An unmatched right series answers with its own matching labels under a left fill.
+        let fill = compiled_test_tree("x + fill_left(0) y");
+        assert_eq!(
+            Some(vec![
+                "host".to_string(),
+                "kind".to_string(),
+                "zone".to_string()
+            ]),
+            fused_output_tags(fill.root(), &sources)
+        );
+        let fill_on = compiled_test_tree("x + on(host) fill(0) y");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(fill_on.root(), &sources)
+        );
+        // An aggregate's labels are its groups, which this walk does not derive.
+        let aggregate = compiled_test_tree("sum by (host) (x)");
+        assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
     }
 
     #[test]
