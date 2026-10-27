@@ -129,7 +129,8 @@ impl Manifest {
             + self.tags.iter().map(|tag| tag.name.capacity()).sum::<usize>()
             + self.coverage.source_file_ids.capacity() * std::mem::size_of::<FileId>()
             // BTree nodes include allocation and partially occupied key/value slots.
-            + (self.coverage.window_sequences.len() + 1) * 128
+            + 512
+            + self.coverage.window_sequences.len() * 128
     }
 
     pub(crate) fn prefix(&self) -> String {
