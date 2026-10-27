@@ -119,6 +119,7 @@ servers = { workspace = true, features = ["testing"] }
 similar-asserts.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",
+    "mysql-rsa",
     "postgres",
     "chrono",
 ] }
