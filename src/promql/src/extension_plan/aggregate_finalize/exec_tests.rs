@@ -50,6 +50,7 @@ use futures::Stream;
 
 use super::*;
 use crate::extension_plan::aggregate_exchange::PartialFold;
+use crate::native::plan::BoundVectorOp;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The query the trees here are compiled from.
@@ -482,6 +483,115 @@ async fn the_state_of_two_producers_merges_into_one_series() {
     assert_eq!(
         rows(&batches),
         [(POINT_TS, Some(6.0), Some(LABEL.to_string()))]
+    );
+}
+
+/// BottomK runs after merging and preserves the labels of each independently selected group.
+#[tokio::test]
+async fn grouped_bottomk_after_merge_preserves_group_labels() {
+    let schema = cut_schema();
+    let group = |label: &str, value| {
+        Series::try_new(
+            &schema,
+            SeriesLabels::try_new(
+                Some(METRIC.into()),
+                vec![Label {
+                    name: K0.into(),
+                    value: label.into(),
+                }],
+            )
+            .unwrap(),
+            TimeAxis::Grid(GridRange::try_new(grid(), POINT, 1).unwrap()),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![value]))])
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = state_of_series(
+        &schema,
+        cut_op(AggregateKind::Sum),
+        &[K0],
+        vec![group("a", 2.0)],
+    );
+    let second = state_of_series(
+        &schema,
+        cut_op(AggregateKind::Sum),
+        &[K0],
+        vec![group("a", 6.0), group("b", 3.0)],
+    );
+    let aggregate = complete(AggregateKind::Sum, by(&[K0]))(window());
+    let root = NativeNode {
+        output: aggregate.output.clone(),
+        expr: NativeExpr::Vector {
+            input: Box::new(aggregate),
+            op: BoundVectorOp::TopK {
+                k: 1.0,
+                top: false,
+                group: by(&[K0]),
+            },
+        },
+    };
+    let plan = finalize(root, output_schema("sum(v0)", &[K0]))
+        .to_execution_plan(state_input(vec![first, second]))
+        .unwrap();
+    let batches = collect(plan, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    // Within group a the merged value is 8; group b independently retains its value 3.
+    assert_eq!(
+        rows(&batches),
+        [
+            (POINT_TS, Some(8.0), Some("a".to_string())),
+            (POINT_TS, Some(3.0), Some("b".to_string())),
+        ]
+    );
+}
+
+/// A TopK tie after merging is resolved by the label order used by `select::topk`.
+#[tokio::test]
+async fn topk_after_merge_breaks_ties_by_label_order() {
+    let schema = cut_schema();
+    let tied = |label: &str| {
+        Series::try_new(
+            &schema,
+            SeriesLabels::try_new(
+                Some(METRIC.into()),
+                vec![Label {
+                    name: K0.into(),
+                    value: label.into(),
+                }],
+            )
+            .unwrap(),
+            TimeAxis::Grid(GridRange::try_new(grid(), POINT, 1).unwrap()),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![5.0]))])
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let first = state_of_series(&schema, cut_op(AggregateKind::Sum), &[K0], vec![tied("b")]);
+    let second = state_of_series(&schema, cut_op(AggregateKind::Sum), &[K0], vec![tied("a")]);
+    let aggregate = complete(AggregateKind::Sum, by(&[K0]))(window());
+    let root = NativeNode {
+        output: aggregate.output.clone(),
+        expr: NativeExpr::Vector {
+            input: Box::new(aggregate),
+            op: BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: by(&[]),
+            },
+        },
+    };
+    let plan = finalize(root, output_schema("sum(v0)", &[K0]))
+        .to_execution_plan(state_input(vec![first, second]))
+        .unwrap();
+    let batches = collect(plan, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    // Both partition states are 5; select::topk chooses lexically earlier label a.
+    assert_eq!(
+        rows(&batches),
+        [(POINT_TS, Some(5.0), Some("a".to_string()))]
     );
 }
 
