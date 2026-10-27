@@ -593,7 +593,20 @@ fn is_in_process_plan(plan: &LogicalPlan) -> bool {
     if let LogicalPlan::Extension(extension) = plan
         && extension.node.as_any().is::<VectorSelect>()
     {
-        return matches!(extension.node.inputs().as_slice(), [LogicalPlan::Extension(prefix)] if prefix.node.as_any().downcast_ref::<FusedSeries>().is_some_and(FusedSeries::has_frame_provenance) && matches!(prefix.node.inputs().as_slice(), [LogicalPlan::TableScan(_)]));
+        // The selection reads the frames one region's fused prefix produces, and that prefix must
+        // state its provenance; anything else keeps the ordinary encoding checks.
+        let inputs = extension.node.inputs();
+        let [LogicalPlan::Extension(prefix_plan)] = inputs.as_slice() else {
+            return false;
+        };
+        let Some(prefix) = prefix_plan.node.as_any().downcast_ref::<FusedSeries>() else {
+            return false;
+        };
+        return prefix.has_frame_provenance()
+            && matches!(
+                prefix_plan.node.inputs().as_slice(),
+                [LogicalPlan::TableScan(_)]
+            );
     }
     let LogicalPlan::Extension(extension) = plan else {
         return false;
