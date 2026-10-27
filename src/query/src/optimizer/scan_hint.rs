@@ -26,7 +26,9 @@ use datafusion_expr::expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, utils};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::arrow::datatypes::{DataType, TimeUnit as ArrowTimeUnit};
-use promql::extension_plan::{FusedSeries, InstantManipulate, SeriesDivide, SeriesNormalize};
+use promql::extension_plan::{
+    FusedSeries, InstantManipulate, RawSeriesSource, SeriesDivide, SeriesNormalize,
+};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
@@ -38,8 +40,8 @@ use crate::dummy_catalog::DummyTableProvider;
 /// - the group by columns when all aggregate functions are `last_value` as
 ///   time series row selector hint.
 /// - the per-series distribution when the leaf table scan node is the input of a
-///   [`FusedSeries`] node, which reads the raw series frames a region only packs
-///   for that distribution.
+///   [`FusedSeries`] or [`RawSeriesSource`] node, which read the raw series frames a
+///   region only packs for that distribution.
 ///
 /// [`ScanRequest`]: store_api::storage::ScanRequest
 #[derive(Debug)]
@@ -289,7 +291,7 @@ struct ScanHintRewriter {
     ts_stack: Vec<Option<(HashSet<Column>, Column)>>,
     inside_single_evaluation: bool,
     single_evaluation_stack: Vec<bool>,
-    /// Whether the node being visited is the input of a [`FusedSeries`] node.
+    /// Whether the node being visited is the input of a [`FusedSeries`] or [`RawSeriesSource`] node.
     ///
     /// The flag only describes that one edge: it is set while a `FusedSeries` node is visited, so
     /// the node visited next — that node's own input — sees it, and a node further down does not.
@@ -310,7 +312,9 @@ impl TreeNodeRewriter for ScanHintRewriter {
         // node hands the flag to its own input and to nothing below it.
         let fused_series_input = std::mem::replace(
             &mut self.fused_series_input,
-            matches!(&node, LogicalPlan::Extension(extension) if extension.node.as_any().is::<FusedSeries>()),
+            matches!(&node, LogicalPlan::Extension(extension)
+                if extension.node.as_any().is::<FusedSeries>()
+                    || extension.node.as_any().is::<RawSeriesSource>()),
         );
 
         if let LogicalPlan::Sort(sort) = &node {

@@ -125,11 +125,17 @@ const EVAL_MILLIS: i64 = EVAL_SECS * 1000;
 const GAUGE_TABLE: &str = "native_agg_gauge";
 /// The table the `rate` queries read: the same five series as [`GAUGE_TABLE`], holding a counter.
 const COUNTER_TABLE: &str = "native_agg_counter";
+/// The right operand of the hybrid binary cases. It has one region but a partition column, so a
+/// pair reading it is declined by the two-scan native route and planned by the hybrid one.
 const COUNTER_RHS_TABLE: &str = "native_agg_counter_rhs";
 /// The table the range-window smoke test reads.
 const RANGE_TABLE: &str = "native_agg_range";
 const HYBRID_MATCH_LEFT: &str = "native_hybrid_match_left";
+/// Partitioned like [`COUNTER_RHS_TABLE`], so the hybrid route plans a pair reading it.
 const HYBRID_MATCH_RIGHT: &str = "native_hybrid_match_right";
+/// The same rows as [`HYBRID_MATCH_RIGHT`] without a partition column, so the two-scan route plans
+/// a pair reading it.
+const HYBRID_MATCH_RIGHT_UNPARTITIONED: &str = "native_hybrid_match_right_unpartitioned";
 /// The tolerance of the value comparisons: relative, with an absolute floor.
 const FLOAT_TOLERANCE: f64 = 1e-10;
 
@@ -545,13 +551,16 @@ async fn native_hybrid_binary_05_06_08() {
     let instance = Arc::clone(standalone.fe_instance());
     setup_fixture(&instance).await;
     execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_LEFT} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
-    execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_RIGHT} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
+    execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_RIGHT} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance)) PARTITION ON COLUMNS (job) ()")).await;
+    execute_sql(&instance, &format!("CREATE TABLE {HYBRID_MATCH_RIGHT_UNPARTITIONED} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance))")).await;
     execute_sql(
         &instance,
         &format!("INSERT INTO {HYBRID_MATCH_LEFT} VALUES ({EVAL_MILLIS}, 'api', 'a1', 10)"),
     )
     .await;
-    execute_sql(&instance, &format!("INSERT INTO {HYBRID_MATCH_RIGHT} VALUES ({EVAL_MILLIS}, 'api', 'b1', 2), ({EVAL_MILLIS}, 'other', 'b2', 3), ({EVAL_MILLIS}, 'other', 'b3', 4)" )).await;
+    for table in [HYBRID_MATCH_RIGHT, HYBRID_MATCH_RIGHT_UNPARTITIONED] {
+        execute_sql(&instance, &format!("INSERT INTO {table} VALUES ({EVAL_MILLIS}, 'api', 'b1', 2), ({EVAL_MILLIS}, 'other', 'b2', 3), ({EVAL_MILLIS}, 'other', 'b3', 4)" )).await;
+    }
     let propagated = format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT}");
     let (legacy, _) = run_query(&instance, &propagated, false, &observer).await;
     assert_eq!(
@@ -594,6 +603,32 @@ async fn native_hybrid_binary_05_06_08() {
         uniqueness.0 && uniqueness.1,
         "on(job) FE uniqueness operators: {}",
         displayable(frontend.as_ref()).indent(false)
+    );
+
+    // On the two-scan route the right side's two `job="other"` series are a duplicate match group,
+    // which Prometheus refuses whether or not the left side has a series to match them with
+    // (`VectorBinop` in engine.go). The 5 above comes from the matcher `{job="api"}` the existing
+    // plan copies to the right side before matching.
+    let unpartitioned =
+        format!("{HYBRID_MATCH_LEFT}{{job=\"api\"}} / on(job) {HYBRID_MATCH_RIGHT_UNPARTITIONED}");
+    let mut query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, "true".to_string());
+    let output = instance
+        .do_query(&tql_eval(&unpartitioned), Arc::new(query_ctx))
+        .await
+        .remove(0)
+        .expect("the query plans");
+    let error = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .expect_err("a duplicate match group fails"),
+        other => panic!("`{unpartitioned}` was expected to stream: {other:?}"),
+    };
+    assert!(
+        error.to_string().contains(
+            "found duplicate series for the match group {job=\"other\"} on the right hand-side"
+        ),
+        "{unpartitioned}: {error}"
     );
 
     check_hybrid_binary_cases(&instance, &observer).await;
@@ -1021,7 +1056,7 @@ async fn setup_fixture(instance: &Arc<Instance>) {
     }
 
     execute_sql(instance, &counter_table_sql()).await;
-    execute_sql(instance, &format!("CREATE TABLE {COUNTER_RHS_TABLE} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance)) WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')")).await;
+    execute_sql(instance, &format!("CREATE TABLE {COUNTER_RHS_TABLE} (ts TIMESTAMP(3) TIME INDEX, job STRING, instance STRING, v DOUBLE, PRIMARY KEY (job, instance)) PARTITION ON COLUMNS (job) () WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')")).await;
     let (counter_first, counter_second) = (
         COUNTER_FIRST_SECS * 1000,
         (COUNTER_FIRST_SECS + COUNTER_STEP_SECS) * 1000,

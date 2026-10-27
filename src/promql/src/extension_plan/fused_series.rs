@@ -56,7 +56,7 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -71,10 +71,11 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
+use store_api::region_engine::RawLabelSource;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
+use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -101,9 +102,13 @@ const POLL_BUDGET: usize = 64;
 /// The statement grid and output naming that travel with a compiled tree.
 ///
 /// Source schemas belong to the tree's input nodes. This binding supplies the grid that addresses
-/// evaluated chunks, the time column and the full raw tag names needed by the scanner. Binary
-/// matching may reduce the output tags. The logical node checks that the root produces values on
-/// that grid; frames carry each series' actual labels and timestamps.
+/// evaluated chunks, the time column and the metric and full raw tag names a region scan child is
+/// bound with. A child that already produces raw frames, a [`RawSeriesSource`] per table of a
+/// cross-table tree, carries its own binding instead. The output tags are the output schema's. The
+/// logical node checks that the root produces values on that grid; frames carry each series'
+/// actual labels and timestamps.
+///
+/// [`RawSeriesSource`]: super::RawSeriesSource
 #[derive(Clone, Debug)]
 pub struct FusedSeriesBinding {
     /// The statement's grid, which is the grid every evaluated chunk is addressed on.
@@ -116,7 +121,7 @@ pub struct FusedSeriesBinding {
     pub metric_name: Option<Arc<str>>,
     /// The output column holding the grid timestamps.
     pub time_index: String,
-    /// The full logical tag names used to bind raw scans, before binary output-label projection.
+    /// The full logical tag names used to bind region scan children, before output-label projection.
     ///
     /// [`METRIC_NAME`] is special: it is resolved to the series' metric name instead of a column,
     /// which is how a reader sees that a range function dropped it.
@@ -361,16 +366,45 @@ impl FusedSeries {
                 self.children.len()
             )));
         }
+        let tags = if self.partial_fold.is_some() {
+            self.binding.tags.clone()
+        } else {
+            self.output_tags()
+        };
         Ok(Arc::new(FusedSeriesExec::build(
             Arc::clone(&self.promql),
             inputs,
             Arc::new(self.tree.clone()),
             output_schema,
             self.binding.time_index.clone(),
-            self.binding.tags.clone(),
+            tags,
             self.partial_fold.clone(),
             self.format,
         )?))
+    }
+
+    /// The label columns of the output: every column that is neither the time index nor a field of
+    /// the root. A scalar root has no labels; its one other column is the value.
+    ///
+    /// The planner decides them from the whole tree - a match narrows them, `or` joins both sides'
+    /// and a wrapper around either keeps them - and the output schema is where it records that.
+    fn output_tags(&self) -> Vec<String> {
+        let Some(root) = self.tree.root().output.samples() else {
+            return Vec::new();
+        };
+        self.output_schema
+            .fields()
+            .iter()
+            .map(|field| field.name())
+            .filter(|name| {
+                *name != &self.binding.time_index
+                    && !root
+                        .fields
+                        .iter()
+                        .any(|field| field.name.as_ref() == name.as_str())
+            })
+            .cloned()
+            .collect()
     }
 }
 
@@ -941,20 +975,6 @@ impl FusedSeriesExec {
                 "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
             ));
         }
-        let mut output_tags = tags.clone();
-        if partial_fold.is_none()
-            && let NativeExpr::Binary { matching, .. } = &tree.root().expr
-            && matching.cardinality == crate::vector_match::Cardinality::OneToOne
-        {
-            match &matching.labels {
-                crate::vector_match::MatchingLabels::On(labels) => {
-                    output_tags.retain(|tag| labels.iter().any(|label| label.as_ref() == tag));
-                }
-                crate::vector_match::MatchingLabels::Ignoring(labels) => {
-                    output_tags.retain(|tag| !labels.iter().any(|label| label.as_ref() == tag));
-                }
-            }
-        }
         let frame_schema = if partial_fold.is_none() && format == FusedOutputFormat::SeriesFrame {
             let declared = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
             if declared != output_schema {
@@ -970,8 +990,8 @@ impl FusedSeriesExec {
         let classification = if partial_fold.is_some() || frame_schema {
             Vec::new()
         } else if scalar_root {
-            let scalar_fields = scalar_root_fields(&output_schema, &output_tags, &time_column)?;
-            classify_output(&output_schema, &scalar_fields, &output_tags, &time_column)?
+            let scalar_fields = scalar_root_fields(&output_schema, &tags, &time_column)?;
+            classify_output(&output_schema, &scalar_fields, &tags, &time_column)?
         } else {
             classify_output(
                 &output_schema,
@@ -980,7 +1000,7 @@ impl FusedSeriesExec {
                         DataFusionError::Plan("FusedSeries output is not samples".into())
                     })?
                     .fields,
-                &output_tags,
+                &tags,
                 &time_column,
             )?
         };
@@ -1045,7 +1065,7 @@ impl FusedSeriesExec {
             inputs,
             classification: classification.into(),
             time_column,
-            tags: output_tags.into(),
+            tags: tags.into(),
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
@@ -1169,7 +1189,7 @@ impl ExecutionPlan for FusedSeriesExec {
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
         state.register_metrics(&self.metric, partition);
-        let mut streams = VecDeque::new();
+        let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if self.inputs.len() == 1 && partition >= count {
@@ -1190,7 +1210,7 @@ impl ExecutionPlan for FusedSeriesExec {
                     unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
                 let raw = materialize_raw_labels(raw)
                     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                streams.push_back((source, raw));
+                streams.push((source, raw));
             }
         }
         let input_ids = (0..self.series_schemas.len())
@@ -1218,15 +1238,23 @@ impl ExecutionPlan for FusedSeriesExec {
             })
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
-        if streams.is_empty() {
+        let inputs = if streams.is_empty() {
             executor.end_of_input()?;
-        }
+            None
+        } else {
+            let reservation = MemoryConsumer::new(format!("FusedSeriesGather[{partition}]"))
+                .register(&context.runtime_env().memory_pool);
+            Some(SeriesGather::new(
+                spawn_partitions(streams, &context.runtime_env().memory_pool),
+                reservation,
+            ))
+        };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
         let frame_mode =
             self.partial_fold.is_none() && self.format == FusedOutputFormat::SeriesFrame;
         let stream = FusedSeriesStream {
-            inputs: streams,
+            inputs,
             executor: Some(executor),
             input_ids,
             classification: Arc::clone(&self.classification),
@@ -1345,11 +1373,11 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    /// Source-indexed partition streams, each decoded independently and consumed to EOF in order.
+    /// Every input partition, read concurrently, or `None` once they all ended.
     ///
-    /// Each decoder holds its current batch, decoded chunks and upstream source. Clearing this
-    /// queue on error releases them even if the consumer keeps the terminated stream.
-    inputs: VecDeque<(usize, SendableRawSeriesStream)>,
+    /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
+    /// error releases them even if the consumer keeps the terminated stream.
+    inputs: Option<SeriesGather>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Runtime input IDs for each source index.
@@ -1445,7 +1473,7 @@ impl FusedSeriesStream {
         self.done = true;
         self.executor = None;
         self.partial_fold = None;
-        self.inputs.clear();
+        self.inputs = None;
         // This reservation belongs only to this execution. Release it even if the consumer keeps
         // the failed stream and the plan alive.
         self._export_budget
@@ -1499,7 +1527,7 @@ impl FusedSeriesStream {
                     .map_or(Ok(None), NativeExecutor::next_chunk)
                 {
                     Ok(Some(chunk)) => return Poll::Ready(Some(Ok(FusedOutput::Evaluated(chunk)))),
-                    Ok(None) if self.inputs.is_empty() => self.executor = None,
+                    Ok(None) if self.inputs.is_none() => self.executor = None,
                     Ok(None) => {}
                     Err(error) => {
                         self.fail();
@@ -1510,7 +1538,7 @@ impl FusedSeriesStream {
             if self.done {
                 return Poll::Ready(None);
             }
-            let Some((source, input)) = self.inputs.front_mut() else {
+            let Some(inputs) = self.inputs.as_mut() else {
                 match self.pull_one() {
                     Ok(Some(chunk)) if self.frame_mode => {
                         return Poll::Ready(Some(Ok(FusedOutput::Evaluated(chunk))));
@@ -1536,14 +1564,11 @@ impl FusedSeriesStream {
                 }
                 continue;
             };
-            let (source, polled) = (*source, input.as_mut().poll_next(cx));
-            match polled {
+            match Pin::new(inputs).poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => {
-                    self.inputs.pop_front();
-                    if self.inputs.is_empty()
-                        && let Err(error) = self.close_input()
-                    {
+                    self.inputs = None;
+                    if let Err(error) = self.close_input() {
                         self.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
@@ -1552,7 +1577,7 @@ impl FusedSeriesStream {
                     self.fail();
                     return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                Poll::Ready(Some(Ok(chunk))) => {
+                Poll::Ready(Some(Ok((source, chunk)))) => {
                     if let Err(error) = self.push(source, chunk) {
                         self.fail();
                         return Poll::Ready(Some(Err(error)));

@@ -120,7 +120,7 @@ impl NativeChunk {
 ///
 /// The figure is what the chunk keeps alive rather than one float per field and row: a histogram
 /// field holds no floats at all, only indices into the table its samples live in.
-fn raw_bytes(chunk: &RawSeriesChunk) -> usize {
+pub(crate) fn raw_bytes(chunk: &RawSeriesChunk) -> usize {
     std::mem::size_of::<RawSeriesChunk>()
         .saturating_add(buffer_bytes(&chunk.primary_key))
         .saturating_add(chunk.metric.as_ref().map_or(0, metric_bytes))

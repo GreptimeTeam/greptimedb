@@ -21,8 +21,8 @@ use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
-    AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate, SeriesDivide,
-    SeriesNormalize,
+    AggregateFinalize, EmptyMetric, FusedSeries, InstantManipulate, RangeManipulate,
+    RawSeriesSource, SeriesDivide, SeriesNormalize,
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
@@ -275,6 +275,15 @@ impl Categorizer {
                 // execution. It is not a claim that matching is globally commutative across regions.
                 Commutativity::Commutative
             }
+            // A region answers its own series of one table, which is what the node above the merge
+            // scans reads from every region.
+            name if name == RawSeriesSource::name() => {
+                if matches!(plan.inputs().as_slice(), [LogicalPlan::TableScan(_)]) {
+                    Commutativity::Commutative
+                } else {
+                    Commutativity::NonCommutative
+                }
+            }
             // The merge reads every partition's state, so it cannot run in one of them: a region
             // would merge the state its own scan produced and report that as the whole group.
             name if name == AggregateFinalize::name() => Commutativity::NonCommutative,
@@ -403,7 +412,9 @@ mod tests {
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding};
+    use promql::extension_plan::{
+        AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource,
+    };
     use promql::functions::{
         NativeHistogramDrop, NativeHistogramFraction, NativeHistogramQuantile,
     };
@@ -857,6 +868,75 @@ mod tests {
             Categorizer::check_extension_plan(extension.node.as_ref(), &AliasMapping::default()),
             Commutativity::NonCommutative
         ));
+    }
+
+    /// Two tables are two regions: the pair stays above them and each table's raw source rides
+    /// in a merge scan of its own.
+    #[test]
+    fn cross_table_pair_runs_above_one_merge_scan_per_table() {
+        let source = |scan: LogicalPlan, metric: &str| {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RawSeriesSource::try_new(
+                        Arc::from(metric),
+                        vec!["host".to_string()],
+                        vec!["v0".to_string()],
+                        scan,
+                    )
+                    .unwrap(),
+                ),
+            })
+        };
+        let other_table = LogicalPlanBuilder::scan(
+            "other_metric",
+            Arc::new(DefaultTableSource::new(Arc::new(mock_table_provider(
+                RegionId::new(2, 1),
+            )))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let pair = fused_pair_plan(
+            source(table_scan_plan(), "some_metric"),
+            source(other_table, "other_metric"),
+        );
+
+        let analyzed_plan = analyze(DistPlannerAnalyzer::new(true), pair);
+        let LogicalPlan::Extension(root) = &analyzed_plan else {
+            panic!("the pair stays the root: {analyzed_plan}");
+        };
+        assert!(root.node.as_any().is::<FusedSeries>(), "{analyzed_plan}");
+        let remote_tables = root
+            .node
+            .inputs()
+            .into_iter()
+            .map(|input| {
+                let merge_scan = first_merge_scan(input).expect("each input is a merge scan");
+                let LogicalPlan::Extension(remote) = merge_scan.input() else {
+                    panic!("expected a raw source: {}", merge_scan.input());
+                };
+                let source = remote
+                    .node
+                    .as_any()
+                    .downcast_ref::<RawSeriesSource>()
+                    .expect("the region runs the raw source");
+                let [LogicalPlan::TableScan(scan)] = remote.node.inputs()[..] else {
+                    panic!("the raw source reads its scan: {}", merge_scan.input());
+                };
+                (
+                    source.metric_name().to_string(),
+                    scan.table_name.to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![
+                ("some_metric".to_string(), "some_metric".to_string()),
+                ("other_metric".to_string(), "other_metric".to_string()),
+            ],
+            remote_tables
+        );
     }
 
     #[test]
