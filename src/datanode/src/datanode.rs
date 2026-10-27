@@ -1544,6 +1544,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_file_store_is_not_self_tested() {
+        // The self-test is enabled by default, but a File store must skip it.
+        let data_home = create_temp_dir("object-store-self-test-file");
+        let storage = StorageConfig {
+            data_home: data_home.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
+
+        // The self-test would leave this directory behind if it ran.
+        assert!(!data_home.path().join(".greptime_self_test").exists());
+    }
+
+    #[tokio::test]
     async fn test_object_store_self_test_failure_aborts_build() {
         // The endpoint does not accept connections, so the probe write fails and the
         // build must fail with it.

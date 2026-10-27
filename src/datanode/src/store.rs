@@ -99,7 +99,7 @@ const SELF_TEST_DIR: &str = ".greptime_self_test";
 
 /// The budget of one [`self_test_object_store`] call, including the retries an object
 /// store makes on top of its 30s request timeout.
-pub const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const SELF_TEST_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// The budget of the best-effort cleanup after a timed-out self-test, kept short so an
 /// unresponsive store cannot block startup a second time.
@@ -107,7 +107,7 @@ const SELF_TEST_CLEANUP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Returns a unique key prefix for [`self_test_object_store`], so datanodes sharing
 /// the same bucket and root do not collide.
-pub fn self_test_key_prefix(node_id: u64) -> String {
+pub(crate) fn self_test_key_prefix(node_id: u64) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -125,7 +125,11 @@ fn self_test_probe_key(prefix: &str) -> String {
 ///
 /// The probe object is removed before returning, after a failed step too. A caller
 /// that abandons the check early must call [`remove_self_test_probe`].
-pub async fn self_test_object_store(store: &ObjectStore, name: &str, prefix: &str) -> Result<()> {
+pub(crate) async fn self_test_object_store(
+    store: &ObjectStore,
+    name: &str,
+    prefix: &str,
+) -> Result<()> {
     let key = self_test_probe_key(prefix);
 
     let check = async {
@@ -219,7 +223,7 @@ async fn verify_content(store: &ObjectStore, name: &str, key: &str, expected: &[
 /// Removes the probe object of a self-test that did not finish.
 ///
 /// It has its own short budget, and failures only log: the caller reports the timeout.
-pub async fn remove_self_test_probe(store: &ObjectStore, prefix: &str) {
+pub(crate) async fn remove_self_test_probe(store: &ObjectStore, prefix: &str) {
     let key = self_test_probe_key(prefix);
     match tokio::time::timeout(SELF_TEST_CLEANUP_TIMEOUT, store.delete(&key)).await {
         Ok(Ok(())) => {}
@@ -237,11 +241,9 @@ pub async fn remove_self_test_probe(store: &ObjectStore, prefix: &str) {
 #[cfg(test)]
 mod tests {
     use common_test_util::temp_dir::create_temp_dir;
-    use object_store::config::S3Config;
     use object_store::services::Fs;
 
     use super::*;
-    use crate::config::ObjectStoreConfig;
 
     fn new_fs_store(root: &str) -> ObjectStore {
         ObjectStore::new(Fs::default().root(root)).unwrap()
@@ -291,11 +293,5 @@ mod tests {
         remove_self_test_probe(&store, &prefix).await;
 
         assert!(store.read(&key).await.is_err());
-    }
-
-    #[test]
-    fn test_file_store_is_not_self_tested() {
-        assert!(!ObjectStoreConfig::default().is_object_storage());
-        assert!(ObjectStoreConfig::S3(S3Config::default()).is_object_storage());
     }
 }
