@@ -472,7 +472,8 @@ impl RegionServer {
     }
 
     /// Sets the role of a region from a lease the metasrv grants until `deadline`, in reply to a
-    /// heartbeat sent at `sent_at`. Returns whether the role was applied.
+    /// heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because the
+    /// region was downgraded or (re)opened after `sent_at`.
     pub fn set_region_role_with_lease(
         &self,
         region_id: RegionId,

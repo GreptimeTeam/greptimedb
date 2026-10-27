@@ -1293,8 +1293,8 @@ pub(crate) struct ManifestContext {
     /// When the role was last demoted. A promotion issued before it does not apply. The lock
     /// covers comparing or raising it and the role change.
     ///
-    /// It starts at creation time. Demotions and reopens both run in the region's worker loop, so
-    /// a context that replaces this one is created after its last demotion.
+    /// It starts at creation time. A context that replaces this one is created after the worker
+    /// loop closes or reopens the region, so after its last demotion.
     demoted_at: Mutex<Instant>,
     /// Partition info of the region in staging mode.
     ///
@@ -1688,7 +1688,7 @@ impl ManifestContext {
         issued_at: Instant,
         region_id: RegionId,
     ) -> bool {
-        // A writable leader needs no change. Staging still leaves staging below.
+        // A writable leader needs no change; a staging leader is promoted below.
         if self.state.load() == RegionRoleState::Leader(RegionLeaderState::Writable) {
             return true;
         }

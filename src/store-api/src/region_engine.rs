@@ -1083,12 +1083,12 @@ pub trait RegionEngine: Send + Sync {
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
     /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
-    /// to a heartbeat sent at `sent_at`. Returns whether the role was applied.
+    /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
+    /// the region was downgraded or (re)opened after `sent_at`.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
-    /// that deadline. The engine may ignore a Leader lease for a heartbeat sent before the region
-    /// was downgraded.
+    /// that deadline.
     fn set_region_role_with_lease(
         &self,
         region_id: RegionId,

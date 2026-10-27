@@ -449,20 +449,23 @@ impl CountdownTask {
                         },
                         Some(CountdownCommand::Reset((role, sent_at, deadline, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            let result = self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std());
-                            if let Err(err) = &result {
-                                if err.status_code() == StatusCode::RegionNotFound {
-                                    // Table metadata in metasrv is deleted after its regions are dropped.
-                                    // The datanode may still receive lease renewal responses that depend on the metadata
-                                    // during the short period before it is removed.
-                                    warn!(err; "Failed to set region role to {role} for region {region_id}");
-                                } else {
-                                    error!(err; "Failed to set region role to {role} for region {region_id}");
+                            let applied = match self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std()) {
+                                Ok(applied) => applied,
+                                Err(err) => {
+                                    if err.status_code() == StatusCode::RegionNotFound {
+                                        // Table metadata in metasrv is deleted after its regions are dropped.
+                                        // The datanode may still receive lease renewal responses that depend on the metadata
+                                        // during the short period before it is removed.
+                                        warn!(err; "Failed to set region role to {role} for region {region_id}");
+                                    } else {
+                                        error!(err; "Failed to set region role to {role} for region {region_id}");
+                                    }
+                                    false
                                 }
+                            };
 
                             // Finalize leadership if the grant was applied: persist backfilled metadata.
-                            } else if !prev_role_leader && role == RegionRole::Leader
-                                && matches!(result, Ok(true))
+                            if applied && !prev_role_leader && role == RegionRole::Leader
                                 && let Err(err) = self
                                     .region_server
                                     .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
