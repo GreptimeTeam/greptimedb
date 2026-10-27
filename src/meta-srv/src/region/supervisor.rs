@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolve
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
-use common_meta::key::table_route::{TableRouteKey, TableRouteValue};
+use common_meta::key::table_route::{TableRouteKey, TableRouteStorage, TableRouteValue};
 use common_meta::key::{MetadataKey, MetadataValue};
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::leadership_notifier::LeadershipChangeListener;
@@ -34,6 +34,7 @@ use common_runtime::JoinHandle;
 use common_telemetry::{debug, error, info, warn};
 use common_time::util::current_time_millis;
 use futures::{StreamExt, TryStreamExt};
+use itertools::Itertools;
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use tokio::sync::mpsc::error::TrySendError;
@@ -671,7 +672,7 @@ impl RegionSupervisor {
         &self,
         from_peer_id: DatanodeId,
         regions: &[RegionId],
-        failure_datanodes: &[DatanodeId],
+        exclude_datanodes: &[DatanodeId],
     ) -> Result<Vec<(RegionId, Peer)>> {
         let affinity = if let Some(resolver) = &self.affinity_resolver {
             match resolver
@@ -703,7 +704,7 @@ impl RegionSupervisor {
             None
         };
         let mut exclude_peer_ids: HashSet<u64> =
-            HashSet::from_iter(failure_datanodes.iter().copied());
+            HashSet::from_iter(exclude_datanodes.iter().copied());
         let unschedulable_datanodes = self
             .selector_context
             .peer_discovery
@@ -780,9 +781,44 @@ impl RegionSupervisor {
             .flatten()
             .unwrap_or_else(|| Peer::empty(from_peer_id));
 
-        let region_peers = self
-            .select_peers(from_peer_id, regions, failed_datanodes)
-            .await?;
+        // Group the regions by their route followers, which can't take them over.
+        let table_ids = regions
+            .iter()
+            .map(|region_id| region_id.table_id())
+            .unique()
+            .collect::<Vec<_>>();
+        let table_routes = TableRouteStorage::new(self.kv_backend.clone())
+            .batch_get(&table_ids)
+            .await
+            .context(error::TableMetadataManagerSnafu)?;
+        let followers = table_routes
+            .iter()
+            .flatten()
+            .filter_map(|table_route| table_route.region_routes().ok())
+            .flatten()
+            .map(|route| {
+                let peers = route.follower_peers.iter().map(|peer| peer.id);
+                (route.region.id, peers.sorted().dedup().collect::<Vec<_>>())
+            })
+            .collect::<HashMap<_, _>>();
+        let mut groups = BTreeMap::<_, Vec<_>>::new();
+        for region_id in regions {
+            let key = followers.get(region_id).cloned().unwrap_or_default();
+            groups.entry(key).or_default().push(*region_id);
+        }
+
+        let mut region_peers = Vec::with_capacity(regions.len());
+        for (followers, regions) in groups {
+            let excluded = [failed_datanodes, &followers].concat();
+            match self.select_peers(from_peer_id, &regions, &excluded).await {
+                Ok(peers) => region_peers.extend(peers),
+                // Other groups may still have candidates.
+                Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
+                    error!(err; "Failed to select failover targets for regions: {:?}", regions)
+                }
+                Err(err) => return Err(err),
+            }
+        }
 
         for (region_id, peer) in region_peers {
             let count = *self
@@ -1281,6 +1317,102 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(1, region_peers.len());
         assert_eq!(Peer::empty(9), region_peers[0].1);
+    }
+
+    #[tokio::test]
+    async fn test_failover_excludes_route_followers() {
+        use std::collections::HashSet as StdHashSet;
+
+        use crate::error::{self, Result};
+        use crate::metasrv::SelectTarget;
+        use crate::selector::{Selector, SelectorOptions};
+
+        /// Records each selection, and has no candidate once datanode 3 is excluded.
+        struct RecordingSelector(Mutex<Vec<(StdHashSet<u64>, usize)>>);
+
+        #[async_trait::async_trait]
+        impl Selector for RecordingSelector {
+            type Context = SelectorContext;
+            type Output = Vec<Peer>;
+
+            async fn select(
+                &self,
+                _ctx: &Self::Context,
+                opts: SelectorOptions<'_>,
+            ) -> Result<Self::Output> {
+                let required = opts.min_required_items;
+                let no_candidate = opts.exclude_peer_ids.contains(&3);
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((opts.exclude_peer_ids, required));
+                if no_candidate {
+                    return error::NoEnoughAvailableNodeSnafu {
+                        required,
+                        available: 0usize,
+                        select_target: SelectTarget::Datanode,
+                    }
+                    .fail();
+                }
+                Ok(vec![Peer::empty(3); required])
+            }
+        }
+
+        let selector = Arc::new(RecordingSelector(Mutex::new(vec![])));
+        let (mut supervisor, _tx) = new_test_supervisor_with(
+            new_test_selector_context(),
+            RegionSupervisorSelector::NaiveSelector(selector.clone()),
+        );
+        let table_id = 1024;
+        let region_route = |region_number, followers: &[u64]| RegionRoute {
+            region: Region {
+                id: RegionId::new(table_id, region_number),
+                ..Default::default()
+            },
+            leader_peer: Some(Peer::empty(8)),
+            follower_peers: followers.iter().map(|id| Peer::empty(*id)).collect(),
+            ..Default::default()
+        };
+        let table_route = PhysicalTableRouteValue::new(vec![
+            region_route(0, &[]),
+            region_route(1, &[2]),
+            region_route(2, &[2]),
+            region_route(3, &[3]),
+        ]);
+        let mut task = test_create_physical_table_task("my_physical_table");
+        task.set_table_id(table_id);
+        TableMetadataManager::new(supervisor.kv_backend.clone())
+            .create_table_metadata(
+                task.table_info,
+                TableRouteValue::Physical(table_route),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        let regions = (0..4)
+            .map(|number| RegionId::new(table_id, number))
+            .collect::<Vec<_>>();
+        let tasks = supervisor
+            .generate_failover_tasks(8, &regions, &[8])
+            .await
+            .unwrap();
+
+        // Regions with the same followers are selected together, excluding those followers.
+        assert_eq!(
+            *selector.0.lock().unwrap(),
+            vec![
+                (StdHashSet::from([8]), 1),
+                (StdHashSet::from([8, 2]), 2),
+                (StdHashSet::from([8, 3]), 1),
+            ]
+        );
+        // Only the region whose follower is the last candidate is skipped.
+        let failed_over = tasks
+            .iter()
+            .map(|(task, _)| task.region_id)
+            .collect::<Vec<_>>();
+        assert_eq!(failed_over, regions[..3]);
     }
 
     #[tokio::test]
