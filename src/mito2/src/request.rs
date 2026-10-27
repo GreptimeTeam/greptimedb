@@ -1148,8 +1148,6 @@ pub(crate) struct FlushFinished {
     pub(crate) _timer: HistogramTimer,
     /// Region edit to apply.
     pub(crate) edit: RegionEdit,
-    /// Files in `edit` written without building their indexes.
-    pub(crate) unindexed_files: Vec<FileId>,
     /// Memtables to remove.
     pub(crate) memtables_to_remove: SmallVec<[MemtableId; 2]>,
     /// Whether the region is in staging mode.

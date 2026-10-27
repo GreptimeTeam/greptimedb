@@ -14,10 +14,29 @@
 
 //! Utilities for choosing an execution batch size from source statistics.
 
+use parquet::file::metadata::ParquetMetaData;
+
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 /// Approximate decoded bytes to produce in one batch.
 pub(crate) const TARGET_BATCH_BYTES: usize = 64 * 1024 * 1024;
+
+/// Returns `(num_rows, uncompressed_bytes)` of the largest row group in a Parquet file, which
+/// bounds the decoded size of a batch read from it.
+pub(crate) fn largest_row_group_statistic(metadata: &ParquetMetaData) -> Option<(u64, u64)> {
+    metadata
+        .row_groups()
+        .iter()
+        .map(|row_group| {
+            let uncompressed_bytes = row_group
+                .columns()
+                .iter()
+                .map(|column| column.uncompressed_size() as u64)
+                .sum();
+            (row_group.num_rows() as u64, uncompressed_bytes)
+        })
+        .max_by_key(|(_, uncompressed_bytes)| *uncompressed_bytes)
+}
 
 /// Estimates a batch size from `(num_rows, estimated_bytes)` pairs.
 ///

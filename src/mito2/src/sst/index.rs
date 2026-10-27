@@ -35,14 +35,16 @@ use std::sync::Arc;
 
 use arrow_schema::extension::ExtensionType;
 use bloom_filter::creator::BloomFilterIndexer;
+use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::Json2ExtensionType;
 use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use puffin_manager::SstPuffinManager;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use snafu::ResultExt;
 use statistics::{ByteCount, RowCount};
 use store_api::codec::PrimaryKeyEncoding;
@@ -52,6 +54,7 @@ use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
+use crate::batch_size::{estimate_batch_size, largest_row_group_statistic};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
 use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
@@ -440,6 +443,80 @@ impl IndexerBuilder for IndexerBuilderImpl {
         indexer.puffin_manager = Some(self.puffin_manager.clone());
         indexer
     }
+}
+
+/// Builds the indexes of an SST from its encoded parquet bytes.
+///
+/// Encoded bulk parts are flushed without passing through [ParquetWriter], so their indexes
+/// are built from the bytes still in memory instead of reading the uploaded SST back. Like
+/// the writer, a failure only drops the index and leaves the SST unindexed.
+///
+/// [ParquetWriter]: crate::sst::parquet::writer::ParquetWriter
+pub(crate) async fn build_index_from_parquet_bytes(
+    builder: &IndexerBuilderImpl,
+    region_file_id: RegionFileId,
+    data: &Bytes,
+) -> IndexOutput {
+    let reader_builder = match ParquetRecordBatchReaderBuilder::try_new(data.clone()) {
+        Ok(reader_builder) => reader_builder,
+        Err(e) => {
+            warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
+            return IndexOutput::default();
+        }
+    };
+    let row_group_size = reader_builder
+        .metadata()
+        .row_groups()
+        .first()
+        .map(|row_group| row_group.num_rows() as usize)
+        .filter(|size| *size > 0);
+    let mut indexer = builder.build(region_file_id, 0, row_group_size).await;
+    if indexer.is_empty() {
+        return IndexOutput::default();
+    }
+    // Follow the batch size the flush reads use, so wide rows are not decoded 8192 at a time.
+    let batch_size = estimate_batch_size(largest_row_group_statistic(reader_builder.metadata()));
+
+    // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
+    // primary key for tag indexes. This needs the indexer to stop locating columns by position.
+    let mut reader = match reader_builder.with_batch_size(batch_size).build() {
+        Ok(reader) => reader,
+        Err(e) => {
+            warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
+            indexer.abort().await;
+            return IndexOutput::default();
+        }
+    };
+    loop {
+        // Decoding is CPU-bound, so each batch is decoded on the blocking pool. Only one batch
+        // is in flight, and an aborted flush stops after the batch being decoded.
+        let decoded = common_runtime::spawn_blocking_global(move || {
+            let batch = reader.next();
+            (reader, batch)
+        })
+        .await;
+        let batch = match decoded {
+            Ok((next_reader, batch)) => {
+                reader = next_reader;
+                batch
+            }
+            Err(e) => {
+                warn!(e; "Failed to decode encoded SST {:?} for index creation", region_file_id);
+                indexer.abort().await;
+                return IndexOutput::default();
+            }
+        };
+        match batch {
+            Some(Ok(batch)) => indexer.update_flat(&batch).await,
+            Some(Err(e)) => {
+                warn!(e; "Failed to decode encoded SST {:?} for index creation", region_file_id);
+                indexer.abort().await;
+                return IndexOutput::default();
+            }
+            None => break,
+        }
+    }
+    indexer.finish().await
 }
 
 impl IndexerBuilderImpl {
@@ -1164,7 +1241,7 @@ impl IndexBuildTask {
                 // Cleans index files on failure.
                 upload_tracker
                     .clean(
-                        &smallvec![SstInfo {
+                        &[SstInfo {
                             file_id,
                             index_metadata: output,
                             ..Default::default()
@@ -1593,6 +1670,7 @@ mod tests {
     use partition::expr::col;
     use puffin::puffin_manager::{PuffinManager, PuffinReader};
     use puffin_manager::PuffinManagerFactory;
+    use smallvec::smallvec;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use tokio::sync::mpsc;
 

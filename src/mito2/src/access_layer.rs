@@ -44,9 +44,9 @@ use crate::metrics::{COMPACTION_STAGE_ELAPSED, FLUSH_ELAPSED};
 use crate::read::FlatSource;
 use crate::region::options::IndexOptions;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
-use crate::sst::index::IndexerBuilderImpl;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::{PuffinManagerFactory, SstPuffinManager};
+use crate::sst::index::{IndexerBuilderImpl, build_index_from_parquet_bytes};
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::reader::ParquetReaderBuilder;
 use crate::sst::parquet::writer::ParquetWriter;
@@ -477,13 +477,19 @@ impl AccessLayer {
     }
 
     /// Puts encoded SST bytes to the write cache (if enabled) and uploads it to the object store.
+    ///
+    /// Builds the SST's indexes from `data` into `sst_info.index_metadata` when
+    /// `index_build_params` is set.
     pub(crate) async fn put_sst(
         &self,
         data: &bytes::Bytes,
-        region_file_id: RegionFileId,
+        region_id: RegionId,
+        sst_info: &mut SstInfo,
         cache_manager: &CacheManagerRef,
         write_buffer_size: ReadableSize,
+        index_build_params: Option<EncodedSstIndexBuildParams>,
     ) -> Result<Metrics> {
+        let region_file_id = RegionFileId::new(region_id, sst_info.file_id);
         if let Some(write_cache) = cache_manager.write_cache() {
             // Write to cache and upload to remote store
             let upload_request = SstUploadRequest {
@@ -494,7 +500,14 @@ impl AccessLayer {
                 remote_store: self.object_store.clone(),
             };
             write_cache
-                .put_and_upload_sst(data, region_file_id, upload_request, write_buffer_size)
+                .put_and_upload_sst(
+                    data,
+                    region_id,
+                    sst_info,
+                    upload_request,
+                    write_buffer_size,
+                    index_build_params,
+                )
                 .await
         } else {
             let start = Instant::now();
@@ -519,6 +532,19 @@ impl AccessLayer {
             }
             let mut metrics = Metrics::new(WriteType::Flush);
             metrics.write_batch = start.elapsed();
+
+            if let Some(params) = index_build_params {
+                let start = Instant::now();
+                let builder = params.indexer_builder(
+                    self.puffin_manager_factory
+                        .build(self.object_store.clone(), path_provider),
+                    false,
+                    self.intermediate_manager.clone(),
+                );
+                sst_info.index_metadata =
+                    build_index_from_parquet_bytes(&builder, region_file_id, data).await;
+                metrics.update_index = start.elapsed();
+            }
             Ok(metrics)
         }
     }
@@ -591,6 +617,36 @@ pub struct SstWriteRequest {
     pub inverted_index_config: InvertedIndexConfig,
     pub fulltext_index_config: FulltextIndexConfig,
     pub bloom_filter_index_config: BloomFilterConfig,
+}
+
+/// Index inputs for SST bytes that were encoded outside [ParquetWriter].
+pub(crate) struct EncodedSstIndexBuildParams {
+    pub(crate) metadata: RegionMetadataRef,
+    pub(crate) index_options: IndexOptions,
+    pub(crate) inverted_index_config: InvertedIndexConfig,
+    pub(crate) fulltext_index_config: FulltextIndexConfig,
+    pub(crate) bloom_filter_index_config: BloomFilterConfig,
+}
+
+impl EncodedSstIndexBuildParams {
+    pub(crate) fn indexer_builder(
+        self,
+        puffin_manager: SstPuffinManager,
+        write_cache_enabled: bool,
+        intermediate_manager: IntermediateManager,
+    ) -> IndexerBuilderImpl {
+        IndexerBuilderImpl {
+            build_type: OperationType::Flush.into(),
+            metadata: self.metadata,
+            puffin_manager,
+            write_cache_enabled,
+            intermediate_manager,
+            index_options: self.index_options,
+            inverted_index_config: self.inverted_index_config,
+            fulltext_index_config: self.fulltext_index_config,
+            bloom_filter_index_config: self.bloom_filter_index_config,
+        }
+    }
 }
 
 /// Cleaner to remove temp files on the atomic write dir.
@@ -830,9 +886,14 @@ mod tests {
         access_layer
             .put_sst(
                 &encoded,
-                file_id,
+                file_id.region_id(),
+                &mut SstInfo {
+                    file_id: file_id.file_id(),
+                    ..Default::default()
+                },
                 &cache_manager,
                 ReadableSize(chunk_size as u64),
+                None,
             )
             .await
             .unwrap();
