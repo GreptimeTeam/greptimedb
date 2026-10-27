@@ -279,8 +279,8 @@ mod tests {
             let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
                 .await
                 .unwrap();
-            let store = ObjectStore::new(Fs::default().root(&dir.path().display().to_string()))
-                .unwrap();
+            let store =
+                ObjectStore::new(Fs::default().root(&dir.path().display().to_string())).unwrap();
             let env = Self {
                 layer: Arc::new(AccessLayer::new(
                     "table1",

@@ -139,7 +139,11 @@ impl FileReferenceManager {
                     ref_files
                         .entry(meta.region_id)
                         .or_insert_with(HashSet::new)
-                        .extend(file_refs(meta.region_id, meta.file_id, meta.index_version()));
+                        .extend(file_refs(
+                            meta.region_id,
+                            meta.file_id,
+                            meta.index_version(),
+                        ));
                 }
             }
             manifest_version.insert(dst_region.region_id(), manifest.manifest_version);
@@ -170,7 +174,10 @@ impl FileReferenceManager {
     /// Registers a logical SST lifetime, paired with `remove_file` when that lifetime ends.
     /// Index replacements reuse the reference; independent lifetimes register separately.
     pub(crate) fn register_file(&self, file_meta: &FileMeta) {
-        let mut region = self.files_per_region.entry(file_meta.region_id).or_default();
+        let mut region = self
+            .files_per_region
+            .entry(file_meta.region_id)
+            .or_default();
         let file = region.files.entry(file_meta.file_id).or_insert_with(|| {
             GC_REF_FILE_CNT.inc();
             FileReference {
