@@ -40,7 +40,7 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryMatching, MatchingLabels, SetOp};
+use crate::vector_match::{BinaryMatching, BinaryOp, MatchingLabels, SetOp};
 
 /// What one node produces.
 ///
@@ -399,6 +399,241 @@ pub struct NativeNode {
     pub expr: NativeExpr,
     /// What this node produces.
     pub output: NativeType,
+}
+
+/// Where the fragments of one canonical label set live.
+///
+/// A canonical label set is the label set a [`NativeExpr::Merge`] groups fragments by: `__name__`
+/// plus the ordinary labels, which is exactly what [`SeriesLabels`] holds. The owner says how much
+/// of one label set a single execution sees, which is what decides whether an answer computed from
+/// a node's output can be the whole answer.
+///
+/// No node carries this fact. It follows from how the query was placed, so it is derived by
+/// [`NativeNode::properties`] from the facts a caller supplies for the tree's inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalOwner {
+    /// Every series of every label set the node can produce lies in this execution, so each label
+    /// set it reads is read whole.
+    SinglePartition,
+    /// The execution holds the label sets its own canonical key names, and no other execution holds
+    /// a fragment of one of them.
+    ByCanonicalKey,
+    /// How the output was placed against the label sets it produces is not known.
+    Unknown,
+}
+
+/// Whether a node answers at most one series per canonical label set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalGrouping {
+    /// One series per canonical label set, so a consumer that needs the whole series already has
+    /// it.
+    CanonicalComplete,
+    /// Pieces of label sets, which is what one scan partition holds of a metric: a consumer of
+    /// these answers a piece of the result.
+    SourcePiecesOnly,
+}
+
+/// Whether two of the fragments a node hands over can belong to one canonical label set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlapStatus {
+    /// Something in the tree decided that two fragments cannot name one label set, which is what a
+    /// [`NativeExpr::Merge`] does on the way out.
+    Checked,
+    /// Nothing has decided, so two fragments may still turn out to hold one label set.
+    Pending,
+}
+
+/// The static facts a node's output answers about canonical series.
+///
+/// These are what a tree rewrite needs and a runtime does not: whether the output already holds one
+/// series per canonical label set ([`CanonicalGrouping`]), whether two of its fragments can share
+/// one ([`OverlapStatus`]), how much of each label set this execution holds ([`CanonicalOwner`]),
+/// and the stream guarantee it hands over ([`SeriesOrdering`]).
+///
+/// They are derived, never stored on a node: [`NativeNode::properties`] recomputes them from the
+/// tree, so a rewritten tree cannot keep a fact that no longer holds. What a compiler knows about a
+/// boundary it built itself travels as the [`NativeProperties`] it hands
+/// [`NativeNode::properties`] for an [`NativeExpr::Input`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeProperties {
+    /// How much of each canonical label set this execution holds.
+    pub owner: CanonicalOwner,
+    /// Whether the output holds at most one series per canonical label set.
+    pub grouping: CanonicalGrouping,
+    /// Whether two fragments of the output may belong to one canonical label set.
+    pub overlaps: OverlapStatus,
+    /// The stream guarantee the output hands over.
+    pub ordering: SeriesOrdering,
+}
+
+impl NativeProperties {
+    /// What an input's own fragments prove: nothing about which series share a label set.
+    ///
+    /// A scan hands over the pieces of a metric that one partition holds, on `ordering`. Nothing
+    /// has grouped them by label set and nothing has checked whether two of them share one, so
+    /// neither fact is claimed; a caller that knows better says so instead.
+    pub fn source_pieces(ordering: SeriesOrdering) -> Self {
+        Self {
+            owner: CanonicalOwner::Unknown,
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+            overlaps: OverlapStatus::Pending,
+            ordering,
+        }
+    }
+
+    /// What a node the caller said nothing about proves: [`Self::source_pieces`] with the weakest
+    /// ordering, because even the stream shape is then unknown.
+    pub fn not_known() -> Self {
+        Self::source_pieces(SeriesOrdering::Interleaved)
+    }
+
+    /// What a node that rewrites label sets still proves.
+    ///
+    /// A rewrite can give two series one label set, so the output is no longer one series per label
+    /// set and nothing has checked whether two of its fragments now share one. A single execution
+    /// still holds every series it produces, but an ownership per canonical key no longer names the
+    /// label sets the rewrite invented.
+    fn labels_rewritten(self) -> Self {
+        Self {
+            owner: match self.owner {
+                CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
+                other => other,
+            },
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+            overlaps: OverlapStatus::Pending,
+            ..self
+        }
+    }
+
+    /// What a node that decides a whole series at once proves.
+    ///
+    /// An aggregate, a vector operation, a binary or set operation and a merge each answer whole
+    /// series, so they close each series they answer and nothing above them sees chunks of one
+    /// series interleaved with another's. What label set a sample ends under is the operation's own
+    /// decision (`by(...)`, `on(...)`, `group_left(...)`), which is not a fact the input has, so the
+    /// input's grouping and its overlap status say nothing about the output's.
+    fn whole_vector(self) -> Self {
+        Self {
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+            overlaps: OverlapStatus::Pending,
+            ordering: SeriesOrdering::Contiguous,
+            ..self
+        }
+    }
+
+    /// What a merge proves.
+    ///
+    /// A merge groups fragments by canonical label set and hands over one series per label set, so
+    /// it is the node that establishes both facts. What it read says nothing about what it emits
+    /// past that; the placement of what it read is still the placement of what it wrote, so the
+    /// ownership is kept.
+    fn merged(self) -> Self {
+        Self {
+            grouping: CanonicalGrouping::CanonicalComplete,
+            overlaps: OverlapStatus::Checked,
+            ordering: SeriesOrdering::Contiguous,
+            ..self
+        }
+    }
+
+    /// What two inputs' facts prove together.
+    ///
+    /// A binary or set operation answers series from both of its sides, so its output holds every
+    /// label set either side produced: the ownership is only what both sides agree on.
+    fn united(self, other: Self) -> Self {
+        Self {
+            owner: if self.owner == other.owner {
+                self.owner
+            } else {
+                CanonicalOwner::Unknown
+            },
+            ..self
+        }
+    }
+}
+
+impl NativeNode {
+    /// The static properties of this node, given the properties of what it reads.
+    ///
+    /// The computation is bottom-up and keeps no state: the facts are derived from the node and the
+    /// facts of its inputs every time, so nothing here can go stale when the tree is rewritten.
+    ///
+    /// An [`NativeExpr::Input`] has no child node, so for it `inputs` is the boundary's own facts —
+    /// what the caller collected about the source this leaf was bound to, one entry at most. The
+    /// ordering is read off the binding instead, because that is where this tree states the stream
+    /// guarantee it was given. Every other node takes one entry per child, in child order, and
+    /// `inputs` may be shorter than that: a missing entry reads as [`NativeProperties::not_known`],
+    /// which claims nothing the caller did not supply.
+    pub fn properties(&self, inputs: &[NativeProperties]) -> NativeProperties {
+        match &self.expr {
+            NativeExpr::Input(binding) => NativeProperties {
+                ordering: binding.ordering,
+                ..inputs
+                    .first()
+                    .copied()
+                    .unwrap_or_else(NativeProperties::not_known)
+            },
+            // A constant is one value everywhere and holds no label set at all, so it is whole as it
+            // stands: a merge has nothing to canonicalize and nothing can overlap.
+            NativeExpr::Scalar(_) => no_label_sets(),
+            // A selection, a window and a timestamp each answer one series from one series' rows, so
+            // the whole series stays one stream under the label set it read.
+            //
+            // A window function may drop the metric name on the way (`Rate`, `Delta`, ...), which
+            // `RangeFunction::drops_metric_name` reports; that is the window's own label policy and
+            // the window node merges the label sets it can make coincide itself, so the facts handed
+            // on are the input's. TODO(narthex): claim the drop here once the runtime no longer
+            // merges inside the window, so a consumer above gets the merge a tree-level rewrite
+            // would otherwise miss.
+            NativeExpr::Instant { .. }
+            | NativeExpr::Window { .. }
+            | NativeExpr::Timestamp { .. } => at(inputs, 0),
+            // A map is point-wise over one series at a time, so it reads its input as it is: what it
+            // does to the label set is a fact about its output.
+            NativeExpr::Map { op, .. } => {
+                let input = at(inputs, 0);
+                if op.ops.iter().all(preserves_canonical_identity) {
+                    input
+                } else {
+                    input.labels_rewritten()
+                }
+            }
+            // A merge is the canonicalizer: it answers one series per label set whatever pieces it
+            // read.
+            NativeExpr::Merge { .. } => at(inputs, 0).merged(),
+            // An aggregate folds a group and a vector operation decides whole series against each
+            // other, so the input's label sets are not what their output holds.
+            NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => {
+                at(inputs, 0).whole_vector()
+            }
+            NativeExpr::Binary {
+                left,
+                right,
+                matching,
+            } => {
+                let operand = at(inputs, 0).united(at(inputs, 1));
+                match (&left.output, &right.output) {
+                    // Two constants make a constant: there is no label set to canonicalize.
+                    (NativeType::Scalar(_), NativeType::Scalar(_)) => no_label_sets(),
+                    // A scalar broadcast reaches each series of its vector side as it is, unless the
+                    // operation drops the metric name on the way: arithmetic and a `bool` comparison
+                    // do, a filtering comparison keeps the label set it read.
+                    (NativeType::Samples(_), NativeType::Scalar(_))
+                    | (NativeType::Scalar(_), NativeType::Samples(_)) => {
+                        if broadcast_drops_labels(matching) {
+                            operand.labels_rewritten()
+                        } else {
+                            operand
+                        }
+                    }
+                    // Two vectors are matched by label, and the modifiers decide what label set a
+                    // sample ends under, so neither side's grouping is the output's.
+                    (_, _) => operand.whole_vector(),
+                }
+            }
+            NativeExpr::Set { .. } => at(inputs, 0).united(at(inputs, 1)).whole_vector(),
+        }
+    }
 }
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
@@ -893,6 +1128,64 @@ impl NativeNode {
     }
 }
 
+/// The properties of a value that holds no label set: a constant, or a binary operation of two of
+/// them.
+///
+/// There is nothing to canonicalize and nothing can overlap, and a constant is the same value in
+/// every execution.
+fn no_label_sets() -> NativeProperties {
+    NativeProperties {
+        owner: CanonicalOwner::SinglePartition,
+        grouping: CanonicalGrouping::CanonicalComplete,
+        overlaps: OverlapStatus::Checked,
+        ordering: SeriesOrdering::Contiguous,
+    }
+}
+
+/// The properties a node's `index`-th child reports, or [`NativeProperties::not_known`] when the
+/// caller supplied fewer entries than the node has children.
+fn at(inputs: &[NativeProperties], index: usize) -> NativeProperties {
+    inputs
+        .get(index)
+        .copied()
+        .unwrap_or_else(NativeProperties::not_known)
+}
+
+/// Whether a map operation leaves the label set it reads as it is.
+///
+/// This is the rule the RFC states as "a pure numeric map inherits grouping", answered by the
+/// kernels instead: none of the three operations leaves a label set alone, so no map preserves
+/// grouping.
+///
+/// The per-variant answer is the decision point: a new [`MapOp`] has to say here what it writes.
+fn preserves_canonical_identity(op: &MapOp) -> bool {
+    match op {
+        // `map_math`, `map_negate` and `map_arithmetic` all end with `drop_metric_name`, which
+        // removes `__name__` together with the type and unit labels: `abs(x)` and `x` no longer hold
+        // one label set.
+        MapOp::Math(_) => false,
+        // `map_native_histogram` follows Prometheus' `simpleHistogramFunc`: it drops `__name__` too
+        // (keeping the type and unit), so a histogram function's output is not its input's label
+        // set.
+        MapOp::Histogram(_) => false,
+        // A rewrite writes a caller-chosen destination label, `__name__` included, and can empty it,
+        // so a series ends under a label set the rewrite built.
+        MapOp::Label(_) => false,
+    }
+}
+
+/// Whether a binary operation drops the metric name when one side is a scalar broadcast.
+///
+/// `BroadcastRuntime::drops_labels` in [`execute`](crate::native::execute) is the rule the runtime
+/// applies: arithmetic and a `bool` comparison answer a series under the metric name dropped, and a
+/// filtering comparison keeps the label set it read.
+fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
+    !matches!(
+        matching.op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
+    ) || matching.return_bool
+}
+
 /// The schema and grid of an evaluated vector, or `None` when `ty` is raw samples, a scalar or
 /// state.
 ///
@@ -981,5 +1274,7 @@ fn invalid(reason: &str) -> DataFusionError {
     DataFusionError::Internal(reason.to_string())
 }
 
+// Shared with the rewrite's tests in `canonicalize`, which prove a merge lands where these trees
+// say it should.
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

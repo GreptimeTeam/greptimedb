@@ -21,21 +21,28 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
-    needs_single_execution, reads_across_series,
+    BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp, NativeExpr,
+    NativeNode, NativeProperties, NativeTree, NativeType, OverlapStatus, needs_single_execution,
+    preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
-use crate::info::InfoSelector;
+use crate::histogram_eval::NativeHistogramFunction;
 use crate::map::MathOp;
+use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
-fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
+// The tree builders below are `pub(crate)` because the rewrite in [`canonicalize`] is proved with
+// the trees they build, rather than with a second set of fixtures that could drift from these.
+//
+// [`canonicalize`]: crate::native::canonicalize
+
+pub(crate) fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
 }
 
-fn evaluated(
+pub(crate) fn evaluated(
     schema_fields: Arc<[datatypes::series::samples::FieldSpec]>,
     grid: Arc<EvalGrid>,
 ) -> NativeType {
@@ -74,7 +81,7 @@ fn input() -> NativeNode {
     }
 }
 
-fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
+pub(crate) fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
     // One schema allocation shared by the binding and the output: `validate` checks that the output
     // is the binding it was bound to, which is about the binding itself, not the grid's spec.
     let output = evaluated(Arc::new([]), grid);
@@ -198,7 +205,7 @@ fn window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeN
 }
 
 /// A window over `inner` that produces `out`, so two windows can be given the same grid.
-fn window_on(
+pub(crate) fn window_on(
     inner: NativeNode,
     input_grid: Option<Arc<EvalGrid>>,
     out: Arc<EvalGrid>,
@@ -222,7 +229,7 @@ fn window_on(
     }
 }
 
-fn map_over(inner: NativeNode) -> NativeNode {
+pub(crate) fn map_over(inner: NativeNode) -> NativeNode {
     let out = inner.output.grid().expect("a map needs a grid").clone();
     NativeNode {
         expr: NativeExpr::Map {
@@ -236,7 +243,7 @@ fn map_over(inner: NativeNode) -> NativeNode {
 }
 
 /// A canonical merge over `inner`, which reports its input's layout.
-fn merge_over(inner: NativeNode) -> NativeNode {
+pub(crate) fn merge_over(inner: NativeNode) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {
         expr: NativeExpr::Merge {
@@ -246,13 +253,84 @@ fn merge_over(inner: NativeNode) -> NativeNode {
     }
 }
 
-fn add() -> BinaryMatching {
+pub(crate) fn add() -> BinaryMatching {
     BinaryMatching {
         op: BinaryOp::Add,
         return_bool: false,
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
         fill: FillValues::default(),
+    }
+}
+
+/// A `sum by (job)` folded into `inner` within this execution, which is an aggregate whose output is
+/// a query value rather than state.
+pub(crate) fn complete_aggregate(inner: NativeNode) -> NativeNode {
+    let out = inner
+        .output
+        .grid()
+        .expect("an aggregate needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// A `sort` over `inner`, which is a vector operation: it decides the whole vector at a point.
+pub(crate) fn sorted(inner: NativeNode) -> NativeNode {
+    let out = inner
+        .output
+        .grid()
+        .expect("a vector operation needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: BoundVectorOp::Sort(SortOrder::Asc),
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// `left + right`, which matches two vectors by label.
+pub(crate) fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
+    let out = left
+        .output
+        .grid()
+        .expect("a binary operation needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// A `label_replace` over `inner`, which writes a label of its own choosing: the one map operation
+/// that keeps `__name__` and still changes which series share a label set.
+pub(crate) fn map_rewriting_labels(inner: NativeNode) -> NativeNode {
+    let out = inner.output.grid().expect("a map needs a grid").clone();
+    let rewrite = LabelRewrite::replace("dst", "$1", "src", "(.*)")
+        .expect("a label_replace with a valid expression");
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Label(Arc::new(rewrite))]),
+            },
+        },
+        output: evaluated(Arc::new([]), out),
     }
 }
 
@@ -359,32 +437,6 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
 fn a_merge_sits_over_any_evaluated_vector() {
     let shared = grid(0, 60_000, 4);
     let rate = || window_on(input(), None, Arc::clone(&shared));
-    let aggregate = |inner: NativeNode| NativeNode {
-        expr: NativeExpr::Aggregate {
-            input: Box::new(inner),
-            op: BoundAggregate {
-                kind: AggregateKind::Sum,
-                group: Grouping::By(Arc::new(["job".into()])),
-                stage: AggregateStage::Complete,
-            },
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&shared)),
-    };
-    let vector = |inner: NativeNode| NativeNode {
-        expr: NativeExpr::Vector {
-            input: Box::new(inner),
-            op: BoundVectorOp::Sort(SortOrder::Asc),
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&shared)),
-    };
-    let binary = |left: NativeNode, right: NativeNode| NativeNode {
-        expr: NativeExpr::Binary {
-            left: Box::new(left),
-            right: Box::new(right),
-            matching: add(),
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&shared)),
-    };
 
     // The prefix the merge was first written for, then the shapes it now also sits over: each of them
     // answers evaluated values, which is what the collection reads.
@@ -392,9 +444,9 @@ fn a_merge_sits_over_any_evaluated_vector() {
         merge_over(input_on(Arc::clone(&shared))),
         merge_over(rate()),
         merge_over(map_over(rate())),
-        merge_over(aggregate(rate())),
-        merge_over(vector(rate())),
-        merge_over(binary(rate(), rate())),
+        merge_over(complete_aggregate(rate())),
+        merge_over(sorted(rate())),
+        merge_over(sum_of(rate(), rate())),
     ] {
         assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
         assert!(reads_across_series(&node));
@@ -415,6 +467,152 @@ fn a_merge_sits_over_any_evaluated_vector() {
     };
     let error = scalar_input.validate().unwrap_err();
     assert!(error.to_string().contains("evaluated vector"), "{error}");
+}
+
+/// The facts a node reports follow what the node does to a label set.
+///
+/// This is where the RFC's simplified rule ("a pure numeric map inherits grouping") had to be
+/// corrected: none of the three map operations leaves a label set as it is, so a map is one of the
+/// nodes that lose grouping rather than pass it on.
+#[test]
+fn properties_follow_what_each_node_does_to_a_label_set() {
+    let shared = grid(0, 60_000, 4);
+
+    // What a caller knows about a scan: this execution holds pieces of a metric, the ordering is the
+    // scan's, and nothing has grouped those pieces by label set.
+    let boundary = NativeProperties::source_pieces(SeriesOrdering::KeyThenTime);
+
+    // A bare input is the boundary it was bound to. Its ordering is the one on the binding, which is
+    // where the tree states it, so the fact supplied beside it does not override it.
+    let bare = input_on(Arc::clone(&shared));
+    let scanned = bare.properties(&[boundary]);
+    assert_eq!(
+        scanned,
+        NativeProperties {
+            owner: CanonicalOwner::Unknown,
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+            overlaps: OverlapStatus::Pending,
+            ordering: SeriesOrdering::Contiguous,
+        }
+    );
+
+    // A window folds a range of one series' samples, so it hands over the label set it read and each
+    // series stays one stream: what it proves is what its input proved.
+    let rate = window_on(
+        input_on(Arc::clone(&shared)),
+        Some(Arc::clone(&shared)),
+        Arc::clone(&shared),
+    );
+    assert_eq!(rate.properties(&[scanned]), scanned);
+
+    // Both facts a map could inherit from a complete child are exactly what it loses: a series ends
+    // under a label set the map built, so no grouping proof survives, and nothing has checked whether
+    // two of the series it emits now share one.
+    let complete = NativeProperties {
+        owner: CanonicalOwner::ByCanonicalKey,
+        grouping: CanonicalGrouping::CanonicalComplete,
+        overlaps: OverlapStatus::Checked,
+        ordering: SeriesOrdering::Contiguous,
+    };
+    // `map_math` ends with `drop_metric_name`, so `abs(x)` and `x` no longer hold one label set:
+    // this is the case the RFC read as inheriting grouping.
+    let absolute = map_over(input_on(Arc::clone(&shared)));
+    let rewritten = absolute.properties(&[complete]);
+    assert_eq!(
+        rewritten,
+        NativeProperties {
+            owner: CanonicalOwner::Unknown,
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+            overlaps: OverlapStatus::Pending,
+            ordering: SeriesOrdering::Contiguous,
+        }
+    );
+
+    // A single execution still holds every series it produces, so that ownership is the one a rewrite
+    // does not invalidate.
+    let single = NativeProperties {
+        owner: CanonicalOwner::SinglePartition,
+        ..complete
+    };
+    assert_eq!(
+        absolute.properties(&[single]).owner,
+        CanonicalOwner::SinglePartition
+    );
+
+    // The other two variants are no purer: `label_replace` writes a label of its own choosing
+    // (`__name__` included) and `histogram_*` removes `__name__`, so no map operation preserves a
+    // label set and none of them can inherit a grouping proof.
+    assert!(!preserves_canonical_identity(&MapOp::Math(MathOp::Abs)));
+    assert!(!preserves_canonical_identity(&MapOp::Histogram(
+        NativeHistogramFunction::Count
+    )));
+    assert!(!preserves_canonical_identity(&MapOp::Label(Arc::new(
+        LabelRewrite::replace("dst", "$1", "src", "(.*)").expect("a valid expression")
+    ))));
+    assert_eq!(
+        map_rewriting_labels(input_on(Arc::clone(&shared))).properties(&[complete]),
+        rewritten
+    );
+
+    // An aggregate folds a group and a vector operation decides whole series against each other, so
+    // neither can claim the label sets of the series it read. What a whole-series node does emit is
+    // still each series whole, which is the ordering it proves.
+    let folded = complete_aggregate(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        folded.properties(&[complete]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    assert_eq!(
+        folded.properties(&[complete]).overlaps,
+        OverlapStatus::Pending
+    );
+    assert_eq!(
+        folded.properties(&[complete]).ordering,
+        SeriesOrdering::Contiguous
+    );
+    let ordered = sorted(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        ordered.properties(&[complete]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    assert_eq!(
+        ordered.properties(&[complete]).overlaps,
+        OverlapStatus::Pending
+    );
+
+    // Two vectors are matched by label, which is the operation's own decision about what label set a
+    // sample ends under, so neither side's grouping is the output's.
+    let sum = sum_of(input_on(Arc::clone(&shared)), input_on(Arc::clone(&shared)));
+    assert_eq!(
+        sum.properties(&[complete, complete]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    assert_eq!(
+        sum.properties(&[complete, complete]).overlaps,
+        OverlapStatus::Pending
+    );
+    // Its output holds series from both sides, so its ownership is only what both agree on.
+    assert_eq!(
+        sum.properties(&[complete, complete]).owner,
+        CanonicalOwner::ByCanonicalKey
+    );
+    assert_eq!(
+        sum.properties(&[complete, scanned]).owner,
+        CanonicalOwner::Unknown
+    );
+
+    // A merge is the node that establishes both facts, and the placement of what it read is the
+    // placement of what it wrote.
+    let merged = merge_over(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        merged.properties(&[complete]),
+        NativeProperties {
+            owner: CanonicalOwner::ByCanonicalKey,
+            grouping: CanonicalGrouping::CanonicalComplete,
+            overlaps: OverlapStatus::Checked,
+            ordering: SeriesOrdering::Contiguous,
+        }
+    );
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.
