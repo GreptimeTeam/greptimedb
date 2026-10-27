@@ -3062,10 +3062,10 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     assert_eq!(native, legacy);
 }
 
-/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
-/// native node has no placement there, and the query used to fail in the dist analyzer.
+/// Partitioned set expressions keep the legacy plan, while arithmetic may use native
+/// operands beneath the existing join.
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
+async fn native_promql_two_selectors_on_a_partitioned_table_use_expected_plans() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -3085,10 +3085,11 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
         QueryContext::arc(),
     )
     .await;
-    for (query, expected) in [
+    for (query, expected, expect_native_operand) in [
         (
             "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
             vec![(5_000, "h0".to_string(), 1.0)],
+            false,
         ),
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
@@ -3096,15 +3097,24 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
             ],
+            true,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        let fused = observer.fused();
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
+        assert_eq!(fused.is_some(), expect_native_operand, "{query}");
+        if expect_native_operand {
+            assert_eq!(
+                fused.expect("expected a native operand").children().len(),
+                1,
+                "the observed native node of `{query}` must read one scan, not both operands",
+            );
+        }
     }
 }
 
