@@ -723,7 +723,6 @@ impl RegionSupervisor {
             .map(|datanode| datanode.peer.id);
         exclude_peer_ids.extend(unschedulable_datanodes);
 
-        // Regions that exclude the same datanodes are selected together.
         let mut groups = BTreeMap::<_, Vec<_>>::new();
         for region_id in regions {
             let excluded = excluded_by_region
