@@ -614,6 +614,7 @@ fn the_prefix_and_the_suffix_each_name_their_own_source_zero() {
             NativeExpr::Scalar(_) => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }

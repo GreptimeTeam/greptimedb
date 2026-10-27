@@ -106,6 +106,7 @@ fn describe(node: &NativeNode) -> String {
             text
         }
         NativeExpr::Window { op, .. } => window(op),
+        NativeExpr::Merge { .. } => "canonical label-set merge".to_string(),
         NativeExpr::Timestamp { .. } => "evaluation time".to_string(),
         NativeExpr::Map { op, .. } => {
             let ops: Vec<String> = op.ops.iter().map(map_op).collect();
@@ -382,6 +383,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Scalar(_) => "Scalar",
         NativeExpr::Instant { .. } => "Instant",
         NativeExpr::Window { .. } => "Window",
+        NativeExpr::Merge { .. } => "Merge",
         NativeExpr::Map { .. } => "Map",
         NativeExpr::Timestamp { .. } => "Timestamp",
         NativeExpr::Aggregate { .. } => "Aggregate",
@@ -409,6 +411,7 @@ fn display_node(
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => {}
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
+        | NativeExpr::Merge { input }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
