@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common_meta::DatanodeId;
-use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
+use common_meta::affinity::{
+    AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolverRef,
+};
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -668,11 +670,15 @@ impl RegionSupervisor {
             .context(error::RuntimeSwitchManagerSnafu)
     }
 
+    /// Selects a target for each of `regions`, excluding `failure_datanodes`, the unschedulable
+    /// datanodes and the region's datanodes in `excluded_by_region`. Regions without a candidate
+    /// are skipped.
     async fn select_peers(
         &self,
         from_peer_id: DatanodeId,
         regions: &[RegionId],
-        exclude_datanodes: &[DatanodeId],
+        failure_datanodes: &[DatanodeId],
+        excluded_by_region: &HashMap<RegionId, BTreeSet<DatanodeId>>,
     ) -> Result<Vec<(RegionId, Peer)>> {
         let affinity = if let Some(resolver) = &self.affinity_resolver {
             match resolver
@@ -704,7 +710,7 @@ impl RegionSupervisor {
             None
         };
         let mut exclude_peer_ids: HashSet<u64> =
-            HashSet::from_iter(exclude_datanodes.iter().copied());
+            HashSet::from_iter(failure_datanodes.iter().copied());
         let unschedulable_datanodes = self
             .selector_context
             .peer_discovery
@@ -716,10 +722,46 @@ impl RegionSupervisor {
             .filter(|datanode| !datanode.is_schedulable())
             .map(|datanode| datanode.peer.id);
         exclude_peer_ids.extend(unschedulable_datanodes);
+
+        // Regions that exclude the same datanodes are selected together.
+        let mut groups = BTreeMap::<_, Vec<_>>::new();
+        for region_id in regions {
+            let excluded = excluded_by_region
+                .get(region_id)
+                .cloned()
+                .unwrap_or_default();
+            groups.entry(excluded).or_default().push(*region_id);
+        }
+        let mut region_peers = Vec::with_capacity(regions.len());
+        for (excluded, regions) in groups {
+            let exclude_peer_ids = exclude_peer_ids.iter().chain(&excluded).copied().collect();
+            match self
+                .select_group(from_peer_id, &regions, exclude_peer_ids, affinity.as_ref())
+                .await
+            {
+                Ok(peers) => region_peers.extend(peers),
+                // Other groups may still have candidates.
+                Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
+                    warn!(err; "No failover target for regions: {:?}, excluded: {:?}", regions, excluded)
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(region_peers)
+    }
+
+    /// Selects a target for each of `regions`, excluding `exclude_peer_ids`.
+    async fn select_group(
+        &self,
+        from_peer_id: DatanodeId,
+        regions: &[RegionId],
+        exclude_peer_ids: HashSet<u64>,
+        affinity: Option<&AffinityRequirements>,
+    ) -> Result<Vec<(RegionId, Peer)>> {
         match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
                 let opts = SelectorOptions {
-                    affinity: affinity.as_ref(),
+                    affinity,
                     min_required_items: regions.len(),
                     allow_duplication: true,
                     exclude_peer_ids,
@@ -749,7 +791,7 @@ impl RegionSupervisor {
                         from_peer_id,
                         regions,
                         exclude_peer_ids,
-                        affinity.as_ref(),
+                        affinity,
                     )
                     .await?;
                 ensure!(
@@ -781,7 +823,7 @@ impl RegionSupervisor {
             .flatten()
             .unwrap_or_else(|| Peer::empty(from_peer_id));
 
-        // Group the regions by their route followers, which can't take them over.
+        // A region's route followers can't take it over.
         let table_ids = regions
             .iter()
             .map(|region_id| region_id.table_id())
@@ -805,27 +847,12 @@ impl RegionSupervisor {
             .flatten()
             .map(|route| {
                 let peers = route.follower_peers.iter().map(|peer| peer.id);
-                (route.region.id, peers.sorted().collect::<Vec<_>>())
+                (route.region.id, peers.collect())
             })
-            .collect::<HashMap<_, _>>();
-        let mut groups = BTreeMap::<_, Vec<_>>::new();
-        for region_id in regions {
-            let key = followers.get(region_id).cloned().unwrap_or_default();
-            groups.entry(key).or_default().push(*region_id);
-        }
-
-        let mut region_peers = Vec::with_capacity(regions.len());
-        for (followers, regions) in groups {
-            let excluded = [failed_datanodes, &followers].concat();
-            match self.select_peers(from_peer_id, &regions, &excluded).await {
-                Ok(peers) => region_peers.extend(peers),
-                // Other groups may still have candidates.
-                Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
-                    warn!(err; "No failover target for regions: {:?}, followers: {:?}", regions, followers)
-                }
-                Err(err) => return Err(err),
-            }
-        }
+            .collect();
+        let region_peers = self
+            .select_peers(from_peer_id, regions, failed_datanodes, &followers)
+            .await?;
 
         for (region_id, peer) in region_peers {
             let count = *self
@@ -1232,20 +1259,23 @@ pub(crate) mod tests {
                 };
                 let regions = [RegionId::new(1, 1), RegionId::new(1, 2)];
                 // Preserve the caller's exclusion set without adding the source.
-                let result = supervisor.select_peers(7, &regions, &[8]).await;
+                let result = supervisor
+                    .select_peers(7, &regions, &[8], &HashMap::new())
+                    .await;
                 if succeeds {
                     assert_eq!(
                         result.unwrap(),
                         vec![(regions[0], Peer::empty(9)), (regions[1], Peer::empty(9))]
                     );
                 } else {
-                    let error = result.unwrap_err();
                     match outcome {
-                        Outcome::Short | Outcome::Exhausted => {
-                            assert!(matches!(error, error::Error::NoEnoughAvailableNode { .. }))
-                        }
+                        // Regions without a candidate are skipped.
+                        Outcome::Short | Outcome::Exhausted => assert!(result.unwrap().is_empty()),
                         Outcome::Error => {
-                            assert!(matches!(error, error::Error::Unexpected { .. }))
+                            assert!(matches!(
+                                result.unwrap_err(),
+                                error::Error::Unexpected { .. }
+                            ))
                         }
                         Outcome::Success => unreachable!(),
                     }
@@ -1319,7 +1349,7 @@ pub(crate) mod tests {
         );
 
         let region_peers = supervisor
-            .select_peers(7, &[RegionId::new(1, 1)], &[8])
+            .select_peers(7, &[RegionId::new(1, 1)], &[8], &HashMap::new())
             .await
             .unwrap();
         assert_eq!(1, region_peers.len());
