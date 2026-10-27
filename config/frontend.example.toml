@@ -362,7 +362,8 @@ allow_query_fallback = false
 ## Supports absolute size (e.g., "4GB", "8GB") or percentage of system memory (e.g., "30%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
-## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
+## This pool applies to operators on this frontend. Datanodes use their own query
+## pools for local operators and internal series merges during table scans.
 ## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
