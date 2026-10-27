@@ -206,10 +206,27 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             return Ok(());
         }
         let mut chunks = Vec::with_capacity(self.leaf_fields.len());
-        for task in mem::take(&mut self.encoding) {
-            let (task_chunks, costs) = task
+        let mut tasks = mem::take(&mut self.encoding).into_iter();
+        while let Some(task) = tasks.next() {
+            let encoded = task
                 .await
-                .map_err(|e| ParquetError::External(Box::new(e)))??;
+                .map_err(|e| ParquetError::External(Box::new(e)))
+                .and_then(|encoded| encoded);
+            let (task_chunks, costs) = match encoded {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    // Abort can stop queued blocking tasks, but running ones must
+                    // be joined before the caller releases its memory budget.
+                    for task in tasks.as_slice() {
+                        task.abort();
+                    }
+                    for task in tasks {
+                        // Cleanup failures must not replace the original error.
+                        let _ = task.await;
+                    }
+                    return Err(error);
+                }
+            };
             chunks.extend(task_chunks);
             for (field, cost) in costs {
                 self.field_costs[field] = cost;
@@ -300,14 +317,19 @@ fn encode_fields(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
     use datatypes::arrow::array::{
         ArrayRef, DictionaryArray, Float64Array, Int32Array, Int64Array, StringArray, StructArray,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema, UInt32Type};
     use parquet::basic::{Compression, ZstdLevel};
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
 
     use super::*;
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
 
     fn schema() -> SchemaRef {
         let nested = Fields::from(vec![
@@ -455,6 +477,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[rstest::rstest]
+    #[case::encode_error(false)]
+    #[case::encode_panic(true)]
+    #[tokio::test]
+    async fn test_encode_failure_drains_tasks_before_releasing_budget(#[case] panics: bool) {
+        let runtime: common_runtime::Runtime = common_runtime::Builder::default()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let mut writer = ParallelArrowWriter::try_new(
+            Vec::new(),
+            schema(),
+            props(64),
+            3,
+            EncodeRuntime::Compact,
+        )
+        .unwrap();
+        let memory = new_compaction_memory_manager(1024 * 1024);
+        let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
+        let batches: Arc<[RecordBatch]> = vec![batch(0, 4)].into();
+        let retained_batches = Arc::downgrade(&batches);
+
+        let failed = runtime.spawn_blocking(move || -> Result<EncodedFields> {
+            if panics {
+                panic!("encode task failed");
+            }
+            Err(ParquetError::General("encode task failed".to_string()))
+        });
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let column = writer.factory.create_column_writers(0).unwrap().remove(0);
+        let running_batches = batches.clone();
+        let running = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.blocking_recv().unwrap();
+            let _encoded =
+                encode_fields(&schema(), &running_batches, vec![(0, vec![(0, column)])])?;
+            Err(ParquetError::General("later encoding failure".to_string()))
+        });
+        // With one blocking thread, this also proves the first task has ended.
+        timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let queued_started = Arc::new(AtomicBool::new(false));
+        let queued_started_task = queued_started.clone();
+        let queued = runtime.spawn_blocking(move || {
+            queued_started_task.store(true, Ordering::SeqCst);
+            drop(batches);
+            Ok((Vec::new(), Vec::new()))
+        });
+        writer.encoding = vec![failed, running, queued];
+
+        // Model the compaction caller's guard: it is released when flush returns.
+        let mut finish = Box::pin(async {
+            let _budget = budget;
+            writer.flush().await
+        });
+        assert!(futures::poll!(finish.as_mut()).is_pending());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_none());
+        assert!(retained_batches.upgrade().is_some());
+
+        release_tx.send(()).unwrap();
+        let error = timeout(Duration::from_secs(10), finish)
+            .await
+            .unwrap()
+            .unwrap_err();
+        if panics {
+            let ParquetError::External(source) = error else {
+                panic!("expected the original task panic, got {error}");
+            };
+            assert!(
+                source
+                    .downcast_ref::<common_runtime::JoinError>()
+                    .unwrap()
+                    .is_panic()
+            );
+        } else {
+            assert!(
+                matches!(error, ParquetError::General(message) if message == "encode task failed")
+            );
+        }
+        assert!(!queued_started.load(Ordering::SeqCst));
+        assert!(retained_batches.upgrade().is_none());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_some());
+        assert!(writer.file_writer.flushed_row_groups().is_empty());
+        assert!(writer.async_writer.is_empty());
     }
 
     #[test]
