@@ -77,12 +77,14 @@ use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TWCS_PREFIX, COMPACTION_TYPE,
     COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
 use table::metadata::{TableInfo, TableInfoRef};
@@ -174,13 +176,27 @@ impl AutoCreateTableType {
 /// and normal requests are requests with ttl set to other values.
 ///
 /// This is used to split requests for different processing.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct InstantAndNormalInsertRequests {
     /// Requests with normal ttl.
     pub normal_requests: RegionInsertRequests,
     /// Requests with ttl=instant.
     /// Will be discarded immediately at frontend, wouldn't even insert into memtable, and only sent to flow node if needed.
     pub instant_requests: RegionInsertRequests,
+}
+
+/// Metric writes bound to the same resolved tables used by their exemplars.
+#[derive(Default)]
+pub struct PreparedMetricInserts {
+    requests: InstantAndNormalInsertRequests,
+    table_infos: HashMap<TableId, TableInfoRef>,
+}
+
+impl PreparedMetricInserts {
+    /// Returns the source tables captured during routing, including auto-created tables.
+    pub fn source_tables(&self) -> impl Iterator<Item = &TableInfoRef> {
+        self.table_infos.values()
+    }
 }
 
 impl Inserter {
@@ -386,6 +402,7 @@ impl Inserter {
         mut requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
+        sources: &[TableInfoRef],
     ) -> Result<Output> {
         ensure!(
             requests
@@ -396,6 +413,8 @@ impl Inserter {
                 reason: "invalid exemplar destination"
             }
         );
+        self.bind_exemplar_table_ids(&mut requests, &ctx, sources)
+            .await?;
         preprocess_row_insert_requests(&mut requests.inserts)?;
         self.handle_row_inserts_with_create_type(
             requests,
@@ -406,6 +425,92 @@ impl Inserter {
             false,
         )
         .await
+    }
+
+    async fn bind_exemplar_table_ids(
+        &self,
+        requests: &mut RowInsertRequests,
+        ctx: &QueryContextRef,
+        sources: &[TableInfoRef],
+    ) -> Result<()> {
+        validate_column_count_match(requests)?;
+        let mut tables = HashMap::new();
+        for info in sources.iter().filter(|info| {
+            info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
+        }) {
+            if let Some(previous) = tables.insert(info.name.clone(), info.clone()) {
+                ensure!(
+                    previous.table_id() == info.table_id(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} changed during write preparation",
+                            info.name
+                        ),
+                    }
+                );
+            }
+        }
+        for request in &mut requests.inserts {
+            let Some(rows) = request.rows.as_mut() else {
+                continue;
+            };
+            ensure!(
+                !rows
+                    .schema
+                    .iter()
+                    .any(|c| c.column_name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+                InvalidInsertRequestSnafu {
+                    reason: "exemplar table IDs must be resolved from their source tables",
+                }
+            );
+            let metric_index = rows
+                .schema
+                .iter()
+                .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN)
+                .context(InvalidInsertRequestSnafu {
+                    reason: "missing exemplar source metric",
+                })?;
+            for row in &mut rows.rows {
+                let Some(ValueData::StringValue(name)) = &row.values[metric_index].value_data
+                else {
+                    return InvalidInsertRequestSnafu {
+                        reason: "invalid exemplar source metric",
+                    }
+                    .fail();
+                };
+                if !tables.contains_key(name) {
+                    let table = self.get_table(ctx.current_catalog(), &ctx.current_schema(), name).await?
+                        .with_context(|| InvalidInsertRequestSnafu {
+                            reason: format!("exemplar source {name} must be an existing logical metric-engine table"),
+                        })?;
+                    tables.insert(name.clone(), table.table_info());
+                }
+                let info = &tables[name];
+                ensure!(
+                    info.meta.engine == METRIC_ENGINE_NAME
+                        && info
+                            .meta
+                            .options
+                            .extra_options
+                            .contains_key(LOGICAL_TABLE_METADATA_KEY),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {name} must be an existing logical metric-engine table"
+                        ),
+                    }
+                );
+                row.values
+                    .insert(0, ValueData::U32Value(info.table_id()).into());
+            }
+            rows.schema.insert(
+                0,
+                api::v1::helper::tag_column_schema(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ColumnDataType::Uint32,
+                ),
+            );
+        }
+        Ok(())
     }
 
     /// Handles row inserts request and creates a log table on demand.
@@ -651,11 +756,25 @@ impl Inserter {
     /// Existing targets retain their backing tables and time-index units.
     pub async fn handle_metric_row_inserts(
         &self,
-        mut requests: RowInsertRequests,
+        requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
+        let prepared = self
+            .prepare_metric_row_inserts(requests, ctx.clone(), statement_executor, physical_table)
+            .await?;
+        self.handle_prepared_metric_inserts(prepared, ctx).await
+    }
+
+    /// Resolves schemas and routes metric rows before dependent exemplar writes start.
+    pub async fn prepare_metric_row_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+        physical_table: String,
+    ) -> Result<PreparedMetricInserts> {
         let skip_wal = ctx.skip_wal();
 
         // remove empty requests
@@ -713,7 +832,20 @@ impl Inserter {
             .convert(requests, skip_wal)
             .await?;
 
-        self.do_request(inserts, &table_infos, &ctx).await
+        Ok(PreparedMetricInserts {
+            requests: inserts,
+            table_infos,
+        })
+    }
+
+    /// Dispatches metric rows using the source table definitions captured during preparation.
+    pub async fn handle_prepared_metric_inserts(
+        &self,
+        prepared: PreparedMetricInserts,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.do_request(prepared.requests, &prepared.table_infos, &ctx)
+            .await
     }
 
     fn table_batcher(
@@ -1741,6 +1873,19 @@ impl Inserter {
         let mut create_table_expr =
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
 
+        if matches!(create_type, AutoCreateTableType::Exemplar) {
+            for column in &mut create_table_expr.column_defs {
+                if [
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                ]
+                .contains(&column.name.as_str())
+                {
+                    column.is_nullable = false;
+                }
+            }
+        }
+
         // extension set by the Splunk HEC handler for identity path
         if ctx.extension(SPLUNK_PK_METADATA_ORDER_KEY).is_some() {
             reorder_splunk_primary_keys(&mut create_table_expr.primary_keys);
@@ -2106,6 +2251,32 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             })
     };
     let (_, timestamp) = lookup(greptime_timestamp())?;
+    for (position, name, id, data_type) in [
+        (
+            0,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            ReservedColumnId::table_id(),
+            datatypes::prelude::ConcreteDataType::uint32_datatype(),
+        ),
+        (
+            1,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            ReservedColumnId::tsid(),
+            datatypes::prelude::ConcreteDataType::uint64_datatype(),
+        ),
+    ] {
+        let (index, column) = lookup(name)?;
+        ensure!(
+            meta.primary_key_indices.get(position) == Some(&index)
+                && meta.column_ids.get(index) == Some(&id)
+                && column.data_type == data_type
+                && !column.is_nullable()
+                && column.default_constraint().is_none(),
+            InvalidInsertRequestSnafu {
+                reason: format!("invalid exemplar source identity column {name}"),
+            }
+        );
+    }
     ensure!(
         timestamp.is_time_index() && timestamp.data_type.is_timestamp(),
         InvalidInsertRequestSnafu {
@@ -2161,6 +2332,8 @@ pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
             greptime_value(),
             EXEMPLAR_METRIC_COLUMN,
             EXEMPLAR_LABELS_COLUMN,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
         ]
         .contains(&column.name.as_str())
         {

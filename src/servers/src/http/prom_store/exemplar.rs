@@ -12,11 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use api::v1::value::ValueData;
 use common_error::ext::BoxedError;
+use common_query::prelude::EXEMPLAR_METRIC_COLUMN;
 use futures::future::{join_all, ready};
+use operator::insert::PreparedMetricInserts;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
 
@@ -33,6 +37,11 @@ pub(super) struct Outcome {
     pub error: Option<error::Error>,
 }
 
+enum PreparedWrite {
+    Metric(PreparedMetricInserts),
+    Rows(RowInsertRequests),
+}
+
 /// Preflights all destinations together, then preserves confirmed counts by input kind.
 pub(super) async fn write(
     handler: PromStoreProtocolHandlerRef,
@@ -45,27 +54,111 @@ pub(super) async fn write(
 ) -> Outcome {
     match prepare(&handler, samples, histograms, exemplars, ctx).await {
         Ok(writes) => {
-            let outputs = join_all(writes.into_iter().map(|(kind, ctx, request)| {
+            let mut targets = HashSet::new();
+            for (_, ctx, request) in writes.iter().filter(|(kind, _, _)| *kind == 2) {
+                for rows in request
+                    .inserts
+                    .iter()
+                    .filter_map(|request| request.rows.as_ref())
+                {
+                    if let Some(index) = rows
+                        .schema
+                        .iter()
+                        .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN)
+                    {
+                        for row in &rows.rows {
+                            if let Some(ValueData::StringValue(name)) =
+                                &row.values[index].value_data
+                            {
+                                targets.insert((
+                                    ctx.current_catalog().to_string(),
+                                    ctx.current_schema(),
+                                    name.clone(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut sources = Vec::new();
+            let mut prepared = Vec::new();
+            let mut source_preparation_failed = false;
+            for (kind, ctx, request) in writes {
+                if kind != 2 && metric_engine {
+                    let (pinned, other): (Vec<_>, Vec<_>) =
+                        request.inserts.into_iter().partition(|request| {
+                            targets.contains(&(
+                                ctx.current_catalog().to_string(),
+                                ctx.current_schema(),
+                                request.table_name.clone(),
+                            ))
+                        });
+                    if !other.is_empty() {
+                        prepared.push((
+                            kind,
+                            ctx.clone(),
+                            Ok(PreparedWrite::Rows(RowInsertRequests { inserts: other })),
+                        ));
+                    }
+                    if !pinned.is_empty() {
+                        let result = handler
+                            .prepare_metric_write(
+                                RowInsertRequests { inserts: pinned },
+                                ctx.clone(),
+                            )
+                            .await;
+                        if let Ok(request) = &result {
+                            sources.extend(request.source_tables().cloned());
+                        } else {
+                            source_preparation_failed = true;
+                        }
+                        prepared.push((kind, ctx, result.map(PreparedWrite::Metric)));
+                    }
+                } else {
+                    prepared.push((kind, ctx, Ok(PreparedWrite::Rows(request))));
+                }
+            }
+            // A failed source preparation must not fall back to a newer table with the same name.
+            if source_preparation_failed {
+                prepared.retain(|(kind, _, _)| *kind != 2);
+            }
+            let outputs = join_all(prepared.into_iter().map(|(kind, ctx, request)| {
                 let handler = &handler;
                 let batcher = &batcher;
+                let sources = &sources;
                 async move {
-                    let batch = (ctx, request);
-                    let output = if kind == 2 {
-                        handler.write_exemplars_prepared(batch.1, batch.0).await
-                    } else if metric_engine
-                        && let Some(batcher) = batcher
-                        && batcher
-                            .accepts_bulk_destinations(std::iter::once(&batch))
-                            .await
-                    {
-                        batcher
-                            .submit_output_with(batch.1, batch.0, |_| ready(Ok(())))
-                            .await
-                            .map(|(output, ())| output)
-                    } else {
-                        handler
-                            .write_prepared(batch.1, batch.0, metric_engine)
-                            .await
+                    let output = match request {
+                        Err(error) => Err(error),
+                        Ok(PreparedWrite::Metric(request)) => {
+                            handler.write_prepared_metric(request, ctx).await
+                        }
+                        Ok(PreparedWrite::Rows(request)) => {
+                            let batch = (ctx, request);
+                            if kind == 2 && !metric_engine {
+                                error::NotSupportedSnafu {
+                                    feat: "exemplars require metric-engine ingestion",
+                                }
+                                .fail()
+                            } else if kind == 2 {
+                                handler
+                                    .write_exemplars_with_sources(batch.1, batch.0, sources)
+                                    .await
+                            } else if metric_engine
+                                && let Some(batcher) = batcher
+                                && batcher
+                                    .accepts_bulk_destinations(std::iter::once(&batch))
+                                    .await
+                            {
+                                batcher
+                                    .submit_output_with(batch.1, batch.0, |_| ready(Ok(())))
+                                    .await
+                                    .map(|(output, ())| output)
+                            } else {
+                                handler
+                                    .write_prepared(batch.1, batch.0, metric_engine)
+                                    .await
+                            }
+                        }
                     };
                     (kind, output)
                 }
@@ -164,10 +257,34 @@ mod tests {
         events: Mutex<Vec<String>>,
         exemplar_done: Arc<Notify>,
         deny_schema: bool,
+        fail_preparation: bool,
     }
 
     #[async_trait]
     impl PromStoreProtocolHandler for Handler {
+        async fn prepare_metric_write(
+            &self,
+            _: RowInsertRequests,
+            _: QueryContextRef,
+        ) -> Result<PreparedMetricInserts> {
+            if self.fail_preparation {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: "source preparation failed",
+                }
+                .fail();
+            }
+            Ok(PreparedMetricInserts::default())
+        }
+
+        async fn write_prepared_metric(
+            &self,
+            _: PreparedMetricInserts,
+            ctx: QueryContextRef,
+        ) -> Result<Output> {
+            self.write_prepared(RowInsertRequests::default(), ctx, true)
+                .await
+        }
+
         async fn pre_write(&self, request: &RowInsertRequests, ctx: QueryContextRef) -> Result<()> {
             self.events
                 .lock()
@@ -264,6 +381,63 @@ mod tests {
         }
         async fn read(&self, _: ReadRequest, _: QueryContextRef) -> Result<PromStoreResponse> {
             unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn exemplar_requires_successful_metric_engine_source_preparation() {
+        for metric_engine in [false, true] {
+            let handler = Arc::new(Handler {
+                fail_preparation: true,
+                ..Default::default()
+            });
+            let ctx = QueryContext::arc();
+            let samples = if metric_engine {
+                vec![(
+                    ctx.clone(),
+                    RowInsertRequests {
+                        inserts: vec![RowInsertRequest {
+                            table_name: "metric".into(),
+                            rows: Some(Rows {
+                                schema: vec![],
+                                rows: vec![Row { values: vec![] }],
+                            }),
+                        }],
+                    },
+                )]
+            } else {
+                vec![]
+            };
+            let exemplars = ExemplarRequests::from([(
+                None,
+                vec![Exemplar {
+                    metric: "metric".into(),
+                    series_labels: BTreeMap::new(),
+                    labels: BTreeMap::new(),
+                    timestamp: 1,
+                    value: 1.0,
+                }],
+            )]);
+            let outcome = write(
+                handler.clone(),
+                None,
+                metric_engine,
+                samples,
+                vec![],
+                exemplars,
+                ctx,
+            )
+            .await;
+            assert!(outcome.error.is_some());
+            assert_eq!(outcome.written, [0, 0, 0]);
+            assert!(
+                !handler
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e == "metric" || e == "exemplar")
+            );
         }
     }
 
@@ -367,7 +541,7 @@ mod tests {
             PromStoreState {
                 prom_store_handler: Arc::new(Handler::default()),
                 pipeline_handler: None,
-                prom_store_with_metric_engine: false,
+                prom_store_with_metric_engine: true,
                 prom_validation_mode: PromValidationMode::Strict,
                 pending_rows_batcher: None,
                 memory_limiter: Default::default(),
@@ -432,16 +606,7 @@ mod tests {
                     }],
                 },
             )];
-            let outcome = write(
-                handler.clone(),
-                None,
-                false,
-                samples,
-                vec![],
-                exemplars,
-                ctx,
-            )
-            .await;
+            let outcome = write(handler.clone(), None, true, samples, vec![], exemplars, ctx).await;
             assert!(outcome.error.is_some());
             let events = handler.events.lock().unwrap();
             if denied {
