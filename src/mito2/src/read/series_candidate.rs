@@ -47,9 +47,7 @@ use crate::error::{
 use crate::read::BoxedRecordBatchStream;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RowGroupIndex;
-use crate::read::range_cache::{
-    build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
-};
+use crate::read::range_cache::{CachedRangeReader, build_candidate_range_cache_key};
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
 use crate::series_index::{
@@ -371,14 +369,29 @@ impl SeriesCandidateRangeBuilder {
         } else {
             build_candidate_range_cache_key(&self.stream_ctx, &part_range)
         };
-        if let Some(key) = cache_key.as_ref() {
-            if let Some(value) = self.stream_ctx.input.cache_strategy.get_range_result(key) {
-                self.part_metrics.inc_range_cache_hit();
-                return Ok(cached_flat_range_stream(value));
-            }
-            self.part_metrics.inc_range_cache_miss();
+        let builder = self.clone();
+        let (stream, _) = CachedRangeReader {
+            stream_ctx: &self.stream_ctx,
+            part_range: &part_range,
+            key: cache_key,
+            metrics: &self.part_metrics,
         }
+        .build(move || async move {
+            let stream = builder
+                .build_uncached_range_stream(part_range, merge_partition)
+                .await?;
+            Ok((stream, DEFAULT_READ_BATCH_SIZE))
+        })
+        .await?;
+        Ok(stream)
+    }
 
+    async fn build_uncached_range_stream(
+        &self,
+        part_range: PartitionRange,
+        merge_partition: usize,
+    ) -> Result<BoxedRecordBatchStream> {
+        let range_meta = &self.stream_ctx.ranges[part_range.identifier];
         let mut sources = Vec::with_capacity(range_meta.row_group_indices.len());
         for index in &range_meta.row_group_indices {
             let source = self.build_source(*index, range_meta.time_range).await?;
@@ -400,15 +413,7 @@ impl SeriesCandidateRangeBuilder {
             "SeriesCandidateScanner::range_merge",
         )?;
 
-        Ok(match cache_key {
-            Some(key) => cache_flat_range_stream(
-                stream,
-                self.stream_ctx.input.cache_strategy.clone(),
-                key,
-                self.part_metrics.clone(),
-            ),
-            None => stream,
-        })
+        Ok(stream)
     }
 
     async fn build_source(

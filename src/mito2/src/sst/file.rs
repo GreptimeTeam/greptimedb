@@ -633,7 +633,12 @@ impl FileHandle {
 
     /// Mark the file as deleted and will delete it on drop asynchronously
     pub fn mark_deleted(&self) {
-        self.inner.lifetime.deleted.store(true, Ordering::Relaxed);
+        if !self.inner.lifetime.deleted.swap(true, Ordering::Relaxed) {
+            self.inner
+                .lifetime
+                .file_purger
+                .invalidate_file(&self.inner.meta);
+        }
     }
 
     pub fn compacting(&self) -> bool {
@@ -867,6 +872,7 @@ pub async fn delete_files(
     // Remove meta of the file from cache.
     if let Some(cache) = &cache_manager {
         for (file_id, _) in file_ids {
+            cache.invalidate_range_results(*file_id);
             cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
         }
     }

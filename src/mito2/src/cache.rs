@@ -19,6 +19,7 @@ pub(crate) mod cache_size;
 pub(crate) mod file_cache;
 pub(crate) mod index;
 pub(crate) mod manifest_cache;
+pub(crate) mod range_cache;
 #[cfg(test)]
 pub(crate) mod test_util;
 pub(crate) mod write_cache;
@@ -143,6 +144,40 @@ impl RangeResultMemoryLimiter {
     #[cfg(test)]
     pub(crate) fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
+    }
+
+    /// Never wait while holding a partial load: several partial loads could
+    /// otherwise exhaust the budget and wait on each other indefinitely.
+    pub(crate) fn try_acquire(&self, bytes: usize) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let permits = bytes.div_ceil(self.permit_bytes).max(1);
+        if permits > self.total_permits {
+            return None;
+        }
+        self.semaphore
+            .clone()
+            .try_acquire_many_owned(permits.try_into().ok()?)
+            .ok()
+    }
+
+    /// Transfers a load's reservation to its completed result without a gap in
+    /// accounting. Compaction may shrink buffers or add metadata; growing the
+    /// reservation must remain nonblocking just like loading more input.
+    pub(crate) fn try_resize(
+        &self,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        bytes: usize,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let Some(mut permit) = permit else {
+            return self.try_acquire(bytes);
+        };
+        let required = bytes.div_ceil(self.permit_bytes).max(1);
+        let reserved = permit.num_permits();
+        if required > reserved {
+            permit.merge(self.try_acquire((required - reserved).checked_mul(self.permit_bytes)?)?);
+        } else {
+            drop(permit.split(reserved - required));
+        }
+        Some(permit)
     }
 
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
@@ -898,6 +933,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::get_range_result()].
     /// It returns None if the strategy is [CacheStrategy::Compaction] or [CacheStrategy::Disabled].
+    #[cfg(test)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -910,6 +946,7 @@ impl CacheStrategy {
 
     /// Calls [CacheManager::put_range_result()].
     /// It does nothing if the strategy isn't [CacheStrategy::EnableAll].
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
@@ -917,6 +954,13 @@ impl CacheStrategy {
     ) {
         if let CacheStrategy::EnableAll(cache_manager) = self {
             cache_manager.put_range_result(key, result);
+        }
+    }
+
+    pub(crate) fn range_cache_worker(&self) -> Option<&Arc<range_cache::RangeCacheWorker>> {
+        match self {
+            Self::EnableAll(manager) => manager.range_result_cache.as_ref(),
+            Self::Compaction(_) | Self::Disabled => None,
         }
     }
 
@@ -1389,7 +1433,15 @@ impl CacheManager {
         }
     }
 
+    /// Retires decoded range results when an SST leaves the current version.
+    pub(crate) fn invalidate_range_results(&self, file_id: FileId) {
+        if let Some(worker) = &self.range_result_cache {
+            worker.invalidate_file(file_id);
+        }
+    }
+
     /// Gets cached result for range scan.
+    #[cfg(test)]
     pub(crate) fn get_range_result(
         &self,
         key: &RangeScanCacheKey,
@@ -1400,15 +1452,13 @@ impl CacheManager {
     }
 
     /// Puts range scan result into cache.
+    #[cfg(any(test, feature = "test"))]
     pub(crate) fn put_range_result(
         &self,
         key: RangeScanCacheKey,
         result: Arc<RangeScanCacheValue>,
     ) {
         if let Some(cache) = &self.range_result_cache {
-            CACHE_BYTES
-                .with_label_values(&[RANGE_RESULT_TYPE])
-                .add(range_result_cache_weight(&key, &result).into());
             cache.insert(key, result);
         }
     }
@@ -1649,21 +1699,8 @@ impl CacheManagerBuilder {
                 })
                 .build()
         });
-        let range_result_cache = (self.range_result_cache_size != 0).then(|| {
-            Cache::builder()
-                .max_capacity(self.range_result_cache_size)
-                .weigher(range_result_cache_weight)
-                .eviction_listener(move |k, v, cause| {
-                    let size = range_result_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[RANGE_RESULT_TYPE])
-                        .sub(size.into());
-                    CACHE_EVICTION
-                        .with_label_values(&[RANGE_RESULT_TYPE, removal_cause_str(cause)])
-                        .inc();
-                })
-                .build()
-        });
+        let range_result_cache = (self.range_result_cache_size != 0)
+            .then(|| range_cache::RangeCacheWorker::new(self.range_result_cache_size));
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
@@ -2093,7 +2130,7 @@ type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
 type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
 /// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Cache<RangeScanCacheKey, Arc<RangeScanCacheValue>>;
+type RangeResultCache = Arc<range_cache::RangeCacheWorker>;
 
 #[cfg(test)]
 mod tests {
@@ -2898,6 +2935,38 @@ mod tests {
         assert_eq!(limiter.available_permits(), 0);
         drop(permit);
         assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[rstest::rstest]
+    #[case::empty_result(None, 0, Some(1))]
+    #[case::new_result(None, 1025, Some(2))]
+    #[case::unchanged(Some(1024), 1024, Some(1))]
+    #[case::grow(Some(1024), 2048, Some(2))]
+    #[case::shrink(Some(3072), 1024, Some(1))]
+    #[case::exhausted(Some(1024), 4096, None)]
+    #[case::oversized(Some(1024), usize::MAX, None)]
+    #[test]
+    fn range_result_memory_reservation_resizes_without_waiting(
+        #[case] input_size: Option<usize>,
+        #[case] result_size: usize,
+        #[case] expected_permits: Option<usize>,
+    ) {
+        let limiter = RangeResultMemoryLimiter::new(4096, 1024);
+        let blocker = limiter.try_acquire(1024).unwrap();
+        let input_permit = input_size.map(|size| limiter.try_acquire(size).unwrap());
+        let result_permit = limiter.try_resize(input_permit, result_size);
+        assert_eq!(
+            result_permit.as_ref().map(|permit| permit.num_permits()),
+            expected_permits
+        );
+        assert_eq!(
+            limiter.available_permits(),
+            3 - expected_permits.unwrap_or(0)
+        );
+        drop(result_permit);
+        assert_eq!(limiter.available_permits(), 3);
+        drop(blocker);
+        assert_eq!(limiter.available_permits(), 4);
     }
 
     #[tokio::test]
