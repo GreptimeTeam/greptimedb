@@ -1011,11 +1011,14 @@ mod tests {
         assert!(native_remote_route_allowed(false, 1, &base));
         assert!(!native_remote_route_allowed(false, 2, &base));
 
+        // A tag-partitioned table is admitted remotely too: the frontend gathers the
+        // selected regions, so the partition layout does not decide completeness.
         let tagged_meta = TableMetaBuilder::empty()
             .schema(meta.schema.clone())
             .primary_key_indices(vec![0])
             .value_indices(vec![1, 2])
             .partition_key_indices(vec![0])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
             .next_column_id(4)
             .build()
             .unwrap();
@@ -1023,6 +1026,34 @@ mod tests {
         assert!(native_remote_route_allowed(false, 1, &tagged));
         assert!(native_remote_route_allowed(true, 1, &tagged));
         assert!(native_remote_route_allowed(true, 2, &base));
+
+        // Unpartitioned tables have a single region and need no placement exception.
+        let unpartitioned_meta = TableMetaBuilder::empty()
+            .schema(meta.schema.clone())
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let unpartitioned = TableInfoBuilder::new("cpu", unpartitioned_meta)
+            .build()
+            .unwrap();
+        assert!(native_remote_route_allowed(false, 1, &unpartitioned));
+
+        // A metric-engine or logical table keeps its existing plan on the remote route.
+        let metric_meta = TableMetaBuilder::empty()
+            .schema(meta.schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![1])
+            .engine(common_catalog::consts::METRIC_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let metric = TableInfoBuilder::new("cpu", metric_meta).build().unwrap();
+        assert!(!native_remote_route_allowed(false, 1, &metric));
     }
 
     #[test]
