@@ -266,8 +266,42 @@ impl BloomFilterIndexer {
         guard.inc_row_count(n);
 
         for (target, creator) in &mut self.creators {
-            let col_id = match target {
-                IndexTarget::ColumnId(id) => id,
+            let (vector, field) = match target {
+                IndexTarget::ColumnId(col_id) => {
+                    if let Some(col_info) = self.codec.pk_col_info(*col_id) {
+                        let pk_idx = col_info.idx;
+                        let field = &col_info.field;
+                        let elems = batch
+                            .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
+                            .filter(|v| !v.is_null())
+                            .map(|v| {
+                                let mut buf = vec![];
+                                IndexValueCodec::encode_nonnull_value(
+                                    v.as_value_ref(),
+                                    field,
+                                    &mut buf,
+                                )
+                                .context(EncodeSnafu)?;
+                                Ok(buf)
+                            })
+                            .transpose()?;
+                        creator
+                            .push_n_row_elems(n, elems)
+                            .await
+                            .context(PushBloomFilterValueSnafu)?;
+                        continue;
+                    }
+
+                    let Some(values) = batch.field_col_value(*col_id) else {
+                        debug!(
+                            "Column {} not found in the batch during building bloom filter index",
+                            col_id
+                        );
+                        continue;
+                    };
+                    let field = SortField::new(values.data.data_type());
+                    (values.data.clone(), field)
+                }
                 IndexTarget::JsonPath(path) => {
                     let root = batch
                         .field_col_value(path.column_id())
@@ -281,72 +315,17 @@ impl BloomFilterIndexer {
                         .to_arrow_array();
                     let vector = extract_json_type_hint_values(&root, path.path())?;
                     let field = SortField::new(vector.data_type());
-                    for row in 0..n {
-                        let value = IndexValueCodec::encode_value(
-                            vector.get_ref(row),
-                            &field,
-                            &mut self.value_buf,
-                        )
-                        .context(EncodeSnafu)?;
-                        creator
-                            .push_n_row_elem(1, value)
-                            .await
-                            .context(PushBloomFilterValueSnafu)?;
-                    }
-                    continue;
+                    (vector, field)
                 }
             };
-            match self.codec.pk_col_info(*col_id) {
-                // tags
-                Some(col_info) => {
-                    let pk_idx = col_info.idx;
-                    let field = &col_info.field;
-                    let elems = batch
-                        .pk_col_value(self.codec.decoder(), pk_idx, *col_id)?
-                        .filter(|v| !v.is_null())
-                        .map(|v| {
-                            let mut buf = vec![];
-                            IndexValueCodec::encode_nonnull_value(
-                                v.as_value_ref(),
-                                field,
-                                &mut buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            Ok(buf)
-                        })
-                        .transpose()?;
-                    creator
-                        .push_n_row_elems(n, elems)
-                        .await
-                        .context(PushBloomFilterValueSnafu)?;
-                }
-                // fields
-                None => {
-                    let Some(values) = batch.field_col_value(*col_id) else {
-                        debug!(
-                            "Column {} not found in the batch during building bloom filter index",
-                            col_id
-                        );
-                        continue;
-                    };
-                    let sort_field = SortField::new(values.data.data_type());
-                    for i in 0..n {
-                        let value = values.data.get_ref(i);
-                        let elems = (!value.is_null())
-                            .then(|| {
-                                let mut buf = vec![];
-                                IndexValueCodec::encode_nonnull_value(value, &sort_field, &mut buf)
-                                    .context(EncodeSnafu)?;
-                                Ok(buf)
-                            })
-                            .transpose()?;
-
-                        creator
-                            .push_row_elems(elems)
-                            .await
-                            .context(PushBloomFilterValueSnafu)?;
-                    }
-                }
+            for row in 0..n {
+                let value =
+                    IndexValueCodec::encode_value(vector.get_ref(row), &field, &mut self.value_buf)
+                        .context(EncodeSnafu)?;
+                creator
+                    .push_n_row_elem(1, value)
+                    .await
+                    .context(PushBloomFilterValueSnafu)?;
             }
         }
 
