@@ -656,6 +656,23 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Region {} does not hold a valid leader lease", region_id))]
+    RegionLeaseExpired {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Region {} lost its leader lease while writing to the WAL, the write may have been applied",
+        region_id
+    ))]
+    UnacknowledgedWrite {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to compact region {}", region_id))]
     CompactRegion {
         region_id: RegionId,
@@ -1445,7 +1462,9 @@ impl Error {
     /// Returns whether a failed manifest update may have been persisted.
     ///
     /// Unknown errors are treated conservatively because deleting output SSTs after an ambiguous
-    /// manifest write could leave the manifest referencing missing files.
+    /// manifest write could leave the manifest referencing missing files. The retry layer returns
+    /// the last attempt's error, so an error that can follow a stored attempt (throttling, or a 403
+    /// from a revoked key, a changed bucket policy or clock skew) never proves nothing was written.
     pub(crate) fn may_have_persisted_manifest_update(&self) -> bool {
         match self {
             Error::UpdateManifest { .. }
@@ -1459,11 +1478,9 @@ impl Error {
                 ErrorKind::Unsupported
                     | ErrorKind::ConfigInvalid
                     | ErrorKind::NotFound
-                    | ErrorKind::PermissionDenied
                     | ErrorKind::IsADirectory
                     | ErrorKind::NotADirectory
                     | ErrorKind::AlreadyExists
-                    | ErrorKind::RateLimited
                     | ErrorKind::IsSameFile
                     | ErrorKind::ConditionNotMatch
                     | ErrorKind::RangeNotSatisfied
@@ -1584,6 +1601,7 @@ impl ErrorExt for Error {
             CompatReader { .. } => StatusCode::Unexpected,
             InvalidRegionRequest { source, .. } => source.status_code(),
             RegionState { .. } | UpdateManifest { .. } => StatusCode::RegionNotReady,
+            RegionLeaseExpired { .. } | UnacknowledgedWrite { .. } => StatusCode::RegionNotReady,
             JsonOptions { .. } => StatusCode::InvalidArguments,
             EmptyRegionDir { .. } | EmptyManifestDir { .. } => StatusCode::RegionNotFound,
             ConvertValue { source, .. } => source.status_code(),
@@ -1681,6 +1699,8 @@ impl ErrorExt for Error {
             | RegionNotFound { .. }
             | RegionClosed { .. }
             | RejectWriteInStaging { .. }
+            | RegionLeaseExpired { .. }
+            | UnacknowledgedWrite { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
                 ..
@@ -1847,11 +1867,9 @@ mod tests {
             ErrorKind::Unsupported,
             ErrorKind::ConfigInvalid,
             ErrorKind::NotFound,
-            ErrorKind::PermissionDenied,
             ErrorKind::IsADirectory,
             ErrorKind::NotADirectory,
             ErrorKind::AlreadyExists,
-            ErrorKind::RateLimited,
             ErrorKind::IsSameFile,
             ErrorKind::ConditionNotMatch,
             ErrorKind::RangeNotSatisfied,
@@ -1864,9 +1882,18 @@ mod tests {
             );
         }
 
-        let error =
-            OpenDalSnafu {}.into_error(object_store::Error::new(ErrorKind::Unexpected, "test"));
-        assert!(error.may_have_persisted_manifest_update());
+        // The last retry can fail with these kinds even though an earlier attempt was stored.
+        for kind in [
+            ErrorKind::Unexpected,
+            ErrorKind::RateLimited,
+            ErrorKind::PermissionDenied,
+        ] {
+            let error = OpenDalSnafu {}.into_error(object_store::Error::new(kind, "test"));
+            assert!(
+                error.may_have_persisted_manifest_update(),
+                "error kind {kind:?} should not prove the manifest was not persisted"
+            );
+        }
 
         let region_id = RegionId::new(1, 1);
         let error = RegionTruncatedSnafu { region_id }.build();

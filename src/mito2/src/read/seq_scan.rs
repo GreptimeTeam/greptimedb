@@ -36,6 +36,7 @@ use store_api::storage::TimeSeriesRowSelector;
 use tokio::sync::Semaphore;
 
 use crate::error::{PartitionOutOfRangeSnafu, Result, TooManyFilesToReadSnafu};
+use crate::metrics::SCAN_MAX_CONCURRENT_FILES;
 use crate::read::flat_dedup::{FlatDedupReader, FlatLastNonNull, FlatLastRow};
 use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
@@ -148,6 +149,11 @@ impl SeqScan {
     /// Panics if the compaction flag is not set.
     pub(crate) async fn build_flat_reader_for_compaction(&self) -> Result<BoxedRecordBatchStream> {
         assert!(self.stream_ctx.input.compaction);
+
+        // Compaction merges all input files together instead of scanning ranges sequentially.
+        SCAN_MAX_CONCURRENT_FILES
+            .with_label_values(&["compaction"])
+            .observe(self.stream_ctx.input.num_files() as f64);
 
         let metrics_set = ExecutionPlanMetricsSet::new();
         let part_metrics = self.new_partition_metrics(false, &metrics_set, 0);
@@ -527,9 +533,6 @@ impl SeqScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_limit() {
-            return Ok(());
-        }
         // Check max file count limit for all partitions since we scan them in parallel.
         let total_max_files: usize = self
             .properties
@@ -537,6 +540,15 @@ impl SeqScan {
             .iter()
             .map(|partition| Self::max_files_in_partition(&self.stream_ctx.ranges, partition))
             .sum();
+
+        if !self.stream_ctx.input.compaction {
+            SCAN_MAX_CONCURRENT_FILES
+                .with_label_values(&["query"])
+                .observe(total_max_files as f64);
+        }
+        if self.stream_ctx.input.uses_scan_memory_limit() {
+            return Ok(());
+        }
 
         let max_concurrent_files = self.stream_ctx.input.max_concurrent_scan_files;
         if total_max_files > max_concurrent_files {

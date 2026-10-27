@@ -20,6 +20,8 @@
 | `write_bytes_exhausted_policy` | String | `wait` | Policy when write bytes quota is exhausted.<br/>Options: "wait" (default, 10s timeout), "wait(<duration>)" (e.g., "wait(30s)"), "fail" |
 | `init_regions_in_background` | Bool | `false` | Initialize all regions in the background during the startup.<br/>By default, it provides services after all regions have been initialized. |
 | `init_regions_parallelism` | Integer | `16` | Parallelism of initializing regions. |
+| `max_concurrent_queries` | Integer | `0` | The maximum concurrent region-read streams. Zero means unlimited.<br/>A single query can consume multiple permits. |
+| `concurrent_query_limiter_timeout` | String | `100ms` | Timeout to acquire a permit when `max_concurrent_queries` is reached.<br/>Only effective when the limiter is enabled. |
 | `enable_telemetry` | Bool | `true` | Enable telemetry to collect anonymous usage data. Enabled by default. |
 | `runtime` | -- | -- | The runtime options. |
 | `runtime.global_rt_size` | Integer | Auto | The number of threads to execute the runtime for global read operations.<br/>Defaults to max(num_cpus, 2). |
@@ -726,7 +728,7 @@
 | `region_engine.mito.gc` | -- | -- | -- |
 | `region_engine.mito.gc.enable` | Bool | `false` | Whether GC is enabled. Need to be the same with metasrv's `gc.enable` or unexpected behavior will occur |
 | `region_engine.mito.gc.lingering_time` | String | `1h` | Lingering time before deleting files.<br/>Should be long enough to allow long running queries to finish.<br/>If set to None, then unused files will be deleted immediately. |
-| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1d` | Lingering time before deleting unknown files (files with undetermined expel time).<br/>Only applies during full file listing GC.<br/>This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);<br/>do not configure this value too small in production to avoid deleting pre-manifest files<br/>from in-progress compaction or flush.<br/>For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.<br/>If the object store does not provide a last-modified timestamp, the file is conservatively kept.<br/>For dropped regions, unknown files are deleted immediately. |
+| `region_engine.mito.gc.unknown_file_lingering_time` | String | `1d` | Lingering time before deleting unknown files (files with undetermined expel time).<br/>It is also the age threshold of the sweep that reclaims temporary files left behind by<br/>a crashed HDFS writer, and that sweep runs even if `enable` is false. HDFS advances the<br/>modification time of a file under construction only as its blocks complete, so lowering<br/>this value also shrinks the margin between the sweep and files that are still being written.<br/>This uses the object's last-modified timestamp as a heuristic (strict less-than comparison);<br/>do not configure this value too small in production to avoid deleting pre-manifest files<br/>from in-progress compaction or flush.<br/>For active/open regions, an unknown file is deleted only if its object last-modified time exceeds this TTL.<br/>If the object store does not provide a last-modified timestamp, the file is conservatively kept.<br/>For dropped regions, unknown files are deleted immediately. |
 | `region_engine.file` | -- | -- | Enable the file engine. |
 | `region_engine.metric` | -- | -- | Metric engine options. |
 | `logging` | -- | -- | The logging options. |

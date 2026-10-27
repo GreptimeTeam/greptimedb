@@ -230,6 +230,14 @@ lazy_static! {
         "Number of SSTs to scan in a scan task",
         vec![1.0, 4.0, 8.0, 16.0, 32.0, 64.0, 256.0, 1024.0],
     ).unwrap();
+    /// Planned maximum concurrent sources per query scan limit evaluation or compaction reader.
+    /// Includes memtables counted by the file limit, rejected scans, and memory-budgeted scans.
+    pub static ref SCAN_MAX_CONCURRENT_FILES: HistogramVec = register_histogram_vec!(
+        "greptime_mito_scan_max_concurrent_files",
+        "Estimated maximum concurrent files (including memtable sources) per query scan limit evaluation or compaction reader",
+        &[TYPE_LABEL],
+        vec![0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 384.0, 512.0, 1024.0, 2048.0, 4096.0, 8192.0],
+    ).unwrap();
     /// Histogram for the number of rows returned per query.
     pub static ref READ_ROWS_RETURN: Histogram = register_histogram!(
         "greptime_mito_read_rows_return",
@@ -597,6 +605,27 @@ lazy_static! {
     /// Counter of flush files.
     pub static ref FLUSH_FILE_TOTAL: IntCounter =
         register_int_counter!("greptime_mito_flush_file_total", "mito flushed file count").unwrap();
+}
+
+#[cfg(feature = "hdfs-object-store")]
+lazy_static! {
+    /// Counter for the number of temporary files deleted by the sweeper.
+    pub static ref SWEEP_FILES_DELETED_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_files_deleted_total",
+        "Total temporary files deleted by the sweeper",
+    ).unwrap();
+
+    /// Counter for the number of failures while sweeping temporary files.
+    pub static ref SWEEP_ERRORS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_errors_total",
+        "Total failures while sweeping temporary files",
+    ).unwrap();
+
+    /// Counter for the number of temporary file sweeps run.
+    pub static ref SWEEP_RUNS_TOTAL: IntCounter = register_int_counter!(
+        "greptime_mito_sweep_runs_total",
+        "Total temporary file sweeps run",
+    ).unwrap();
 }
 
 /// Stager notifier to collect metrics.

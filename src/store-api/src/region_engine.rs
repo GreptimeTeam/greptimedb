@@ -18,6 +18,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
@@ -1104,6 +1105,18 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`.
+    ///
+    /// The region must not acknowledge a write whose WAL append completes at or after the
+    /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
+    /// that deadline.
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(
