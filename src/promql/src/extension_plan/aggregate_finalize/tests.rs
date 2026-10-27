@@ -112,6 +112,17 @@ fn map_over(inner: NativeNode, ops: Vec<MathOp>) -> NativeNode {
     }
 }
 
+/// A canonical merge over `inner`, which reports its input's layout.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
 fn aggregate_over(
     inner: NativeNode,
     kind: AggregateKind,
@@ -382,6 +393,100 @@ fn topk_and_bottomk_run_after_the_aggregate_cut() {
             matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0 && bound.output.samples().is_some_and(|schema| schema.fields.len() == 1 && schema.fields[0].name.as_ref() == "v0" && schema.eval_grid.as_ref().is_some_and(|actual| actual.spec() == grid().spec())))
         );
     }
+}
+
+/// A canonical merge above the cut canonicalizes values the aggregate already evaluated, so it is
+/// part of the suffix exactly as an aggregate above the cut is: it runs once, over the merged series,
+/// and it cannot tell they were assembled from partitions rather than produced by one execution.
+#[test]
+fn a_merge_above_the_cut_lands_in_the_suffix() {
+    let root = merge_over(complete(AggregateKind::Sum, by(&["k0"]))(window()));
+    let tree = NativeTree::try_new(root.clone()).unwrap();
+    assert!(
+        AggregateFinalize::can_split(&tree, &raw_fields(), "ts"),
+        "a merge above the cut no longer refuses the split"
+    );
+
+    // The cut is still the innermost aggregate, and the prefix is the per-series half below it: the
+    // window, and no merge at all.
+    let split = split(tree.root(), &raw_fields(), "ts")
+        .unwrap()
+        .expect("the tree holds the aggregate the cut takes out");
+    assert_eq!(AggregateKind::Sum, split.op.kind);
+    assert_eq!(AggregateStage::Complete, split.op.stage);
+    let prefix = NativeTree::try_new(split.prefix.clone())
+        .unwrap()
+        .to_string();
+    assert!(prefix.contains("Window"), "{prefix}");
+    assert!(!prefix.contains("Merge"), "{prefix}");
+    assert!(!prefix.contains("Aggregate"), "{prefix}");
+
+    // The suffix holds the merge the query wrote, over the input its merged values enter at.
+    let NativeExpr::Merge { input } = &split.suffix.expr else {
+        panic!(
+            "the merge stays above the cut: {}",
+            NativeTree::try_new(split.suffix.clone()).unwrap()
+        );
+    };
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0),
+        "the merged values enter where the aggregate was"
+    );
+
+    // The node builds both halves, which validates the re-wrapped merge on the way in.
+    let node = finalize(root, output_schema(&["sum(v0)"], &["k0"])).unwrap();
+    let producer = producer(&node).tree().to_string();
+    assert!(producer.contains("Window"), "{producer}");
+    assert!(!producer.contains("Merge"), "{producer}");
+    let suffix = node.suffix.to_string();
+    assert!(suffix.contains("Merge"), "{suffix}");
+    assert!(suffix.contains("Input"), "{suffix}");
+    assert!(!suffix.contains("Window"), "{suffix}");
+}
+
+/// A merge below the cut is in the per-series prefix, which does not hold one series' samples: the
+/// merge reads the whole vector, and two of its input series can collapse into the one it answers.
+/// The prefix therefore refuses it, and the query keeps the plan it would have had without the split.
+///
+/// The shape the split would have to walk is the one validation lets through, because a merge over
+/// raw samples is refused before the split ever sees it: see
+/// [`a_merge_over_raw_samples_is_refused_at_the_tree_boundary`] below.
+#[test]
+fn a_merge_below_the_cut_is_declined_by_the_prefix() {
+    let root = complete(AggregateKind::Sum, by(&["k0"]))(merge_over(window()));
+    let tree = NativeTree::try_new(root.clone()).unwrap();
+    assert!(!AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
+    let error = match split(tree.root(), &raw_fields(), "ts") {
+        Err(error) => error,
+        Ok(_) => panic!("a prefix across a merge is not one series at a time"),
+    };
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("canonical merge"),
+        "the refusal names the merge the prefix would hold: {error}"
+    );
+    assert!(
+        error.to_string().contains("whole vector"),
+        "the refusal says why a prefix cannot hold it: {error}"
+    );
+    assert!(finalize(root, output_schema(&["sum(v0)"], &["k0"])).is_err());
+}
+
+/// `sum(merge(...))` with the merge directly over the scan is not a tree at all: the merge consumes an
+/// evaluated vector, and a scan's samples are not one. The tree boundary refuses it, before any split
+/// is asked for.
+#[test]
+fn a_merge_over_raw_samples_is_refused_at_the_tree_boundary() {
+    let error = NativeTree::try_new(complete(AggregateKind::Sum, by(&["k0"]))(merge_over(raw())))
+        .unwrap_err();
+    assert!(matches!(error, DataFusionError::Internal(_)), "{error}");
+    assert!(
+        error.to_string().contains("evaluated vector"),
+        "the refusal names what a merge needs: {error}"
+    );
 }
 
 #[test]

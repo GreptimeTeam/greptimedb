@@ -235,6 +235,17 @@ fn map_over(inner: NativeNode) -> NativeNode {
     }
 }
 
+/// A canonical merge over `inner`, which reports its input's layout.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
 fn add() -> BinaryMatching {
     BinaryMatching {
         op: BinaryOp::Add,
@@ -338,6 +349,72 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
     };
     let fields_error = wrong_fields.validate().unwrap_err();
     assert!(fields_error.to_string().contains("field"), "{fields_error}");
+}
+
+/// A merge canonicalizes evaluated fragments and names no operator below it, so any tree whose output
+/// is an evaluated vector is one it may sit over: a scan's samples, a window's rate, an aggregate's
+/// fold, a vector operation's choice and a binary operation's match all hand over the same thing.
+/// An input that is not an evaluated vector at all is still refused.
+#[test]
+fn a_merge_sits_over_any_evaluated_vector() {
+    let shared = grid(0, 60_000, 4);
+    let rate = || window_on(input(), None, Arc::clone(&shared));
+    let aggregate = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let vector = |inner: NativeNode| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: BoundVectorOp::Sort(SortOrder::Asc),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let binary = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+
+    // The prefix the merge was first written for, then the shapes it now also sits over: each of them
+    // answers evaluated values, which is what the collection reads.
+    for node in [
+        merge_over(input_on(Arc::clone(&shared))),
+        merge_over(rate()),
+        merge_over(map_over(rate())),
+        merge_over(aggregate(rate())),
+        merge_over(vector(rate())),
+        merge_over(binary(rate(), rate())),
+    ] {
+        assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
+        assert!(reads_across_series(&node));
+    }
+
+    // Raw samples carry their own timestamps instead of positions on a grid, so there is nothing to
+    // merge by: a scan is the one input a merge refuses however many fields it carries.
+    for inner in [input(), input_with_fields(1)] {
+        let error = merge_over(inner).validate().unwrap_err();
+        assert!(error.to_string().contains("evaluated vector"), "{error}");
+    }
+    // A scalar is not a vector at all, and a merge reports samples.
+    let scalar_input = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let error = scalar_input.validate().unwrap_err();
+    assert!(error.to_string().contains("evaluated vector"), "{error}");
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.

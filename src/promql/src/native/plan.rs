@@ -478,15 +478,27 @@ pub fn needs_single_execution(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether `node` is a supported child of Merge: only an input with optional windows and maps.
-fn merge_shape_supported(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::Input(_) => true,
-        NativeExpr::Window { input, .. } | NativeExpr::Map { input, .. } => {
-            merge_shape_supported(input)
-        }
-        _ => false,
-    }
+/// Whether `node` is a supported child of a [`NativeExpr::Merge`], and the evaluated vector it hands
+/// over.
+///
+/// A merge receives fragments and groups them by canonical label set, combining the ones a label set
+/// shares by grid position; it names neither the tree nor the operator that produced a fragment. What
+/// it reads is therefore the whole of its requirement: samples evaluated on one grid in one field
+/// layout, which is an evaluated vector and nothing else. This is that type check and no more, so no
+/// node kind is refused for what it computes: a scan's samples, a window's rate, an aggregate's fold
+/// and a binary operation's match all hand over the same thing, and which one of them did says
+/// nothing about whether the fragments merge.
+///
+/// The collection does rely on the shape of the stream - a series arrives whole, its chunks
+/// contiguous and its last one marked as closing it - and every node that answers an evaluated vector
+/// keeps it. A window, a map, an instant selection, a timestamp and a scalar broadcast hand their
+/// input's closing on, and an aggregate, a vector operation, a binary or set operation and a merge
+/// itself close each series they answer, because each decides a whole series at once. There is hence
+/// no operator above a merge that could break the collection, and none has to be listed here; the
+/// collector checks the shape chunk by chunk before it keeps a fragment, which is where a stream that
+/// broke it is refused.
+fn merge_shape_supported(node: &NativeNode) -> Option<(&Arc<SeriesSchema>, &Arc<EvalGrid>)> {
+    evaluated_vector(&node.output)
 }
 
 /// A bound evaluation tree.
@@ -560,13 +572,14 @@ impl NativeNode {
             }
             NativeExpr::Merge { input } => {
                 input.validate()?;
-                if !merge_shape_supported(input) {
-                    return Err(invalid(
-                        "a merge is only supported over input/window/map trees",
-                    ));
-                }
-                let Some((_input_schema, input_grid)) = evaluated_vector(&input.output) else {
-                    return Err(invalid("a merge consumes an evaluated vector"));
+                // A merge canonicalizes evaluated fragments, so an evaluated vector is the whole of
+                // what it needs of its input: [`merge_shape_supported`] is that check, and its
+                // documentation says why no shape of tree above those fragments matters.
+                let Some((_input_schema, input_grid)) = merge_shape_supported(input) else {
+                    return Err(invalid(&format!(
+                        "a merge consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
                 };
                 ensure_samples(&self.output, "a merge")?;
                 ensure_same_fields(&input.output, &self.output, "a merge")?;
