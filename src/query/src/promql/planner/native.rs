@@ -686,6 +686,9 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
 /// Whether `root` is a supported one-to-one match or set operation between two independent scan
 /// occurrences, under any number of point-wise wrappers.
 ///
+/// Any arithmetic or comparison operator qualifies: they pair series by the same matching rules,
+/// and a comparison only changes which value a matched pair keeps.
+///
 /// A wrapper, a function of each value or an operation with a constant as in `100 * (1 - a / b)`,
 /// maps each series of the match on its own, so the tree still reads both scans whole exactly once.
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
@@ -707,22 +710,11 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
         _ => return false,
     };
 
-    let supported_operator = matches!(
-        matching.op,
-        promql::vector_match::BinaryOp::Add
-            | promql::vector_match::BinaryOp::Sub
-            | promql::vector_match::BinaryOp::Mul
-            | promql::vector_match::BinaryOp::Div
-            | promql::vector_match::BinaryOp::Mod
-            | promql::vector_match::BinaryOp::Pow
-            | promql::vector_match::BinaryOp::Atan2
-    );
     let supported_labels = match &matching.labels {
         MatchingLabels::On(names) => !names.is_empty(),
         MatchingLabels::Ignoring(names) => names.is_empty(),
     };
     matching.cardinality == Cardinality::OneToOne
-        && supported_operator
         && supported_labels
         && pointwise_operand(left)
         && pointwise_operand(right)
@@ -1057,6 +1049,9 @@ mod tests {
             "x + on(host) x",
             "x - (x * 2)",
             "rate(x[5s]) + rate(x[10s] offset 2s)",
+            "x == on(host) x",
+            "x > bool x",
+            "2 * (x != on(host) x)",
         ] {
             let tree = compiled_test_tree(query);
             assert_eq!(input_sources(tree.root()), vec![0, 1], "{query}");
@@ -1068,12 +1063,9 @@ mod tests {
         assert!(!independent_scan_pair(
             compiled_test_tree("x + on() x").root()
         ));
-        assert!(!independent_scan_pair(
-            compiled_test_tree("x == on(host) x").root()
-        ));
         // A wrapper does not admit a core the pair itself refuses.
         assert!(!independent_scan_pair(
-            compiled_test_tree("2 * (x == on(host) x)").root()
+            compiled_test_tree("2 * (x > on() x)").root()
         ));
     }
 
