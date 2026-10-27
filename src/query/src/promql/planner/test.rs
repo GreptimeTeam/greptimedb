@@ -2822,6 +2822,45 @@ async fn native_fused_info_reads_the_info_table_after_the_base() {
     }
 }
 
+/// `info` over the info table itself reads both scans of that one table under the node, which
+/// stays in the region: `rate` drops the base's name, so its series are enriched rather than
+/// passed through as info series.
+#[tokio::test]
+async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
+    let query = "info(rate(target_info[5m]))";
+    let plan = build_native_fused_plan_with_provider(query, true, native_info_provider()).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    assert!(matches!(fused.tree().root().expr, NativeExpr::Info { .. }));
+    let tables = fused
+        .inputs()
+        .iter()
+        .map(|input| match input {
+            LogicalPlan::TableScan(scan) => scan.table_name.table().to_string(),
+            other => panic!("expected a direct scan, got {other}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["target_info", "target_info"], tables);
+    assert_eq!(Some("target_info"), fused.binding().metric_name.as_deref());
+    assert!(matches!(
+        crate::dist_plan::Categorizer::check_extension_plan(
+            fused as &dyn datafusion::logical_expr::UserDefinedLogicalNode,
+            &Default::default(),
+        ),
+        crate::dist_plan::Commutativity::Commutative
+    ));
+    assert_eq!(
+        vec![
+            "greptime_timestamp",
+            "greptime_value",
+            "instance",
+            "job",
+            "version",
+            "zone"
+        ],
+        sorted_column_names(&plan)
+    );
+}
+
 /// A function of each value or an operation with a constant around a pair keeps the pair native,
 /// on one table with both scans under the node.
 #[tokio::test]
