@@ -38,7 +38,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use common_catalog::consts::{METRIC_ENGINE, MITO_ENGINE, MITO2_ENGINE};
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
-use datafusion::common::{DFSchema, DFSchemaRef};
+use datafusion::common::{DFSchema, DFSchemaRef, TableReference};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
@@ -55,10 +55,10 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::QueryContextRef;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_ENGINE_NAME};
 
-use crate::promql::error::{DataFusionPlanningSnafu, Result};
+use crate::promql::error::{DataFusionPlanningSnafu, Result, TableNameNotFoundSnafu};
 use crate::promql::native_compile::{
     compile_selectors, compile_statement, constant_value, statement_grid,
 };
@@ -148,9 +148,6 @@ impl PromPlanner {
         expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        if admitted_selector(expr).is_none() {
-            return Ok(None);
-        }
         let saved = self.ctx.clone();
         let (plan, operand_ctx) = match self
             .try_plan_native_fused_with_context(expr, query_engine_state)
@@ -162,10 +159,16 @@ impl PromPlanner {
                 return Ok(None);
             }
         };
-        self.ctx = operand_ctx.clone();
-        let table_ref = self.table_ref();
         self.ctx = saved;
-        let table_ref = table_ref?;
+        let table_name = operand_ctx
+            .table_name
+            .clone()
+            .context(TableNameNotFoundSnafu)?;
+        let table_ref = if let Some(schema_name) = &operand_ctx.schema_name {
+            TableReference::partial(schema_name.as_str(), table_name.as_str())
+        } else {
+            TableReference::bare(table_name.as_str())
+        };
         let plan = LogicalPlanBuilder::from(plan)
             .alias(table_ref)
             .context(DataFusionPlanningSnafu)?
