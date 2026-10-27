@@ -1300,3 +1300,149 @@ async fn series_artifact_read_failure_propagates() {
     assert!(error.output_msg().contains("injected"), "{error}");
     engine.stop().await.unwrap();
 }
+
+#[test]
+fn series_pushdown_preserves_predicate_semantics() {
+    use datafusion_expr::{Expr, Operator};
+    use datatypes::arrow::datatypes::{DataType, Field};
+    let schema = Arc::new(Schema::new(vec![
+        Field::new(DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DataType::UInt32, false),
+        Field::new(DATA_SCHEMA_TSID_COLUMN_NAME, DataType::UInt64, false),
+        Field::new(ROW_COUNT_COLUMN, DataType::UInt64, false),
+        Field::new("tag", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt32Array::from(vec![10, 10, 20, 20])),
+            Arc::new(UInt64Array::from(vec![1, 2, 1, 2])),
+            Arc::new(UInt64Array::from(vec![1, 1, 1, 1])),
+            Arc::new(StringArray::from(vec![
+                None,
+                Some(""),
+                Some("alpha"),
+                Some("beta"),
+            ])),
+        ],
+    )
+    .unwrap();
+    let table = col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME);
+    let cases = vec![
+        table.clone().eq(lit(10u32)).and(col("tag").is_null()),
+        lit(20u32).eq(table.clone()).and(col("tag").not_eq(lit(""))),
+        col("tag").is_null().or(col("tag").eq(lit(""))),
+        datafusion_expr::binary_expr(col("tag"), Operator::RegexMatch, lit("^a.*")),
+        datafusion_expr::cast(col("tag"), DataType::Utf8).eq(lit("alpha")),
+        table
+            .clone()
+            .eq(lit(10u32))
+            .and(table.clone().eq(lit(20u32))),
+    ];
+    for expr in cases {
+        let expected = common_recordbatch::filter::batch_filter(
+            &batch,
+            &Predicate::to_physical_expr(&expr, &schema).unwrap(),
+        )
+        .unwrap();
+        let request = series_read_request(&schema, Some(&Predicate::new(vec![expr])));
+        assert!(
+            !request
+                .projection
+                .iter()
+                .any(|name| name == ROW_COUNT_COLUMN)
+        );
+        let mut actual = batch.clone();
+        for filter in request.filters {
+            let mask = filter
+                .evaluate_array(actual.column_by_name(filter.column_name()).unwrap())
+                .unwrap();
+            actual = filter_record_batch(&actual, &BooleanArray::new(mask, None)).unwrap();
+        }
+        assert_eq!(expected, actual);
+    }
+    // A field-dependent OR cannot contribute either branch as an index restriction.
+    let mixed = table.clone().eq(lit(10u32)).or(col("field_0").gt(lit(0.0)));
+    let request = series_read_request(&schema, Some(&Predicate::new(vec![mixed])));
+    assert!(request.filters.is_empty());
+    assert_eq!(None, request.table_id);
+    let unsupported = Expr::Not(Box::new(col("tag").eq(lit("alpha"))));
+    assert!(
+        series_read_request(&schema, Some(&Predicate::new(vec![unsupported])))
+            .filters
+            .is_empty()
+    );
+    let request = series_read_request(&schema, Some(&Predicate::new(vec![lit(20u32).eq(table)])));
+    assert_eq!(Some(20), request.table_id);
+}
+
+#[tokio::test]
+async fn series_pushdown_skips_unrelated_table_payloads() {
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ReadRecorder {
+                    inner,
+                    path: path.to_owned(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let version = region.series_index_version();
+    let handle = version.series_indexes.values().next().unwrap().clone();
+    let reader = ColumnarSeriesFormat::default()
+        .reader(store, handle)
+        .await
+        .unwrap();
+    let schema = reader.schema();
+    reads.lock().unwrap().clear();
+    let unprojected = reader
+        .read(SeriesReadRequest {
+            projection: schema
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        })
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let reads_with_count = reads.lock().unwrap().len();
+    reads.lock().unwrap().clear();
+    let all = reader
+        .read(series_read_request(&schema, None))
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(all.iter().map(RecordBatch::num_rows).sum::<usize>() > 0);
+    let full_reads = reads.lock().unwrap().len();
+    assert!(full_reads < reads_with_count);
+    assert_eq!(
+        all.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        unprojected.iter().map(RecordBatch::num_rows).sum::<usize>()
+    );
+    reads.lock().unwrap().clear();
+    let request = series_read_request(
+        &schema,
+        Some(&Predicate::new(vec![
+            col(DATA_SCHEMA_TABLE_ID_COLUMN_NAME).eq(lit(u32::MAX)),
+        ])),
+    );
+    let selected = reader
+        .read(request)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(selected.is_empty());
+    assert!(reads.lock().unwrap().len() < full_reads);
+    engine.stop().await.unwrap();
+}
