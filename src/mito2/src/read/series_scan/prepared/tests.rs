@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -46,6 +47,7 @@ use crate::engine::MitoEngine;
 use crate::read::flat_projection::FlatProjectionMapper;
 use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::series_scan::SeriesScan;
+use crate::read::series_scan::partition_balance;
 use crate::region::MitoRegionRef;
 use crate::series_index::SeriesIndexReadContext;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -1299,5 +1301,329 @@ async fn series_artifact_read_failure_propagates() {
         .err()
         .expect("a failed artifact read must not report a not-ready source");
     assert!(error.output_msg().contains("injected"), "{error}");
+    engine.stop().await.unwrap();
+}
+
+/// Partitions the skewed split test divides its series over.
+const SKEW_PARTITIONS: usize = 4;
+/// Long series in the skewed source, each with [`SKEW_LONG_ROWS`] rows.
+const SKEW_LONG_SERIES: usize = 8;
+const SKEW_LONG_ROWS: usize = 1000;
+/// Short series in the skewed source, each with [`SKEW_SHORT_ROWS`] rows.
+const SKEW_SHORT_SERIES: usize = 200;
+const SKEW_SHORT_ROWS: usize = 10;
+
+/// Creates an empty region with the columnar format enabled.
+///
+/// Unlike [`fixture`], no data is written while creating it, so every series' index row count is
+/// exactly the rows the skewed split test writes and flushes into one SST.
+async fn skew_fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let mut env = TestEnv::with_prefix("prepared-skew").await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::float64_datatype();
+    let (engine, region) = crate::series_index::prepare_region_with_metadata(
+        &mut env,
+        &[],
+        MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_format: SelectedFormat::Columnar,
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+        Arc::new(metadata),
+    )
+    .await;
+    (env, engine, region)
+}
+
+/// Writes every point of one series in a single request.
+///
+/// One request per series keeps the flushed SST's index row count per series equal to the points
+/// written here, which is the cost the split divides.
+async fn write_series(
+    engine: &MitoEngine,
+    region: &MitoRegionRef,
+    tag_1: &str,
+    tsid: u64,
+    points: &[(i64, f64)],
+) {
+    let metadata = region.version().metadata.clone();
+    let schema = vec![
+        ColumnSchema {
+            column_name: "__primary_key".into(),
+            datatype: ColumnDataType::Binary as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".into(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "field_0".into(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ];
+    let rows = points
+        .iter()
+        .map(|(timestamp, value)| {
+            row(vec![
+                // `tag_0` stays "a" so the fixture predicate keeps every series.
+                ValueData::BinaryValue(new_sparse_primary_key(&["a", tag_1], &metadata, 10, tsid)),
+                ValueData::TimestampMillisecondValue(*timestamp),
+                ValueData::F64Value(*value),
+            ])
+        })
+        .collect();
+    engine
+        .handle_request(
+            region.region_id,
+            RegionRequest::Put(RegionPutRequest {
+                rows: Rows { schema, rows },
+                skip_wal: false,
+                hint: Some(api::v1::WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                }),
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+/// Groups rows by series so two reads compare series by series: the label set, and every timestamp
+/// with its value's bits.
+fn by_series(rows: Vec<(Vec<u8>, i64, f64)>) -> BTreeMap<Vec<u8>, Vec<(i64, u64)>> {
+    let mut series = BTreeMap::<Vec<u8>, Vec<(i64, u64)>>::new();
+    for (key, timestamp, value) in rows {
+        series
+            .entry(key)
+            .or_default()
+            .push((timestamp, value.to_bits()));
+    }
+    for samples in series.values_mut() {
+        samples.sort_unstable();
+    }
+    series
+}
+
+/// Returns the `assigned_series` counter of a partition.
+///
+/// `ScanMetricsSet` exposes the counter only through its verbose `Debug` output, which is what
+/// `EXPLAIN VERBOSE` prints and what reports a partition's share of a source.
+fn assigned_series(metrics: &PartitionMetrics) -> usize {
+    let debug = format!("{metrics:?}");
+    match debug.split("\"assigned_series\":").nth(1) {
+        Some(rest) => rest
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap(),
+        // The counter is omitted when it is zero, which is a partition reading no series.
+        None => 0,
+    }
+}
+
+/// The prepared path must divide a skewed source by work rather than by series count, and still
+/// read exactly the rows the legacy path reads.
+///
+/// The source holds a few long series followed by many short ones, in that ordinal order, which is
+/// the shape a count split balances worst: the first partition takes every long series while the
+/// rest read only short ones. Splitting by the index's per-series row counts spreads the long
+/// series over the partitions, and this test pins both the reduction in the worst partition's cost
+/// and the rows that survive the new assignment.
+#[tokio::test]
+async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
+    let (_env, engine, region) = skew_fixture().await;
+    // Long series take the low TSIDs, so they are the first ordinals; values are distinct exact
+    // binary fractions, so a mismatch can only come from the wrong series or row. They stay above
+    // zero because the fixture predicate keeps only `field_0 > 0`.
+    let value = |series: usize, row: usize| (series * SKEW_LONG_ROWS + row + 1) as f64 / 8.0;
+    for series in 0..SKEW_LONG_SERIES {
+        let points = (0..SKEW_LONG_ROWS)
+            .map(|row| (1000 + row as i64, value(series, row)))
+            .collect::<Vec<_>>();
+        write_series(
+            &engine,
+            &region,
+            &format!("long-{series:03}"),
+            series as u64,
+            &points,
+        )
+        .await;
+    }
+    for series in 0..SKEW_SHORT_SERIES {
+        let points = (0..SKEW_SHORT_ROWS)
+            .map(|row| (1000 + row as i64, value(SKEW_LONG_SERIES + series, row)))
+            .collect::<Vec<_>>();
+        write_series(
+            &engine,
+            &region,
+            &format!("short-{series:03}"),
+            100 + series as u64,
+            &points,
+        )
+        .await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+    build(&engine, &region).await;
+
+    let total_rows = SKEW_LONG_SERIES * SKEW_LONG_ROWS + SKEW_SHORT_SERIES * SKEW_SHORT_ROWS;
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let store = region.series_index_store.clone().unwrap();
+    let projection = (0..region.version().metadata.column_metadatas.len()).collect::<Vec<_>>();
+
+    // The oracle reads the same SST through the legacy series-index path in a single partition.
+    let legacy = scanner_with_projection(
+        &region,
+        store.clone(),
+        SelectedFormat::Legacy,
+        projection.clone(),
+    );
+    let legacy_binding = labels(legacy.metadata());
+    assert!(
+        legacy
+            .prepare_series(&ctx, &metrics, &legacy_binding)
+            .await
+            .unwrap()
+            .is_none(),
+        "the oracle must read the legacy path"
+    );
+    let legacy_rows = legacy
+        .scan_series_partition(&ctx, &metrics, 0, &legacy_binding)
+        .unwrap()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    // The prepared path reads the same ranges, spread over the partitions DataFusion would run.
+    let mut scan = scanner_with_projection(&region, store, SelectedFormat::Columnar, projection);
+    let mut ranges = vec![Vec::new(); SKEW_PARTITIONS];
+    for (index, range) in scan.properties().partitions[0].iter().enumerate() {
+        ranges[index % SKEW_PARTITIONS].push(*range);
+    }
+    scan.prepare(PrepareRequest::default().with_ranges(ranges))
+        .unwrap();
+    assert_eq!(SKEW_PARTITIONS, scan.properties().num_partitions());
+    let binding = labels(scan.metadata());
+    // The columnar source, not the ordinary scan, must serve this read: the split below is the
+    // prepared path's, and a fallback would silently compare the legacy path with itself.
+    assert!(
+        scan.prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_some(),
+        "the columnar prepared source must serve the weighted split"
+    );
+    let mut prepared_rows = Vec::new();
+    for partition in 0..SKEW_PARTITIONS {
+        let stream = scan
+            .scan_series_partition(&ctx, &metrics, partition, &binding)
+            .unwrap()
+            .unwrap();
+        assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
+        prepared_rows.extend(rows(&stream.try_collect::<Vec<_>>().await.unwrap()));
+    }
+
+    // (a) Same series, timestamps and value bits as the legacy path, series by series.
+    let expected = by_series(rows(&legacy_rows));
+    let actual = by_series(prepared_rows);
+    assert_eq!(total_rows, expected.values().map(Vec::len).sum::<usize>());
+    assert_eq!(SKEW_LONG_SERIES + SKEW_SHORT_SERIES, expected.len());
+    assert_eq!(expected, actual);
+
+    // (b) The costs the split divides are the rows the index recorded for the written series.
+    let costs = scan
+        .prepared
+        .costs()
+        .expect("the prepared source publishes its costs")
+        .to_vec();
+    assert_eq!(SKEW_LONG_SERIES + SKEW_SHORT_SERIES, costs.len());
+    let mut written = actual.values().map(Vec::len).collect::<Vec<_>>();
+    written.sort_unstable();
+    let mut divided = costs.clone();
+    divided.sort_unstable();
+    assert_eq!(written, divided, "the costs are the per-series row counts");
+    assert!(
+        costs[..SKEW_LONG_SERIES]
+            .iter()
+            .all(|c| *c == SKEW_LONG_ROWS)
+            && costs[SKEW_LONG_SERIES..]
+                .iter()
+                .all(|c| *c == SKEW_SHORT_ROWS),
+        "the long series are the first ordinals: {costs:?}"
+    );
+    // Every partition reports the ordinals of the range the split gives it, and every series is
+    // assigned to exactly one partition.
+    let mut assigned = Vec::with_capacity(SKEW_PARTITIONS);
+    for partition in 0..SKEW_PARTITIONS {
+        let range = partition_balance::partition_range(&costs, partition, SKEW_PARTITIONS);
+        let reported = assigned_series(
+            &scan
+                .metrics_list
+                .get(partition)
+                .expect("every scanned partition reports metrics"),
+        );
+        assert_eq!(
+            range.len(),
+            reported,
+            "partition {partition} reports the ordinals of {range:?}"
+        );
+        assigned.push(reported);
+    }
+    assert_eq!(costs.len(), assigned.iter().sum::<usize>());
+
+    // (c) The cost split leaves the heaviest partition far closer to the average than the
+    // equal-count split, which is exactly what an unweighted split assigns.
+    let total_cost = costs.iter().sum::<usize>();
+    let average = total_cost as f64 / SKEW_PARTITIONS as f64;
+    let weighted = (0..SKEW_PARTITIONS)
+        .map(|partition| {
+            let range = partition_balance::partition_range(&costs, partition, SKEW_PARTITIONS);
+            costs[range].iter().sum::<usize>()
+        })
+        .collect::<Vec<_>>();
+    let uniform = vec![1usize; costs.len()];
+    let by_count = (0..SKEW_PARTITIONS)
+        .map(|partition| {
+            let range = partition_balance::partition_range(&uniform, partition, SKEW_PARTITIONS);
+            costs[range].iter().sum::<usize>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(total_cost, weighted.iter().sum::<usize>());
+    assert_eq!(total_cost, by_count.iter().sum::<usize>());
+    let worst = |costs: &[usize]| *costs.iter().max().unwrap() as f64 / average;
+    // The long series cannot be divided, so their row counts bound how even the split can get.
+    // These 208 series divide as [2000, 3000, 2000, 3000] over an average of 2500, while the count
+    // split gives [8440, 520, 520, 520] and leaves the first partition with every long series.
+    assert!(
+        worst(&weighted) < 1.5,
+        "the cost split left a partition at {}x the average: {weighted:?}",
+        worst(&weighted)
+    );
+    assert!(
+        worst(&by_count) > 3.0,
+        "the equal-count split should starve the short-series partitions: {by_count:?}"
+    );
+    assert!(
+        worst(&by_count) > 2.0 * worst(&weighted),
+        "the cost split must be clearly better: {} vs {}",
+        worst(&weighted),
+        worst(&by_count)
+    );
     engine.stop().await.unwrap();
 }
