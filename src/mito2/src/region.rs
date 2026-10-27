@@ -25,7 +25,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
@@ -254,8 +254,6 @@ pub(crate) struct NodeLease {
     /// Whether writes need a lease. Only a datanode the metasrv controls sets it.
     enabled: AtomicBool,
     deadline: Deadline,
-    /// The longest lease length seen, in nanoseconds.
-    max_lease: AtomicU64,
     /// The time of the lease checks while a test freezes it, in the unit of [Deadline]; 0 when
     /// it is not frozen.
     #[cfg(any(test, feature = "test"))]
@@ -271,21 +269,8 @@ impl NodeLease {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    pub(crate) fn renew(&self, deadline: Instant, lease: Duration) {
+    pub(crate) fn renew(&self, deadline: Instant) {
         self.deadline.extend(deadline);
-        // A lease too long to store saturates, and then counts as unknown.
-        let lease = u64::try_from(lease.as_nanos()).unwrap_or(u64::MAX);
-        self.max_lease.fetch_max(lease, Ordering::Relaxed);
-    }
-
-    /// Returns the longest lease length seen. Once a lease has been seen, a deadline minus it is
-    /// never later than the heartbeat the lease was granted for (the datanode always renews before
-    /// it applies grants). Returns `None` once a lease was too long to store.
-    pub(crate) fn max_lease(&self) -> Option<Duration> {
-        match self.max_lease.load(Ordering::Relaxed) {
-            u64::MAX => None,
-            nanos => Some(Duration::from_nanos(nanos)),
-        }
     }
 
     /// Returns the current time in the unit of [Deadline].
@@ -521,21 +506,19 @@ impl MitoRegion {
         self.set_role(RegionRole::DowngradingLeader);
     }
 
-    /// Applies a Leader grant that lasts until `deadline`, unless the region was demoted after
-    /// the heartbeat behind it was sent.
-    pub(crate) fn grant_leader(&self, deadline: Instant, node_lease: &NodeLease) {
+    /// Applies a Leader grant for a heartbeat sent at `sent_at`, unless the region was demoted
+    /// after it. Returns whether the grant was applied.
+    pub(crate) fn grant_leader(&self, sent_at: Instant) -> bool {
         // A writable region needs no change. Staging still leaves staging below.
         if self.state() == RegionRoleState::Leader(RegionLeaderState::Writable) {
-            return;
+            return true;
         }
-        // An unknown or unrepresentable send time is earlier than any gate.
-        let sent_at = node_lease
-            .max_lease()
-            .and_then(|lease| deadline.checked_sub(lease));
         let gate = self.grant_gate.lock().unwrap();
-        if gate.is_none_or(|gate| sent_at.is_some_and(|sent_at| sent_at >= gate)) {
-            self.set_role(RegionRole::Leader);
+        if gate.is_some_and(|gate| sent_at < gate) {
+            return false;
         }
+        self.set_role(RegionRole::Leader);
+        true
     }
 
     pub(crate) fn region_role(&self) -> RegionRole {

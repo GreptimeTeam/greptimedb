@@ -388,23 +388,26 @@ impl RegionEngine for MetricEngine {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<bool, BoxedError> {
+        let mut applied = true;
         // ignore the region not found error
         for x in [
             utils::to_metadata_region_id(region_id),
             utils::to_data_region_id(region_id),
         ] {
-            if let Err(e) = self
+            match self
                 .inner
                 .mito
-                .set_region_role_with_lease(x, role, deadline)
-                && e.status_code() != StatusCode::RegionNotFound
+                .set_region_role_with_lease(x, role, sent_at, deadline)
             {
-                return Err(e);
+                Ok(region_applied) => applied &= region_applied,
+                Err(e) if e.status_code() != StatusCode::RegionNotFound => return Err(e),
+                Err(_) => {}
             }
         }
-        Ok(())
+        Ok(applied)
     }
 
     async fn sync_region(

@@ -134,13 +134,18 @@ impl RegionAliveKeeper {
         }
     }
 
-    /// Renews the lease of regions to `deadline`.
-    async fn renew_region_leases(&self, regions: &[GrantedRegion], deadline: Instant) {
+    /// Renews the lease of regions to `deadline`, granted for a heartbeat sent at `sent_at`.
+    async fn renew_region_leases(
+        &self,
+        regions: &[GrantedRegion],
+        sent_at: Instant,
+        deadline: Instant,
+    ) {
         for region in regions {
             let (role, region_id) = (region.role().into(), RegionId::from(region.region_id));
             if let Some(handle) = self.find_handle(region_id).await {
                 handle
-                    .reset_deadline(role, deadline, region.extensions.clone())
+                    .reset_deadline(role, sent_at, deadline, region.extensions.clone())
                     .await;
             } else {
                 warn!(
@@ -276,13 +281,12 @@ impl HeartbeatResponseHandler for RegionAliveKeeper {
                 err_msg: "'region_lease' is missing in heartbeat response",
             })?;
         let start_instant = self.epoch + Duration::from_millis(region_lease.duration_since_epoch);
-        let lease = Duration::from_secs(region_lease.lease_seconds);
-        let deadline = start_instant + lease;
+        let deadline = start_instant + Duration::from_secs(region_lease.lease_seconds);
 
         if let Some(mito) = self.region_server.mito_engine() {
-            mito.renew_node_lease(deadline.into_std(), lease);
+            mito.renew_node_lease(deadline.into_std());
         }
-        self.renew_region_leases(&region_lease.regions, deadline)
+        self.renew_region_leases(&region_lease.regions, start_instant, deadline)
             .await;
         self.close_staled_regions(&region_lease.closeable_region_ids)
             .await;
@@ -297,8 +301,8 @@ enum CountdownCommand {
     /// 4 * `heartbeat_interval_millis`
     Start(u64),
     /// Reset countdown deadline to the given instance.
-    /// (NextRole, Deadline, ExtensionInfo)
-    Reset((RegionRole, Instant, HashMap<String, Vec<u8>>)),
+    /// (NextRole, HeartbeatSentAt, Deadline, ExtensionInfo)
+    Reset((RegionRole, Instant, Instant, HashMap<String, Vec<u8>>)),
     /// Returns the current deadline of the countdown task.
     #[cfg(test)]
     Deadline(oneshot::Sender<Instant>),
@@ -378,12 +382,18 @@ impl CountdownTaskHandle {
     async fn reset_deadline(
         &self,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
         extension_info: HashMap<String, Vec<u8>>,
     ) {
         if let Err(e) = self
             .tx
-            .send(CountdownCommand::Reset((role, deadline, extension_info)))
+            .send(CountdownCommand::Reset((
+                role,
+                sent_at,
+                deadline,
+                extension_info,
+            )))
             .await
         {
             warn!(
@@ -437,9 +447,10 @@ impl CountdownTask {
                                 started = true;
                             }
                         },
-                        Some(CountdownCommand::Reset((role, deadline, extension_info))) => {
+                        Some(CountdownCommand::Reset((role, sent_at, deadline, extension_info))) => {
                             let prev_role_leader = self.region_server.is_region_leader(self.region_id).unwrap_or(false);
-                            if let Err(err) = self.region_server.set_region_role_with_lease(self.region_id, role, deadline.into_std()) {
+                            let result = self.region_server.set_region_role_with_lease(self.region_id, role, sent_at.into_std(), deadline.into_std());
+                            if let Err(err) = &result {
                                 if err.status_code() == StatusCode::RegionNotFound {
                                     // Table metadata in metasrv is deleted after its regions are dropped.
                                     // The datanode may still receive lease renewal responses that depend on the metadata
@@ -449,10 +460,9 @@ impl CountdownTask {
                                     error!(err; "Failed to set region role to {role} for region {region_id}");
                                 }
 
-                            // Finalize leadership when the grant made the region a leader: persist
-                            // backfilled metadata.
+                            // Finalize leadership if the grant was applied: persist backfilled metadata.
                             } else if !prev_role_leader && role == RegionRole::Leader
-                                && self.region_server.is_region_leader(self.region_id).unwrap_or(false)
+                                && matches!(result, Ok(true))
                                 && let Err(err) = self
                                     .region_server
                                     .set_region_role_state_gracefully(self.region_id, SettableRegionRoleState::Leader)
@@ -681,6 +691,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(200),
             )
             .await;
@@ -734,6 +745,7 @@ mod test {
         countdown_handle
             .reset_deadline(
                 RegionRole::Leader,
+                Instant::now(),
                 Instant::now() + Duration::from_millis(heartbeat_interval_millis * 5),
                 HashMap::new(),
             )
@@ -784,6 +796,7 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -832,6 +845,7 @@ mod test {
                     role: api::v1::meta::RegionRole::Leader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;
@@ -874,6 +888,7 @@ mod test {
                     role: api::v1::meta::RegionRole::StagingLeader.into(),
                     extensions: HashMap::new(),
                 }],
+                Instant::now(),
                 Instant::now() + Duration::from_millis(3000),
             )
             .await;

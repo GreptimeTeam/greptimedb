@@ -435,9 +435,11 @@ mod tests {
             &self,
             id: RegionId,
             role: store_api::region_engine::RegionRole,
+            sent_at: std::time::Instant,
             deadline: std::time::Instant,
-        ) -> Result<(), common_error::ext::BoxedError> {
-            self.inner.set_region_role_with_lease(id, role, deadline)
+        ) -> Result<bool, common_error::ext::BoxedError> {
+            self.inner
+                .set_region_role_with_lease(id, role, sent_at, deadline)
         }
         async fn sync_region(
             &self,

@@ -70,9 +70,20 @@ async fn create_region(
 }
 
 fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
+    grant_sent_at(engine, role, Instant::now(), deadline);
+}
+
+/// Grants `role` until `deadline` for a heartbeat sent at `sent_at`, and returns whether the
+/// role was applied.
+fn grant_sent_at(
+    engine: &MitoEngine,
+    role: RegionRole,
+    sent_at: Instant,
+    deadline: Instant,
+) -> bool {
     engine
-        .set_region_role_with_lease(REGION_ID, role, deadline)
-        .unwrap();
+        .set_region_role_with_lease(REGION_ID, role, sent_at, deadline)
+        .unwrap()
 }
 
 /// Returns a request that writes rows `start..start + 3`.
@@ -252,7 +263,7 @@ async fn test_created_region_writes_under_node_lease() {
     assert_retryable(bulk_insert(REGION_ID).await, lease_expired);
 
     // Renewing the node lease does not extend the deadline of a region created before.
-    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
+    engine.renew_node_lease(Instant::now() + LEASE);
     assert!(put(&engine, REGION_ID, &schema, 0).await.unwrap().is_err());
 
     // A region created under the node lease takes writes before its first Leader grant.
@@ -275,7 +286,7 @@ async fn test_upgraded_region_writes_before_leader_grant() {
     let (_listener, engine, schema) = create_region(&mut env, None).await;
     // A migration candidate is a follower until the upgrade.
     grant(&engine, RegionRole::Follower, Instant::now() + LEASE);
-    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
+    engine.renew_node_lease(Instant::now() + LEASE);
 
     let request = RegionCatchupRequest {
         set_writable: true,
@@ -296,42 +307,30 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("stale-leader-grant").await;
     let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    engine.renew_node_lease(Instant::now() + 2 * LEASE, 2 * LEASE);
     let sent_before = Instant::now() - Duration::from_millis(1);
     engine
         .set_region_role_state_gracefully(REGION_ID, demoted_to)
         .await
         .unwrap();
     let demoted = engine.get_region(REGION_ID).unwrap().state();
-    // A later reply shortens the lease. Send times still come from the longest lease seen.
-    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
 
     // The grant for a heartbeat sent before the downgrade arrives late.
-    grant(&engine, RegionRole::Leader, sent_before + 2 * LEASE);
+    let deadline = Instant::now() + LEASE;
+    assert!(!grant_sent_at(
+        &engine,
+        RegionRole::Leader,
+        sent_before,
+        deadline
+    ));
     assert_eq!(demoted, engine.get_region(REGION_ID).unwrap().state());
 
-    // The grant for a heartbeat sent now, under the longest lease seen.
-    grant(&engine, RegionRole::Leader, Instant::now() + 2 * LEASE);
+    assert!(grant_sent_at(
+        &engine,
+        RegionRole::Leader,
+        Instant::now(),
+        deadline
+    ));
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
-}
-
-#[tokio::test]
-async fn test_lease_too_long_for_nanos_is_stale() {
-    common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("lease-too-long").await;
-    let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    // Longer than a u64 of nanoseconds holds. Clamping it to that would derive a send time LEASE
-    // after the real one, which is after the gate.
-    let lease = Duration::from_nanos(u64::MAX) + LEASE;
-    let sent_before = Instant::now() - Duration::from_millis(1);
-    engine.renew_node_lease(sent_before + lease, lease);
-    engine
-        .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
-        .await
-        .unwrap();
-
-    grant(&engine, RegionRole::Leader, sent_before + lease);
-    assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
 #[tokio::test]
@@ -355,7 +354,6 @@ async fn test_grant_gate_survives_reopen() {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("grant-gate-reopen").await;
     let (_listener, engine, schema) = create_region(&mut env, None).await;
-    engine.renew_node_lease(Instant::now() + LEASE, LEASE);
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
     // The memtable is not empty, so the catchup below reopens the region.
     put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
@@ -377,7 +375,13 @@ async fn test_grant_gate_survives_reopen() {
         &engine.get_region(REGION_ID).unwrap()
     ));
 
-    grant(&engine, RegionRole::Leader, sent_before + LEASE);
+    let deadline = Instant::now() + LEASE;
+    assert!(!grant_sent_at(
+        &engine,
+        RegionRole::Leader,
+        sent_before,
+        deadline
+    ));
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);

@@ -471,20 +471,22 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
-    /// Sets the role of a region from a lease the metasrv grants until `deadline`.
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`, in reply to a
+    /// heartbeat sent at `sent_at`. Returns whether the role was applied.
     pub fn set_region_role_with_lease(
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: std::time::Instant,
         deadline: std::time::Instant,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let engine = self
             .inner
             .region_map
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_region_role_with_lease(region_id, role, deadline)
+            .set_region_role_with_lease(region_id, role, sent_at, deadline)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 

@@ -98,7 +98,7 @@ mod puffin_index;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::region::RegionResponse;
 use async_trait::async_trait;
@@ -335,8 +335,8 @@ impl MitoEngine {
     }
 
     /// Renews the lease of this node from a heartbeat response that carries region leases.
-    pub fn renew_node_lease(&self, deadline: Instant, lease: Duration) {
-        self.inner.workers.node_lease().renew(deadline, lease);
+    pub fn renew_node_lease(&self, deadline: Instant) {
+        self.inner.workers.node_lease().renew(deadline);
     }
 
     /// Freezes the clock of the lease checks at `at`.
@@ -1603,19 +1603,19 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<bool, BoxedError> {
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
             region.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
-            region.grant_leader(deadline, self.inner.workers.node_lease());
-        } else {
-            region.set_role(role);
+            return Ok(region.grant_leader(sent_at));
         }
-        Ok(())
+        region.set_role(role);
+        Ok(true)
     }
 
     async fn set_region_role_state_gracefully(
