@@ -1681,7 +1681,8 @@ impl ManifestContext {
     }
 
     /// Promotes the region to a writable leader unless it was demoted after `issued_at`. Returns
-    /// whether the region is a writable leader afterwards.
+    /// false if the promotion is ignored for that reason; otherwise the role changes as
+    /// [`Self::set_role`] allows.
     pub(crate) fn promote_unless_demoted_after(
         &self,
         issued_at: Instant,
