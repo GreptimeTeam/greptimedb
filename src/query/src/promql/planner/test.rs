@@ -2189,8 +2189,8 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// More than one selector over metric-engine logical tables keeps the existing plan, though one
-/// selector over the same tables is native.
+/// More than one selector over metric-engine logical tables is not one multi-input node, though
+/// one selector over the same tables is native.
 #[tokio::test]
 async fn native_fused_multiple_metric_engine_selectors_fall_back() {
     let tables = [
@@ -2207,13 +2207,7 @@ async fn native_fused_multiple_metric_engine_selectors_fall_back() {
         "some_metric + other_metric + some_metric",
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
-        let legacy = build_native_fused_plan_with_provider(query, false, provider().await).await;
-        assert!(find_fused_series(&native).is_none(), "{query}: {native}");
-        assert_eq!(
-            native.display_indent().to_string(),
-            legacy.display_indent().to_string(),
-            "{query}"
-        );
+        assert!(!has_pair_node(&native), "{query}: {native}");
     }
 }
 
@@ -2520,6 +2514,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
         "some_metric + some_metric",
         "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}",
         "rate(some_metric[5m]) + on(tag_0) rate(some_metric[10m] offset 2m)",
+        "some_metric != some_metric",
+        "some_metric < on(tag_0) some_metric",
+        "some_metric >= bool on(tag_0) some_metric",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("the plan holds a native node");
@@ -2626,6 +2623,9 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         "100 * (1 - some_metric{tag_0=\"a\"} / other_metric)",
         "some_metric unless on(tag_0) other_metric",
         "some_metric or other_metric",
+        "some_metric > on(tag_0) other_metric",
+        "some_metric == bool other_metric",
+        "(some_metric <= on(tag_0) other_metric) * 100",
     ] {
         let plan = build_native_fused_plan_with_provider(
             query,
@@ -2684,7 +2684,20 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
-/// Two selectors over tables split into regions keep the existing plan, across tables as on one.
+/// Whether `plan` holds a native node over more than one input. The hybrid route plans a binary's
+/// selector operands as single-input nodes under the existing join, which this does not count.
+fn has_pair_node(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        && fused.inputs().len() > 1
+    {
+        return true;
+    }
+    plan.inputs().into_iter().any(has_pair_node)
+}
+
+/// Two selectors over tables split into regions are not one two-input node, across tables as on
+/// one; the hybrid route may still plan each operand natively under the existing join.
 #[tokio::test]
 async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
     let plan = build_native_fused_plan_with_provider(
@@ -2693,7 +2706,7 @@ async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert!(!has_pair_node(&plan), "{plan}");
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
@@ -2797,6 +2810,7 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         "1 - some_metric / some_metric",
         "(some_metric / some_metric) * 100",
         "abs(some_metric - on(tag_0) some_metric)",
+        "(some_metric > some_metric) * 100",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
@@ -2876,8 +2890,8 @@ async fn native_fused_three_selector_trees_bind_every_occurrence() {
     }
 }
 
-/// More than two selectors over tables split into regions keep the existing plan, on one table as
-/// across two.
+/// More than two selectors over tables split into regions are not one multi-input node, on one
+/// table as across two.
 #[tokio::test]
 async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
     for query in [
@@ -2890,7 +2904,7 @@ async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
             native_two_table_provider(vec![0]).await,
         )
         .await;
-        assert!(find_fused_series(&plan).is_none(), "{query}: {plan}");
+        assert!(!has_pair_node(&plan), "{query}: {plan}");
     }
 }
 

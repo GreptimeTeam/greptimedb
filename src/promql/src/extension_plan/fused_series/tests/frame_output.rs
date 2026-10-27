@@ -162,7 +162,11 @@ async fn sparse_instant_frame_preserves_positions_nulls_and_nan_across_formats()
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema_of(&schema))],
-            two_field_output_schema().to_dfschema_ref().unwrap(),
+            if format == FusedOutputFormat::SeriesFrame {
+                canonical_frame_schema(&tree)
+            } else {
+                two_field_output_schema().to_dfschema_ref().unwrap()
+            },
             format,
         )
         .expect("instant tree has the declared frame output")
@@ -217,7 +221,11 @@ async fn abs_rate_frame_matches_plain_rows_with_exact_values_and_labels() {
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema())],
-            output_schema().to_dfschema_ref().unwrap(),
+            if format == FusedOutputFormat::SeriesFrame {
+                canonical_frame_schema(&tree)
+            } else {
+                output_schema().to_dfschema_ref().unwrap()
+            },
             format,
         )
         .unwrap()
@@ -317,7 +325,11 @@ async fn rewritten_identical_labels_keep_disjoint_chains_in_one_encoder() {
             tree.clone(),
             binding.clone(),
             vec![input_plan(frame_schema())],
-            output_schema().to_dfschema_ref().unwrap(),
+            if format == FusedOutputFormat::SeriesFrame {
+                canonical_frame_schema(&tree)
+            } else {
+                output_schema().to_dfschema_ref().unwrap()
+            },
             format,
         )
         .unwrap()

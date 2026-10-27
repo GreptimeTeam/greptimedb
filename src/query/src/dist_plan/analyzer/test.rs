@@ -16,6 +16,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::promql::native_compile::{compile, statement_grid};
 use arrow::datatypes::{DataType, IntervalDayTime, TimeUnit};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE};
 use common_error::ext::BoxedError;
@@ -43,10 +44,14 @@ use datafusion_functions::datetime::expr_fn::now;
 use datafusion_functions::unicode::expr_fn::substring;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
+use datatypes::series::SeriesOrdering;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
 use futures::task::{Context, Poll};
 use pretty_assertions::assert_eq;
-use promql::extension_plan::{HistogramFold, HistogramFoldOperation};
+use promql::extension_plan::{
+    FusedSeries, FusedSeriesBinding, HistogramFold, HistogramFoldOperation,
+};
 use regex::Regex;
 use store_api::data_source::DataSource;
 use store_api::storage::ScanRequest;
@@ -319,6 +324,134 @@ impl Stream for EmptyStream {
 
     fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(None)
+    }
+}
+
+fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
+    let stmt = promql_parser::parser::EvalStmt {
+        expr: promql_parser::parser::parse(metric).unwrap(),
+        start: std::time::UNIX_EPOCH,
+        end: std::time::UNIX_EPOCH + std::time::Duration::from_secs(10),
+        interval: std::time::Duration::from_secs(1),
+        lookback_delta: std::time::Duration::from_secs(1),
+    };
+    let series = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec { name: "v0".into() }]),
+        eval_grid: None,
+    });
+    let tree = compile(&stmt, series, SeriesOrdering::KeyThenTime).unwrap();
+    let fused = FusedSeries::try_new(
+        Arc::from(metric),
+        tree,
+        FusedSeriesBinding {
+            grid: statement_grid(&stmt).unwrap(),
+            time_index: "ts".into(),
+            tags: vec![],
+            metric_name: Some(Arc::from(metric)),
+        },
+        vec![scan],
+        Arc::new(
+            datafusion_common::DFSchema::try_from(arrow::datatypes::Schema::new(vec![
+                arrow::datatypes::Field::new("v0", DataType::Float64, true),
+            ]))
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    })
+}
+
+fn count_merge_scans(plan: &LogicalPlan) -> usize {
+    usize::from(
+        matches!(plan, LogicalPlan::Extension(extension) if extension.node.as_any().is::<MergeScanLogicalPlan>()),
+    ) + plan
+        .inputs()
+        .iter()
+        .map(|input| count_merge_scans(input))
+        .sum::<usize>()
+}
+
+#[test]
+fn hybrid_binary_join_rewrites_each_native_operand_boundary() {
+    let left_table = TestTable::table_with_name(0, "left_metric".into());
+    let right_table = TestTable::table_with_name(1, "right_metric".into());
+    let scan = |table: TableRef| {
+        LogicalPlanBuilder::scan(
+            table.table_info().name.clone(),
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(table),
+            ))),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    };
+    let left = LogicalPlanBuilder::from(hybrid_fused(scan(left_table), "left_metric"))
+        .alias(TableReference::bare("left_metric"))
+        .unwrap()
+        .build()
+        .unwrap();
+    let right = LogicalPlanBuilder::from(hybrid_fused(scan(right_table), "right_metric"))
+        .alias(TableReference::bare("right_metric"))
+        .unwrap()
+        .build()
+        .unwrap();
+    let plan = LogicalPlanBuilder::from(left)
+        .join(
+            LogicalPlanBuilder::from(right).build().unwrap(),
+            JoinType::Inner,
+            (vec![Column::from_name("v0")], vec![Column::from_name("v0")]),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let rewritten = DistPlannerAnalyzer::new(true).try_push_down(plan).unwrap();
+    let LogicalPlan::Join(join) = &rewritten else {
+        panic!("Join must remain frontend: {rewritten}");
+    };
+    for (side, expected_table) in [(&join.left, "left_metric"), (&join.right, "right_metric")] {
+        assert_eq!(1, count_merge_scans(side), "{rewritten}");
+        assert_no_fused_series_outside_merge_scan(side);
+
+        let merge_scan = find_merge_scan(side).expect("each join operand has a MergeScan");
+        let LogicalPlan::Extension(extension) = merge_scan.input() else {
+            panic!("MergeScan remote input must be a FusedSeries root");
+        };
+        let fused = extension
+            .node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .expect("MergeScan remote input must be a FusedSeries root");
+        assert_eq!(expected_table, fused.promql());
+        assert_eq!(1, fused.children().len());
+        let [LogicalPlan::TableScan(table_scan)] = fused.children() else {
+            panic!("FusedSeries operand must directly consume a TableScan: {fused:?}");
+        };
+        assert_eq!(expected_table, table_scan.table_name.to_string());
+    }
+    assert_eq!(
+        2,
+        count_merge_scans(&rewritten),
+        "Join must be outside both MergeScans: {rewritten}"
+    );
+}
+
+fn assert_no_fused_series_outside_merge_scan(plan: &LogicalPlan) {
+    if let LogicalPlan::Extension(extension) = plan {
+        if extension.node.as_any().is::<MergeScanLogicalPlan>() {
+            return;
+        }
+        assert!(
+            !extension.node.as_any().is::<FusedSeries>(),
+            "FusedSeries must be contained in a MergeScan remote input: {plan}"
+        );
+    }
+    for input in plan.inputs() {
+        assert_no_fused_series_outside_merge_scan(input);
     }
 }
 
