@@ -3830,7 +3830,7 @@ impl PromPlanner {
                     // `days_in_month` is built by `days_in_month_expr` and selects
                     // no `date_part` unit.
                     "days_in_month" => None,
-                    _ => unreachable!("not a date function: {func.name}"),
+                    _ => unreachable!("not a date function: {}", func.name),
                 };
                 if has_input_arg {
                     // With an argument, Prometheus reads each sample value as a Unix
