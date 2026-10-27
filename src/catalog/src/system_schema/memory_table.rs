@@ -40,6 +40,7 @@ pub(crate) struct MemoryTable {
     pub(crate) table_name: &'static str,
     pub(crate) schema: SchemaRef,
     pub(crate) columns: Vec<VectorRef>,
+    scope: InformationSchemaTableScope,
 }
 
 impl MemoryTable {
@@ -49,12 +50,14 @@ impl MemoryTable {
         table_name: &'static str,
         schema: SchemaRef,
         columns: Vec<VectorRef>,
+        scope: InformationSchemaTableScope,
     ) -> Self {
         Self {
             table_id,
             table_name,
             schema,
             columns,
+            scope,
         }
     }
 
@@ -107,7 +110,7 @@ impl DfPartitionStream for MemoryTable {
 
 impl InformationTable for MemoryTable {
     fn scope(&self) -> InformationSchemaTableScope {
-        InformationSchemaTableScope::Global
+        self.scope
     }
 }
 
@@ -172,6 +175,7 @@ mod tests {
                 Arc::new(StringVector::from(vec!["a1", "a2"])),
                 Arc::new(StringVector::from(vec!["b1", "b2"])),
             ],
+            InformationSchemaTableScope::Global,
         );
 
         assert_eq!(42, table.table_id());
@@ -201,7 +205,13 @@ mod tests {
             ColumnSchema::new("b", ConcreteDataType::string_datatype(), false),
         ]));
 
-        let table = MemoryTable::new(42, "test", schema.clone(), vec![]);
+        let table = MemoryTable::new(
+            42,
+            "test",
+            schema.clone(),
+            vec![],
+            InformationSchemaTableScope::Global,
+        );
 
         assert_eq!(42, table.table_id());
         assert_eq!("test", table.table_name());

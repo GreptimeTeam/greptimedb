@@ -843,6 +843,104 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert_eq!(sst_entries.iter().filter(|e| e.visible).count(), 1);
     assert_eq!(sst_entries.iter().filter(|e| !e.visible).count(), 2);
 
+    // Streaming inspection must retain staging entries and their visibility.
+    {
+        use futures::StreamExt;
+
+        let mut batches = engine.scan_ssts_from_manifest(
+            &[datafusion_expr::col("region_id").eq(datafusion_expr::lit(region_id.as_u64()))],
+            1,
+        );
+        let mut actual = Vec::new();
+        while let Some(batch) = batches.next().await {
+            assert_eq!(batch.len(), 1);
+            actual.extend(batch);
+        }
+        actual.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        let mut expected = sst_entries;
+        expected.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        assert_eq!(actual, expected);
+    }
+
+    // Staging metadata overrides the same file in the normal manifest. Filter
+    // evaluation must use that winning metadata, even if it is not projected.
+    {
+        use futures::StreamExt;
+
+        let region = engine.get_region(region_id).unwrap();
+        let original = region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest()
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mut overridden = original.clone();
+        overridden.file_size = u64::MAX - 1;
+        for metadata in [overridden, original.clone()] {
+            region
+                .manifest_ctx
+                .manifest_manager
+                .write()
+                .await
+                .update(
+                    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+                        files_to_add: vec![metadata.clone()],
+                        files_to_remove: vec![],
+                        timestamp_ms: None,
+                        compaction_time_window: None,
+                        flushed_entry_id: None,
+                        flushed_sequence: None,
+                        committed_sequence: None,
+                    })]),
+                    true,
+                )
+                .await
+                .unwrap();
+            let entries = engine.all_ssts_from_manifest().await;
+            assert_eq!(entries.len(), 3);
+            let matches = entries
+                .iter()
+                .filter(|entry| entry.file_id == original.file_id.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].file_size, metadata.file_size);
+            assert!(matches[0].visible);
+
+            let schema = store_api::sst_entry::ManifestSstEntry::schema();
+            let projection = ["file_id", "visible"]
+                .map(|name| {
+                    schema
+                        .column_schemas()
+                        .iter()
+                        .position(|c| c.name == name)
+                        .unwrap()
+                })
+                .to_vec();
+            let mut stream = engine.scan_ssts_from_manifest_projected(
+                &[datafusion_expr::col("file_size").eq(datafusion_expr::lit(metadata.file_size))],
+                1,
+                Some(&projection),
+            );
+            let mut filtered = Vec::new();
+            while let Some(batch) = stream.next().await {
+                filtered.extend(batch);
+            }
+            assert!(
+                filtered
+                    .iter()
+                    .any(|entry| entry.file_id == original.file_id.to_string())
+            );
+            if metadata.file_size == u64::MAX - 1 {
+                assert_eq!(filtered.len(), 1);
+            }
+        }
+    }
+
     // Exit staging mode successfully
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)

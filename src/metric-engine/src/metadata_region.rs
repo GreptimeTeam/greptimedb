@@ -538,11 +538,15 @@ impl MetadataRegion {
     ) -> Result<()> {
         let cache_access_lock = self.cache_access_lock(metadata_region_id);
         let _cache_guard = cache_access_lock.write().await;
-        self.mito
+        let result = self
+            .mito
             .handle_request(metadata_region_id, request)
             .await
-            .context(MitoWriteOperationSnafu)?;
+            .context(MitoWriteOperationSnafu);
+        // A failed write may still be applied, e.g. when the region lease expires after the
+        // WAL append.
         self.cache.invalidate(&metadata_region_id).await;
+        result?;
 
         Ok(())
     }

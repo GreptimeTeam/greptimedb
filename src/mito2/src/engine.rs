@@ -48,6 +48,8 @@ mod filter_deleted_test;
 mod flush_test;
 #[cfg(test)]
 mod index_build_test;
+#[cfg(test)]
+mod lease_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -104,10 +106,13 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
+use common_recordbatch::filter::MetadataFilter;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
+use datafusion_common::ScalarValue;
+use datafusion_expr::Expr;
 use futures::FutureExt;
 use futures::future::{self, join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
@@ -132,7 +137,7 @@ use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
     AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::sst_entry::{self, ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
@@ -322,6 +327,22 @@ impl MitoEngine {
 
     pub fn gc_limiter(&self) -> GcLimiterRef {
         self.inner.workers.gc_limiter()
+    }
+
+    /// Makes regions acknowledge only writes whose WAL append completes within their lease.
+    pub fn require_write_lease(&self) {
+        self.inner.workers.node_lease().enable();
+    }
+
+    /// Renews the lease of this node from a heartbeat response that carries region leases.
+    pub fn renew_node_lease(&self, deadline: Instant) {
+        self.inner.workers.node_lease().renew(deadline);
+    }
+
+    /// Freezes the clock of the lease checks at `at`.
+    #[cfg(any(test, feature = "test"))]
+    pub fn freeze_lease_clock(&self, at: Instant) {
+        self.inner.workers.node_lease().freeze_clock(at);
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -578,19 +599,65 @@ impl MitoEngine {
 
     /// Lists all SSTs from the manifest of all regions in the engine.
     pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
-        let node_id = self.inner.workers.file_ref_manager().node_id();
-        let regions = self.inner.workers.all_regions();
+        self.scan_ssts_from_manifest(&[], 1024)
+            .flat_map(stream::iter)
+            .collect()
+            .await
+    }
 
-        let mut results = Vec::new();
-        for region in regions {
-            let mut entries = region.manifest_sst_entries().await;
-            for e in &mut entries {
-                e.node_id = node_id;
+    /// Lazily emits bounded batches of manifest entries, pruning regions before
+    /// opening their manifest snapshots and files before constructing entries.
+    /// Filters are conservative; callers must retain their residual predicates.
+    pub(crate) fn scan_ssts_from_manifest(
+        &self,
+        filters: &[Expr],
+        batch_size: usize,
+    ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
+        self.scan_ssts_from_manifest_projected(filters, batch_size, None)
+    }
+
+    /// Like [`Self::scan_ssts_from_manifest`], but avoids allocating unrequested
+    /// variable-sized fields. The projection must include residual filter columns.
+    pub fn scan_ssts_from_manifest_projected(
+        &self,
+        filters: &[Expr],
+        batch_size: usize,
+        projection: Option<&[usize]>,
+    ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
+        let engine = self.clone();
+        let projection = crate::region::ManifestSstProjection::new(projection);
+        let filters = MetadataFilter::new(filters);
+        Box::pin(async_stream::stream! {
+            let node_id = engine.inner.workers.file_ref_manager().node_id();
+            if !filters.matches(|column| match column {
+                sst_entry::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                return;
             }
-            results.extend(entries);
-        }
-
-        results
+            let mut batch = Vec::with_capacity(batch_size.max(1));
+            for region in engine.inner.workers.all_regions() {
+                if !manifest_region_matches(region.region_id, node_id, &filters)
+                    || !filters.matches(|column| match column {
+                        sst_entry::TABLE_DIR => Some(ScalarValue::Utf8(Some(region.table_dir().to_string()))),
+                        _ => None,
+                    })
+                {
+                    continue;
+                }
+                let mut entries = region.manifest_sst_stream(filters.clone(), projection);
+                while let Some(mut entry) = entries.next().await {
+                    entry.node_id = node_id;
+                    batch.push(entry);
+                    if batch.len() == batch_size.max(1) {
+                        yield std::mem::replace(&mut batch, Vec::with_capacity(batch_size.max(1)));
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                yield batch;
+            }
+        })
     }
 
     /// Lists metadata about all puffin index targets stored in the engine.
@@ -1532,6 +1599,21 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError> {
+        let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
+        // Before the role, and even if the role leaves the region's state unchanged.
+        if role.writable() {
+            region.leader_deadline.extend(deadline);
+        }
+        region.set_role(role);
+        Ok(())
+    }
+
     async fn set_region_role_state_gracefully(
         &self,
         region_id: RegionId,
@@ -1700,12 +1782,55 @@ impl MitoEngine {
     }
 }
 
+/// Evaluates region-constant predicates before visiting any of its files.
+fn manifest_region_matches(
+    region_id: RegionId,
+    node_id: Option<u64>,
+    filters: &MetadataFilter,
+) -> bool {
+    filters.matches(|column| {
+        Some(match column {
+            sst_entry::REGION_ID => ScalarValue::UInt64(Some(region_id.as_u64())),
+            sst_entry::TABLE_ID => ScalarValue::UInt32(Some(region_id.table_id())),
+            sst_entry::REGION_NUMBER => ScalarValue::UInt32(Some(region_id.region_number())),
+            sst_entry::REGION_GROUP => ScalarValue::UInt8(Some(region_id.region_group())),
+            sst_entry::REGION_SEQUENCE => ScalarValue::UInt32(Some(region_id.region_sequence())),
+            sst_entry::NODE_ID => ScalarValue::UInt64(node_id),
+            _ => return None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
     use crate::sst::file::FileMeta;
+
+    #[test]
+    fn test_manifest_region_predicates() {
+        use super::manifest_region_matches;
+        use common_recordbatch::filter::MetadataFilter;
+        use datafusion_expr::{col, lit};
+        let region = store_api::storage::RegionId::new(42, 3);
+        for (expr, expected) in [
+            (col("region_id").eq(lit(region.as_u64())), true),
+            (col("region_id").eq(lit(region.as_u64() + 1)), false),
+            (col("table_id").eq(lit(42u32)), true),
+            (col("node_id").is_null(), true),
+            (col("file_size").gt(lit(100u64)), true),
+            // A type mismatch is left to the residual filter, never pruned.
+            (col("region_id").eq(lit("invalid")), true),
+        ] {
+            let filter = MetadataFilter::new(std::slice::from_ref(&expr));
+            assert_eq!(
+                manifest_region_matches(region, None, &filter),
+                expected,
+                "{expr}"
+            );
+        }
+    }
 
     #[test]
     fn test_is_valid_region_edit() {
