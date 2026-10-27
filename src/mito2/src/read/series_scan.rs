@@ -14,6 +14,7 @@
 
 //! Per-series scan implementation.
 
+mod partition_balance;
 mod prepared;
 mod raw;
 
@@ -907,12 +908,19 @@ impl RegionScanner for SeriesScan {
             let future = self.prepare_series(ctx, metrics_set, label_source);
             let schema = preparation.schema;
             let labels = label_source.clone();
+            // The costs the split divides are the same for every partition of this scan, so read the
+            // copy prepared once with the source instead of rebuilding the whole source per partition.
+            let state = self.prepared.clone();
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
-                let n = source.num_series() as u128;
-                let start = (n * partition as u128 / partitions as u128) as usize;
-                let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
-                let mut reader = source.read_series(start..end)?;
+                let costs = state.costs().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series costs missing after preparation" }.build()))?;
+                debug_assert_eq!(costs.len(), source.num_series(), "a source reports one cost per ordinal");
+                // Split by estimated work rather than blindly by ordinal, so a source that reports
+                // per-series weights is divided evenly; the current coarse estimate is the series
+                // count times grid points, which makes this a count split. Every ordinal still
+                // belongs to exactly one partition, so one series' chunks stay together.
+                let range = partition_balance::partition_range(&costs, partition, partitions);
+                let mut reader = source.read_series(range)?;
                 while let Some(chunk) = reader.try_next().await? { yield chunk; }
             };
             return Ok(Some(raw::from_stream(
@@ -1414,36 +1422,62 @@ struct SenderList {
     senders: Vec<Option<Sender<Result<SeriesBatch>>>>,
     /// Number of None senders.
     num_nones: usize,
-    /// Index of the current partition to send.
-    sender_idx: usize,
     /// Number of full senders.
     num_full: usize,
+    /// Rows already sent to each partition.
+    ///
+    /// Sending each batch to the partition that has carried the least keeps the partitions finishing
+    /// together when their series differ in length, which round-robin cannot do: it hands the long
+    /// series to whichever partition came next, and that partition reads long after the others are
+    /// done.
+    ///
+    /// The count is a heuristic, not an exact ledger. A [`FlatSeriesBatch`] may hold rows of more
+    /// than one series -- the divider promises only that one series' rows stay together, not that a
+    /// batch holds a single series -- so a batch spanning a series boundary charges its whole row
+    /// count to one partition. It stays accurate to within those boundary batches, which is enough
+    /// for choosing a partition: every row is still sent to exactly one partition and read once.
+    sent_rows: Vec<usize>,
 }
 
 impl SenderList {
     fn new(senders: Vec<Option<Sender<Result<SeriesBatch>>>>) -> Self {
         let num_nones = senders.iter().filter(|sender| sender.is_none()).count();
+        let partitions = senders.len();
         Self {
             senders,
             num_nones,
-            sender_idx: 0,
             num_full: 0,
+            sent_rows: vec![0; partitions],
         }
     }
 
     /// Finds a partition and tries to send the batch to the partition.
     /// Returns None if it sends successfully.
     fn try_send_batch(&mut self, mut batch: SeriesBatch) -> Result<Option<SeriesBatch>> {
-        for _ in 0..self.senders.len() {
-            ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
+        let rows = batch.num_rows();
+        // Lightest first, so the batch goes to the partition that has carried the least. The index
+        // breaks ties, which keeps the order the batches were produced in for equal loads.
+        let mut order: Vec<usize> = (0..self.senders.len())
+            .filter(|index| self.senders[*index].is_some())
+            .collect();
+        order.sort_by_key(|index| (self.sent_rows[*index], *index));
 
-            let sender_idx = self.fetch_add_sender_idx();
+        let mut tried = 0;
+        for sender_idx in order {
+            ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
+            tried += 1;
+            if tried > self.senders.len() {
+                break;
+            }
             let Some(sender) = &self.senders[sender_idx] else {
                 continue;
             };
 
             match sender.try_send(Ok(batch)) {
-                Ok(()) => return Ok(None),
+                Ok(()) => {
+                    self.sent_rows[sender_idx] = self.sent_rows[sender_idx].saturating_add(rows);
+                    return Ok(None);
+                }
                 Err(TrySendError::Full(res)) => {
                     self.num_full += 1;
                     // Safety: we send Ok.
@@ -1463,6 +1497,7 @@ impl SenderList {
 
     /// Finds a partition and sends the batch to the partition.
     async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
+        let rows = batch.num_rows();
         let Some(batch) = self.try_send_batch(batch)? else {
             return Ok(());
         };
@@ -1483,6 +1518,7 @@ impl SenderList {
                 match reserved {
                     Ok(permit) => {
                         permit.send(Ok(batch));
+                        self.sent_rows[idx] = self.sent_rows[idx].saturating_add(rows);
                         return Ok(());
                     }
                     Err(_) => idx,
@@ -1499,12 +1535,6 @@ impl SenderList {
             let result = Err(error.clone()).context(ScanSeriesSnafu);
             let _ = sender.send(result).await;
         }
-    }
-
-    fn fetch_add_sender_idx(&mut self) -> usize {
-        let sender_idx = self.sender_idx;
-        self.sender_idx = (self.sender_idx + 1) % self.senders.len();
-        sender_idx
     }
 }
 

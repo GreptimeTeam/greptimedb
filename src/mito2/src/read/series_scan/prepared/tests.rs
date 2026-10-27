@@ -940,6 +940,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         labels: source.labels.clone(),
         raw: source.raw.clone(),
         candidates: source.candidates.clone(),
+        costs: source.costs.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(

@@ -57,7 +57,6 @@ use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
-use crate::series_index::MetricSeriesId;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::ColumnarSeriesFormat;
 use crate::series_index::format::{
@@ -65,6 +64,7 @@ use crate::series_index::format::{
     SeriesReadRequest,
 };
 use crate::series_index::samples::ColumnarSamplesFormat;
+use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -107,6 +107,17 @@ impl Preparation {
             )));
         }
         Ok(source.clone())
+    }
+
+    /// Returns the prepared source's per-ordinal costs, or `None` before preparation succeeds.
+    ///
+    /// The costs are built with the source and shared by every partition, so a partition that has
+    /// already awaited [`Self::prepare`] reads them here instead of rebuilding them.
+    pub(crate) fn costs(&self) -> Option<Arc<[usize]>> {
+        match self.source.get() {
+            Some(Ok(source)) => Some(source.costs()),
+            _ => None,
+        }
     }
 }
 
@@ -229,10 +240,30 @@ fn collect_inputs(
     Ok(ready.then_some((file_indices, indexes)))
 }
 
+/// The work one series of this source is estimated to cost when a partition assignment weighs it.
+///
+/// The assignment uses the coarse first-version model, series count times grid points, and both
+/// factors weigh every series of one source equally: the grid is the scan's time range, not a
+/// property of a single series, and the series count is what the source already knows. A uniform
+/// weight therefore *is* that model, and it makes the split a count-based one (grid points cancel
+/// out because they scale the whole source, and the split only compares costs within one source).
+///
+/// The series index also records a per-series row count (`__series_row_count`), which the candidate
+/// batch already carries, so reading it would cost no extra I/O and would describe a long series as
+/// heavier than a short one. That is the finer model this version deliberately does not use: it
+/// would make the assignment depend on per-series sample counts, which the coarse model rejects.
+/// Switching to it means overriding [`PreparedSeriesSource::series_cost`] per ordinal with that
+/// column and nothing else.
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
     tags: HashMap<u32, Option<String>>,
+    /// How many samples the series index records for this series.
+    ///
+    /// It is the work estimate the partition split weighs ordinals by: the column is already in the
+    /// batch the candidate is built from, so it costs no extra read, and it is the one per-series
+    /// size the index carries.
+    cost: usize,
 }
 
 struct ColumnarPreparedSource {
@@ -240,6 +271,12 @@ struct ColumnarPreparedSource {
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
     candidates: Arc<Vec<Candidate>>,
+    /// The work estimate of every ordinal, in ordinal order, built together with the candidates.
+    ///
+    /// Ordinals do not change after preparation, so one copy serves the scan: the partitions divide
+    /// this slice instead of each rebuilding the whole source's costs. See
+    /// [`PreparedSeriesSource::series_cost`].
+    costs: Arc<[usize]>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
     // Readers retain this reservation with the candidate set.
@@ -247,6 +284,14 @@ struct ColumnarPreparedSource {
 }
 
 impl ColumnarPreparedSource {
+    /// Returns the work estimate of every ordinal, in ordinal order.
+    ///
+    /// One copy is built while preparing, so a caller that divides the ordinals shares it instead of
+    /// paying for one [`PreparedSeriesSource::series_cost`] call per ordinal and per partition.
+    fn costs(&self) -> Arc<[usize]> {
+        self.costs.clone()
+    }
+
     async fn prepare(
         context: Arc<StreamContext>,
         ranges: Vec<PartitionRange>,
@@ -333,6 +378,18 @@ impl ColumnarPreparedSource {
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .ok_or_else(|| invalid("invalid TSID column"))?;
+                // Found by name, not by position: the index format owns its column order, and a cost
+                // read from the wrong column would misbalance every assignment without failing.
+                let cost_column = schema
+                    .fields()
+                    .iter()
+                    .position(|field| field.name() == ROW_COUNT_COLUMN)
+                    .ok_or_else(|| invalid("series index has no row count column"))?;
+                let costs = batch
+                    .column(cost_column)
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .ok_or_else(|| invalid("invalid series row count column"))?;
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
                         table_id: table.value(row),
@@ -393,6 +450,7 @@ impl ColumnarPreparedSource {
                             id,
                             key: Buffer::from(key),
                             tags: values,
+                            cost: costs.value(row).min(usize::MAX as u64) as usize,
                         },
                     );
                 }
@@ -400,11 +458,15 @@ impl ColumnarPreparedSource {
         }
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
+        // Built once here, with the ordinals the source exposes from now on, so no partition pays
+        // for the whole source again when it asks how to split them.
+        let costs: Arc<[usize]> = candidates.iter().map(|candidate| candidate.cost).collect();
         Ok(Self {
             context,
             labels,
             raw: Arc::new(raw),
             candidates: Arc::new(candidates),
+            costs,
             samples: Arc::new(samples),
             metrics,
             reservation: Arc::new(reservation),
@@ -418,6 +480,9 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
     }
     fn label_source(&self) -> &RawLabelSource {
         &self.labels
+    }
+    fn series_cost(&self, ordinal: usize) -> usize {
+        self.costs.get(ordinal).copied().unwrap_or(1)
     }
     fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
         let candidate = self

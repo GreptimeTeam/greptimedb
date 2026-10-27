@@ -597,6 +597,33 @@ pub trait PreparedSeriesSource: Send + Sync {
     /// Returns identity metadata for an ordinal without polling sample data.
     fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError>;
 
+    /// Returns a cheap estimate of the work reading the series at `ordinal` costs.
+    ///
+    /// A partition assignment uses it to balance what each partition reads. The estimate is coarse
+    /// on purpose: a source reports series count times grid points for its own series, a figure that
+    /// weighs every one of them the same, so the split stays a count-based one instead of depending
+    /// on per-series sample counts. Only costs of the same source are comparable -- the figure is a
+    /// work estimate, not a duration -- and it must be obtainable without reading sample data.
+    ///
+    /// The default is one for every ordinal, which is exactly the coarse figure when the grid points
+    /// of all series are equal: a source that cannot estimate its series honestly says so by not
+    /// overriding this, rather than reporting a made-up figure that would make the split look
+    /// balanced.
+    fn series_cost(&self, ordinal: usize) -> usize {
+        let _ = ordinal;
+        1
+    }
+
+    /// Returns the cost of every selected series, in ordinal order.
+    ///
+    /// It is [`Self::series_cost`] for a whole source at once, so a caller that splits the ordinals
+    /// pays for one pass instead of one call per ordinal.
+    fn series_costs(&self) -> Vec<usize> {
+        (0..self.num_series())
+            .map(|ordinal| self.series_cost(ordinal))
+            .collect()
+    }
+
     /// Creates an independent reader for the half-open ordinal range.
     fn read_series(
         &self,
