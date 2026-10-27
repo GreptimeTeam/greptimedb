@@ -23,7 +23,7 @@ use moka::sync::Cache;
 use store_api::storage::FileId;
 use tokio::sync::watch;
 
-use super::{
+use crate::cache::{
     RANGE_RESULT_TYPE, RangeResultMemoryLimiter, range_result_cache_weight, removal_cause_str,
 };
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, RANGE_CACHE_WORKER_EVENTS};
