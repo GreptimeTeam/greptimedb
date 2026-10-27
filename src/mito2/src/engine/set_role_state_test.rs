@@ -1468,6 +1468,7 @@ async fn test_downgrade_during_alter_keeps_acknowledged_writes_with_local_wal() 
                 set_writable: true,
                 entry_id: Some(reported),
                 metadata_entry_id: None,
+                location_id: None,
                 checkpoint: None,
             }),
         )
