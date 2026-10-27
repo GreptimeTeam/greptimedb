@@ -723,17 +723,15 @@ impl RegionSupervisor {
             .map(|datanode| datanode.peer.id);
         exclude_peer_ids.extend(unschedulable_datanodes);
 
+        let empty = BTreeSet::new();
         let mut groups = BTreeMap::<_, Vec<_>>::new();
         for region_id in regions {
-            let excluded = excluded_by_region
-                .get(region_id)
-                .cloned()
-                .unwrap_or_default();
+            let excluded = excluded_by_region.get(region_id).unwrap_or(&empty);
             groups.entry(excluded).or_default().push(*region_id);
         }
         let mut region_peers = Vec::with_capacity(regions.len());
         for (excluded, regions) in groups {
-            let exclude_peer_ids = exclude_peer_ids.iter().chain(&excluded).copied().collect();
+            let exclude_peer_ids = exclude_peer_ids.iter().chain(excluded).copied().collect();
             match self
                 .select_group(from_peer_id, &regions, exclude_peer_ids, affinity.as_ref())
                 .await
@@ -741,7 +739,7 @@ impl RegionSupervisor {
                 Ok(peers) => region_peers.extend(peers),
                 // Other groups may still have candidates.
                 Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
-                    warn!(err; "No failover target for regions: {:?}, excluded: {:?}", regions, excluded)
+                    error!(err; "No failover target for regions: {:?}, excluded: {:?}", regions, excluded)
                 }
                 Err(err) => return Err(err),
             }
@@ -828,18 +826,15 @@ impl RegionSupervisor {
             .map(|region_id| region_id.table_id())
             .unique()
             .collect::<Vec<_>>();
-        let table_routes = match TableRouteStorage::new(self.kv_backend.clone())
+        let table_routes = TableRouteStorage::new(self.kv_backend.clone())
             .batch_get(&table_ids)
             .await
-        {
-            Ok(table_routes) => table_routes,
-            // Select without followers, as before; the submit still rejects them.
-            Err(err) => {
+            .unwrap_or_else(|err| {
+                // Select without followers, as before; the submit still rejects them.
                 warn!(err; "Failed to read the routes of failover regions: {:?}", regions);
                 vec![]
-            }
-        };
-        let followers = table_routes
+            });
+        let excluded_by_region = table_routes
             .iter()
             .flatten()
             .filter_map(|table_route| table_route.region_routes().ok())
@@ -850,7 +845,7 @@ impl RegionSupervisor {
             })
             .collect();
         let region_peers = self
-            .select_peers(from_peer_id, regions, failed_datanodes, &followers)
+            .select_peers(from_peer_id, regions, failed_datanodes, &excluded_by_region)
             .await?;
 
         for (region_id, peer) in region_peers {
