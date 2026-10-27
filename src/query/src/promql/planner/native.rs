@@ -40,7 +40,7 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Extension, LogicalPlan, TableScanBuilder};
+use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
@@ -51,7 +51,8 @@ use promql::vector_match::{Cardinality, MatchingLabels};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    EvalStmt, Expr as PromExpr, MatrixSelector, ParenExpr, VectorSelector,
+    BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
+    VectorMatchCardinality, VectorSelector, token,
 };
 use session::context::QueryContextRef;
 use snafu::ResultExt;
@@ -109,7 +110,70 @@ type PreparedInput = (
     Vec<String>,
 );
 
+pub(crate) fn hybrid_binary_admitted(
+    op: token::TokenType,
+    modifier: &Option<BinModifier>,
+    lhs: &PromExpr,
+    rhs: &PromExpr,
+) -> bool {
+    let supported_op = matches!(
+        op.id(),
+        token::T_ADD
+            | token::T_SUB
+            | token::T_MUL
+            | token::T_DIV
+            | token::T_MOD
+            | token::T_POW
+            | token::T_ATAN2
+    );
+    let supported_matching = match modifier {
+        None => true,
+        Some(modifier) => {
+            matches!(&modifier.card, VectorMatchCardinality::OneToOne)
+                && (matches!(&modifier.matching, Some(LabelModifier::Include(labels)) if !labels.labels.is_empty())
+                    || matches!(&modifier.matching, Some(LabelModifier::Exclude(labels)) if labels.labels.is_empty()))
+        }
+    };
+    supported_op
+        && supported_matching
+        && lhs.value_type() == ValueType::Vector
+        && rhs.value_type() == ValueType::Vector
+        && admitted_selector(lhs).is_some()
+        && admitted_selector(rhs).is_some()
+}
+
 impl PromPlanner {
+    pub(super) async fn try_plan_native_operand(
+        &mut self,
+        expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
+        if admitted_selector(expr).is_none() {
+            return Ok(None);
+        }
+        let saved = self.ctx.clone();
+        let (plan, operand_ctx) = match self
+            .try_plan_native_fused_with_context(expr, query_engine_state)
+            .await?
+        {
+            Some((plan, Some(operand_ctx))) => (plan, operand_ctx),
+            _ => {
+                self.ctx = saved;
+                return Ok(None);
+            }
+        };
+        self.ctx = operand_ctx.clone();
+        let table_ref = self.table_ref();
+        self.ctx = saved;
+        let table_ref = table_ref?;
+        let plan = LogicalPlanBuilder::from(plan)
+            .alias(table_ref)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        Ok(Some((plan, operand_ctx)))
+    }
+
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
     /// `query_engine_state` is only read to build the *existing* plan of an aggregate query, whose
@@ -133,6 +197,17 @@ impl PromPlanner {
         prom_expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<LogicalPlan>> {
+        Ok(self
+            .try_plan_native_fused_with_context(prom_expr, query_engine_state)
+            .await?
+            .map(|(plan, _)| plan))
+    }
+
+    async fn try_plan_native_fused_with_context(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<(LogicalPlan, Option<super::PromPlannerContext>)>> {
         if !self.native_fused {
             return Ok(None);
         }
@@ -188,13 +263,17 @@ impl PromPlanner {
                 output_schema,
             )
             .context(DataFusionPlanningSnafu)?;
-            return Ok(Some(LogicalPlan::Extension(Extension {
-                node: Arc::new(node),
-            })));
+            return Ok(Some((
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                }),
+                None,
+            )));
         }
         let original_context = self.ctx.clone();
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
+            let mut single_input_context = None;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -209,6 +288,9 @@ impl PromPlanner {
                     };
                 if self.setup_context().await?.is_some() {
                     return Ok(None);
+                }
+                if selectors.len() == 1 {
+                    single_input_context = Some(self.ctx.clone());
                 }
                 let (Some(metric), Some(time)) = (
                     self.ctx.table_name.clone(),
@@ -360,11 +442,11 @@ impl PromPlanner {
                 }
                 prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
             }
-            Ok(Some(prepared))
+            Ok(Some((prepared, single_input_context)))
         }
         .await;
         self.ctx = original_context;
-        let Some(mut prepared) = preparation? else {
+        let Some((mut prepared, single_input_context)) = preparation? else {
             return Ok(None);
         };
         // The time index, the raw tag list and metric name are shared binding properties. The
@@ -522,9 +604,12 @@ impl PromPlanner {
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            return Ok(Some(LogicalPlan::Extension(Extension {
-                node: Arc::new(node),
-            })));
+            return Ok(Some((
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(node),
+                }),
+                single_input_context,
+            )));
         }
         let tree = compiled.tree;
         let root_fields = tree
@@ -560,9 +645,12 @@ impl PromPlanner {
             output_schema,
         )
         .context(DataFusionPlanningSnafu)?;
-        Ok(Some(LogicalPlan::Extension(Extension {
-            node: Arc::new(node),
-        })))
+        Ok(Some((
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(node),
+            }),
+            single_input_context,
+        )))
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -906,8 +994,8 @@ mod tests {
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
-        collect_selectors, fused_output_tags, independent_scan_pair, native_promql_requested,
-        scan_time_filter,
+        collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
+        native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -1034,6 +1122,32 @@ mod tests {
         for query in ["sum(x)", "sum by (job) (rate(x[5m]))"] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_single_selector(&expression), "{query}");
+        }
+    }
+
+    fn hybrid_admission(query: &str) -> bool {
+        let expression = promql_parser::parser::parse(query).unwrap();
+        let promql_parser::parser::Expr::Binary(binary) = expression else {
+            panic!("expected binary expression: {query}");
+        };
+        hybrid_binary_admitted(binary.op, &binary.modifier, &binary.lhs, &binary.rhs)
+    }
+
+    #[test]
+    fn hybrid_binary_admission_is_narrow() {
+        for query in ["A / B", "rate(A[1m]) / rate(B[1m])"] {
+            assert!(hybrid_admission(query), "{query}");
+        }
+        assert!(hybrid_admission("A + on(job) B"));
+        for query in [
+            "A and B",
+            "A + on() B",
+            "A + on(job) group_left B",
+            "sum(A) / B",
+            "100 / B",
+            "A / (B + C)",
+        ] {
+            assert!(!hybrid_admission(query), "{query}");
         }
     }
 
