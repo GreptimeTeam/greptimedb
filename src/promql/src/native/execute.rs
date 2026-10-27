@@ -2966,16 +2966,8 @@ impl RuntimeNode {
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Window { input, .. }
-            | RuntimeOp::Aggregate { input, .. } => input.unclosed(),
-            RuntimeOp::Merge { input, merge, .. } => {
-                input.unclosed()?;
-                if merge.as_ref().is_some_and(|m| m.open.is_some()) {
-                    return Err(DataFusionError::Execution(
-                        "merge input ended inside a series".into(),
-                    ));
-                }
-                Ok(())
-            }
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Merge { input, .. } => input.unclosed(),
             RuntimeOp::Binary {
                 left,
                 right,
@@ -3878,7 +3870,7 @@ impl NodeState {
         )
     }
 
-    /// Retains and validates a fragment for standalone canonicalization.
+    /// Retains and validates a fragment for canonicalization.
     fn collect_merge(&mut self, merge: &mut MergeInput, chunk: EvaluatedChunk) -> Result<()> {
         let EvaluatedChunk { series, is_last } = chunk;
         merge.check(&series, is_last)?;
@@ -3934,24 +3926,7 @@ impl NodeState {
         window: &RangeEvaluator,
         chunk: EvaluatedChunk,
     ) -> Result<Option<EvaluatedChunk>> {
-        let EvaluatedChunk { series, is_last } = chunk;
-        // The chunk is checked before it is charged for or kept, so a stream that breaks the
-        // contract leaves nothing behind.
-        merge.check(&series, is_last)?;
-        let positions = series.time.len();
-        let bytes = series_bytes(&series);
-        // The fragment is held from here on, so the pool admits it before this node keeps it: a
-        // rejected fragment leaves nothing behind.
-        self.buffer.grow(bytes)?;
-        merge.bytes = merge.bytes.saturating_add(bytes);
-        merge.fragments.push(series);
-        let metrics = Arc::clone(&self.buffer.metrics);
-        metrics.record_input(1, positions);
-        if is_last {
-            // The source series whose data this fragment carries ended, which is what `is_last`
-            // says; the label set it shares with another series is not closed by it.
-            metrics.record_completed_series(1);
-        }
+        self.collect_merge(merge, chunk)?;
         // What this node holds is the fragments and the label sets it has already handed out; its
         // evaluator has read none of them yet.
         let retained = window.retained_bytes();

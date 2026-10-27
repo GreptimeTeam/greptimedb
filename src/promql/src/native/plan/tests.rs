@@ -276,24 +276,6 @@ fn adding_a_map_only_changes_the_tree() {
     );
 }
 
-/// A merge is a whole-series barrier over the supported evaluated shape.
-#[test]
-fn merge_is_a_whole_series_barrier_over_supported_shapes() {
-    let grid = grid(0, 60_000, 4);
-    let merge = NativeNode {
-        expr: NativeExpr::Merge {
-            input: Box::new(map_over(input_on(Arc::clone(&grid)))),
-        },
-        output: evaluated(Arc::new([]), Arc::clone(&grid)),
-    };
-    assert!(
-        merge.validate().is_ok(),
-        "{}",
-        merge.validate().unwrap_err()
-    );
-    assert!(reads_across_series(&merge));
-}
-
 #[test]
 fn merge_rejects_raw_and_mismatched_input_shapes() {
     let raw_merge = NativeNode {
@@ -305,6 +287,29 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
     assert!(raw_merge.validate().is_err());
 
     let output_grid = grid(0, 60_000, 4);
+    let supported = [
+        input_on(Arc::clone(&output_grid)),
+        window_over(
+            input_on(Arc::clone(&output_grid)),
+            Some(Arc::clone(&output_grid)),
+        ),
+        map_over(input_on(Arc::clone(&output_grid))),
+    ];
+    for inner in supported {
+        let merge = NativeNode {
+            expr: NativeExpr::Merge {
+                input: Box::new(inner),
+            },
+            output: evaluated(Arc::new([]), Arc::clone(&output_grid)),
+        };
+        assert!(
+            merge.validate().is_ok(),
+            "{}",
+            merge.validate().unwrap_err()
+        );
+        assert!(reads_across_series(&merge));
+    }
+
     let inner = window_over(
         input_on(Arc::clone(&output_grid)),
         Some(Arc::clone(&output_grid)),
