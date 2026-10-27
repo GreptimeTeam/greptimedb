@@ -2470,10 +2470,9 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
 }
 
 #[apply(both_deployment_cases)]
-async fn test_exemplar_otel_arrow_metrics(distributed: bool) {
+async fn test_exemplar_otel_arrow_rejects_non_metric_source(distributed: bool) {
     use datatypes::arrow::array::BinaryArray;
-    use servers::exemplar::query::Query as ExemplarQuery;
-    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     let env = MockInstanceImpl::new("exemplar_otel_arrow", distributed).await;
@@ -2517,27 +2516,26 @@ async fn test_exemplar_otel_arrow_metrics(distributed: bool) {
         .await
         .unwrap()
         .into_inner();
-    let status = response.message().await.unwrap().unwrap();
-    assert_eq!(
-        status.status_code,
-        ArrowStatusCode::Ok as i32,
-        "{}",
-        status.status_message
-    );
-    assert!(response.message().await.unwrap().is_none());
-    let result = frontend
-        .query_exemplars(
-            ExemplarQuery::parse("otel_arrow_gauge".into(), "1", "2", "public").unwrap(),
-            QueryContext::arc(),
-        )
+    let error = response.message().await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    // Arrow currently selects ordinary-engine ingestion; metric rows still complete independently.
+    let output = frontend
+        .do_query("SELECT COUNT(*) FROM otel_arrow_gauge", QueryContext::arc())
         .await
+        .remove(0)
         .unwrap();
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].exemplars.len(), 1);
-    let exemplar = &result[0].exemplars[0];
-    assert_eq!(exemplar.timestamp.0, 1_123_456_789);
-    assert_eq!(exemplar.value, "0.25");
-    assert_eq!(exemplar.labels["trace_id"], "ab".repeat(16));
-    assert_eq!(exemplar.labels["span_id"], "cd".repeat(8));
+    common_test_util::recordbatch::check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+",
+    )
+    .await;
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "metrics_exemplars", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
     server.shutdown().await.unwrap();
 }

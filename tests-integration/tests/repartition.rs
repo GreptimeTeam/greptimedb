@@ -427,8 +427,11 @@ async fn assert_append_count(
     );
 }
 
+#[rstest::rstest]
+#[case::ordinary(false)]
+#[case::source_ids(true)]
 #[tokio::test(flavor = "multi_thread")]
-async fn test_exemplar_sparse_repartition_compaction() {
+async fn test_exemplar_sparse_repartition_compaction(#[case] source_ids: bool) {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&StorageType::File);
     let cluster = GreptimeDbClusterBuilder::new("test_exemplar_sparse_repartition_compaction")
@@ -449,19 +452,37 @@ async fn test_exemplar_sparse_repartition_compaction() {
         .await;
     let instance = cluster.fe_instance();
     let ctx = QueryContext::arc();
+    let (columns, prefix, first, second) = if source_ids {
+        (
+            "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,",
+            "__table_id, __tsid,",
+            "(42, 7, 'a', 1, 1), (42, 7, 'h', 1, 2), (43, 7, 'z', 1, 3)",
+            "(42, 7, 'a', 1, 4), (42, 7, 'h', 1, 5), (43, 7, 'z', 1, 6)",
+        )
+    } else {
+        (
+            "",
+            "",
+            "('a', 1, 1), ('h', 1, 2), ('z', 1, 3)",
+            "('a', 1, 4), ('h', 1, 5), ('z', 1, 6)",
+        )
+    };
     for sql in [
-        "CREATE TABLE exemplar_sparse_repartition (
-            host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE
+        format!(
+            "CREATE TABLE exemplar_sparse_repartition (
+            {columns} host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY ({prefix} host)
          ) PARTITION ON COLUMNS(host) (host < 'm', host >= 'm')
-         WITH ('primary_key_encoding'='sparse', 'append_mode'='true')",
-        "INSERT INTO exemplar_sparse_repartition VALUES ('a', 1, 1), ('h', 1, 2), ('z', 1, 3)",
-        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
-        "INSERT INTO exemplar_sparse_repartition VALUES ('a', 1, 4), ('h', 1, 5), ('z', 1, 6)",
-        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
+         WITH ('primary_key_encoding'='sparse', 'append_mode'='true')"
+        ),
+        format!("INSERT INTO exemplar_sparse_repartition VALUES {first}"),
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')".into(),
+        format!("INSERT INTO exemplar_sparse_repartition VALUES {second}"),
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')".into(),
         "ALTER TABLE exemplar_sparse_repartition SPLIT PARTITION (host < 'm')
-         INTO (host < 'g', host >= 'g' AND host < 'm')",
+         INTO (host < 'g', host >= 'g' AND host < 'm')"
+            .into(),
     ] {
-        run_sql(instance, sql, ctx.clone()).await.unwrap();
+        run_sql(instance, &sql, ctx.clone()).await.unwrap();
     }
     // Refresh routes synchronously instead of depending on heartbeat timing.
     instance.cache_invalidator().invalidate_all().unwrap();
@@ -489,7 +510,7 @@ async fn test_exemplar_sparse_repartition_compaction() {
         instance,
         "SELECT host, COUNT(*) AS n, SUM(val) AS total
          FROM exemplar_sparse_repartition GROUP BY host ORDER BY host",
-        ctx,
+        ctx.clone(),
     )
     .await
     .unwrap();
@@ -504,6 +525,20 @@ async fn test_exemplar_sparse_repartition_compaction() {
          +------+---+-------+",
     )
     .await;
+    if source_ids {
+        let output = run_sql(
+            instance,
+            "SELECT COUNT(*) FROM exemplar_sparse_repartition WHERE __table_id=42 AND __tsid=7",
+            ctx,
+        )
+        .await
+        .unwrap();
+        check_output_stream(
+            output.data,
+            "+----------+\n| count(*) |\n+----------+\n| 4        |\n+----------+",
+        )
+        .await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

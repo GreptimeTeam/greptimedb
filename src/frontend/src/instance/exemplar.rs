@@ -41,6 +41,9 @@ use servers::exemplar::query::{ExactTimestamp, Observation, Query, Selector, Ser
 use servers::prometheus_handler::PrometheusHandler;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME,
+};
 use table::metadata::TableInfo;
 
 use crate::instance::Instance;
@@ -217,6 +220,13 @@ fn filter(info: &TableInfo, selectors: &[Selector], bounds: (i64, i64)) -> Resul
         .primary_key_indices
         .iter()
         .map(|index| schema.column_schemas()[*index].name.as_str())
+        .filter(|name| {
+            ![
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                DATA_SCHEMA_TSID_COLUMN_NAME,
+            ]
+            .contains(name)
+        })
         .collect::<BTreeSet<_>>();
     let labels = selectors
         .iter()
@@ -345,7 +355,13 @@ fn collect(
     let mut tags = Vec::<(&str, VectorRef)>::new();
     for tag in &info.meta.primary_key_indices {
         let name = info.meta.schema.column_schemas()[*tag].name.as_str();
-        if name != EXEMPLAR_METRIC_COLUMN {
+        if ![
+            EXEMPLAR_METRIC_COLUMN,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+        ]
+        .contains(&name)
+        {
             let values = Helper::try_into_vector(batch.column(index(name)?))
                 .map_err(BoxedError::new)
                 .context(error::ExecuteQuerySnafu)?;
