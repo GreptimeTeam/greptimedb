@@ -556,12 +556,13 @@ impl PromPlanner {
                     .iter()
                     .map(|f| f.name.to_string())
                     .collect::<Vec<_>>();
-                if fields.iter().any(|field| {
-                    !series_schema
-                        .fields
-                        .iter()
-                        .any(|f| f.name.as_ref() == field)
-                }) {
+                // The fields are the compiled root's own: a raw field's name, or the one `vector(s)`
+                // gives its result. A name the output already uses for a tag or the time index has
+                // no column of its own, so such a statement keeps the existing plan.
+                if fields
+                    .iter()
+                    .any(|field| *field == time || tags.iter().any(|tag| tag == field))
+                {
                     return Ok(None);
                 }
                 (fields, fused_output_tags(tree.root(), &tags))

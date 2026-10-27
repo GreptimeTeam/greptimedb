@@ -4428,3 +4428,29 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
         ])
     );
 }
+
+/// `vector(s)` names its own result, so a table whose field is not called `value` still answers it
+/// natively: one unlabelled sample.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_vector_of_scalar_names_its_own_field() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_vector_of_scalar_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE scalar_vector_case (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host)); \
+         INSERT INTO scalar_vector_case VALUES ('a', 0, 1)",
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = "TQL EVAL (0, 0, '1s') vector(scalar(scalar_vector_case))";
+    observer.clear();
+    let rows = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 1);
+    assert_eq!(rows, expected_rows(&[(0, "", 1.0)]));
+}

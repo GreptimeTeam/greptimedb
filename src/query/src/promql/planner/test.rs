@@ -1951,6 +1951,14 @@ async fn native_fused_plans_dynamic_scalars_over_one_region() {
         let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
         assert!(fused.children().is_empty(), "{query}");
     }
+    // `vector(s)` names its own result, which is not a field of the table.
+    let plan = build_native_fused_plan("vector(scalar(some_metric))", true).await;
+    let fused = find_fused_series(&plan).expect("`vector(scalar(v))` uses the native route");
+    assert_eq!(1, fused.children().len());
+    assert!(
+        plan.schema().field_with_unqualified_name("value").is_ok(),
+        "{plan}"
+    );
     for query in [
         "scalar(some_metric)",
         "some_metric > bool scalar(some_metric)",
