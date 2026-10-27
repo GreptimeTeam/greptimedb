@@ -478,14 +478,19 @@ impl FirstError {
 type Signature = (Arc<str>, Vec<Option<Arc<str>>>);
 
 /// The value of each identifying label, `None` where the series does not have it.
+///
+/// The values share the series' own label strings, which the retained operands already hold and
+/// charge, so the patterns and signatures built from them allocate no label text of their own.
 fn identifying_values(metric: &SeriesLabels) -> Vec<Option<Arc<str>>> {
     IDENTIFYING_LABELS
         .iter()
         .map(|label| {
             metric
-                .get(label)
-                .filter(|value| !value.is_empty())
-                .map(Arc::from)
+                .tags()
+                .iter()
+                .find(|tag| tag.name.as_ref() == *label)
+                .filter(|tag| !tag.value.is_empty())
+                .map(|tag| Arc::clone(&tag.value))
         })
         .collect()
 }
