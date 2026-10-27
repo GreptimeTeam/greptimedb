@@ -1038,7 +1038,7 @@ mod tests {
     use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::instruction::Instruction;
     use common_meta::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
 
     use super::*;
     use crate::handler::HeartbeatMailbox;
@@ -1059,7 +1059,8 @@ mod tests {
     async fn test_rollback_registers_detectors_for_switched_regions() {
         let env = TestingEnv::new();
         // The route switch aborted after the table of `switched` was switched to the target and
-        // before the table of `unswitched`; the table of `dropped` has been dropped.
+        // before the table of `unswitched`, whose leader is still downgrading; the table of
+        // `dropped` has been dropped.
         let switched = RegionId::new(1024, 1);
         let unswitched = RegionId::new(1025, 1);
         let dropped = RegionId::new(1026, 1);
@@ -1069,6 +1070,7 @@ mod tests {
             let region_routes = vec![RegionRoute {
                 region: Region::new_test(region_id),
                 leader_peer: Some(Peer::empty(leader)),
+                leader_state: (region_id == unswitched).then_some(LeaderState::Downgrading),
                 ..Default::default()
             }];
             env.create_physical_table_metadata(table_info, region_routes)
@@ -1095,6 +1097,15 @@ mod tests {
         assert_matches!(rx.try_recv(), Ok(Event::RegisterFailureDetectors(r)) if r == source);
         assert_matches!(rx.try_recv(), Ok(Event::ResetFailureDetectors(r)) if r == [(2, switched)]);
         assert!(rx.try_recv().is_err());
+        let table_route = env
+            .table_metadata_manager()
+            .table_route_manager()
+            .table_route_storage()
+            .get(unswitched.table_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(table_route.region_routes().unwrap()[0].leader_state, None);
     }
 
     #[test]
