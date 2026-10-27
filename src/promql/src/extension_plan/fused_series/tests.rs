@@ -2013,8 +2013,15 @@ async fn later_source_error_drops_all_gathered_inputs() {
     let mut stream = exec.execute(0, task_context(&pool)).unwrap();
     let error = stream.next().await.unwrap().unwrap_err();
     assert!(error.to_string().contains("later source failed"));
-    assert!(dropped.iter().all(|flag| flag.load(Ordering::SeqCst)));
-    assert_eq!(0, pool.reserved());
+    // Each partition is read on a spawned task that the failure only aborts, so its stream and the
+    // chunk it holds are dropped once its runtime cancels it, after the error is out.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.iter().all(|flag| flag.load(Ordering::SeqCst)) || pool.reserved() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the failure left an input stream or its charge alive");
 }
 
 /// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map

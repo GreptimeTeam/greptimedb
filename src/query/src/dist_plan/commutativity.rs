@@ -30,7 +30,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scan};
+use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -245,20 +245,16 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
-                // The raw-series reader supports one scan, or the narrow same-table two-scan
+                // The raw-series reader supports one scan, or the narrow same-table multi-scan
                 // one-to-one case. This classification is for region-local execution only.
                 let children = fused.children();
-                let pair = children.len() == 2
-                    && children
-                        .iter()
-                        .all(|child| matches!(child, LogicalPlan::TableScan(_)))
-                    && same_table_scan(&children[0], &children[1])
-                    && independent_scan_pair(fused.tree().root());
                 if children.len() == 1 {
                     if !matches!(children[0], LogicalPlan::TableScan(_)) {
                         return Commutativity::NonCommutative;
                     }
-                } else if !pair {
+                } else if !(same_table_scans(children)
+                    && independent_scan_pair(fused.tree().root()))
+                {
                     return Commutativity::NonCommutative;
                 }
                 let binding = fused.binding();
@@ -271,7 +267,7 @@ impl Categorizer {
                     return Commutativity::NonCommutative;
                 }
 
-                // The two-scan exception describes only in-process, same-table region-local
+                // The multi-scan exception describes only in-process, same-table region-local
                 // execution. It is not a claim that matching is globally commutative across regions.
                 Commutativity::Commutative
             }
