@@ -3062,10 +3062,16 @@ async fn native_promql_or_fills_the_steps_the_left_side_misses() {
     assert_eq!(native, legacy);
 }
 
-/// Partitioned set expressions keep the legacy plan, while arithmetic may use native
-/// operands beneath the existing join.
+/// A two-selector query over a table split into regions never fuses the binary itself.
+///
+/// A fused node with more than one input has no placement on such a table — the dist analyzer
+/// refuses it with "only accept plan with at most one child" — so admitting one used to make the
+/// whole query fail instead of falling back. Each operand may still be fused on its own: that is a
+/// single-input node over a region-local scan, which places fine, and it is what the hybrid
+/// operand route does. What must never appear is a fused node with two children, so that is what
+/// is asserted rather than "no fused node at all".
 #[tokio::test(flavor = "multi_thread")]
-async fn native_promql_two_selectors_on_a_partitioned_table_use_expected_plans() {
+async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfused() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
         "native_promql_partitioned_pair",
     ))
@@ -3085,11 +3091,10 @@ async fn native_promql_two_selectors_on_a_partitioned_table_use_expected_plans()
         QueryContext::arc(),
     )
     .await;
-    for (query, expected, expect_native_operand) in [
+    for (query, expected) in [
         (
             "native_partitioned_pair{kind=\"a\"} and on(host) native_partitioned_pair{kind=\"b\",host=\"h0\"}",
             vec![(5_000, "h0".to_string(), 1.0)],
-            false,
         ),
         (
             "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"}",
@@ -3097,24 +3102,22 @@ async fn native_promql_two_selectors_on_a_partitioned_table_use_expected_plans()
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
             ],
-            true,
         ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        let fused = observer.fused();
+        if let Some(fused) = observer.fused() {
+            assert_eq!(
+                fused.children().len(),
+                1,
+                "`{query}` fused the two-selector binary, which has no placement on a partitioned \
+                 table: {fused:?}"
+            );
+        }
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");
-        assert_eq!(fused.is_some(), expect_native_operand, "{query}");
-        if expect_native_operand {
-            assert_eq!(
-                fused.expect("expected a native operand").children().len(),
-                1,
-                "the observed native node of `{query}` must read one scan, not both operands",
-            );
-        }
     }
 }
 

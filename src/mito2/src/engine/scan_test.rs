@@ -5229,8 +5229,8 @@ async fn test_mito_handle_query_raw_series_candidate_projection_and_mvcc() {
 /// A `TwoPhase` scan declares [`SeriesOrdering::Contiguous`] on the scanner, on every partition
 /// stream, and therefore in every frame it packs; the frame adapter validates that declaration.
 ///
-/// The ordered merge that rejects a non-`KeyThenTime` input is covered by
-/// `promql::source::merge::tests::rejects_unsupported_ordering_and_empty_input_without_polling`.
+/// An ordering the frame cannot carry is rejected by the frame constructor before any poll; that
+/// refusal is covered by `common_query::series_frame::tests::interleaved_ordering_is_rejected_before_any_poll`.
 #[tokio::test]
 async fn test_two_phase_native_raw_stream_declares_contiguous_frames() {
     use common_query::series_frame::{pack_raw_series, series_frame_ordering, unpack_raw_series};

@@ -4878,6 +4878,7 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             NativeExpr::Input(bound) => bound.source_index = source,
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }

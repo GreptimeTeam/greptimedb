@@ -304,13 +304,13 @@ struct OpenSeries {
     last_position: Option<usize>,
 }
 
-/// The input a window with a [`RuntimeOp::Window`] collects until its input ends.
+/// The input a [`RuntimeOp::Window`] or a [`RuntimeOp::Merge`] collects until its input ends.
 ///
-/// Such a window cannot evaluate the series under one canonical label set one after another: its
-/// evaluator closes a series on the chunk carrying `is_last`, and the points a window across the
-/// boundary needs are exactly the ones that closed series held. The fragments are therefore kept
-/// whole, merged into one series per label set with
-/// [`crate::grid_series::merge_same_labelset`], and only then evaluated.
+/// Either node cannot answer one label set at a time: their evaluators and consumers close a series
+/// on the chunk carrying `is_last`, and the points a window across the boundary needs — or the
+/// fragments a canonical merge has to combine — are exactly the ones those closed series held. The
+/// fragments are therefore kept whole, merged into one series per label set with
+/// [`crate::grid_series::merge_same_labelset`], and only then evaluated or emitted.
 ///
 /// Collecting is also where the contract a series keeps is checked, because the merge that follows
 /// would hide a stream that broke it: it sorts the rows by position and groups them by label set, so
@@ -349,13 +349,10 @@ impl MergeInput {
 
     /// Checks one received chunk against the contract a series keeps, and follows the open series.
     ///
-    /// The checks are the ones a streaming window makes on every delivery it reads: the chunk is
-    /// addressed on this window's input grid, carries one sample per row in every field, holds a
-    /// position unless it closes its series, continues the identity of the series it belongs to, and
-    /// only ever moves forward within it. They cost a constant number of reads of the chunk's own
-    /// axis -- its first and last positions, not its rows, which the merge then copies nothing of --
-    /// and they are what keeps the sort below honest: a stream that broke one of them is refused
-    /// here, on the chunk that broke it, rather than merged into an answer.
+    /// The checks ensure each chunk matches the input grid and schema, contains positions as
+    /// required, continues the same series identity, and only moves forward within that series.
+    /// They inspect only the chunk's first and last positions and prevent invalid streams from being
+    /// sorted into a plausible merged answer.
     ///
     /// A chunk carrying `is_last` closes the open series, whether it holds rows or none at all, and
     /// nothing is remembered of it: the next chunk starts a series whose identity is its own.
@@ -372,25 +369,20 @@ impl MergeInput {
                 .any(|field| field.len() != series.time.len())
         {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that does not match its input schema"
-                    .to_string(),
+                "merge input does not match its input schema".to_string(),
             ));
         }
         let (first, last) = (series.time.first_position(), series.time.last_position());
         if !is_last && first.is_none() {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that holds no position before the last \
-                 run of its series"
-                    .to_string(),
+                "merge input has no position before the last run of its series".to_string(),
             ));
         }
         if let Some(open) = &self.open
             && open.metric != series.metric
         {
             return Err(DataFusionError::Execution(
-                "the window was handed an evaluated series that changed identity before its last \
-                 run"
-                .to_string(),
+                "merge input changed identity before its last run".to_string(),
             ));
         }
         if let Some(previous) = self.open.as_ref().and_then(|open| open.last_position)
@@ -398,8 +390,7 @@ impl MergeInput {
             && first <= previous
         {
             return Err(DataFusionError::Execution(format!(
-                "the window was handed evaluated series runs that are not increasing: {first} after \
-                 {previous}"
+                "merge input runs are not increasing: {first} after {previous}"
             )));
         }
         self.open = if is_last {
@@ -444,7 +435,10 @@ impl NodeBuffer {
     /// Registers a reservation for the node called `name` with `pool`.
     ///
     /// The name identifies both the operator and its tree location, such as
-    /// `native.window at root.left`; separate nodes therefore have distinct consumers.
+    /// `native.window at root.left`, so a failure names the node that hit it rather than only its
+    /// kind. It labels the reservation, it does not key it: the pool accounts a consumer by its own
+    /// id, so two nodes sharing a name stay separate reservations. This name is what the error
+    /// context and the pool's top-consumer report print.
     fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
         let consumer = MemoryConsumer::new(name.into());
         Self {
@@ -2164,6 +2158,11 @@ enum RuntimeOp {
         instant: Option<InstantRuntime>,
         state: NodeState,
     },
+    Merge {
+        input: Box<RuntimeNode>,
+        merge: Option<MergeInput>,
+        state: NodeState,
+    },
     Window {
         input: Box<RuntimeNode>,
         window: Option<RangeEvaluator>,
@@ -2312,6 +2311,25 @@ impl RuntimeNode {
                         },
                     },
                     shared || op.timestamp,
+                )
+            }
+            NativeExpr::Merge { input } => {
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("merge does not produce samples".to_string())
+                })?;
+                let state = NodeState::new(
+                    format!("native.merge at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
+                (
+                    RuntimeOp::Merge {
+                        input: Box::new(child),
+                        merge: Some(MergeInput::new(schema)),
+                        state,
+                    },
+                    false,
                 )
             }
             NativeExpr::Window { input, op } => {
@@ -2571,6 +2589,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
+            | RuntimeOp::Merge { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
@@ -2589,6 +2608,7 @@ impl RuntimeNode {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => 0,
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }
+            | RuntimeOp::Merge { input, state, .. }
             | RuntimeOp::Map { input, state, .. }
             | RuntimeOp::Timestamp { input, state, .. }
             | RuntimeOp::Aggregate { input, state, .. }
@@ -2666,6 +2686,29 @@ impl RuntimeNode {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
+            }
+            RuntimeOp::Merge {
+                input,
+                merge,
+                state,
+            } => {
+                if let Some(chunk) = state.take_output()? {
+                    return Ok(Some(chunk));
+                }
+                while let Some(chunk) = input.pull(inputs, inputs_finished)? {
+                    let NativeChunk::Evaluated(chunk) = chunk else {
+                        return Err(DataFusionError::Execution(
+                            "merge consumes evaluated samples, not raw samples".into(),
+                        ));
+                    };
+                    state.collect_merge(
+                        merge.as_mut().ok_or_else(|| {
+                            DataFusionError::Execution("merge buffer was released".into())
+                        })?,
+                        chunk,
+                    )?;
+                }
+                Ok(None)
             }
             RuntimeOp::Window {
                 input,
@@ -2895,6 +2938,11 @@ impl RuntimeNode {
                 state,
                 ..
             } => state.queued.is_empty() && merge.is_none() && input.settled(inputs),
+            RuntimeOp::Merge {
+                input,
+                merge,
+                state,
+            } => state.queued.is_empty() && merge.is_none() && input.settled(inputs),
             // An aggregate answers one series per group and only once its input ended, so its own
             // fold has to have run as well: a child that has handed everything up is not enough,
             // because every one of those chunks was folded and none of them answered yet.
@@ -2968,6 +3016,18 @@ impl RuntimeNode {
                 let right_flushed = right.flush_ready_merges(inputs)?;
                 Ok(left_flushed || right_flushed)
             }
+            RuntimeOp::Merge {
+                input,
+                merge,
+                state,
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                if merge.is_some() && input.settled(inputs) {
+                    state.flush_canonical_merge(merge)?;
+                    flushed = true;
+                }
+                Ok(flushed)
+            }
             RuntimeOp::Window {
                 input,
                 window,
@@ -3007,6 +3067,7 @@ impl RuntimeNode {
             }
             // Only a window that collects its input keeps collected input to merge.
             RuntimeOp::Window { input, merge, .. } => merge.is_some() || input.any_merge_pending(),
+            RuntimeOp::Merge { input, merge, .. } => merge.is_some() || input.any_merge_pending(),
         }
     }
 
@@ -3023,7 +3084,8 @@ impl RuntimeNode {
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Window { input, .. }
-            | RuntimeOp::Aggregate { input, .. } => input.unclosed(),
+            | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::Merge { input, .. } => input.unclosed(),
             RuntimeOp::Binary {
                 left,
                 right,
@@ -3069,7 +3131,8 @@ impl RuntimeNode {
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.finish_windows(),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::Merge { input, .. } => input.finish_windows(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 // Both sides are finished even when the first one fails: the failure is reported
                 // from here, and an evaluator left holding a series would keep its bytes.
@@ -3110,6 +3173,15 @@ impl RuntimeNode {
                 state,
             } => {
                 *instant = None;
+                state.release();
+                input.release();
+            }
+            RuntimeOp::Merge {
+                input,
+                merge,
+                state,
+            } => {
+                *merge = None;
                 state.release();
                 input.release();
             }
@@ -3939,6 +4011,49 @@ impl NodeState {
         )
     }
 
+    /// Retains and validates a fragment for canonicalization.
+    fn collect_merge(&mut self, merge: &mut MergeInput, chunk: EvaluatedChunk) -> Result<()> {
+        let EvaluatedChunk { series, is_last } = chunk;
+        merge.check(&series, is_last)?;
+        let bytes = series_bytes(&series);
+        self.buffer.grow(bytes)?;
+        merge.bytes = merge.bytes.saturating_add(bytes);
+        merge.fragments.push(series);
+        self.buffer
+            .metrics
+            .record_input(1, merge.fragments.last().map_or(0, |s| s.time.len()));
+        if is_last {
+            self.buffer.metrics.record_completed_series(1);
+        }
+        Ok(())
+    }
+
+    /// Canonicalizes all fragments before exposing any output.
+    fn flush_canonical_merge(&mut self, merge: &mut Option<MergeInput>) -> Result<()> {
+        let Some(merge) = merge.take() else {
+            return Ok(());
+        };
+        if merge.fragments.is_empty() {
+            return self.buffer.shrink(merge.bytes);
+        }
+        let workspace = merge.workspace_bytes();
+        self.buffer.grow(workspace)?;
+        let held = merge.bytes.saturating_add(workspace);
+        let merged = merge_same_labelset(&merge.schema, merge.fragments)?;
+        for series in merged {
+            let chunk = EvaluatedChunk::try_new(series, true)?;
+            self.buffer
+                .metrics
+                .record_grid_points(chunk.series.time.len());
+            self.buffer.metrics.record_output(1, valid_values(&chunk));
+            let bytes = series_bytes(&chunk.series);
+            self.buffer.grow(bytes)?;
+            self.queued
+                .push_back((NativeChunk::Evaluated(chunk), bytes));
+        }
+        self.buffer.shrink(held)
+    }
+
     /// Keeps one fragment of this node's collected input, charged for as it arrives.
     ///
     /// The fragment is measured once, here, and its estimate stands until the flush that merges it
@@ -3952,24 +4067,7 @@ impl NodeState {
         window: &RangeEvaluator,
         chunk: EvaluatedChunk,
     ) -> Result<Option<EvaluatedChunk>> {
-        let EvaluatedChunk { series, is_last } = chunk;
-        // The chunk is checked before it is charged for or kept, so a stream that breaks the
-        // contract leaves nothing behind.
-        merge.check(&series, is_last)?;
-        let positions = series.time.len();
-        let bytes = series_bytes(&series);
-        // The fragment is held from here on, so the pool admits it before this node keeps it: a
-        // rejected fragment leaves nothing behind.
-        self.buffer.grow(bytes)?;
-        merge.bytes = merge.bytes.saturating_add(bytes);
-        merge.fragments.push(series);
-        let metrics = Arc::clone(&self.buffer.metrics);
-        metrics.record_input(1, positions);
-        if is_last {
-            // The source series whose data this fragment carries ended, which is what `is_last`
-            // says; the label set it shares with another series is not closed by it.
-            metrics.record_completed_series(1);
-        }
+        self.collect_merge(merge, chunk)?;
         // What this node holds is the fragments and the label sets it has already handed out; its
         // evaluator has read none of them yet.
         let retained = window.retained_bytes();

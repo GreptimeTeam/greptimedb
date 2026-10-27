@@ -85,10 +85,11 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundScalar,
-    BoundWindow, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
+    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -354,6 +355,7 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             NativeExpr::Scalar(_) => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
@@ -1949,7 +1951,105 @@ async fn later_source_error_drops_all_gathered_inputs() {
     assert_eq!(0, pool.reserved());
 }
 
-/// A literal scalar runs as one schema-checked, one-partition output without scan children.
+/// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map
+/// to one rewritten label set.
+#[tokio::test]
+async fn hand_bound_fused_merge_canonicalizes_shared_labels() {
+    let grid = grid();
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&schema));
+    let raw = NativeType::Samples(raw_schema());
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw,
+    };
+    let window = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 1,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(window),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace("host", "web-1", "host", "web-.*").unwrap(),
+                ))]),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(map),
+        },
+        output: evaluated,
+    })
+    .unwrap();
+    let points = grid_timestamps();
+    let exec = plan(
+        tree,
+        memory_exec(frames(&[
+            series_chunk("web-1", &[(points[0], 1.0), (points[2], 3.0)], true),
+            series_chunk("web-2", &[(points[1], 2.0), (points[3], 4.0)], true),
+        ])),
+    )
+    .unwrap();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    assert_eq!(
+        vec![
+            (
+                points[0],
+                Some(1.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[1],
+                Some(2.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[2],
+                Some(3.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+            (
+                points[3],
+                Some(4.0),
+                Some("web-1".to_string()),
+                Some(METRIC.to_string())
+            ),
+        ],
+        rows(&batches),
+        "Merge must combine complementary mapped window outputs under one canonical label set"
+    );
+}
+
+/// A scalar root needs no source child and can be evaluated directly on its bound grid.
 #[tokio::test]
 async fn physical_plan_accepts_scalar_root_without_sources() {
     let statement_grid = grid();

@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use api::v1::SemanticType;
 use async_stream::try_stream;
@@ -55,7 +55,7 @@ use store_api::region_engine::{
 use store_api::storage::consts::{ReservedColumnId, is_internal_column};
 use table::predicate::Predicate;
 use tokio::sync::Semaphore;
-use tokio::sync::mpsc::error::{SendTimeoutError, TrySendError};
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use crate::error::{
@@ -75,9 +75,6 @@ use crate::read::series_reader::{AssignedSeriesBatch, SeriesBatchCollector, Seri
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::PrimaryKeyArray;
-
-/// Timeout to send a batch to a sender.
-const SEND_TIMEOUT: Duration = Duration::from_micros(100);
 
 /// Maximum number of candidate series retained before distributing assignments.
 const CANDIDATE_SERIES_ASSIGNMENT_THRESHOLD: usize = 1_000_000;
@@ -1265,7 +1262,6 @@ impl SeriesDistributor {
         }
 
         metrics.scan_cost += fetch_start.elapsed();
-        metrics.num_series_send_timeout = self.senders.num_timeout;
         metrics.num_series_send_full = self.senders.num_full;
         part_metrics.set_distributor_metrics(&metrics);
 
@@ -1420,8 +1416,6 @@ struct SenderList {
     num_nones: usize,
     /// Index of the current partition to send.
     sender_idx: usize,
-    /// Number of timeout.
-    num_timeout: usize,
     /// Number of full senders.
     num_full: usize,
 }
@@ -1433,7 +1427,6 @@ impl SenderList {
             senders,
             num_nones,
             sender_idx: 0,
-            num_timeout: 0,
             num_full: 0,
         }
     }
@@ -1469,46 +1462,35 @@ impl SenderList {
     }
 
     /// Finds a partition and sends the batch to the partition.
-    async fn send_batch(&mut self, mut batch: SeriesBatch) -> Result<()> {
-        // Sends the batch without blocking first.
-        match self.try_send_batch(batch)? {
-            Some(b) => {
-                // Unable to send batch to partition.
-                batch = b;
-            }
-            None => {
-                return Ok(());
-            }
-        }
+    async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
+        let Some(batch) = self.try_send_batch(batch)? else {
+            return Ok(());
+        };
 
         loop {
             ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
 
-            let sender_idx = self.fetch_add_sender_idx();
-            let Some(sender) = &self.senders[sender_idx] else {
-                continue;
+            // Waits on every partition at once and sends to whichever frees a slot first. A
+            // consumer may leave partitions unpolled for a long time, e.g. one that drains them one
+            // after another, and waiting on such a partition would stall the scan.
+            let closed = {
+                let reservations = self.senders.iter().enumerate().filter_map(|(idx, sender)| {
+                    sender
+                        .as_ref()
+                        .map(|sender| Box::pin(async move { (idx, sender.reserve().await) }))
+                });
+                let ((idx, reserved), _, _) = futures::future::select_all(reservations).await;
+                match reserved {
+                    Ok(permit) => {
+                        permit.send(Ok(batch));
+                        return Ok(());
+                    }
+                    Err(_) => idx,
+                }
             };
-            // Adds a timeout to avoid blocking indefinitely and sending
-            // the batch in a round-robin fashion when some partitions
-            // don't poll their inputs. This may happen if we have a
-            // node like sort merging. But it is rare when we are using SeriesScan.
-            match sender.send_timeout(Ok(batch), SEND_TIMEOUT).await {
-                Ok(()) => break,
-                Err(SendTimeoutError::Timeout(res)) => {
-                    self.num_timeout += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
-                }
-                Err(SendTimeoutError::Closed(res)) => {
-                    self.senders[sender_idx] = None;
-                    self.num_nones += 1;
-                    // Safety: we send Ok.
-                    batch = res.unwrap();
-                }
-            }
+            self.senders[closed] = None;
+            self.num_nones += 1;
         }
-
-        Ok(())
     }
 
     async fn send_error(&self, error: Error) {
@@ -1716,6 +1698,37 @@ mod tests {
 
         drop(receivers[1].take());
         assert_eq!(0, active_receivers.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn distributor_does_not_stall_on_partitions_read_one_after_another() {
+        const NUM_BATCHES: usize = 2000;
+        let (mut senders, receivers) = new_legacy_channel_list(16);
+        let producer = tokio::spawn(async move {
+            for _ in 0..NUM_BATCHES {
+                senders
+                    .send_batch(SeriesBatch::Flat(FlatSeriesBatch::default()))
+                    .await
+                    .unwrap();
+            }
+        });
+        // Reads partition 0 to its end before touching the next one, so all other partitions stay
+        // full while the producer still has batches to send.
+        let consume = async {
+            let mut received = 0;
+            for mut receiver in receivers.into_iter().flatten() {
+                while let Some(batch) = receiver.recv().await {
+                    batch.unwrap();
+                    received += 1;
+                }
+            }
+            received
+        };
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), consume)
+            .await
+            .expect("the distributor stalled on partitions the consumer was not reading");
+        producer.await.unwrap();
+        assert_eq!(NUM_BATCHES, received);
     }
 
     fn new_test_record_batch(
