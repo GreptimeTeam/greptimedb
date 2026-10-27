@@ -655,8 +655,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     ///
     /// Legacy raw sources have no ordering declaration, so `Contiguous` is the conservative
     /// default; `Interleaved` is not representable on the raw frame wire.
-    fn raw_series_ordering(&self) -> SeriesOrdering {
-        SeriesOrdering::Contiguous
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        Ok(SeriesOrdering::Contiguous)
     }
 
     /// Scans a partition as raw series when this source supports that path.
@@ -1018,7 +1018,10 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(scanner.raw_series_ordering(), SeriesOrdering::Contiguous);
+        assert_eq!(
+            scanner.raw_series_ordering().unwrap(),
+            SeriesOrdering::Contiguous
+        );
 
         // SinglePartitionScanner uses the default raw-scan implementation, which panics.
         let raw_scan = catch_unwind(AssertUnwindSafe(|| {

@@ -152,9 +152,6 @@ default_ratio = 1.0
 
 [query]
 
-## Whether to enable experimental native PromQL execution.
-## Default: false
-#+ experimental_native_promql = false
 ## Parallelism of the query engine for query sent by flownode.
 ## Default to 1, so it won't use too much cpu or memory
 parallelism = 1

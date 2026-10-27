@@ -1024,9 +1024,14 @@ impl FusedSeriesExec {
             } else {
                 partition_count
             }),
-            inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
-                input.properties().emission_type
-            }),
+            if partial_fold.is_some() {
+                // Partial aggregate state is only emitted after the scan reaches EOF.
+                EmissionType::Final
+            } else {
+                inputs.first().map_or(EmissionType::Final, |(input, _, _)| {
+                    input.properties().emission_type
+                })
+            },
             inputs
                 .first()
                 .map_or(Boundedness::Bounded, |(input, _, _)| {

@@ -4645,6 +4645,45 @@ fn timestamp_multi_field_input_is_not_supported_natively() {
             .unwrap_or_else(|error| panic!("`{query}` over one field was refused: {error}"));
     }
 }
+
+#[test]
+fn timestamp_anchored_selector_retains_offset_and_ordinary_selection_keeps_it() {
+    for (query, expected_offset, expected_anchor, expected_bounds) in [
+        (
+            "timestamp(x @ 50 offset 60s)",
+            60_000,
+            Some(50_000),
+            (-15_000, -10_000),
+        ),
+        ("timestamp(x offset 2s)", 2_000, None, (-7_000, 98_000)),
+        (
+            "x @ 50 offset 60s",
+            60_000,
+            Some(50_000),
+            (-15_000, -10_000),
+        ),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("{query}: {error}"));
+        let requirement = &compiled.inputs[0].requirement;
+        assert_eq!(requirement.offset_ms, expected_offset, "{query}");
+        assert_eq!(requirement.at_ms, expected_anchor, "{query}");
+        let (start, end, _) = requirement.raw_scan_bounds().unwrap();
+        assert_eq!((start, end), expected_bounds, "{query}");
+        if query.starts_with("timestamp(") && expected_anchor.is_some() {
+            let NativeExpr::Instant { op, .. } = &compiled.tree.root().expr else {
+                panic!("{query} did not compile as instant timestamp");
+            };
+            assert_eq!(op.offset_ms, expected_offset, "{query}");
+            assert_eq!(op.at_ms, expected_anchor, "{query}");
+        }
+    }
+}
+
 #[test]
 fn selector_requirements_capture_bounds_and_source_occurrence() {
     let compiled = compile_selectors(

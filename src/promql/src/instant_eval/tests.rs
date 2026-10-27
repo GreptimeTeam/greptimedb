@@ -535,6 +535,7 @@ fn anchored_instant_uses_lookback_offset_and_staleness_rules() {
         select_instant_at(&raw_axis, &fields, 499, 0, 0).unwrap(),
         None
     );
+    assert!(select_instant_at(&raw_axis, &fields, 500, -1, 0).is_err());
     let stale = Samples::from_float(Float64Array::from(vec![
         Some(7.0),
         Some(f64::from_bits(

@@ -868,13 +868,10 @@ impl RegionScanner for SeriesScan {
             .map_err(BoxedError::new)
     }
 
-    fn raw_series_ordering(&self) -> SeriesOrdering {
-        // Readiness is fallible here, but every fallible entry point rejects the same structural
-        // errors before execution, so the `false` fallback below is never observed in a query.
-        match self.uses_prepared_columnar() {
-            Ok(prepared_columnar) => self.raw_ordering(prepared_columnar),
-            Err(_) => self.raw_ordering(false),
-        }
+    fn raw_series_ordering(&self) -> Result<SeriesOrdering, BoxedError> {
+        self.uses_prepared_columnar()
+            .map(|prepared_columnar| self.raw_ordering(prepared_columnar))
+            .map_err(BoxedError::new)
     }
 
     fn raw_series_schema(
