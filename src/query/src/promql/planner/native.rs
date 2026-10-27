@@ -846,21 +846,33 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             (NativeExpr::Scalar(_), _) => fused_output_tags(right, source_tags),
             (_, NativeExpr::Scalar(_)) => fused_output_tags(left, source_tags),
             _ => {
-                let tags = fused_output_tags(left, source_tags)?;
                 if matching.cardinality != Cardinality::OneToOne {
                     return None;
                 }
-                Some(match &matching.labels {
-                    MatchingLabels::On(names) if !names.is_empty() => tags
-                        .into_iter()
-                        .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
-                        .collect(),
-                    MatchingLabels::Ignoring(names) => tags
-                        .into_iter()
-                        .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
-                        .collect(),
-                    MatchingLabels::On(_) => tags,
-                })
+                let kept = |tags: Vec<String>| -> Vec<String> {
+                    match &matching.labels {
+                        MatchingLabels::On(names) if !names.is_empty() => tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+                            .collect(),
+                        MatchingLabels::Ignoring(names) => tags
+                            .into_iter()
+                            .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
+                            .collect(),
+                        MatchingLabels::On(_) => tags,
+                    }
+                };
+                let mut tags = kept(fused_output_tags(left, source_tags)?);
+                // A filled left side takes an unmatched right series' matching labels, so those
+                // results carry the right side's tags.
+                if matching.fill.lhs.is_some() {
+                    for tag in kept(fused_output_tags(right, source_tags)?) {
+                        if !tags.contains(&tag) {
+                            tags.push(tag);
+                        }
+                    }
+                }
+                Some(tags)
             }
         },
         NativeExpr::Set { left, right, op } => {
@@ -1260,6 +1272,21 @@ mod tests {
                 "zone".to_string()
             ]),
             fused_output_tags(or.root(), &sources)
+        );
+        // An unmatched right series answers with its own matching labels under a left fill.
+        let fill = compiled_test_tree("x + fill_left(0) y");
+        assert_eq!(
+            Some(vec![
+                "host".to_string(),
+                "kind".to_string(),
+                "zone".to_string()
+            ]),
+            fused_output_tags(fill.root(), &sources)
+        );
+        let fill_on = compiled_test_tree("x + on(host) fill(0) y");
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(fill_on.root(), &sources)
         );
         // An aggregate's labels are its groups, which this walk does not derive.
         let aggregate = compiled_test_tree("sum by (host) (x)");
