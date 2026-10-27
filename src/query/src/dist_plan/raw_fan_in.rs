@@ -190,6 +190,282 @@ pub(crate) struct NativeRawFanInExec {
     properties: Arc<PlanProperties>,
 }
 
+fn fan_in_frame_schema(
+    raw_schema: &SeriesSchema,
+    decode: &LabelDecodeSpec,
+) -> Result<datatypes::arrow::datatypes::SchemaRef> {
+    let basic = datatypes::series::frame::series_frame_schema(
+        raw_schema,
+        FrameLabelMode::Key,
+        Some(decode),
+    )
+    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    let mut metadata = basic.metadata().clone();
+    metadata.insert(
+        "greptime.series.ordering".into(),
+        "read_key_then_time".into(),
+    );
+    Ok(Arc::new(ArrowSchema::new_with_metadata(
+        basic.fields().clone(),
+        metadata,
+    )))
+}
+
+impl NativeRawFanInExec {
+    pub(crate) fn try_new(
+        template: RawSeriesRead,
+        expected_raw_schema: Arc<SeriesSchema>,
+        expected_decode: LabelDecodeSpec,
+        regions: Vec<FrozenRawRegion>,
+        plan: datafusion_expr::LogicalPlan,
+        handler: RegionQueryHandlerRef,
+        query_ctx: QueryContextRef,
+    ) -> Result<Self> {
+        if expected_decode.encoding != datatypes::series::frame::LabelDecodeEncoding::Dense
+            || template.version != 1
+            || template.metric_name != expected_decode.metric_name
+            || template.primary_key.len() != expected_decode.primary_key.len()
+        {
+            return Err(DataFusionError::Plan(
+                "native raw fan-in requires dense keys".into(),
+            ));
+        }
+        let remote_schema = fan_in_frame_schema(&expected_raw_schema, &expected_decode)?;
+        let schema = remote_schema.clone();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(schema.clone()),
+            Partitioning::UnknownPartitioning(1),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Ok(Self {
+            template,
+            expected_raw_schema,
+            expected_decode,
+            regions,
+            plan,
+            handler,
+            query_ctx,
+            schema,
+            remote_schema,
+            properties,
+        })
+    }
+
+    fn stream(
+        &self,
+        context: Arc<TaskContext>,
+        partition: usize,
+    ) -> Result<DfSendableRecordBatchStream> {
+        if partition != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "invalid NativeRawFanInExec partition {partition}"
+            )));
+        }
+        if self.regions.is_empty() {
+            return Ok(Box::pin(
+                datafusion::physical_plan::EmptyRecordBatchStream::new(self.schema.clone()),
+            ));
+        }
+        let expected_schema = self.expected_raw_schema.clone();
+        let template = self.template.clone();
+        let expected_decode = self.expected_decode.clone();
+        let regions = self.regions.clone();
+        let plan = self.plan.clone();
+        let handler = self.handler.clone();
+        let query_ctx = self.query_ctx.clone();
+        let task_id = context.task_id().unwrap_or_default();
+        let tracing = TracingContext::from_json(context.session_id().as_str());
+        let frame_schema = self.remote_schema.clone();
+        let pending = Box::pin(async move {
+            let mut streams = Vec::with_capacity(regions.len());
+            for (region_id, target) in regions {
+                let mut region_ctx = query_ctx.fork();
+                let mut read = template.clone();
+                read.region_id = region_id;
+                region_ctx.set_extension(
+                    RawSeriesRead::EXTENSION_KEY,
+                    read.encode().map_err(|error| {
+                        BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+                    })?,
+                );
+                let request = QueryRequest {
+                    header: Some(RegionRequestHeader {
+                        tracing_context: tracing.to_w3c(),
+                        dbname: task_id.clone(),
+                        query_context: Some((&region_ctx).into()),
+                    }),
+                    region_id,
+                    plan: plan.clone(),
+                };
+                let stream = handler
+                    .do_get(&target, request)
+                    .await
+                    .map_err(BoxedError::new)?;
+                validate_remote_schema(
+                    &frame_schema,
+                    stream.schema().arrow_schema().as_ref(),
+                    "native raw advertised stream",
+                )
+                .map_err(|error| {
+                    BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+                })?;
+                let stream_schema = stream.schema().arrow_schema().clone();
+                let df_stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
+                let raw = common_query::series_frame::unpack_raw_series(
+                    df_stream,
+                    Some(expected_schema.clone()),
+                )
+                .map_err(|error| {
+                    BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
+                })?;
+                let actual_decode =
+                    datatypes::series::frame::series_frame_label_decode(stream_schema.as_ref())
+                        .map_err(|error| {
+                            BoxedError::new(PlainError::new(
+                                error.to_string(),
+                                StatusCode::Unexpected,
+                            ))
+                        })?;
+                if actual_decode.as_ref() != Some(&expected_decode) {
+                    return Err(BoxedError::new(PlainError::new(
+                        "native raw label decode mismatch".to_string(),
+                        StatusCode::Unexpected,
+                    )));
+                }
+                streams.push(raw);
+            }
+            merge_ordered_raw_series(streams)
+        });
+        let raw_stream = FanInRawStream {
+            expected_schema: self.expected_raw_schema.clone(),
+            expected_decode: self.expected_decode.clone(),
+            pending,
+            merged: None,
+            finished: false,
+        };
+        common_query::series_frame::pack_raw_series(Box::pin(raw_stream))
+            .map_err(|error| DataFusionError::External(Box::new(error)))
+    }
+}
+
+struct FanInRawStream {
+    expected_schema: Arc<SeriesSchema>,
+    expected_decode: LabelDecodeSpec,
+    pending: std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = std::result::Result<SendableRawSeriesStream, BoxedError>,
+                > + Send,
+        >,
+    >,
+    merged: Option<SendableRawSeriesStream>,
+    finished: bool,
+}
+
+impl futures_util::Stream for FanInRawStream {
+    type Item = std::result::Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if self.finished {
+            return Poll::Ready(None);
+        }
+        if let Some(merged) = self.merged.as_mut() {
+            let result = merged.as_mut().poll_next(cx);
+            if matches!(result, Poll::Ready(None)) {
+                self.finished = true;
+            }
+            return result;
+        }
+        match self.pending.as_mut().poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => {
+                self.finished = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(Ok(merged)) => {
+                self.merged = Some(merged);
+                self.merged.as_mut().unwrap().as_mut().poll_next(cx)
+            }
+        }
+    }
+}
+
+impl RawSeriesStream for FanInRawStream {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        self.merged
+            .as_ref()
+            .map_or(&self.expected_schema, |stream| stream.schema())
+    }
+    fn label_source(&self) -> &RawLabelSource {
+        &store_api::region_engine::NO_BOUND_LABEL_SOURCE
+    }
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        Some(&self.expected_decode)
+    }
+    fn ordering(&self) -> SeriesOrdering {
+        SeriesOrdering::KeyThenTime
+    }
+}
+
+impl std::fmt::Debug for NativeRawFanInExec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeRawFanInExec")
+            .field("regions", &self.regions.len())
+            .finish()
+    }
+}
+
+impl ExecutionPlan for NativeRawFanInExec {
+    fn name(&self) -> &str {
+        "NativeRawFanInExec"
+    }
+    fn schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
+        self.schema.clone()
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![]
+    }
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
+    ) -> Result<TreeNodeRecursion> {
+        apply_expression_roots(std::iter::empty::<Arc<dyn PhysicalExpr>>(), f)
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> Result<DfSendableRecordBatchStream> {
+        self.stream(context, partition)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        _children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        Ok(self)
+    }
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        _args: &datafusion::physical_plan::StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        Ok(Arc::new(Statistics::new_unknown(self.schema.as_ref())))
+    }
+}
+
+impl DisplayAs for NativeRawFanInExec {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "NativeRawFanInExec: regions={}", self.regions.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -568,7 +844,7 @@ mod tests {
                 )
             })
             .collect();
-        let steps = std::mem::replace(&mut *handler.steps.lock().unwrap(), vec![]);
+        let steps = std::mem::take(&mut *handler.steps.lock().unwrap());
         let steps = steps
             .into_iter()
             .map(|step| match step {
@@ -735,281 +1011,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-}
-
-fn fan_in_frame_schema(
-    raw_schema: &SeriesSchema,
-    decode: &LabelDecodeSpec,
-) -> Result<datatypes::arrow::datatypes::SchemaRef> {
-    let basic = datatypes::series::frame::series_frame_schema(
-        raw_schema,
-        FrameLabelMode::Key,
-        Some(decode),
-    )
-    .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    let mut metadata = basic.metadata().clone();
-    metadata.insert(
-        "greptime.series.ordering".into(),
-        "read_key_then_time".into(),
-    );
-    Ok(Arc::new(ArrowSchema::new_with_metadata(
-        basic.fields().clone(),
-        metadata,
-    )))
-}
-
-impl NativeRawFanInExec {
-    pub(crate) fn try_new(
-        template: RawSeriesRead,
-        expected_raw_schema: Arc<SeriesSchema>,
-        expected_decode: LabelDecodeSpec,
-        regions: Vec<FrozenRawRegion>,
-        plan: datafusion_expr::LogicalPlan,
-        handler: RegionQueryHandlerRef,
-        query_ctx: QueryContextRef,
-    ) -> Result<Self> {
-        if expected_decode.encoding != datatypes::series::frame::LabelDecodeEncoding::Dense
-            || template.version != 1
-            || template.metric_name != expected_decode.metric_name
-            || template.primary_key.len() != expected_decode.primary_key.len()
-        {
-            return Err(DataFusionError::Plan(
-                "native raw fan-in requires dense keys".into(),
-            ));
-        }
-        let remote_schema = fan_in_frame_schema(&expected_raw_schema, &expected_decode)?;
-        let schema = remote_schema.clone();
-        let properties = Arc::new(PlanProperties::new(
-            EquivalenceProperties::new(schema.clone()),
-            Partitioning::UnknownPartitioning(1),
-            EmissionType::Incremental,
-            Boundedness::Bounded,
-        ));
-        Ok(Self {
-            template,
-            expected_raw_schema,
-            expected_decode,
-            regions,
-            plan,
-            handler,
-            query_ctx,
-            schema,
-            remote_schema,
-            properties,
-        })
-    }
-
-    fn stream(
-        &self,
-        context: Arc<TaskContext>,
-        partition: usize,
-    ) -> Result<DfSendableRecordBatchStream> {
-        if partition != 0 {
-            return Err(DataFusionError::Execution(format!(
-                "invalid NativeRawFanInExec partition {partition}"
-            )));
-        }
-        if self.regions.is_empty() {
-            return Ok(Box::pin(
-                datafusion::physical_plan::EmptyRecordBatchStream::new(self.schema.clone()),
-            ));
-        }
-        let expected_schema = self.expected_raw_schema.clone();
-        let template = self.template.clone();
-        let expected_decode = self.expected_decode.clone();
-        let regions = self.regions.clone();
-        let plan = self.plan.clone();
-        let handler = self.handler.clone();
-        let query_ctx = self.query_ctx.clone();
-        let task_id = context.task_id().unwrap_or_default();
-        let tracing = TracingContext::from_json(context.session_id().as_str());
-        let frame_schema = self.remote_schema.clone();
-        let pending = Box::pin(async move {
-            let mut streams = Vec::with_capacity(regions.len());
-            for (region_id, target) in regions {
-                let mut region_ctx = query_ctx.fork();
-                let mut read = template.clone();
-                read.region_id = region_id;
-                region_ctx.set_extension(
-                    RawSeriesRead::EXTENSION_KEY,
-                    read.encode().map_err(|error| {
-                        BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
-                    })?,
-                );
-                let request = QueryRequest {
-                    header: Some(RegionRequestHeader {
-                        tracing_context: tracing.to_w3c(),
-                        dbname: task_id.clone(),
-                        query_context: Some((&region_ctx).into()),
-                    }),
-                    region_id,
-                    plan: plan.clone(),
-                };
-                let stream = handler
-                    .do_get(&target, request)
-                    .await
-                    .map_err(BoxedError::new)?;
-                validate_remote_schema(
-                    &frame_schema,
-                    stream.schema().arrow_schema().as_ref(),
-                    "native raw advertised stream",
-                )
-                .map_err(|error| {
-                    BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
-                })?;
-                let stream_schema = stream.schema().arrow_schema().clone();
-                let df_stream = Box::pin(DfRecordBatchStreamAdapter::new(stream));
-                let raw = common_query::series_frame::unpack_raw_series(
-                    df_stream,
-                    Some(expected_schema.clone()),
-                )
-                .map_err(|error| {
-                    BoxedError::new(PlainError::new(error.to_string(), StatusCode::Unexpected))
-                })?;
-                let actual_decode =
-                    datatypes::series::frame::series_frame_label_decode(stream_schema.as_ref())
-                        .map_err(|error| {
-                            BoxedError::new(PlainError::new(
-                                error.to_string(),
-                                StatusCode::Unexpected,
-                            ))
-                        })?;
-                if actual_decode.as_ref() != Some(&expected_decode) {
-                    return Err(BoxedError::new(PlainError::new(
-                        "native raw label decode mismatch".to_string(),
-                        StatusCode::Unexpected,
-                    )));
-                }
-                streams.push(raw);
-            }
-            merge_ordered_raw_series(streams)
-        });
-        let raw_stream = FanInRawStream {
-            expected_schema: self.expected_raw_schema.clone(),
-            expected_decode: self.expected_decode.clone(),
-            pending,
-            merged: None,
-            finished: false,
-        };
-        common_query::series_frame::pack_raw_series(Box::pin(raw_stream))
-            .map_err(|error| DataFusionError::External(Box::new(error)))
-    }
-}
-
-struct FanInRawStream {
-    expected_schema: Arc<SeriesSchema>,
-    expected_decode: LabelDecodeSpec,
-    pending: std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = std::result::Result<SendableRawSeriesStream, BoxedError>,
-                > + Send,
-        >,
-    >,
-    merged: Option<SendableRawSeriesStream>,
-    finished: bool,
-}
-
-impl futures_util::Stream for FanInRawStream {
-    type Item = std::result::Result<RawSeriesChunk, BoxedError>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        if self.finished {
-            return Poll::Ready(None);
-        }
-        if let Some(merged) = self.merged.as_mut() {
-            let result = merged.as_mut().poll_next(cx);
-            if matches!(result, Poll::Ready(None)) {
-                self.finished = true;
-            }
-            return result;
-        }
-        match self.pending.as_mut().poll(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => {
-                self.finished = true;
-                Poll::Ready(Some(Err(error)))
-            }
-            Poll::Ready(Ok(merged)) => {
-                self.merged = Some(merged);
-                self.merged.as_mut().unwrap().as_mut().poll_next(cx)
-            }
-        }
-    }
-}
-
-impl RawSeriesStream for FanInRawStream {
-    fn schema(&self) -> &Arc<SeriesSchema> {
-        self.merged
-            .as_ref()
-            .map_or(&self.expected_schema, |stream| stream.schema())
-    }
-    fn label_source(&self) -> &RawLabelSource {
-        &store_api::region_engine::NO_BOUND_LABEL_SOURCE
-    }
-    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
-        Some(&self.expected_decode)
-    }
-    fn ordering(&self) -> SeriesOrdering {
-        SeriesOrdering::KeyThenTime
-    }
-}
-
-impl std::fmt::Debug for NativeRawFanInExec {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("NativeRawFanInExec")
-            .field("regions", &self.regions.len())
-            .finish()
-    }
-}
-
-impl ExecutionPlan for NativeRawFanInExec {
-    fn name(&self) -> &str {
-        "NativeRawFanInExec"
-    }
-    fn schema(&self) -> datatypes::arrow::datatypes::SchemaRef {
-        self.schema.clone()
-    }
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.properties
-    }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![]
-    }
-    fn apply_expressions(
-        &self,
-        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> Result<TreeNodeRecursion>,
-    ) -> Result<TreeNodeRecursion> {
-        apply_expression_roots(std::iter::empty::<Arc<dyn PhysicalExpr>>(), f)
-    }
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> Result<DfSendableRecordBatchStream> {
-        self.stream(context, partition)
-    }
-    fn with_new_children(
-        self: Arc<Self>,
-        _children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        Ok(self)
-    }
-    fn statistics_from_inputs(
-        &self,
-        _input_stats: &[Arc<Statistics>],
-        _args: &datafusion::physical_plan::StatisticsArgs,
-    ) -> Result<Arc<Statistics>> {
-        Ok(Arc::new(Statistics::new_unknown(self.schema.as_ref())))
-    }
-}
-
-impl DisplayAs for NativeRawFanInExec {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "NativeRawFanInExec: regions={}", self.regions.len())
     }
 }

@@ -211,7 +211,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
                 .collect::<Vec<_>>();
             let field_names = fused.raw_source_fields();
             let (read, expected, decode) = bind_raw_series_table(
-                &source.table_info,
+                source.table_info,
                 metric_name,
                 &tag_names,
                 &field_names,

@@ -313,7 +313,6 @@ mod tests {
         let (metadata, mut read) = fixture();
         read.fields[0] = read.tags[0].clone();
         assert!(read.bind(metadata.clone()).is_err());
-        let mut read = read;
         read.fields[0] = RawSeriesReadColumn {
             column_id: 2,
             name: "wrong".into(),
