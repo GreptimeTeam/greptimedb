@@ -275,9 +275,29 @@ mod tests {
 
     #[test]
     fn binds_and_decodes_tagless_read() {
-        let (metadata, mut read) = fixture();
-        let mut builder = RegionMetadataBuilder::from_existing((*metadata).clone());
-        builder.primary_key(vec![]);
+        // A tagless table has no tag columns at all, not tag columns with an empty primary key:
+        // region metadata requires the tag columns and the primary key to agree.
+        let (_, mut read) = fixture();
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 2));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "value",
+                    ConcreteDataType::int64_datatype(),
+                    false,
+                ),
+                semantic_type: api::v1::SemanticType::Field,
+                column_id: 2,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: api::v1::SemanticType::Timestamp,
+                column_id: 3,
+            });
         let metadata = std::sync::Arc::new(builder.build().unwrap());
         read.primary_key.clear();
         read.tags.clear();

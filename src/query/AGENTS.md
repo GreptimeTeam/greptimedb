@@ -36,6 +36,14 @@ side effects live in `operator`.
   schema mismatch. Datanode prefix pushdown, frontend repartition/hash shuffle,
   remote `NativeTree` serialization, metric-engine remote admission, and evaluated
   cross-region canonical merging beyond local `Merge` are not implemented.
+  A key-and-time fan-in merge holds one open region read per selected region, and a
+  datanode read holds its `max_concurrent_queries` permit for the stream's lifetime.
+  With a finite limit below the number of regions one query selects on a datanode,
+  such a query fails at the limiter (explicit error, permits released, never a
+  partial result). Multi-region merging that stays reliable under finite datanode
+  concurrency needs coordinated admission/stream-lifecycle work; the default
+  `max_concurrent_queries = 0` disables the limiter. State this limitation instead
+  of advising operators to raise or disable the limiter.
 
 ## Testing
 

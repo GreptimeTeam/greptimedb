@@ -40,6 +40,14 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   work. Still missing are datanode prefix pushdown, frontend repartition/hash shuffle,
   remote `NativeTree` serialization, and evaluated cross-region canonical merging beyond
   local `Merge`; metric-engine remote admission also remains unsupported.
+  The raw merge needs every selected region's head before it can emit, so it keeps one
+  open region read per selected region; each open datanode read holds a
+  `max_concurrent_queries` permit until the stream is dropped. A finite limit below the
+  number of regions a query selects on one datanode therefore fails that query at the
+  limiter with an explicit error (all permits released, no partial result). Do not
+  document "raise the limit" as the remedy: reliable operation under finite datanode
+  concurrency needs coordinated admission or bounded materialization, which is follow-up
+  work. The default `max_concurrent_queries = 0` disables the limiter.
 - **Admission and SQL output:** the guards live in
   `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
   (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the

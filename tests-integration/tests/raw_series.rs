@@ -203,8 +203,6 @@ async fn raw_series_read_case(tagless: bool) {
         let host = labels.get("host").map(ToString::to_string);
         if tagless {
             assert!(host.is_none(), "tagless series has no host label");
-        } else {
-            assert!(host.is_some(), "tagged series has a host label");
         }
         let values = chunk.fields.get(0).unwrap();
         for row in 0..chunk.time.len() {
@@ -212,15 +210,22 @@ async fn raw_series_read_case(tagless: bool) {
                 SampleRef::Float(value) => value,
                 _ => panic!("unexpected non-float raw sample"),
             };
-            observations.push((chunk.time.timestamp(row).unwrap(), value));
+            observations.push((host.clone(), chunk.time.timestamp(row).unwrap(), value));
         }
     }
+    // The decoded tag value identifies the series each sample belongs to: a decoder that
+    // reported one host for both, or swapped them, must fail here.
     assert_eq!(
         observations,
         if tagless {
-            vec![(1000, 1.0), (2000, 2.0)]
+            vec![(None, 1000, 1.0), (None, 2000, 2.0)]
         } else {
-            vec![(1000, 1.0), (2000, 2.0), (1000, 3.0), (2000, 4.0)]
+            vec![
+                (Some("a".to_string()), 1000, 1.0),
+                (Some("a".to_string()), 2000, 2.0),
+                (Some("b".to_string()), 1000, 3.0),
+                (Some("b".to_string()), 2000, 4.0),
+            ]
         }
     );
 

@@ -387,6 +387,8 @@ mod tests {
         schema: Arc<datatypes::schema::Schema>,
         fail_next: bool,
         _drop_flag: DropFlag,
+        /// The datanode-side permit this stream keeps until it is dropped, if it took one.
+        _permit: Option<tokio::sync::OwnedSemaphorePermit>,
     }
 
     impl Stream for GuardedEmptyStream {
@@ -426,6 +428,14 @@ mod tests {
         LateError(Arc<datatypes::schema::Schema>, Arc<AtomicBool>),
         Fail,
         Pending(Arc<AtomicBool>),
+        /// A read that has to take a permit released by the streams already handed out, the way a
+        /// datanode with `max_concurrent_queries` set does. The permit is held by the returned
+        /// stream, so this only succeeds once the fan-in has released what it was given.
+        Limited {
+            schema: Arc<datatypes::schema::Schema>,
+            limiter: Arc<tokio::sync::Semaphore>,
+            dropped: Arc<AtomicBool>,
+        },
     }
 
     struct LifecycleHandler {
@@ -460,12 +470,43 @@ mod tests {
                     schema,
                     fail_next: false,
                     _drop_flag: DropFlag(dropped),
+                    _permit: None,
                 })),
                 HandlerStep::LateError(schema, dropped) => Ok(Box::pin(GuardedEmptyStream {
                     schema,
                     fail_next: true,
                     _drop_flag: DropFlag(dropped),
+                    _permit: None,
                 })),
+                HandlerStep::Limited {
+                    schema,
+                    limiter,
+                    dropped,
+                } => {
+                    let permit = tokio::time::timeout(
+                        std::time::Duration::from_millis(50),
+                        limiter.acquire_owned(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        crate::error::UnimplementedSnafu {
+                            operation: "test region read limiter exhausted".to_string(),
+                        }
+                        .build()
+                    })?
+                    .map_err(|_| {
+                        crate::error::UnimplementedSnafu {
+                            operation: "test region read limiter closed".to_string(),
+                        }
+                        .build()
+                    })?;
+                    Ok(Box::pin(GuardedEmptyStream {
+                        schema,
+                        fail_next: false,
+                        _drop_flag: DropFlag(dropped),
+                        _permit: Some(permit),
+                    }))
+                }
                 HandlerStep::Fail => Err(crate::error::UnimplementedSnafu {
                     operation: "test region request failure".to_string(),
                 }
@@ -533,6 +574,13 @@ mod tests {
             .map(|step| match step {
                 HandlerStep::Empty(_, flag) => HandlerStep::Empty(declared.clone(), flag),
                 HandlerStep::LateError(_, flag) => HandlerStep::LateError(declared.clone(), flag),
+                HandlerStep::Limited {
+                    limiter, dropped, ..
+                } => HandlerStep::Limited {
+                    schema: declared.clone(),
+                    limiter,
+                    dropped,
+                },
                 other => other,
             })
             .collect();
@@ -591,6 +639,51 @@ mod tests {
         assert!(output.next().await.is_none());
         assert!(upstream_dropped.load(Ordering::SeqCst));
         assert!(other_dropped.load(Ordering::SeqCst));
+    }
+
+    /// A datanode that runs out of read permits must surface as an error, and the permit the
+    /// already-opened stream holds must come back so the query does not wedge the datanode.
+    #[tokio::test]
+    async fn exhausted_region_read_limiter_fails_and_releases_held_permit() {
+        let first_dropped = Arc::new(AtomicBool::new(false));
+        let second_dropped = Arc::new(AtomicBool::new(false));
+        let limiter = Arc::new(tokio::sync::Semaphore::new(1));
+        // The first read takes the only permit; the second can only proceed if the fan-in hands
+        // back the stream it already holds, which it must not do while the query is still live.
+        let ids = [RegionId::new(4, 1), RegionId::new(4, 2)];
+        let (exec, _) = lifecycle_exec(
+            vec![
+                HandlerStep::Limited {
+                    schema: Arc::new(Schema::new(vec![])),
+                    limiter: Arc::clone(&limiter),
+                    dropped: first_dropped.clone(),
+                },
+                HandlerStep::Limited {
+                    schema: Arc::new(Schema::new(vec![])),
+                    limiter: Arc::clone(&limiter),
+                    dropped: second_dropped.clone(),
+                },
+            ],
+            ids,
+        );
+        let mut output = exec.execute(0, Arc::new(TaskContext::default())).unwrap();
+        let error = output
+            .next()
+            .await
+            .expect("the fan-in must report the failure")
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("limiter exhausted"),
+            "unexpected error: {error:?}"
+        );
+        assert!(output.next().await.is_none());
+        drop(output);
+        assert!(first_dropped.load(Ordering::SeqCst));
+        // Nothing the failed query opened is still holding a permit.
+        assert!(
+            limiter.try_acquire().is_ok(),
+            "the failed query left a read permit held"
+        );
     }
 
     #[test]
