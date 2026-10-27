@@ -29,14 +29,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::SeriesLabels;
 use datatypes::series::samples::{SampleRef, Series, SeriesSchema};
+use datatypes::series::{Label, SeriesLabels};
 use regex::Regex;
 
 use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, external, label_set, owned, render_label_set,
 };
 use crate::select::MatchOp;
+use crate::vector_match::{Budget, HISTOGRAM_ROW_BYTES, owned_histogram_bytes};
 
 /// The labels an info series is joined on, as in Prometheus.
 const IDENTIFYING_LABELS: [&str; 2] = ["instance", "job"];
@@ -71,6 +72,33 @@ pub fn info(
     info: &[Series],
     selector: &InfoSelector,
 ) -> Result<Vec<Series>> {
+    info_inner(schema, base, info, selector, None)
+}
+
+/// [`info()`], handing the live workspace it holds to `reserve` before it allocates it.
+///
+/// What the index of the info series and the rows of the results keep is held until the operation
+/// returns; the merge of one label set's rows is a phase, and the builder's columns join the phase
+/// of the output they are finished as. A total `reserve` refuses ends the operation with that error.
+pub(crate) fn info_with_reservation(
+    schema: &Arc<SeriesSchema>,
+    base: &[Series],
+    info: &[Series],
+    selector: &InfoSelector,
+    reserve: &mut dyn FnMut(usize) -> Result<()>,
+) -> Result<Vec<Series>> {
+    let mut budget = Budget::new(reserve);
+    info_inner(schema, base, info, selector, Some(&mut budget))
+}
+
+/// The one info kernel, whether or not a caller accounts for its workspace.
+fn info_inner(
+    schema: &Arc<SeriesSchema>,
+    base: &[Series],
+    info: &[Series],
+    selector: &InfoSelector,
+    mut budget: Option<&mut Budget<'_>>,
+) -> Result<Vec<Series>> {
     let grid = schema
         .eval_grid
         .as_ref()
@@ -96,7 +124,13 @@ pub fn info(
     }
     let name_matchers = effective_name_matchers(&selector.name_matchers)?;
     let is_info_metric = |name: &str| name_matchers.iter().all(|matcher| matcher.matches(name));
+    let width = schema.fields.len();
 
+    // The presence of the base at each point and the identifying values of every base series
+    // stay live until the operation returns.
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.hold(points.saturating_add(base.len().saturating_mul(PATTERN_BYTES)))?;
+    }
     let mut base_present = vec![false; points];
     for series in base {
         for field in series.fields.iter() {
@@ -146,6 +180,17 @@ pub fn info(
         if !fetched {
             continue;
         }
+        // The entry of a signature and the newest series it keeps at each point the series
+        // holds a sample, charged before they are allocated.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.hold(
+                series
+                    .time
+                    .len()
+                    .saturating_mul(KEPT_POINT_BYTES)
+                    .saturating_add(SIGNATURE_BYTES),
+            )?;
+        }
         let name: Arc<str> = Arc::from(series.metric.name().unwrap_or(""));
         info_names.insert(name.clone());
         let kept = by_signature.entry((name, values)).or_default();
@@ -185,7 +230,6 @@ pub fn info(
         }
     }
 
-    let width = schema.fields.len();
     let mut result_index: HashMap<LabelSet, usize> = HashMap::new();
     let mut results: Vec<(SeriesLabels, Vec<Row>)> = Vec::new();
     let mut added: Vec<(Arc<str>, Arc<str>)> = Vec::new();
@@ -205,13 +249,21 @@ pub fn info(
         };
         // The result of the previous point, reused while the same info series are kept.
         let mut previous: Option<Choice> = None;
+        // A row of this series is kept by the result it goes to, so every row it can have is held
+        // before the walk; a histogram is held as it is copied.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.hold(series.time.len().saturating_mul(row_bytes(width)))?;
+        }
         let mut cursors: Vec<_> = series.fields.iter().map(|field| field.cursor()).collect();
         for (point, row) in series.time.positions() {
             let mut values = Vec::with_capacity(width);
             for cursor in &mut cursors {
-                values.push(owned(
-                    cursor.at(row).expect("the axis and the fields are aligned"),
-                )?);
+                let sample = cursor.at(row).expect("the axis and the fields are aligned");
+                if let (Some(budget), SampleRef::Histogram(view)) = (budget.as_deref_mut(), &sample)
+                {
+                    budget.hold(owned_histogram_bytes(view))?;
+                }
+                values.push(owned(sample)?);
             }
             if values.iter().all(Option::is_none) {
                 continue;
@@ -246,6 +298,9 @@ pub fn info(
                     Some(match result_index.entry(label_set(&metric)) {
                         std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
                         std::collections::hash_map::Entry::Vacant(entry) => {
+                            if let Some(budget) = budget.as_deref_mut() {
+                                budget.hold(result_set_bytes(&metric))?;
+                            }
                             results.push((metric, Vec::new()));
                             *entry.insert(results.len() - 1)
                         }
@@ -270,6 +325,10 @@ pub fn info(
     // Rows of one label set arrive per base series; sorted by point, a field held twice at one
     // point is a collision.
     for (metric, rows) in &mut results {
+        // The sort's buffer and the merged rows, while the rows they replace are still alive.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.phase(rows.len().saturating_mul(2 * std::mem::size_of::<Row>()))?;
+        }
         rows.sort_by_key(|(point, _)| *point);
         let mut merged: Vec<Row> = Vec::with_capacity(rows.len());
         for (point, values) in rows.drain(..) {
@@ -301,8 +360,17 @@ pub fn info(
 
     let mut builder = GridSeriesBuilder::try_new(schema.clone())?;
     let mut output = Vec::with_capacity(results.len());
+    if let Some(budget) = budget.as_deref_mut() {
+        budget.phase(0)?;
+    }
     for (metric, rows) in results {
         builder.begin_series();
+        // This series' columns, reserved before its first row. They stay live inside the series
+        // it is finished as, so the phase keeps them.
+        if let Some(budget) = budget.as_deref_mut() {
+            budget.grow(column_bytes(&rows, width))?;
+        }
+        builder.reserve_rows(rows.len())?;
         for (point, row) in rows {
             builder.push_samples(point, &row)?;
         }
@@ -313,6 +381,66 @@ pub fn info(
 
 /// The samples of one result series at one grid point, one per field.
 type Row = (usize, Vec<Option<GridSample>>);
+
+/// The identifying values one base series adds to its presence pattern, charged twice for the
+/// spare room of the sets they go to.
+const PATTERN_BYTES: usize = 2 * IDENTIFYING_LABELS.len() * std::mem::size_of::<Arc<str>>();
+
+/// The entry of one info series' signature: its key, its map of kept series, and the name the
+/// info metric list keeps, charged twice for the spare room of the tables.
+const SIGNATURE_BYTES: usize = 2
+    * (std::mem::size_of::<(Signature, BTreeMap<usize, (f64, usize)>)>()
+        + IDENTIFYING_LABELS.len() * std::mem::size_of::<Option<Arc<str>>>()
+        + std::mem::size_of::<Arc<str>>());
+
+/// The series one signature keeps at one point, charged twice for the B-tree's spare room.
+const KEPT_POINT_BYTES: usize = 2 * std::mem::size_of::<(usize, (f64, usize))>();
+
+/// One row a result keeps: its entry in the result's row list, charged twice for the list's
+/// growth, and its samples, allocated at their exact count.
+fn row_bytes(width: usize) -> usize {
+    (2 * std::mem::size_of::<Row>())
+        .saturating_add(width.saturating_mul(std::mem::size_of::<Option<GridSample>>()))
+}
+
+/// The bytes a result label set keeps: its metric, rebuilt by each label it is given, the label set
+/// it is filed under with the copy of the name that set makes, and its entries in the result list
+/// and index.
+fn result_set_bytes(metric: &SeriesLabels) -> usize {
+    let labels = metric.tags().len().saturating_add(1);
+    labels
+        .saturating_mul(
+            2 * std::mem::size_of::<Label>() + std::mem::size_of::<(Arc<str>, Arc<str>)>(),
+        )
+        .saturating_add(metric.name().map_or(0, str::len))
+        .saturating_add(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| tag.name.len())
+                .sum::<usize>(),
+        )
+        .saturating_add(2 * std::mem::size_of::<(SeriesLabels, Vec<Row>)>())
+        .saturating_add(2 * std::mem::size_of::<(LabelSet, usize)>())
+}
+
+/// The bytes one result series' columns take: per row, the grid index, the value and validity
+/// column of every field, charged twice for the capacity each grows to, and a histogram index; per
+/// histogram, a row of the builder's histogram table and the buckets copied into it.
+fn column_bytes(rows: &[Row], width: usize) -> usize {
+    let row = std::mem::size_of::<usize>()
+        + 2 * width.saturating_mul(std::mem::size_of::<f64>() + 1)
+        + width.saturating_mul(std::mem::size_of::<Option<u32>>());
+    rows.iter().flat_map(|(_, values)| values).fold(
+        rows.len().saturating_mul(row),
+        |bytes, value| match value {
+            Some(GridSample::Histogram(histogram)) => bytes
+                .saturating_add(HISTOGRAM_ROW_BYTES)
+                .saturating_add(histogram.heap_bytes()),
+            _ => bytes,
+        },
+    )
+}
 
 /// What the info series kept at a point make of one base series.
 struct Choice {

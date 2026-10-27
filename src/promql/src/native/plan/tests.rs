@@ -21,10 +21,11 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
-    reads_across_series,
+    BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
+use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -431,7 +432,7 @@ fn an_instant_selection_cannot_change_the_field_count() {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -458,7 +459,7 @@ fn an_instant_selection_reads_raw_samples() {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -483,7 +484,7 @@ fn an_instant_selection_cannot_consume_state() {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -537,7 +538,7 @@ fn an_instant_selection_cannot_read_interleaved_input() {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -1372,4 +1373,44 @@ fn a_samples_root_without_an_input_is_refused() {
         error.to_string().contains("constant scalar"),
         "the refusal must name the shape a zero-child tree has to be: {error}"
     );
+}
+
+/// `info` reads its info side's values as sample times, so it accepts only the instant selection
+/// that reports them: one that reports the samples themselves would compare every info series as
+/// equally new.
+#[test]
+fn info_reads_the_sample_times_of_one_field() {
+    let out = grid(0, 60_000, 4);
+    let info_of = |value: InstantValue, fields: usize| NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(NativeNode {
+                expr: NativeExpr::Instant {
+                    input: Box::new(input_with_fields(fields)),
+                    op: BoundInstant {
+                        lookback_ms: 300_000,
+                        offset_ms: 0,
+                        at_ms: None,
+                        value,
+                        output_grid: Arc::clone(&out),
+                    },
+                },
+                output: evaluated(self::fields(fields), Arc::clone(&out)),
+            }),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(self::fields(1), Arc::clone(&out)),
+    };
+    info_of(InstantValue::InfoTimestamp, 1).validate().unwrap();
+    for (value, fields, expected) in [
+        (InstantValue::Sample, 1, "not their values"),
+        (InstantValue::InfoTimestamp, 2, "carry 2 fields"),
+    ] {
+        let error = info_of(value, fields).validate().unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }

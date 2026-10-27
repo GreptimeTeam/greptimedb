@@ -307,7 +307,7 @@ const MERGE_SLOT_BYTES: usize =
     2 * std::mem::size_of::<(GroupKey, (SeriesLabels, Vec<(usize, usize, GridSample)>))>();
 
 /// One row of the builder's histogram table: the scalar columns and the seven list offsets.
-const HISTOGRAM_ROW_BYTES: usize = 4 * std::mem::size_of::<f64>()
+pub(crate) const HISTOGRAM_ROW_BYTES: usize = 4 * std::mem::size_of::<f64>()
     + 2 * std::mem::size_of::<i32>()
     + std::mem::size_of::<i64>()
     + 7 * std::mem::size_of::<i32>();
@@ -323,7 +323,8 @@ fn output_bytes(fields: usize) -> usize {
         .saturating_add(std::mem::size_of::<SeriesSchema>())
 }
 
-/// The live workspace a binary operation admits as it allocates, at three granularities.
+/// The live workspace a binary, set or `info` operation admits as it allocates, at three
+/// granularities.
 ///
 /// A resource limit belongs at an allocation boundary, not at a value:
 ///
@@ -336,7 +337,7 @@ fn output_bytes(fields: usize) -> usize {
 /// - [`Budget::grow`]: a block a container of that phase took when it outgrew what it held.
 ///
 /// It exists because the caller is handed a *total*, and this turns those figures into that total.
-struct Budget<'a> {
+pub(crate) struct Budget<'a> {
     /// Admits the live workspace, or refuses it.
     reserve: &'a mut dyn FnMut(usize) -> Result<()>,
     /// The bytes the results keep until the operation returns.
@@ -348,7 +349,7 @@ struct Budget<'a> {
 }
 
 impl<'a> Budget<'a> {
-    fn new(reserve: &'a mut dyn FnMut(usize) -> Result<()>) -> Self {
+    pub(crate) fn new(reserve: &'a mut dyn FnMut(usize) -> Result<()>) -> Self {
         Self {
             reserve,
             held: 0,
@@ -358,19 +359,19 @@ impl<'a> Budget<'a> {
     }
 
     /// Retains `bytes` of results, which stay live until the operation returns.
-    fn hold(&mut self, bytes: usize) -> Result<()> {
+    pub(crate) fn hold(&mut self, bytes: usize) -> Result<()> {
         self.held = self.held.saturating_add(bytes);
         self.admit()
     }
 
     /// Admits `bytes` as the whole workspace of the phase being run, replacing the phase before it.
-    fn phase(&mut self, bytes: usize) -> Result<()> {
+    pub(crate) fn phase(&mut self, bytes: usize) -> Result<()> {
         self.phase = bytes;
         self.admit()
     }
 
     /// Adds `bytes` to the phase for a container of it that has outgrown what was reserved.
-    fn grow(&mut self, bytes: usize) -> Result<()> {
+    pub(crate) fn grow(&mut self, bytes: usize) -> Result<()> {
         self.phase = self.phase.saturating_add(bytes);
         self.admit()
     }
@@ -627,7 +628,7 @@ fn label_text_bytes(metric: &SeriesLabels) -> usize {
 
 /// The bytes one owned copy of a histogram view holds: its scalars inline, and on the heap the
 /// buckets of both sides, the span layout of the view and its custom bounds.
-fn owned_histogram_bytes(view: &HistogramView<'_>) -> usize {
+pub(crate) fn owned_histogram_bytes(view: &HistogramView<'_>) -> usize {
     let sides = [view.positive, view.negative];
     let buckets = sides
         .iter()

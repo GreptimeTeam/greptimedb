@@ -3388,6 +3388,141 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
     }
 }
 
+/// `info()` over a base table and a `target_info` table whose time index and field are named
+/// differently, answered natively above both regions with Prometheus' answer, which the existing
+/// plan does not give: it has no `info`.
+///
+/// `target_info` holds `version="v1"` for `a` from 0s to 4s and `version="v2"` from 6s, and `v1` for
+/// `b` throughout; `c` has none. With a 2s lookback, `a` reads `v1` up to 5s and `v2` from 6s.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_info_enriches_from_the_info_table() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_info")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_info_up (instance STRING, job STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(instance, job))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE target_info (instance STRING, job STRING, \"version\" STRING, \
+         greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
+         PRIMARY KEY(instance, job, \"version\"))",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut up = Vec::new();
+    let mut info = Vec::new();
+    for second in 0..10_i64 {
+        for (target, job, base) in [("a", "j", 0), ("b", "j", 100), ("c", "k", 200)] {
+            up.push(format!(
+                "('{target}', '{job}', {}, {})",
+                second * 1_000,
+                base + second
+            ));
+        }
+        let a_version = match second {
+            0..=4 => Some("v1"),
+            5 => None,
+            _ => Some("v2"),
+        };
+        for (target, version) in [("a", a_version), ("b", Some("v1"))] {
+            if let Some(version) = version {
+                info.push(format!(
+                    "('{target}', 'j', '{version}', {}, 1)",
+                    second * 1_000
+                ));
+            }
+        }
+    }
+    for (table, values) in [("native_info_up", up), ("target_info", info)] {
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let row = |second: i64, labels: &[(&str, &str)], value: i64| {
+        (
+            second * 1_000,
+            labels
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            value as f64,
+        )
+    };
+    let a = |version| [("instance", "a"), ("job", "j"), ("version", version)];
+    let b = [("instance", "b"), ("job", "j"), ("version", "v1")];
+    let c = [("instance", "c"), ("job", "k")];
+    // `a` takes the version current at each step, `b` keeps `v1`, and `c`, which no info series
+    // matches, passes through unless the selector requires a version.
+    let mut enriched = Vec::new();
+    let mut v1_only = Vec::new();
+    let mut shifted = Vec::new();
+    for second in 3..10_i64 {
+        let version = if second <= 5 { "v1" } else { "v2" };
+        enriched.push(row(second, &a(version), second));
+        enriched.push(row(second, &b, 100 + second));
+        enriched.push(row(second, &c, 200 + second));
+        if second <= 5 {
+            v1_only.push(row(second, &a("v1"), second));
+        }
+        v1_only.push(row(second, &b, 100 + second));
+        // An offset moves the info series along with the base: each step reads both a second back.
+        let version = if second <= 6 { "v1" } else { "v2" };
+        shifted.push(row(second, &a(version), second - 1));
+        shifted.push(row(second, &b, 99 + second));
+        shifted.push(row(second, &c, 199 + second));
+    }
+    for (query, columns, mut expected) in [
+        (
+            "info(native_info_up)",
+            vec!["instance", "job", "ts", "val", "version"],
+            enriched,
+        ),
+        (
+            "info(native_info_up, {version=\"v1\"})",
+            vec!["instance", "job", "ts", "val", "version"],
+            v1_only,
+        ),
+        (
+            "info(native_info_up offset 1s)",
+            vec!["instance", "job", "ts", "val", "version"],
+            shifted,
+        ),
+    ] {
+        expected.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        let sql = format!("TQL EVAL (3, 9, '1s', '2s') {query}");
+        observer.clear();
+        let (native_columns, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), 2, "{query}");
+        assert_eq!(native_columns, columns, "{query}");
+        assert_eq!(native, expected, "{query}");
+
+        // The existing plan refuses `info`: "Unsupported expr type: info" for one argument, and
+        // "Cannot accept multiple vector as function input" for two.
+        let legacy = instance
+            .do_query(&sql, native_query_context(false, 4))
+            .await
+            .remove(0);
+        assert!(
+            legacy.is_err(),
+            "{query}: the existing plan answered `info`"
+        );
+    }
+}
+
 /// A two-selector query over a table split into regions keeps the existing plan: the two-scan
 /// native node has no placement there, and the query used to fail in the dist analyzer.
 #[tokio::test(flavor = "multi_thread")]

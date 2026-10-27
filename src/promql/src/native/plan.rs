@@ -35,6 +35,7 @@ use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -160,10 +161,22 @@ pub struct BoundInstant {
     pub offset_ms: i64,
     /// Anchored selection instant; samples are selected at this time for every grid point.
     pub at_ms: Option<i64>,
-    /// Emit the selected sample timestamp in seconds rather than its value.
-    pub timestamp: bool,
+    /// What the selection reports for the sample it selects.
+    pub value: InstantValue,
     /// The grid the selection produces values on.
     pub output_grid: Arc<EvalGrid>,
+}
+
+/// What an instant selection reports at a grid point for the sample it selected there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstantValue {
+    /// The sample itself.
+    Sample,
+    /// `timestamp(x)`: the sample's own time in seconds, without the metric name.
+    Timestamp,
+    /// The info series `info()` reads: the sample's own time in milliseconds, under all of its
+    /// labels, as Prometheus' `evalSeries` records it for `info`.
+    InfoTimestamp,
 }
 
 /// A window function over raw samples or over an evaluated input.
@@ -367,6 +380,14 @@ pub enum NativeExpr {
         right: Box<NativeNode>,
         op: BoundSetOp,
     },
+    /// `info(base, {selector})`: the series of `base` with the data labels of the info series that
+    /// share their identifying labels. `info` is the instant selection of those info series, whose
+    /// values are the times of the samples it selected ([`InstantValue::InfoTimestamp`]).
+    Info {
+        base: Box<NativeNode>,
+        info: Box<NativeNode>,
+        selector: InfoSelector,
+    },
 }
 
 /// One node of a bound tree.
@@ -380,9 +401,10 @@ pub struct NativeNode {
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// Four kinds do: an `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two
-/// vectors' series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
-/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
+/// Five kinds do: an `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two
+/// vectors' series by label, an `Info` looks the info series of each series up by its identifying
+/// labels, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...)
+/// reorders or reads the whole vector at a grid point. Everything else -
 /// an input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
 /// side, whose broadcast reaches each series the other side answers - answers one series from one
 /// series' rows.
@@ -407,7 +429,10 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
             // Two vectors are matched by label, which pairs series of the whole vector.
             (_, _) => true,
         },
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Set { .. } => true,
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::Set { .. }
+        | NativeExpr::Info { .. } => true,
     }
 }
 
@@ -744,6 +769,44 @@ impl NativeNode {
                 ensure_samples(&self.output, "a set operation")?;
                 ensure_same_fields(&left.output, &self.output, "a set operation")?;
                 ensure_grid(&self.output, left_grid, "a set operation")?;
+            }
+            NativeExpr::Info { base, info, .. } => {
+                base.validate()?;
+                info.validate()?;
+                let Some((_, base_grid)) = evaluated_vector(&base.output) else {
+                    return Err(invalid(&format!(
+                        "info consumes an evaluated vector, not {}",
+                        base.output.describe()
+                    )));
+                };
+                // The kernel reads the info side's values as sample times, which only an instant
+                // selection that reports them produces.
+                let NativeExpr::Instant { op, .. } = &info.expr else {
+                    return Err(invalid(
+                        "info reads its info series from an instant selection",
+                    ));
+                };
+                if op.value != InstantValue::InfoTimestamp {
+                    return Err(invalid(
+                        "info reads the sample times of its info series, not their values",
+                    ));
+                }
+                let Some((info_schema, info_grid)) = evaluated_vector(&info.output) else {
+                    return Err(invalid("info's info series are not an evaluated vector"));
+                };
+                if info_schema.fields.len() != 1 {
+                    return Err(invalid(&format!(
+                        "info reads one sample time per info series, and its info series carry {} \
+                         fields",
+                        info_schema.fields.len()
+                    )));
+                }
+                if base_grid.spec() != info_grid.spec() {
+                    return Err(invalid("info aligns two different grids"));
+                }
+                ensure_samples(&self.output, "info")?;
+                ensure_same_fields(&base.output, &self.output, "info")?;
+                ensure_grid(&self.output, base_grid, "info")?;
             }
         }
         Ok(())
