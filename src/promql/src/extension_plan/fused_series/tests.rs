@@ -89,7 +89,7 @@ use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -446,6 +446,29 @@ fn quantile_aggregate_tree() -> NativeTree {
             },
         },
         output: root.output.clone(),
+    })
+    .expect("the bound tree is legal")
+}
+
+/// The `rate(x[5m])` tree with a `topk(k, ...)` over it.
+///
+/// A vector operation over the whole vector: `k` ranks a group's series against each other, so the
+/// operator over part of the metric keeps each part's `k` instead of the `k` of the whole.
+fn topk_tree(k: f64) -> NativeTree {
+    let window = rate_tree().root().clone();
+    let output = window.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window),
+            op: BoundVectorOp::TopK {
+                k,
+                top: true,
+                // No grouping, so every series is one group and the kept series are the largest of
+                // the whole vector.
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output,
     })
     .expect("the bound tree is legal")
 }
@@ -2812,6 +2835,88 @@ async fn every_partition_evaluates_its_own_series() {
         assert_eq!(GRID_LEN as usize, series.len(), "{host}: {series:?}");
         assert_series_rates(&series, &[(scale, host.as_str())]);
     }
+}
+
+/// A tree that reads the whole vector runs once over every scan partition, and that one execution
+/// sees the series of both.
+///
+/// `topk(k, rate(x[5m]))` ranks series against each other, which is a decision over the whole
+/// vector: run per partition it keeps each partition's `k`, so `topk(1, ...)` would answer `web-0`
+/// as well. The two series live in different partitions and are told apart by their rate, so
+/// `topk(1, ...)` names the series only partition 1 holds, and `topk(2, ...)` names both.
+#[tokio::test]
+async fn a_whole_vector_tree_runs_once_over_every_partition() {
+    let partitions = [1.0, 5.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scale)| {
+            vec![frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(scale),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+
+    // The same split, read by a per-series tree, keeps one execution per partition.
+    let per_series = plan(rate_tree(), memory_exec_partitioned(partitions.clone()))
+        .expect("the runtime executes a rate tree");
+    assert_eq!(
+        2,
+        per_series
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "a per-series tree answers each partition's series on its own"
+    );
+
+    // `topk(2, ...)` keeps both series, which are each in a partition of their own: the one
+    // execution the node reports is the only thing that could have gathered them together, since a
+    // per-partition run would answer one series per partition in two partitions.
+    let both = plan(topk_tree(2.0), memory_exec_partitioned(partitions.clone()))
+        .expect("the runtime executes a topk tree");
+    assert_eq!(
+        1,
+        both.properties().output_partitioning().partition_count(),
+        "topk reads every series, so one execution answers it"
+    );
+    let batches = collect(both, SessionContext::default().task_ctx())
+        .await
+        .expect("the single execution runs");
+    let gathered = rows(&batches);
+    // The rates are distinct, so the two series are told apart by value and not only by name.
+    assert_series_rates(&one_series(&gathered, 1.0, "web-0"), &[(1.0, "web-0")]);
+    assert_series_rates(&one_series(&gathered, 5.0, "web-1"), &[(5.0, "web-1")]);
+
+    // `topk(1, ...)` keeps the larger of the two, which lives in partition 1: answering `web-1`
+    // means the comparison saw partition 0's `web-0` and rejected it.
+    let top = plan(topk_tree(1.0), memory_exec_partitioned(partitions))
+        .expect("the runtime executes a topk tree");
+    let batches = collect(top, SessionContext::default().task_ctx())
+        .await
+        .expect("the single execution runs");
+    let rows = rows(&batches);
+    assert_eq!(
+        GRID_LEN as usize,
+        rows.len(),
+        "one kept series over the whole grid: {rows:?}"
+    );
+    assert_series_rates(&rows, &[(5.0, "web-1")]);
+}
+
+/// The rows of the series `host` rates `rate` at, in time order.
+///
+/// Neither the name nor the value alone identifies a series here: the fixtures differ in both, so a
+/// row of another series cannot be mistaken for one of these.
+fn one_series(rows: &[Row], rate: f64, host: &str) -> Vec<Row> {
+    let mut series = rows
+        .iter()
+        .filter(|row| row.2.as_deref() == Some(host))
+        .filter(|row| row.1.is_some_and(|value| (value - rate).abs() < 1e-9))
+        .cloned()
+        .collect::<Vec<_>>();
+    series.sort_by_key(|row| row.0);
+    series
 }
 
 /// A single repeated source feeds both operands once in each of four independent partitions.

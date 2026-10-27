@@ -16,8 +16,10 @@
 //!
 //! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
 //! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
-//! half: it owns one execution of that tree per partition and decodes its input frames into raw
-//! series chunks and converts its evaluated chunks back into batches.
+//! half: it runs that tree over the node's input - once per input partition for a tree that answers
+//! one series from one series' rows, once over all of them for a tree that reads the whole vector -
+//! and decodes its input frames into raw series chunks and converts its evaluated chunks back into
+//! batches.
 //!
 //! The two halves show different things in `EXPLAIN`, which is the point of having both. The
 //! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
@@ -79,7 +81,7 @@ use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
-    reads_across_series,
+    needs_single_execution, reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
@@ -945,6 +947,18 @@ impl FusedSeriesExec {
         )
     }
 
+    /// Whether a tree over `source_count` sources has to be evaluated once over every input
+    /// partition instead of once per partition.
+    ///
+    /// More than one source is one execution: its operands are matched against each other, so a
+    /// partition-by-partition run would pair each side's series with only its own partition's. A
+    /// single-source tree is one execution only when the tree itself reads the whole vector
+    /// ([`needs_single_execution`]); otherwise every series is an independent answer and one execution
+    /// per scan partition is the parallelism that keeps those answers cheap.
+    fn requires_single_execution(source_count: usize, tree: &NativeTree) -> bool {
+        source_count > 1 || needs_single_execution(tree.root())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build(
         promql: Arc<str>,
@@ -1043,13 +1057,13 @@ impl FusedSeriesExec {
                 Some(raw_schemas[index].clone()),
             )?;
         }
+        // One execution over every input partition, rather than one execution per partition: a tree
+        // that reads the whole vector has to see every series at once, and more than one source is
+        // one execution because its operands are matched against each other.
+        let single_execution = Self::requires_single_execution(inputs.len(), &tree);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(if inputs.len() != 1 {
-                1
-            } else {
-                partition_count
-            }),
+            Partitioning::UnknownPartitioning(if single_execution { 1 } else { partition_count }),
             if partial_fold.is_some() {
                 // Partial aggregate state is only emitted after the scan reaches EOF.
                 EmissionType::Final
@@ -1132,8 +1146,9 @@ impl ExecutionPlan for FusedSeriesExec {
     }
 
     /// Splitting the input further would not help: a second partition is a second set of series
-    /// answered by a second tree, which this node already runs, and raising the count is what an
-    /// optimizer does by adding a round-robin exchange that reorders nothing it can rely on.
+    /// answered by a second tree when the tree is per-series, and one execution already reads every
+    /// partition when it is not, so raising the count is what an optimizer does by adding a
+    /// round-robin exchange that reorders nothing it can rely on.
     fn benefits_from_input_partitioning(&self) -> Vec<bool> {
         vec![false; self.inputs.len()]
     }
@@ -1195,21 +1210,22 @@ impl ExecutionPlan for FusedSeriesExec {
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
         state.register_metrics(&self.metric, partition);
+        // One execution reads every partition of its input, so an output partition does not name one
+        // of them here; a per-partition execution does, and must name one the input has.
+        let single_execution = Self::requires_single_execution(self.inputs.len(), &self.tree);
         let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
-            if self.inputs.len() == 1 && partition >= count {
+            if !single_execution && partition >= count {
                 return Err(DataFusionError::Execution(format!(
                     "FusedSeries input {source} has no partition {partition}"
                 )));
             }
-            let start = if self.inputs.len() > 1 { 0 } else { partition };
-            let end = if self.inputs.len() > 1 {
-                count
+            let partitions = if single_execution {
+                0..count
             } else {
-                partition + 1
+                partition..partition + 1
             };
-            let partitions = start..end;
             for child_partition in partitions {
                 let frames = input.execute(child_partition, Arc::clone(&context))?;
                 let raw =

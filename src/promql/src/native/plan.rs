@@ -443,6 +443,41 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
     }
 }
 
+/// Whether `node` answers a value for the whole vector, so a tree holding it has to see every series
+/// in one execution rather than one partition's worth at a time.
+///
+/// A `Vector` operation (`topk`, `bottomk`, `limitk`, `limit_ratio`, `sort`, `absent`,
+/// `histogram_quantile`, `histogram_fraction`, `count_values`) picks, orders or reads its input's
+/// series against each other, and a `Complete` aggregate folds every contribution to a group: given
+/// part of the metric, either one answers part of the result instead of the result. `Merge`
+/// canonicalizes label sets of the whole vector and is asked here for the same reason. A `Partial` or
+/// `Final` aggregate's own stage is not: its contract is exactly the part it was handed, so only what
+/// sits below it is followed.
+///
+/// Everything else recurses into its children. A window (`rate`, `sum_over_time`, ...), a map, an
+/// instant selection and a timestamp compute one series from one series' rows, and a binary or set
+/// operation is decided by its sides, so a tree built from those still answers each of its series on
+/// its own: splitting it across scan partitions splits the answer rather than an operator's view.
+///
+/// This is about placement, not admission: it says how many executions the tree needs, not whether
+/// it may run over part of the metric ([`reads_across_series`] answers that).
+pub fn needs_single_execution(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => needs_single_execution(input),
+        NativeExpr::Aggregate { input, op } => {
+            op.stage == AggregateStage::Complete || needs_single_execution(input)
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            needs_single_execution(left) || needs_single_execution(right)
+        }
+        NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => true,
+    }
+}
+
 /// Whether `node` is a supported child of Merge: only an input with optional windows and maps.
 fn merge_shape_supported(node: &NativeNode) -> bool {
     match &node.expr {

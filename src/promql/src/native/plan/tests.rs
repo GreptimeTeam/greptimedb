@@ -21,13 +21,14 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    needs_single_execution, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::range_eval::{RangeFunction, RangeWindow};
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
@@ -909,6 +910,99 @@ fn a_constant_operand_reads_one_series_at_a_time() {
     assert!(!reads_across_series(&binary(
         scalar_on(1.0, Arc::clone(&shared)),
         scalar_on(2.0, Arc::clone(&shared))
+    )));
+}
+
+/// A tree needs one execution over every scan partition exactly when one of its operators answers a
+/// value for the whole vector; every other tree answers each series on its own and keeps running one
+/// execution per partition.
+#[test]
+fn only_a_whole_vector_tree_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let rate = || window_on(input(), None, Arc::clone(&shared));
+    let vector = |inner: NativeNode, op: BoundVectorOp| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let binary = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let aggregate = |inner: NativeNode, stage: AggregateStage| NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage,
+            },
+        },
+        output: if stage == AggregateStage::Partial {
+            partial_aggregate(rate()).output
+        } else {
+            evaluated(Arc::new([]), Arc::clone(&shared))
+        },
+    };
+
+    // One series' rows answer one series: the input, `rate(x[5m])` and `abs(rate(x[5m]))`.
+    for node in [input(), rate(), map_over(rate())] {
+        assert!(
+            !needs_single_execution(&node),
+            "a per-series tree keeps one execution per partition: {node:?}"
+        );
+    }
+    // A broadcast reaches each series of the vector side, and a state aggregate is contractually
+    // one execution's contribution.
+    assert!(!needs_single_execution(&binary(
+        scalar_on(1.0, Arc::clone(&shared)),
+        rate()
+    )));
+    assert!(!needs_single_execution(&binary(rate(), rate())));
+    assert!(!needs_single_execution(&aggregate(
+        rate(),
+        AggregateStage::Partial
+    )));
+
+    // `topk(1, rate(x[5m]))`, `sort(rate(x[5m]))` and `limitk(1, rate(x[5m]))` read every series
+    // against the others, as does a complete aggregate.
+    let group = Grouping::By(Arc::new(["job".into()]));
+    for op in [
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: group.clone(),
+        },
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: group.clone(),
+        },
+        BoundVectorOp::Sort(SortOrder::Asc),
+    ] {
+        assert!(
+            needs_single_execution(&vector(rate(), op)),
+            "a global vector operation needs every series at once"
+        );
+    }
+    assert!(needs_single_execution(&aggregate(
+        rate(),
+        AggregateStage::Complete
+    )));
+    // Depth does not hide it: `sum(rate(x[5m])) + 100` still folds a group, and so does a per-series
+    // left side over a whole-vector right side.
+    assert!(needs_single_execution(&binary(
+        aggregate(rate(), AggregateStage::Complete),
+        scalar_on(100.0, Arc::clone(&shared))
+    )));
+    assert!(needs_single_execution(&binary(
+        rate(),
+        vector(rate(), BoundVectorOp::Sort(SortOrder::Asc))
     )));
 }
 
