@@ -369,6 +369,7 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             NativeExpr::Scalar(_) => true,
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
+            | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
