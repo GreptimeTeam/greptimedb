@@ -146,6 +146,64 @@ const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
 const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
 
+/// Validates complete sparse keys without materializing their values.
+///
+/// Scratch buffers retain capacity between keys; validation does not depend on region metadata.
+#[derive(Default)]
+pub struct SparsePrimaryKeyValidator {
+    column_ids: HashSet<ColumnId>,
+    label_buf: Vec<u8>,
+}
+
+impl SparsePrimaryKeyValidator {
+    /// Checks the prefix, all label framing and UTF-8, and rejects duplicate or reserved labels.
+    pub fn validate(&mut self, bytes: &[u8]) -> Result<()> {
+        self.column_ids.clear();
+        validate_prefix(bytes)?;
+        let mut remaining = &bytes[TAGS_START_OFFSET..];
+        while !remaining.is_empty() {
+            let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "truncated label column id",
+                },
+            )?;
+            let column_id = u32::from_be_bytes(*id);
+            ensure!(
+                !ReservedColumnId::is_reserved(column_id),
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "reserved column id in sparse labels",
+                }
+            );
+            ensure!(
+                self.column_ids.insert(column_id),
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "duplicate column id in sparse key",
+                }
+            );
+            let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
+            let length =
+                crate::row_converter::encoded_string_len(encoded).context(DeserializeFieldSnafu)?;
+            let encoded = &encoded[..length];
+            // Framing is already checked; ASCII needs no unchunking to establish valid UTF-8.
+            if encoded[0] != 0 && !encoded.is_ascii() {
+                self.label_buf.clear();
+                self.label_buf.reserve(length);
+                Deserializer::new(&encoded[1..])
+                    .read_bytes_into(&mut self.label_buf)
+                    .context(DeserializeFieldSnafu)?;
+                std::str::from_utf8(&self.label_buf).map_err(|_| {
+                    InvalidSparsePrimaryKeySnafu {
+                        reason: "label is not valid UTF-8",
+                    }
+                    .build()
+                })?;
+            }
+            remaining = &remaining[COLUMN_ID_ENCODE_SIZE + length..];
+        }
+        Ok(())
+    }
+}
+
 /// Inline capacity for the small-vec fast path of [`SparseOffsetsCache`].
 ///
 /// Most sparse primary keys carry only a handful of tags, so a linear scan
@@ -651,6 +709,21 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
     }
 }
 
+fn validate_prefix(pk: &[u8]) -> Result<()> {
+    ensure!(
+        pk.len() >= TAGS_START_OFFSET
+            && pk[..COLUMN_ID_ENCODE_SIZE] == RESERVED_COLUMN_ID_TABLE_ID.to_be_bytes()
+            && pk[TSID_VALUE_OFFSET - COLUMN_ID_ENCODE_SIZE..TSID_VALUE_OFFSET]
+                == RESERVED_COLUMN_ID_TSID.to_be_bytes()
+            && pk[TABLE_ID_VALUE_OFFSET] == 1
+            && pk[TSID_VALUE_OFFSET] == 1,
+        InvalidSparsePrimaryKeySnafu {
+            reason: "invalid table_id/tsid prefix"
+        }
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1011,6 +1084,101 @@ mod tests {
         invalid[0..4].copy_from_slice(&1_u32.to_be_bytes());
         assert!(codec.decode_ids(&invalid).is_err());
         assert!(codec.decode_ids(&buffer[..buffer.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn test_sparse_validator_matches_decoder() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut validator = SparsePrimaryKeyValidator::default();
+        let mut prefix = Vec::new();
+        codec.encode_internal(0, 0, &mut prefix).unwrap();
+        let mut cases = vec![prefix.clone()];
+        let mut max_prefix = Vec::new();
+        codec
+            .encode_internal(u32::MAX, u64::MAX, &mut max_prefix)
+            .unwrap();
+        cases.push(max_prefix);
+
+        for label in ["", "a", "12345678", "123456789", "1234567🦀末尾", "日本語"] {
+            let mut key = prefix.clone();
+            codec
+                .encode_raw_tag_value([(37, label.as_bytes())].into_iter(), &mut key)
+                .unwrap();
+            assert!(validator.validate(&key).is_ok());
+            cases.push(key);
+        }
+
+        // Null labels, unknown IDs and arbitrary label order are accepted by the decoder.
+        let mut labels = prefix.clone();
+        labels.extend_from_slice(&12_u32.to_be_bytes());
+        labels.push(0);
+        codec
+            .encode_raw_tag_value(
+                [(999, b"unknown".as_slice()), (0, b"first".as_slice())].into_iter(),
+                &mut labels,
+            )
+            .unwrap();
+        assert!(validator.validate(&labels).is_ok());
+        cases.push(labels.clone());
+
+        // Padding outside the significant bytes has never been required to be zero.
+        let mut padded = cases[3].clone();
+        let padding_offset = padded.len() - 2;
+        padded[padding_offset] = 0xff;
+        assert!(codec.decode(&padded).is_ok());
+        assert!(validator.validate(&padded).is_ok());
+        cases.push(padded);
+
+        for id in [
+            12,
+            RESERVED_COLUMN_ID_TABLE_ID,
+            RESERVED_COLUMN_ID_TSID,
+            u32::MAX,
+        ] {
+            let mut invalid = labels.clone();
+            invalid.extend_from_slice(&id.to_be_bytes());
+            invalid.push(0);
+            assert!(codec.decode(&invalid).is_err());
+            assert!(validator.validate(&invalid).is_err());
+            cases.push(invalid);
+        }
+        for label in [
+            b"\xff".as_slice(),
+            b"\xc0\xaf",
+            b"\xed\xa0\x80",
+            b"1234567\xf4\x90\x80\x80",
+        ] {
+            let mut invalid = prefix.clone();
+            codec
+                .encode_raw_tag_value([(37, label)].into_iter(), &mut invalid)
+                .unwrap();
+            assert!(codec.decode(&invalid).is_err());
+            assert!(validator.validate(&invalid).is_err());
+            cases.push(invalid);
+        }
+
+        // Reuse the same scratch state across successes and failures, including every
+        // truncation and byte substitution in this corpus of framing and UTF-8 boundaries.
+        let mut compare = |bytes: &[u8]| {
+            assert_eq!(
+                validator.validate(bytes).is_ok(),
+                codec.decode(bytes).is_ok(),
+                "{bytes:02x?}"
+            );
+        };
+        for key in cases {
+            compare(&key);
+            for end in 0..key.len() {
+                compare(&key[..end]);
+            }
+            for offset in 0..key.len() {
+                let mut mutated = key.clone();
+                for byte in 0..=u8::MAX {
+                    mutated[offset] = byte;
+                    compare(&mutated);
+                }
+            }
+        }
     }
 
     #[test]

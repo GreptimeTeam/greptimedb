@@ -96,6 +96,91 @@ async fn scan_num_rows(engine: &MitoEngine, region_id: RegionId) -> usize {
     batches.iter().map(|batch| batch.num_rows()).sum()
 }
 
+#[tokio::test]
+async fn test_encoded_sparse_keys_reject_whole_batch_and_replay() {
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, WriteHint};
+    use mito_codec::row_converter::SparsePrimaryKeyCodec;
+
+    for bulk in [false, true] {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(MitoConfig::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let create = CreateRequestBuilder::new()
+            .insert_option("primary_key_encoding", "sparse")
+            .build();
+        let table_dir = create.table_dir.clone();
+        let options = create.options.clone();
+        let mut schema = rows_schema(&create);
+        schema[0].column_name = "__primary_key".to_string();
+        schema[0].datatype = ColumnDataType::Binary as i32;
+        schema.swap(1, 2);
+        engine
+            .handle_request(region_id, RegionRequest::Create(create))
+            .await
+            .unwrap();
+
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut key = Vec::new();
+        codec.encode_internal(0, 0, &mut key).unwrap();
+        codec
+            .encode_raw_tag_value([(0, "1234567🦀".as_bytes())].into_iter(), &mut key)
+            .unwrap();
+        let mut malformed = key.clone();
+        malformed.push(0); // A truncated label ID after a valid Unicode label.
+        let request = |second: &[u8]| {
+            if bulk {
+                bulk_request(
+                    region_id,
+                    vec![
+                        column(
+                            "__primary_key",
+                            Arc::new(BinaryArray::from_vec(vec![key.as_slice(), second])),
+                        ),
+                        field(),
+                        ts(),
+                    ],
+                )
+            } else {
+                let mut rows = build_rows(0, 2);
+                for (row, key) in rows.iter_mut().zip([key.as_slice(), second]) {
+                    row.values[0].value_data = Some(ValueData::BinaryValue(key.to_vec()));
+                    row.values.swap(1, 2);
+                }
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: schema.clone(),
+                        rows,
+                    },
+                    hint: Some(WriteHint {
+                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                    }),
+                    skip_wal: false,
+                    partition_expr_version: None,
+                })
+            }
+        };
+        let error = engine
+            .handle_request(region_id, request(&malformed))
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(0, scan_num_rows(&engine, region_id).await);
+        // Byte validation follows WAL append; replay must also discard the malformed batch.
+        reopen_region(&engine, region_id, table_dir.clone(), true, options.clone()).await;
+        assert_eq!(0, scan_num_rows(&engine, region_id).await);
+        engine
+            .handle_request(region_id, request(&key))
+            .await
+            .unwrap();
+        assert_eq!(2, scan_num_rows(&engine, region_id).await);
+
+        reopen_region(&engine, region_id, table_dir, true, options).await;
+        assert_eq!(2, scan_num_rows(&engine, region_id).await);
+        engine.stop().await.unwrap();
+    }
+}
+
 /// Batches that do not match the region schema are rejected before they are
 /// appended to the WAL, and the region keeps accepting writes.
 #[tokio::test]
