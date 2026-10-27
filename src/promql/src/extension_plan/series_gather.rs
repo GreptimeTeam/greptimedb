@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
-use datafusion::execution::memory_pool::MemoryReservation;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::frame::LabelDecodeSpec;
@@ -221,30 +221,51 @@ impl Stream for SeriesGather {
 /// Decoding a partition (the scan's batch conversion, the frame codec and the label decode) is most
 /// of what reading it costs, and the gather runs on one task: without this, that work for every
 /// partition of every input runs there one chunk at a time.
+///
+/// The chunks a task has read and not handed over yet are charged to `pool`.
 pub(crate) fn spawn_partitions(
     streams: Vec<(usize, SendableRawSeriesStream)>,
+    pool: &Arc<dyn MemoryPool>,
 ) -> Vec<(usize, SendableRawSeriesStream)> {
     if streams.len() < 2 {
         return streams;
     }
     streams
         .into_iter()
-        .map(|(source, stream)| (source, spawn_partition(stream)))
+        .map(|(source, stream)| {
+            let reservation = MemoryConsumer::new("SpawnedRawSeriesPartition").register(pool);
+            (source, spawn_partition(stream, reservation))
+        })
         .collect()
 }
 
-/// Chunks a spawned partition reads ahead of the gather, beyond the one its task holds. Like a
-/// scan's own partition channel, they are not charged to a reservation.
+/// Chunks a spawned partition queues ahead of the gather. With the one its task holds while the
+/// queue is full, a partition reads at most this many plus one chunks ahead, of any series: this
+/// bound is per partition and separate from the one series per stream the gather holds back.
 const SPAWNED_READ_AHEAD: usize = 2;
 
-fn spawn_partition(mut stream: SendableRawSeriesStream) -> SendableRawSeriesStream {
+type SpawnedItem = Result<(RawSeriesChunk, MemoryReservation), BoxedError>;
+
+fn spawn_partition(
+    mut stream: SendableRawSeriesStream,
+    reservation: MemoryReservation,
+) -> SendableRawSeriesStream {
     let schema = Arc::clone(stream.schema());
     let label_source = stream.label_source().clone();
     let label_decode_spec = stream.label_decode_spec().cloned();
     let ordering = stream.ordering();
-    let (sender, receiver) = mpsc::channel(SPAWNED_READ_AHEAD);
+    let (sender, receiver) = mpsc::channel::<SpawnedItem>(SPAWNED_READ_AHEAD);
     let task = common_runtime::spawn_query(async move {
         while let Some(item) = stream.next().await {
+            // Each chunk carries its own charge, so a chunk dropped anywhere on the way, in the
+            // queue or in a task that is aborted, frees what it was charged.
+            let item = item.and_then(|chunk| {
+                let charge = reservation.new_empty();
+                charge
+                    .try_grow(raw_bytes(&chunk))
+                    .map_err(|error| BoxedError::new(common_query::error::Error::from(error)))?;
+                Ok((chunk, charge))
+            });
             let failed = item.is_err();
             if sender.send(item).await.is_err() || failed {
                 return;
@@ -267,7 +288,7 @@ struct SpawnedPartition {
     label_source: RawLabelSource,
     label_decode_spec: Option<LabelDecodeSpec>,
     ordering: SeriesOrdering,
-    receiver: mpsc::Receiver<Result<RawSeriesChunk, BoxedError>>,
+    receiver: mpsc::Receiver<SpawnedItem>,
     task: common_runtime::JoinHandle<()>,
     /// Whether `task` was seen to finish, after which its handle must not be polled again.
     finished: bool,
@@ -288,7 +309,8 @@ impl Stream for SpawnedPartition {
         let this = self.get_mut();
         match this.receiver.poll_recv(cx) {
             Poll::Ready(None) if !this.finished => {}
-            polled => return polled,
+            // The gather charges what it holds on to itself.
+            polled => return polled.map(|item| item.map(|item| item.map(|(chunk, _)| chunk))),
         }
         // The channel also closes when the task panics, and that end must not read as the end of
         // the partition: what it had not sent yet would be missing from the answer.
@@ -458,9 +480,12 @@ mod tests {
         })
     }
 
+    fn unbounded_pool() -> Arc<dyn MemoryPool> {
+        Arc::new(UnboundedMemoryPool::default())
+    }
+
     fn unbounded() -> MemoryReservation {
-        MemoryConsumer::new("test")
-            .register(&(Arc::new(UnboundedMemoryPool::default()) as Arc<dyn MemoryPool>))
+        MemoryConsumer::new("test").register(&unbounded_pool())
     }
 
     fn keys(chunks: &[(usize, RawSeriesChunk)]) -> Vec<(usize, String, bool)> {
@@ -642,10 +667,64 @@ mod tests {
     async fn dropping_a_spawned_partition_releases_its_stream() {
         let (sender, receiver) = mpsc::channel(1);
         let (other, _) = scripted(Vec::new());
-        drop(spawn_partitions(vec![(0, channel(receiver)), (0, other)]));
+        drop(spawn_partitions(
+            vec![(0, channel(receiver)), (0, other)],
+            &unbounded_pool(),
+        ));
         tokio::time::timeout(Duration::from_secs(5), sender.closed())
             .await
             .expect("the spawned task kept reading after its partition was dropped");
+    }
+
+    /// The chunks a spawned partition has read ahead are charged until they are handed over, and a
+    /// pool that cannot hold the next one ends the partition in an error.
+    #[tokio::test]
+    async fn read_ahead_chunks_are_charged_until_handed_over() {
+        async fn reserved_reaches(pool: &Arc<dyn MemoryPool>, bytes: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while pool.reserved() != bytes {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("reserved {} bytes, expected {bytes}", pool.reserved()));
+        }
+        let key = "k".repeat(1024);
+        let chunks = || {
+            scripted(
+                (0..6)
+                    .map(|time| Step::Chunk(chunk(&key, time, time == 5)))
+                    .collect(),
+            )
+            .0
+        };
+        let bytes = raw_bytes(&chunk(&key, 0, false));
+        let pool = Arc::new(GreedyMemoryPool::new(1 << 20)) as Arc<dyn MemoryPool>;
+
+        let (empty, _) = scripted(Vec::new());
+        let mut streams = spawn_partitions(vec![(0, chunks()), (0, empty)], &pool);
+        // Two queued and the one the task holds while the queue is full.
+        reserved_reaches(&pool, (SPAWNED_READ_AHEAD + 1) * bytes).await;
+        let mut partition = streams.remove(0).1;
+        for _ in 0..3 {
+            partition.next().await.unwrap().unwrap();
+        }
+        // What was handed over is no longer charged: only the last three chunks are.
+        reserved_reaches(&pool, 3 * bytes).await;
+        let mut read = 3;
+        while let Some(chunk) = partition.next().await {
+            chunk.unwrap();
+            read += 1;
+        }
+        assert_eq!(6, read);
+        assert_eq!(0, pool.reserved());
+
+        let small = Arc::new(GreedyMemoryPool::new(bytes - 1)) as Arc<dyn MemoryPool>;
+        let (empty, _) = scripted(Vec::new());
+        let mut streams = spawn_partitions(vec![(0, chunks()), (0, empty)], &small);
+        let mut partition = streams.remove(0).1;
+        assert!(matches!(partition.next().await, Some(Err(_))));
+        assert!(partition.next().await.is_none());
     }
 
     /// A partition whose task panics ends in an error, not in an end that would drop the chunks it
@@ -671,7 +750,10 @@ mod tests {
             }
         }
         let (other, _) = scripted(Vec::new());
-        let mut streams = spawn_partitions(vec![(0, other), (0, Box::pin(Panics(schema())))]);
+        let mut streams = spawn_partitions(
+            vec![(0, other), (0, Box::pin(Panics(schema())))],
+            &unbounded_pool(),
+        );
         let mut panicking = streams.pop().unwrap().1;
         assert!(matches!(panicking.next().await, Some(Err(_))));
         assert!(panicking.next().await.is_none());

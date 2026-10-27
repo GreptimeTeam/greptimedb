@@ -331,7 +331,10 @@ impl ExecutionPlan for RawSeriesSourceExec {
         pack_raw_series(Box::pin(GatheredRawSeries {
             schema: Arc::clone(&self.series_schema),
             label_source: RawLabelSource::Explicit,
-            inputs: SeriesGather::new(spawn_partitions(inputs), reservation),
+            inputs: SeriesGather::new(
+                spawn_partitions(inputs, &context.runtime_env().memory_pool),
+                reservation,
+            ),
         }))
     }
 }

@@ -1236,7 +1236,10 @@ impl ExecutionPlan for FusedSeriesExec {
         } else {
             let reservation = MemoryConsumer::new(format!("FusedSeriesGather[{partition}]"))
                 .register(&context.runtime_env().memory_pool);
-            Some(SeriesGather::new(spawn_partitions(streams), reservation))
+            Some(SeriesGather::new(
+                spawn_partitions(streams, &context.runtime_env().memory_pool),
+                reservation,
+            ))
         };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
