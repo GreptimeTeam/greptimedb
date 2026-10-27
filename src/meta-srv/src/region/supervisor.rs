@@ -19,9 +19,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use common_meta::DatanodeId;
-use common_meta::affinity::{
-    AffinityFallback, AffinityReference, AffinityRequirements, AffinityResolverRef,
-};
+use common_meta::affinity::{AffinityFallback, AffinityReference, AffinityResolverRef};
 use common_meta::datanode::Stat;
 use common_meta::ddl::{DetectingRegion, RegionFailureDetectorController};
 use common_meta::key::runtime_switch::RuntimeSwitchManagerRef;
@@ -47,7 +45,7 @@ use tokio::time::{MissedTickBehavior, interval, interval_at};
 use crate::discovery::utils::accept_ingest_workload;
 use crate::error::{self, Result};
 use crate::failure_detector::PhiAccrualFailureDetectorOptions;
-use crate::metasrv::{RegionStatAwareSelectorRef, SelectTarget, SelectorContext, SelectorRef};
+use crate::metasrv::{RegionStatAwareSelectorRef, SelectorContext, SelectorRef};
 use crate::metrics::METRIC_META_HEARTBEAT_DROPPED;
 use crate::procedure::region_migration::manager::{
     RegionMigrationManagerRef, RegionMigrationTriggerReason, SubmitRegionMigrationTaskResult,
@@ -672,7 +670,7 @@ impl RegionSupervisor {
 
     /// Selects a target for each of `regions`, excluding `failure_datanodes`, the unschedulable
     /// datanodes and the region's datanodes in `excluded_by_region`. Regions without a candidate
-    /// are skipped.
+    /// are left out.
     async fn select_peers(
         &self,
         from_peer_id: DatanodeId,
@@ -723,86 +721,59 @@ impl RegionSupervisor {
             .map(|datanode| datanode.peer.id);
         exclude_peer_ids.extend(unschedulable_datanodes);
 
-        let empty = BTreeSet::new();
-        let mut groups = BTreeMap::<_, Vec<_>>::new();
-        for region_id in regions {
-            let excluded = excluded_by_region.get(region_id).unwrap_or(&empty);
-            groups.entry(excluded).or_default().push(*region_id);
-        }
-        let mut region_peers = Vec::with_capacity(regions.len());
-        for (excluded, regions) in groups {
-            let exclude_peer_ids = exclude_peer_ids.iter().chain(excluded).copied().collect();
-            match self
-                .select_group(from_peer_id, &regions, exclude_peer_ids, affinity.as_ref())
-                .await
-            {
-                Ok(peers) => region_peers.extend(peers),
-                // Other groups may still have candidates.
-                Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
-                    error!(err; "No failover target for regions: {:?}, excluded: {:?}", regions, excluded)
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(region_peers)
-    }
-
-    /// Selects a target for each of `regions`, excluding `exclude_peer_ids`.
-    async fn select_group(
-        &self,
-        from_peer_id: DatanodeId,
-        regions: &[RegionId],
-        exclude_peer_ids: HashSet<u64>,
-        affinity: Option<&AffinityRequirements>,
-    ) -> Result<Vec<(RegionId, Peer)>> {
-        match &self.selector {
+        let region_peers = match &self.selector {
             RegionSupervisorSelector::NaiveSelector(selector) => {
-                let opts = SelectorOptions {
-                    affinity,
-                    min_required_items: regions.len(),
-                    allow_duplication: true,
-                    exclude_peer_ids,
-                    workload_filter: Some(accept_ingest_workload),
-                };
-                let peers = selector.select(&self.selector_context, opts).await?;
-                ensure!(
-                    peers.len() == regions.len(),
-                    error::NoEnoughAvailableNodeSnafu {
-                        required: regions.len(),
-                        available: peers.len(),
-                        select_target: SelectTarget::Datanode,
+                // It doesn't balance across regions, so regions that exclude the same datanodes
+                // are selected together.
+                let empty = BTreeSet::new();
+                let mut groups = BTreeMap::<_, Vec<_>>::new();
+                for region_id in regions {
+                    let excluded = excluded_by_region.get(region_id).unwrap_or(&empty);
+                    groups.entry(excluded).or_default().push(*region_id);
+                }
+                let mut region_peers = Vec::with_capacity(regions.len());
+                for (excluded, regions) in groups {
+                    let mut exclude_peer_ids = exclude_peer_ids.clone();
+                    exclude_peer_ids.extend(excluded);
+                    let opts = SelectorOptions {
+                        affinity: affinity.as_ref(),
+                        min_required_items: regions.len(),
+                        allow_duplication: true,
+                        exclude_peer_ids,
+                        workload_filter: Some(accept_ingest_workload),
+                    };
+                    match selector.select(&self.selector_context, opts).await {
+                        Ok(peers) if peers.len() == regions.len() => {
+                            region_peers.extend(regions.into_iter().zip(peers))
+                        }
+                        // Other groups may still have candidates.
+                        Ok(_) | Err(error::Error::NoEnoughAvailableNode { .. }) => {}
+                        Err(err) => return Err(err),
                     }
-                );
-                let region_peers = regions
-                    .iter()
-                    .zip(peers)
-                    .map(|(region_id, peer)| (*region_id, peer))
-                    .collect::<Vec<_>>();
-
-                Ok(region_peers)
+                }
+                region_peers
             }
             RegionSupervisorSelector::RegionStatAwareSelector(selector) => {
-                let peers = selector
+                selector
                     .select(
                         &self.selector_context,
                         from_peer_id,
                         regions,
                         exclude_peer_ids,
-                        affinity,
+                        excluded_by_region,
+                        affinity.as_ref(),
                     )
-                    .await?;
-                ensure!(
-                    peers.len() == regions.len(),
-                    error::NoEnoughAvailableNodeSnafu {
-                        required: regions.len(),
-                        available: peers.len(),
-                        select_target: SelectTarget::Datanode,
-                    }
-                );
-
-                Ok(peers)
+                    .await?
             }
+        };
+        let unplaced = regions
+            .iter()
+            .filter(|region_id| region_peers.iter().all(|(placed, _)| placed != *region_id))
+            .collect::<Vec<_>>();
+        if !unplaced.is_empty() {
+            error!("No failover target for regions: {:?}", unplaced);
         }
+        Ok(region_peers)
     }
 
     async fn generate_failover_tasks(
@@ -1096,7 +1067,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_failover_affinity_fallback_and_selector_errors() {
-        use std::collections::HashSet;
+        use std::collections::{BTreeSet, HashSet};
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         use common_meta::affinity::{
@@ -1211,11 +1182,13 @@ pub(crate) mod tests {
                 source: u64,
                 regions: &[RegionId],
                 excluded: HashSet<u64>,
+                excluded_by_region: &HashMap<RegionId, BTreeSet<u64>>,
                 affinity: Option<&AffinityRequirements>,
             ) -> Result<Self::Output> {
                 assert_eq!(ctx.affinity_fallback, self.expected_fallback);
                 assert_eq!(source, 7);
                 assert_eq!(excluded, HashSet::from([8]));
+                assert!(excluded_by_region.is_empty());
                 Ok(regions
                     .iter()
                     .copied()
@@ -1262,16 +1235,24 @@ pub(crate) mod tests {
                         vec![(regions[0], Peer::empty(9)), (regions[1], Peer::empty(9))]
                     );
                 } else {
-                    match outcome {
-                        // Regions without a candidate are skipped.
-                        Outcome::Short | Outcome::Exhausted => assert!(result.unwrap().is_empty()),
-                        Outcome::Error => {
-                            assert!(matches!(
-                                result.unwrap_err(),
-                                error::Error::Unexpected { .. }
-                            ))
+                    match (outcome, stat_aware) {
+                        // The stat-aware selector leaves out regions without a candidate.
+                        (Outcome::Short, true) => {
+                            assert_eq!(result.unwrap(), vec![(regions[0], Peer::empty(9))])
                         }
-                        Outcome::Success => unreachable!(),
+                        (Outcome::Exhausted, true) => assert!(matches!(
+                            result.unwrap_err(),
+                            error::Error::NoEnoughAvailableNode { .. }
+                        )),
+                        // Other selectors skip a group without enough candidates.
+                        (Outcome::Short | Outcome::Exhausted, false) => {
+                            assert!(result.unwrap().is_empty())
+                        }
+                        (Outcome::Error, _) => assert!(matches!(
+                            result.unwrap_err(),
+                            error::Error::Unexpected { .. }
+                        )),
+                        (Outcome::Success, _) => unreachable!(),
                     }
                 }
                 assert_eq!(
@@ -1352,15 +1333,16 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn test_failover_excludes_route_followers() {
-        use std::collections::HashSet as StdHashSet;
+        use std::collections::{BTreeSet, HashSet as StdHashSet};
 
+        use common_meta::affinity::AffinityRequirements;
         use common_meta::key::MetadataKey;
         use common_meta::key::table_route::TableRouteKey;
         use common_meta::rpc::store::PutRequest;
 
         use crate::error::{self, Result};
         use crate::metasrv::SelectTarget;
-        use crate::selector::{Selector, SelectorOptions};
+        use crate::selector::{RegionStatAwareSelector, Selector, SelectorOptions};
 
         /// Records each selection, and has no candidate once datanode 3 is excluded.
         struct RecordingSelector(Mutex<Vec<(StdHashSet<u64>, usize)>>);
@@ -1390,6 +1372,41 @@ pub(crate) mod tests {
                     .fail();
                 }
                 Ok(vec![Peer::empty(3); required])
+            }
+        }
+
+        /// Records each batch, and places a region on datanode 3 unless the region excludes it.
+        struct StatAwareRecorder(Mutex<Vec<(Vec<RegionId>, HashMap<RegionId, BTreeSet<u64>>)>>);
+
+        #[async_trait::async_trait]
+        impl RegionStatAwareSelector for StatAwareRecorder {
+            type Context = SelectorContext;
+            type Output = Vec<(RegionId, Peer)>;
+
+            async fn select(
+                &self,
+                _ctx: &Self::Context,
+                _from_peer_id: u64,
+                region_ids: &[RegionId],
+                exclude_peer_ids: StdHashSet<u64>,
+                excluded_by_region: &HashMap<RegionId, BTreeSet<u64>>,
+                _affinity: Option<&AffinityRequirements>,
+            ) -> Result<Self::Output> {
+                assert_eq!(exclude_peer_ids, StdHashSet::from([8]));
+                let excludes_3 = |region_id: &RegionId| {
+                    excluded_by_region
+                        .get(region_id)
+                        .is_some_and(|excluded| excluded.contains(&3))
+                };
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((region_ids.to_vec(), excluded_by_region.clone()));
+                Ok(region_ids
+                    .iter()
+                    .filter(|region_id| !excludes_3(region_id))
+                    .map(|region_id| (*region_id, Peer::empty(3)))
+                    .collect())
             }
         }
 
@@ -1453,6 +1470,33 @@ pub(crate) mod tests {
             failed_over,
             [regions[0], regions[4], regions[2], regions[3]]
         );
+
+        // The stat-aware selector gets the whole batch with each region's followers.
+        let stat_aware = Arc::new(StatAwareRecorder(Mutex::new(vec![])));
+        supervisor.selector = RegionSupervisorSelector::RegionStatAwareSelector(stat_aware.clone());
+        let tasks = supervisor
+            .generate_failover_tasks(8, &regions, &[8])
+            .await
+            .unwrap();
+        let followers = HashMap::from([
+            (regions[0], BTreeSet::new()),
+            (regions[1], BTreeSet::from([3])),
+            (regions[2], BTreeSet::from([4])),
+            (regions[3], BTreeSet::from([4])),
+        ]);
+        assert_eq!(
+            *stat_aware.0.lock().unwrap(),
+            vec![(regions.clone(), followers)]
+        );
+        let failed_over = tasks
+            .iter()
+            .map(|(task, _)| task.region_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            failed_over,
+            [regions[0], regions[2], regions[3], regions[4]]
+        );
+        supervisor.selector = RegionSupervisorSelector::NaiveSelector(selector.clone());
 
         // A route that can't be read leaves every region without followers, as before.
         supervisor

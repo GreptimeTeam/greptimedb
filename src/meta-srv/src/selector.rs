@@ -20,7 +20,7 @@ pub mod round_robin;
 pub(crate) mod test_utils;
 pub mod weight_compute;
 pub mod weighted_choose;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
 use common_meta::affinity::AffinityRequirements;
@@ -43,6 +43,10 @@ pub trait Selector: Send + Sync {
 ///
 /// It selects the best destination peer for a list of regions.
 /// The selection is based on the region statistics, such as the region leader's write throughput.
+///
+/// A region is never placed on `exclude_peer_ids`, nor on its own peers in `excluded_by_region`.
+/// A region without a remaining candidate is left out of the output instead of failing the
+/// selection of the others.
 #[async_trait::async_trait]
 pub trait RegionStatAwareSelector: Send + Sync {
     type Context;
@@ -54,6 +58,7 @@ pub trait RegionStatAwareSelector: Send + Sync {
         from_peer_id: u64,
         region_ids: &[RegionId],
         exclude_peer_ids: HashSet<u64>,
+        excluded_by_region: &HashMap<RegionId, BTreeSet<u64>>,
         affinity: Option<&AffinityRequirements>,
     ) -> Result<Self::Output>;
 }
