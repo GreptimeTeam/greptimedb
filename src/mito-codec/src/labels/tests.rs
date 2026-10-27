@@ -15,14 +15,13 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_time::timestamp::TimeUnit;
-use common_time::{Date, Timestamp};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::prelude::Value;
 use datatypes::schema::ColumnSchema;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
 use store_api::region_engine::BoundTag;
+use store_api::region_engine::RawLabelSource;
 use store_api::storage::RegionId;
 
 use crate::row_converter::{
@@ -122,591 +121,95 @@ fn values() -> Vec<(u32, Value)> {
 }
 
 #[test]
-fn dense_and_sparse_decode_complete_or_projected_labels() {
-    for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
-        let source = source(
-            string_metadata(encoding),
-            "requests_total",
-            &[(8, "zeta"), (41, "alpha")],
-        );
-        let key = encoded(encoding, &values());
-        let mut all = PrimaryKeyLabelDecoder::new(&source, LabelProjection::All).unwrap();
-        let complete = all.decode(&key).unwrap();
-        let DecodedLabels::Complete(metric) = complete else {
-            panic!("All must return a complete metric identity")
-        };
-        assert_eq!(metric.name(), Some("requests_total"));
-        assert_eq!(metric.get("alpha"), Some("first"));
-        assert_eq!(metric.get("zeta"), Some("last"));
-        assert_eq!(metric.get("private"), None);
-
-        let mut projected = PrimaryKeyLabelDecoder::new(
-            &source,
-            LabelProjection::Only(Arc::from([
-                Arc::<str>::from("zeta"),
-                Arc::from("alpha"),
-                Arc::from("__name__"),
-                Arc::from("missing"),
-                Arc::from("alpha"),
-            ])),
-        )
-        .unwrap();
-        assert_eq!(
-            projected.decode(&key).unwrap(),
-            DecodedLabels::Projected(vec![
-                Label {
-                    name: Arc::from("__name__"),
-                    value: Arc::from("requests_total")
-                },
-                Label {
-                    name: Arc::from("alpha"),
-                    value: Arc::from("first")
-                },
-                Label {
-                    name: Arc::from("zeta"),
-                    value: Arc::from("last")
-                },
-            ])
-        );
-        assert_eq!(
-            projected.decode(&key).unwrap(),
-            DecodedLabels::Projected(vec![
-                Label {
-                    name: Arc::from("__name__"),
-                    value: Arc::from("requests_total")
-                },
-                Label {
-                    name: Arc::from("alpha"),
-                    value: Arc::from("first")
-                },
-                Label {
-                    name: Arc::from("zeta"),
-                    value: Arc::from("last")
-                },
-            ])
-        );
-
-        let mut without_name = PrimaryKeyLabelDecoder::new(
-            &source,
-            LabelProjection::Only(Arc::from([Arc::<str>::from("alpha")])),
-        )
-        .unwrap();
-        assert_eq!(
-            without_name.decode(&key).unwrap(),
-            DecodedLabels::Projected(vec![Label {
-                name: Arc::from("alpha"),
-                value: Arc::from("first")
-            }])
-        );
-
-        let mut empty_projection =
-            PrimaryKeyLabelDecoder::new(&source, LabelProjection::Only(Arc::from([]))).unwrap();
-        assert_eq!(
-            empty_projection.decode(&key).unwrap(),
-            DecodedLabels::Projected(vec![])
-        );
-    }
-}
-
-#[test]
-fn projection_snapshots_its_layout_and_distinguishes_missing_and_empty() {
-    let original = metadata(
-        &[
-            (21, "old", ConcreteDataType::string_datatype()),
-            (4, "added_later", ConcreteDataType::string_datatype()),
-        ],
-        PrimaryKeyEncoding::Sparse,
-    );
-    let old_source = source(
-        original.clone(),
-        "old_metric",
-        &[(21, "old"), (4, "added_later")],
-    );
-    let weak_metadata = Arc::downgrade(&original);
-    let replacement = metadata(
-        &[(21, "renamed", ConcreteDataType::string_datatype())],
-        PrimaryKeyEncoding::Sparse,
-    );
-    let new_source = source(replacement, "new_metric", &[(21, "renamed")]);
-    assert!(PrimaryKeyLabelDecoder::new(&new_source, LabelProjection::All).is_ok());
-
-    let codec = SparsePrimaryKeyCodec::with_fields(vec![(
-        21,
-        SortField::new(ConcreteDataType::string_datatype()),
-    )]);
-    let mut key = Vec::new();
-    codec.encode_internal(42, 9, &mut key).unwrap();
-    codec
-        .encode_values(&[(21, Value::String("".into()))], &mut key)
-        .unwrap();
-    let mut decoder = PrimaryKeyLabelDecoder::new(
-        &old_source,
-        LabelProjection::Only(Arc::from([
-            Arc::<str>::from("old"),
-            Arc::from("added_later"),
-        ])),
-    )
-    .unwrap();
-    let mut all = PrimaryKeyLabelDecoder::new(&old_source, LabelProjection::All).unwrap();
-    drop(old_source);
-    drop(original);
-    assert!(
-        weak_metadata.upgrade().is_none(),
-        "the decoder keeps its own key layout (ids, positions, types), not the region metadata"
-    );
-    assert_eq!(
-        decoder.decode(&key).unwrap(),
-        DecodedLabels::Projected(vec![Label {
-            name: Arc::from("old"),
-            value: Arc::from("")
-        },])
-    );
-
-    let mut absent = Vec::new();
-    codec.encode_internal(42, 9, &mut absent).unwrap();
-    assert_eq!(
-        decoder.decode(&absent).unwrap(),
-        DecodedLabels::Projected(vec![])
-    );
-    let DecodedLabels::Complete(absent_tags) = all.decode(&absent).unwrap() else {
-        panic!("All must return complete identity")
-    };
-    assert_eq!(absent_tags.get("old"), None);
-    let DecodedLabels::Complete(empty_tag) = all.decode(&key).unwrap() else {
-        panic!("All must return complete identity")
-    };
-    assert_eq!(empty_tag.get("old"), Some(""));
-    let mut complete = PrimaryKeyLabelDecoder::new(
-        &source(
-            metadata(
-                &[(21, "old", ConcreteDataType::string_datatype())],
-                PrimaryKeyEncoding::Sparse,
-            ),
-            "",
-            &[(21, "old")],
-        ),
-        LabelProjection::All,
-    )
-    .unwrap();
-    let DecodedLabels::Complete(empty_name) = complete.decode(&absent).unwrap() else {
-        panic!("All must return complete identity")
-    };
-    assert_eq!(empty_name.name(), Some(""));
-    let named_source = source(
-        metadata(
-            &[(21, "old", ConcreteDataType::string_datatype())],
-            PrimaryKeyEncoding::Sparse,
-        ),
-        "old_metric",
-        &[(21, "old")],
-    );
-    let mut complete = PrimaryKeyLabelDecoder::new(&named_source, LabelProjection::All).unwrap();
-    let DecodedLabels::Complete(named) = complete.decode(&absent).unwrap() else {
-        panic!("All must return complete identity")
-    };
-    assert_eq!(named.name(), Some("old_metric"));
-    // A null value is represented by its sparse column ID and null marker.
-    let mut null = Vec::new();
-    codec.encode_internal(42, 9, &mut null).unwrap();
-    null.extend_from_slice(&21_u32.to_be_bytes());
-    null.push(0);
-    assert_eq!(
-        decoder.decode(&null).unwrap(),
-        DecodedLabels::Projected(vec![])
-    );
-    drop(decoder);
-    drop(all);
-    assert!(weak_metadata.upgrade().is_none());
-}
-
-#[test]
-fn projection_does_not_hide_bad_framing_or_materialize_unselected_values() {
-    let meta = metadata(
-        &[
-            (11, "wanted", ConcreteDataType::string_datatype()),
-            (35, "unwanted", ConcreteDataType::string_datatype()),
-        ],
-        PrimaryKeyEncoding::Sparse,
-    );
-    let bound = source(meta, "m", &[(11, "wanted"), (35, "unwanted")]);
-    let codec = SparsePrimaryKeyCodec::with_fields(vec![
-        (11, SortField::new(ConcreteDataType::string_datatype())),
-        (35, SortField::new(ConcreteDataType::string_datatype())),
-    ]);
-    let mut key = Vec::new();
-    codec.encode_internal(42, 9, &mut key).unwrap();
-    codec
-        .encode_raw_tag_value(
-            [(11, b"ok".as_slice()), (35, &[0xff])].into_iter(),
-            &mut key,
-        )
-        .unwrap();
-
-    let mut only = PrimaryKeyLabelDecoder::new(
-        &bound,
-        LabelProjection::Only(Arc::from([Arc::<str>::from("wanted")])),
-    )
-    .unwrap();
-    assert_eq!(
-        only.decode(&key).unwrap(),
-        DecodedLabels::Projected(vec![Label {
-            name: Arc::from("wanted"),
-            value: Arc::from("ok")
-        },])
-    );
-    let mut all = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All).unwrap();
-    assert!(all.decode(&key).is_err());
-    let mut malformed = key.clone();
-    malformed.pop();
-    assert!(only.decode(&malformed).is_err());
-    assert!(all.decode(&malformed).is_err());
-    let mut empty_projection =
-        PrimaryKeyLabelDecoder::new(&bound, LabelProjection::Only(Arc::from([]))).unwrap();
-    assert!(empty_projection.decode(&malformed).is_err());
-}
-
-#[test]
-fn dense_projection_still_rejects_short_and_extra_key_bytes() {
-    let meta = metadata(
-        &[(17, "label", ConcreteDataType::string_datatype())],
-        PrimaryKeyEncoding::Dense,
-    );
-    let bound = source(meta, "m", &[(17, "label")]);
-    let key = encoded(
-        PrimaryKeyEncoding::Dense,
-        &[(17, Value::String("ok".into()))],
-    );
-    let mut decoder =
-        PrimaryKeyLabelDecoder::new(&bound, LabelProjection::Only(Arc::from([]))).unwrap();
-    assert!(decoder.decode(&key[..key.len() - 1]).is_err());
-    let mut extra = key;
-    extra.push(0);
-    assert!(decoder.decode(&extra).is_err());
-}
-
-#[test]
-fn dense_unselected_invalid_utf8_is_not_materialized() {
-    let meta = metadata(
-        &[
-            (17, "wanted", ConcreteDataType::string_datatype()),
-            (18, "unwanted", ConcreteDataType::string_datatype()),
-        ],
-        PrimaryKeyEncoding::Dense,
-    );
-    let bound = source(meta, "m", &[(17, "wanted"), (18, "unwanted")]);
-    let first_value = encoded(
-        PrimaryKeyEncoding::Dense,
-        &[(17, Value::String("ok".into()))],
-    );
-    let mut key = encoded(
-        PrimaryKeyEncoding::Dense,
-        &[
-            (17, Value::String("ok".into())),
-            (18, Value::String("x".into())),
-        ],
-    );
-    key[first_value.len() + 2] = 0xff;
-    let mut only = PrimaryKeyLabelDecoder::new(
-        &bound,
-        LabelProjection::Only(Arc::from([Arc::<str>::from("wanted")])),
-    )
-    .unwrap();
-    assert_eq!(
-        only.decode(&key).unwrap(),
-        DecodedLabels::Projected(vec![Label {
-            name: Arc::from("wanted"),
-            value: Arc::from("ok")
-        }])
-    );
-    let mut selected_invalid = PrimaryKeyLabelDecoder::new(
-        &bound,
-        LabelProjection::Only(Arc::from([Arc::<str>::from("unwanted")])),
-    )
-    .unwrap();
-    assert!(selected_invalid.decode(&key).is_err());
-    let mut all = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All).unwrap();
-    assert!(all.decode(&key).is_err());
-}
-
-#[test]
-fn unknown_sparse_ids_are_skipped_only_for_projection_and_full_keys_stay_distinct() {
-    let meta = metadata(
-        &[(11, "wanted", ConcreteDataType::string_datatype())],
-        PrimaryKeyEncoding::Sparse,
-    );
-    let bound = source(meta, "m", &[(11, "wanted")]);
-    let codec = SparsePrimaryKeyCodec::with_fields(vec![(
-        11,
-        SortField::new(ConcreteDataType::string_datatype()),
-    )]);
-    let mut first = Vec::new();
-    codec.encode_internal(42, 9, &mut first).unwrap();
-    codec
-        .encode_raw_tag_value(
-            [
-                (10, b"before".as_slice()),
-                (11, b"one".as_slice()),
-                (12, b"between".as_slice()),
-                (90, b"after".as_slice()),
-            ]
-            .into_iter(),
-            &mut first,
-        )
-        .unwrap();
-    let original_first = first.clone();
-    let mut second = Vec::new();
-    codec.encode_internal(42, 9, &mut second).unwrap();
-    codec
-        .encode_raw_tag_value(
-            [
-                (10, b"before".as_slice()),
-                (11, b"two".as_slice()),
-                (12, b"between".as_slice()),
-                (90, b"after".as_slice()),
-            ]
-            .into_iter(),
-            &mut second,
-        )
-        .unwrap();
-
-    let mut only = PrimaryKeyLabelDecoder::new(
-        &bound,
-        LabelProjection::Only(Arc::from([Arc::<str>::from("wanted")])),
-    )
-    .unwrap();
-    assert_eq!(
-        only.decode(&first).unwrap(),
-        DecodedLabels::Projected(vec![Label {
-            name: Arc::from("wanted"),
-            value: Arc::from("one")
-        },])
-    );
-    assert_eq!(
-        only.decode(&second).unwrap(),
-        DecodedLabels::Projected(vec![Label {
-            name: Arc::from("wanted"),
-            value: Arc::from("two")
-        },])
-    );
-    assert_ne!(first, second);
-    assert_eq!(first, original_first);
-    let original_second = second.clone();
-
-    let mut all = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All).unwrap();
-    assert!(all.decode(&first).is_err());
-    assert_eq!(first, original_first);
-    assert_eq!(second, original_second);
-}
-
-#[test]
-fn unknown_sparse_ids_before_between_and_after_known_tags_are_projected() {
-    let meta = metadata(
-        &[
-            (11, "wanted", ConcreteDataType::string_datatype()),
-            (13, "other", ConcreteDataType::string_datatype()),
-        ],
-        PrimaryKeyEncoding::Sparse,
-    );
-    let bound = source(meta, "m", &[(11, "wanted"), (13, "other")]);
-    let codec = SparsePrimaryKeyCodec::schemaless();
-    let cases: [&[(u32, &[u8])]; 3] = [
-        &[(10, b"before"), (11, b"one"), (12, b"two")],
-        &[(11, b"one"), (12, b"between"), (13, b"two")],
-        &[(11, b"one"), (13, b"two"), (90, b"after")],
-    ];
-    for tags in cases {
-        let mut key = Vec::new();
-        codec.encode_internal(42, 9, &mut key).unwrap();
-        codec
-            .encode_raw_tag_value(tags.iter().copied(), &mut key)
-            .unwrap();
-        let mut only = PrimaryKeyLabelDecoder::new(
-            &bound,
-            LabelProjection::Only(Arc::from([Arc::<str>::from("wanted")])),
-        )
-        .unwrap();
-        assert_eq!(
-            only.decode(&key).unwrap(),
-            DecodedLabels::Projected(vec![Label {
-                name: Arc::from("wanted"),
-                value: Arc::from("one")
-            }])
-        );
-        let mut all = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All).unwrap();
-        assert!(all.decode(&key).is_err());
-    }
-}
-
-#[test]
-fn constructor_rejects_invalid_bindings_but_accepts_valid_control() {
-    let meta = metadata(
-        &[
-            (11, "wanted", ConcreteDataType::string_datatype()),
-            (35, "other", ConcreteDataType::string_datatype()),
-        ],
-        PrimaryKeyEncoding::Sparse,
-    );
-    for bindings in [
-        vec![(11, "wrong")],
-        vec![(11, "same"), (35, "same")],
-        vec![(11, "wanted"), (11, "wanted")],
-        vec![(0, "ts")],
-        vec![(90, "not_a_tag")],
-        vec![(99, "field")],
-        vec![(11, "__name__")],
-        vec![(u32::MAX, "internal")],
-    ] {
-        let invalid = source(meta.clone(), "m", &bindings);
-        assert!(PrimaryKeyLabelDecoder::new(&invalid, LabelProjection::All).is_err());
-    }
-    let valid = source(meta, "m", &[(11, "wanted"), (35, "other")]);
-    assert!(PrimaryKeyLabelDecoder::new(&valid, LabelProjection::All).is_ok());
-    assert!(PrimaryKeyLabelDecoder::new(&RawLabelSource::Explicit, LabelProjection::All).is_err());
-}
-
-#[test]
-fn dense_typed_values_keep_exact_integer_string_representation() {
-    let cases = [
-        (
-            "count",
-            ConcreteDataType::int64_datatype(),
-            Value::Int64(9_007_199_254_740_993),
-        ),
-        (
-            "binary",
-            ConcreteDataType::binary_datatype(),
-            Value::Binary(vec![0xab, 0xcd].into()),
-        ),
-        (
-            "date",
-            ConcreteDataType::date_datatype(),
-            Value::Date(Date::new(0)),
-        ),
-        (
-            "timestamp",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            Value::Timestamp(Timestamp::new(1234, TimeUnit::Millisecond)),
-        ),
-    ];
-    for (name, data_type, value) in cases {
-        let expected = value.to_string();
-        let meta = metadata(&[(17, name, data_type)], PrimaryKeyEncoding::Dense);
-        let bound = source(meta, "typed", &[(17, name)]);
-        let key = encoded(PrimaryKeyEncoding::Dense, &[(17, value)]);
-        let mut decoder = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All).unwrap();
-        let DecodedLabels::Complete(metric) = decoder.decode(&key).unwrap() else {
-            panic!("All must return a complete metric identity")
-        };
-        assert_eq!(metric.get(name), Some(expected.as_str()));
-    }
-    assert_eq!(
-        Value::Int64(9_007_199_254_740_993).to_string(),
-        "9007199254740993"
-    );
-}
-
-/// One field is enough: the frame schema only carries ordered payload fields and metadata.
-fn frame_series_schema() -> Arc<datatypes::series::samples::SeriesSchema> {
-    Arc::new(datatypes::series::samples::SeriesSchema {
-        fields: vec![datatypes::series::samples::FieldSpec {
-            name: Arc::from("value"),
-        }]
-        .into(),
-        eval_grid: None,
-    })
-}
-
-/// A key-encoded frame's schema describes its own labels: recovering the description from the
-/// schema and decoding with it matches decoding with the original bound source, for both primary
-/// key encodings and both projections.
-#[test]
-fn frame_label_decode_description_decodes_like_the_bound_source() {
+fn dense_and_sparse_decode_complete_labels() {
     for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
         let bound = source(
             string_metadata(encoding),
             "requests_total",
             &[(8, "zeta"), (41, "alpha")],
         );
-        let description = common_query::series_frame::label_decode_spec(&bound)
-            .expect("a primary-key binding describes its key layout");
-        let frame_schema = datatypes::series::frame::series_frame_schema(
-            &frame_series_schema(),
-            datatypes::series::frame::FrameLabelMode::Key,
-            Some(&description),
-        )
-        .unwrap();
-        let recovered = datatypes::series::frame::series_frame_label_decode(&frame_schema)
-            .unwrap()
-            .expect("the frame declares its decode description");
-        assert_eq!(recovered, description);
-
+        let description = common_query::series_frame::label_decode_spec(&bound).unwrap();
         let key = encoded(encoding, &values());
-        for projection in [
-            LabelProjection::All,
-            LabelProjection::Only(Arc::from([Arc::<str>::from("alpha")])),
-            LabelProjection::Only(Arc::from([])),
-        ] {
-            let mut direct = PrimaryKeyLabelDecoder::new(&bound, projection.clone()).unwrap();
-            let mut from_frame =
-                PrimaryKeyLabelDecoder::from_decode_spec(&recovered, projection).unwrap();
-            assert_eq!(
-                from_frame.decode(&key).unwrap(),
-                direct.decode(&key).unwrap()
-            );
-        }
+        let mut decoder = PrimaryKeyLabelDecoder::from_decode_spec(&description).unwrap();
+        let metric = decoder.decode(&key).unwrap();
+        assert_eq!(metric.name(), Some("requests_total"));
+        assert_eq!(metric.get("alpha"), Some("first"));
+        assert_eq!(metric.get("zeta"), Some("last"));
+        assert_eq!(metric.get("private"), None);
     }
 }
 
-/// A description this revision cannot honour is rejected when a decoder is bound, not decoded
-/// best-effort.
 #[test]
-fn frame_label_decode_description_rejects_unsupported_version() {
+fn dense_malformed_key_reports_dense_error() {
     let bound = source(
-        string_metadata(PrimaryKeyEncoding::Dense),
-        "requests_total",
-        &[(8, "zeta")],
+        metadata(
+            &[(17, "label", ConcreteDataType::string_datatype())],
+            PrimaryKeyEncoding::Dense,
+        ),
+        "m",
+        &[(17, "label")],
     );
     let description = common_query::series_frame::label_decode_spec(&bound).unwrap();
-    let mut future = description.clone();
-    future.version += 1;
-    assert!(PrimaryKeyLabelDecoder::from_decode_spec(&future, LabelProjection::All).is_err());
-
-    // The description must list the column a logical tag reads.
-    let mut unbound = description;
-    unbound.primary_key.retain(|column| column.column_id != 8);
-    assert!(PrimaryKeyLabelDecoder::from_decode_spec(&unbound, LabelProjection::All).is_err());
+    let mut decoder = PrimaryKeyLabelDecoder::from_decode_spec(&description).unwrap();
+    let key = encoded(
+        PrimaryKeyEncoding::Dense,
+        &[(17, Value::String("ok".into()))],
+    );
+    let mut extra = key.clone();
+    extra.push(0);
+    let error = decoder.decode(&extra).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::InvalidDensePrimaryKey { .. }
+    ));
+    let error = decoder.decode(&key[..key.len() - 1]).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::DeserializeField { .. }
+    ));
 }
 
-/// A primary-key column that is not a `Tag` column is rejected when a decoder is bound, because the
-/// layout records no per-column role and decodes every listed key column as a tag.
-///
-/// `RegionMetadata::validate` rejects such metadata, so this snapshot is built without validation to
-/// exercise the check the decoder performs itself.
 #[test]
-fn binding_rejects_a_primary_key_column_that_is_not_a_tag() {
-    let mut builder = RegionMetadataBuilder::new(RegionId::new(7, 1));
-    builder.push_column_metadata(ColumnMetadata {
-        column_schema: ColumnSchema::new(
-            "ts",
-            ConcreteDataType::timestamp_millisecond_datatype(),
-            false,
+fn dense_invalid_logical_binding_reports_dense_error() {
+    let bound = source(
+        metadata(
+            &[(17, "label", ConcreteDataType::string_datatype())],
+            PrimaryKeyEncoding::Dense,
         ),
-        semantic_type: SemanticType::Timestamp,
-        column_id: 0,
-    });
-    builder.push_column_metadata(ColumnMetadata {
-        column_schema: ColumnSchema::new("not_a_tag", ConcreteDataType::string_datatype(), true),
-        semantic_type: SemanticType::Field,
-        column_id: 8,
-    });
-    builder.primary_key(vec![8]);
-    builder.primary_key_encoding(PrimaryKeyEncoding::Sparse);
-    let invalid = Arc::new(builder.build_without_validation().unwrap());
-
-    let bound = source(invalid, "m", &[(8, "not_a_tag")]);
-    let error = PrimaryKeyLabelDecoder::new(&bound, LabelProjection::All)
+        "m",
+        &[(17, "label")],
+    );
+    let mut description = common_query::series_frame::label_decode_spec(&bound).unwrap();
+    description.logical_tags[0].name = "wrong_name".to_string();
+    let error = PrimaryKeyLabelDecoder::from_decode_spec(&description)
         .err()
-        .expect("a non-tag primary-key column must be rejected")
-        .to_string();
-    assert!(error.contains("not a tag column"), "{error}");
+        .unwrap();
+    assert!(matches!(
+        error,
+        crate::error::Error::InvalidDensePrimaryKey { .. }
+    ));
+}
+
+#[test]
+fn sparse_malformed_key_reports_sparse_error() {
+    let bound = source(
+        metadata(
+            &[(17, "label", ConcreteDataType::string_datatype())],
+            PrimaryKeyEncoding::Sparse,
+        ),
+        "m",
+        &[(17, "label")],
+    );
+    let description = common_query::series_frame::label_decode_spec(&bound).unwrap();
+    let mut decoder = PrimaryKeyLabelDecoder::from_decode_spec(&description).unwrap();
+    let mut malformed = encoded(
+        PrimaryKeyEncoding::Sparse,
+        &[(17, Value::String("ok".into()))],
+    );
+    malformed.pop();
+    let error = decoder.decode(&malformed).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::error::Error::InvalidSparsePrimaryKey { .. }
+    ));
 }

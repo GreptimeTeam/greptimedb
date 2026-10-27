@@ -479,7 +479,10 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
-    assert_eq!(fallback_ordering, raw_scanner.raw_series_ordering());
+    assert_eq!(
+        fallback_ordering,
+        raw_scanner.raw_series_ordering().unwrap()
+    );
     assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
     assert_eq!(
         vec![(1000, 1.0), (2000, 1.0)],
@@ -522,7 +525,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     let binding = labels(raw_scanner.metadata());
     assert_eq!(
         SeriesOrdering::KeyThenTime,
-        raw_scanner.raw_series_ordering()
+        raw_scanner.raw_series_ordering().unwrap()
     );
     let source = raw_scanner
         .prepare_series(&ctx, &metrics, &binding)
@@ -564,7 +567,10 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
         .await
         .unwrap();
     let binding = labels(raw_scanner.metadata());
-    assert_eq!(fallback_ordering, raw_scanner.raw_series_ordering());
+    assert_eq!(
+        fallback_ordering,
+        raw_scanner.raw_series_ordering().unwrap()
+    );
     assert!(raw_scanner.raw_series_schema(&binding).unwrap().is_some());
     assert!(
         raw_scanner
@@ -1218,6 +1224,25 @@ async fn preflight_rejects_unsupported_assignments_without_artifact_io() {
             .to_string()
             .contains("invalid prepared scan range")
     );
+
+    // The public ordering API must propagate malformed scanner assignments, rather than
+    // silently describing them as an ordinary scan.
+    let mut scan = SeriesScan::new(make_context().input, false);
+    scan.prepare(PrepareRequest::default()).unwrap();
+    let malformed = PartitionRange {
+        identifier: ranges[0].identifier + ranges.len(),
+        ..ranges[0]
+    };
+    // Inject after valid preparation: prepare() also checks scan limits by indexing ranges,
+    // whereas this test targets the ordering API's prepared-input validation.
+    scan.properties.partitions = vec![vec![malformed]];
+    assert!(
+        scan.raw_series_ordering()
+            .unwrap_err()
+            .to_string()
+            .contains("invalid prepared scan range")
+    );
+
     let scan = SeriesScan::new(context.input, false);
     let binding = labels(scan.metadata());
     // The raw path stays available for the ordinary scan and preparation is skipped.

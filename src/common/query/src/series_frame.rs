@@ -57,10 +57,6 @@ use store_api::region_engine::{
     NO_BOUND_LABEL_SOURCE, RawLabelSource, RawSeriesStream, SendableRawSeriesStream,
 };
 
-mod record_batches;
-
-pub use record_batches::{InputMapping, record_batches_to_raw_series};
-
 #[cfg(test)]
 mod tests;
 

@@ -32,6 +32,14 @@ use datatypes::series::samples::{
 use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 
+fn is_resources_exhausted(error: &DataFusionError) -> bool {
+    match error {
+        DataFusionError::ResourcesExhausted(_) => true,
+        DataFusionError::Context(_, inner) => is_resources_exhausted(inner),
+        _ => false,
+    }
+}
+
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
     NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
@@ -264,6 +272,35 @@ fn instant(
             eval_grid: Some(output_grid),
         })),
     }
+}
+
+#[test]
+fn timestamp_instant_rejects_negative_lookback() {
+    let output_grid = grid(500, 1_000, 1);
+    let mut root = instant(input(), -1, 0, Arc::clone(&output_grid));
+    let NativeExpr::Instant { op, .. } = &mut root.expr else {
+        unreachable!();
+    };
+    op.value = InstantValue::Timestamp;
+    op.at_ms = Some(500);
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[500], &[1.0], true),
+        )
+        .unwrap();
+
+    let error = execution
+        .finish()
+        .expect_err("negative lookback was accepted");
+    assert!(
+        error.to_string().contains("lookback must be non-negative"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
 }
 
 fn merge(inner: NativeNode) -> NativeNode {
@@ -522,7 +559,11 @@ fn source_runtime(pool: &Arc<dyn MemoryPool>) -> InputSlot {
         source_index: 0,
         schema: raw_schema(),
         open_source_series: false,
-        state: NodeState::new("native.input", Arc::new(NodeMetrics::default()), pool),
+        state: NodeState::new(
+            "native.input at root (source_index=0)",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
     }
 }
 
@@ -536,7 +577,11 @@ fn binary_runtime(
     schema: &Arc<SeriesSchema>,
 ) -> (NodeState, BinaryRuntime) {
     (
-        NodeState::new("native.binary", Arc::new(NodeMetrics::default()), pool),
+        NodeState::new(
+            "native.binary at root",
+            Arc::new(NodeMetrics::default()),
+            pool,
+        ),
         BinaryRuntime::new(
             PairKernel::Binary(Arc::new(binary_matching(BinaryOp::Add))),
             [Arc::clone(schema), Arc::clone(schema)],
@@ -1140,10 +1185,11 @@ fn timestamp_projection_workspace_failure_releases_runtime() {
             evaluated_chunk(&evaluated_schema(grid(0, 1, 10_000)), 0, vec![1.0], true),
         )
         .unwrap();
-    assert!(matches!(
-        execution.next_chunk(),
-        Err(DataFusionError::ResourcesExhausted(_))
-    ));
+    assert!(
+        execution
+            .next_chunk()
+            .is_err_and(|error| is_resources_exhausted(&error))
+    );
     assert_eq!(pool.reserved(), 0);
     assert_eq!(execution.state().reserved_bytes(), 0);
 }
@@ -1726,6 +1772,10 @@ fn an_error_releases_the_reservation() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(error.to_string().contains("not increasing"), "{error}");
+    assert!(
+        error.to_string().contains("native.window at root"),
+        "{error}"
+    );
     // Everything went back to the pool while the execution is alive: waiting for the drop would
     // keep the query's bytes in use for as long as the caller holds the executor.
     assert_eq!(pool.reserved(), 0);
@@ -1816,13 +1866,60 @@ fn a_fanout_enqueue_failure_releases_every_recipient() {
     let pool = bounded_pool(first_charge);
     let mut execution = executor(&tree, Arc::clone(&pool));
     let ids: Vec<_> = execution.state().input_ids(0).collect();
+    let names = &execution.state().inputs;
+    assert_ne!(
+        names[0].state.buffer.reservation.consumer().name(),
+        names[1].state.buffer.reservation.consumer().name()
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.left.input")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("root.right.input")
+    );
+    assert!(
+        names[0]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
+    assert!(
+        names[1]
+            .state
+            .buffer
+            .reservation
+            .consumer()
+            .name()
+            .contains("source_index=0")
+    );
     let first = ids[0];
     let second = ids[1];
     let error = execution
         .push_raw(first, chunk.clone())
         .and_then(|()| execution.push_raw(second, chunk))
         .expect_err("second fanout recipient exceeded the shared pool");
-    assert!(matches!(error, DataFusionError::ResourcesExhausted(_)));
+    match &error {
+        DataFusionError::Context(context, inner) => {
+            assert_eq!(context, "native.input at root.right.input (source_index=0)");
+            assert!(is_resources_exhausted(inner), "{inner}");
+        }
+        other => panic!("expected input context around resource exhaustion, got {other}"),
+    }
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
     assert!(
@@ -1871,10 +1968,7 @@ fn a_pool_that_cannot_admit_a_chunk_releases_what_it_held() {
             raw_chunk(&schema, &timestamps, &values, true),
         )
         .expect_err("a chunk larger than the pool was admitted");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
 
     // The chunk never entered the queue, and everything the execution held went back to the pool
     // while the executor is still alive.
@@ -2090,6 +2184,12 @@ fn an_input_that_ends_inside_a_collected_series_is_reported() {
             .to_string()
             .contains("ended before the last chunk of a series"),
         "the truncation was reported as {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("native.input at root.input.input (source_index=0)"),
+        "{error}"
     );
     // Nothing was merged and nothing was answered, and everything went back while the executor is
     // alive.
@@ -2686,10 +2786,7 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
     let error = execution
         .next_chunk()
         .expect_err("the chain was admitted by a pool that cannot hold what it makes of the chunk");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
     assert!(
@@ -2763,10 +2860,7 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     let error = execution
         .finish()
         .expect_err("the merge ran without its workspace admitted");
-    assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
-        "{error}"
-    );
+    assert!(is_resources_exhausted(&error), "{error}");
     // Everything the chain held went back while the executor is alive: the fragments, the
     // evaluator and both queues.
     assert_eq!(execution.state().reserved_bytes(), 0);
@@ -5167,7 +5261,7 @@ fn an_instant_selection_reserves_the_workspace_it_gathers() {
 
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the gather's workspace was taken without asking the pool: {error}"
     );
     assert!(
@@ -5275,7 +5369,7 @@ fn a_selection_reserves_the_points_it_decides() {
         .unwrap();
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a series covering the grid was gathered without asking the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -5307,7 +5401,7 @@ fn an_oversized_selection_is_refused_by_the_pool() {
 
     let error = execution.next_chunk().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the gather's workspace was taken without asking the pool: {error}"
     );
     assert!(
@@ -6079,7 +6173,7 @@ fn an_oversized_binary_workspace_is_refused_by_the_pool() {
         .unwrap();
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a point limit answered in the pool's place: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -6106,7 +6200,7 @@ fn an_oversized_binary_operand_is_refused_by_the_pool() {
         .push_evaluated(right, evaluated_chunk(&schema, 0, values, true))
         .unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "an operand limit answered in the pool's place: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -6390,7 +6484,7 @@ fn a_pool_that_holds_one_histogram_table_refuses_a_second() {
         .retain_binary(&mut refused_binary, 0, NativeChunk::Evaluated(second_own))
         .unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "a second chunk holding a table of its own was admitted beside the first: {error}"
     );
     assert_eq!(
@@ -6677,7 +6771,7 @@ fn an_assembly_the_pool_cannot_hold_is_refused_before_it_allocates() {
     assert_eq!(state.buffer.reservation.size(), retained);
     let error = state.compute_binary(&mut binary).unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the assembly was not reserved before it allocated: {error}"
     );
     // The assembly never ran, so its charge is gone: what the node holds is what it retained, and
@@ -6746,7 +6840,7 @@ fn an_assembly_the_executors_pool_cannot_hold_stops_it() {
 
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        is_resources_exhausted(&error),
         "the assembly was not reserved before it allocated: {error}"
     );
     assert_eq!(
@@ -7814,7 +7908,7 @@ fn an_oversized_set_workspace_is_refused_by_the_pool() {
     }
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
         "the set workspace was not refused by the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -7840,6 +7934,13 @@ fn queued_set_results_hold_their_labels_until_handed_on() {
     .unwrap();
     let start = |pool: &Arc<dyn MemoryPool>| {
         let mut execution = executor(&tree, Arc::clone(pool));
+        match &execution.state().root.op {
+            RuntimeOp::Binary { state, .. } => assert_eq!(
+                state.buffer.reservation.consumer().name(),
+                "native.set at root"
+            ),
+            _ => panic!("expected set binary runtime"),
+        }
         let (left, right) = (
             execution.state().input_ids(0).next().unwrap(),
             execution.state().input_ids(1).next().unwrap(),
@@ -8052,7 +8153,7 @@ fn an_oversized_info_workspace_is_refused_by_the_pool() {
         .unwrap();
     let error = execution.finish().unwrap_err();
     assert!(
-        matches!(error, DataFusionError::ResourcesExhausted(_)),
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
         "the info workspace was not refused by the pool: {error}"
     );
     assert_eq!(pool.reserved(), 0);
@@ -9457,10 +9558,16 @@ fn an_aggregate_refuses_a_chunk_of_another_layout_and_returns_its_reservation() 
     let error = execution
         .next_chunk()
         .expect_err("a chunk of another field count was folded");
-    assert!(
-        matches!(error, DataFusionError::Execution(_)),
-        "the refusal is not an execution error: {error}"
-    );
+    match &error {
+        DataFusionError::Context(context, inner) => {
+            assert_eq!(context, "native.aggregate at root");
+            assert!(
+                matches!(inner.as_ref(), DataFusionError::Execution(_)),
+                "{inner}"
+            );
+        }
+        other => panic!("the refusal is not aggregate-contextualized: {other}"),
+    }
     let message = error.to_string();
     assert!(
         message.contains("the `Sum` aggregate"),

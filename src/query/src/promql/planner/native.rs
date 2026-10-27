@@ -1007,7 +1007,7 @@ fn collect_selectors<'a>(
         PromExpr::Call(call)
             if matches!(
                 call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs"
+                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
             ) && call.args.args.len() == 1 =>
         {
             return collect_selectors(stmt, &call.args.args[0], out);
@@ -1188,6 +1188,22 @@ mod tests {
             .iter()
             .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn selector_walk_keeps_plain_selector_identity() {
+        for (query, expected) in [
+            ("timestamp((x @ 2 offset -1s))", vec!["x"]),
+            ("abs(timestamp(x @ 2 offset -1s))", vec!["x"]),
+            ("timestamp(x @ start() offset 1s)", vec!["x"]),
+            ("timestamp(x @ end() offset -1s)", vec!["x"]),
+            (
+                "timestamp(x @ 2 offset 1s) + y @ 2 offset 1s",
+                vec!["x", "y"],
+            ),
+        ] {
+            assert_eq!(collected_selectors(query), expected, "{query}");
+        }
     }
 
     #[test]

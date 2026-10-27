@@ -360,8 +360,9 @@ metadata_cache_tti = "5m"
 ## The query engine options.
 [query]
 
-## Whether to enable experimental native PromQL execution.
-## Default: false
+## Enable experimental native PromQL execution for compatible standalone queries.
+## Requires in-process region transport and the per-request
+## query.experimental_native_promql=true extension. Default: false
 #+ experimental_native_promql = false
 ## Parallelism of the query engine.
 ## Default to 0, which means the number of CPU cores.

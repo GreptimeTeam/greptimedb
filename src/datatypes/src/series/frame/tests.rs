@@ -249,6 +249,28 @@ fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
     }
 }
 
+fn assert_evaluated_sample_equal(actual: SampleRef<'_>, expected: SampleRef<'_>, index: usize) {
+    match (actual, expected) {
+        (SampleRef::Missing, SampleRef::Missing) => {}
+        (SampleRef::Float(actual), SampleRef::Float(expected)) => {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+        }
+        (SampleRef::Histogram(actual), SampleRef::Histogram(expected)) => {
+            assert_eq!(
+                actual.sum.to_bits(),
+                expected.sum.to_bits(),
+                "position {index}"
+            );
+            assert_eq!(
+                actual.count.to_bits(),
+                expected.count.to_bits(),
+                "position {index}"
+            );
+        }
+        _ => panic!("sample kind changed at position {index}"),
+    }
+}
+
 /// Packs one owned chunk through the public cursor/builder pair, mirroring the explicit
 /// single-chunk wrapper: every batch the walk produces, then the final flush.
 fn pack_chunk_with_budget(
@@ -1258,6 +1280,498 @@ fn histogram_payload_and_present_all_null_representation_survive() {
     assert_eq!(mixed.histograms().indices().len(), 2);
     assert!(
         (0..2).all(|i| !mixed.floats().is_valid(i) && !mixed.histograms().indices().is_valid(i))
+    );
+}
+
+fn evaluated_series(schema: &SeriesSchema, spans: Vec<GridSpan>, fields: SeriesFields) -> Series {
+    Series::try_new(
+        schema,
+        metric(Some("cpu"), &[("host", "a")]),
+        TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), spans).unwrap(),
+        fields,
+    )
+    .unwrap()
+}
+
+#[test]
+fn evaluated_sparse_runs_share_row_preserve_gaps_and_finality() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 10, 10).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let values = Float64Array::from(vec![Some(1.0), None, Some(3.0), Some(4.0)]);
+    let series = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 2), GridSpan::new(5, 2)],
+        SeriesFields::one(Samples::from_float(values.clone())),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 4096).unwrap();
+    assert!(cursor.append_to(&mut builder).unwrap().is_none());
+    let batch = builder.flush().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(
+        batch.column(1).len(),
+        1,
+        "labels are encoded once for the row"
+    );
+    let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+        .unwrap()
+        .decode_evaluated(&batch)
+        .unwrap();
+    assert_eq!(decoded.len(), 1);
+    let (decoded, last) = &decoded[0];
+    assert!(*last);
+    assert_eq!(
+        decoded
+            .time
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect::<Vec<_>>(),
+        vec![(0, 2), (5, 2)]
+    );
+    let values = decoded.fields.get(0).unwrap().dense().unwrap();
+    let DenseSamplesRef::Float(values) = values else {
+        panic!("expected float values")
+    };
+    assert_eq!(
+        values,
+        &Float64Array::from(vec![Some(1.0), None, Some(3.0), Some(4.0)])
+    );
+    assert_eq!(decoded.time.row_of(3), None);
+}
+
+#[test]
+fn evaluated_incremental_measure_matches_full_measure_at_exact_byte_budget() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 16).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let metric = metric(Some("cpu"), &[("host", "a")]);
+    let floats = Float64Array::from(
+        (0..9)
+            .map(|index| (index != 3 && index != 6).then_some(index as f64))
+            .collect::<Vec<_>>(),
+    );
+    let table = histogram_batch();
+    let indices = UInt32Array::from(
+        (0..9)
+            .map(|index| (index != 3 && index != 6).then_some(0))
+            .collect::<Vec<_>>(),
+    );
+    let mixed_indices = UInt32Array::from(
+        (0..9)
+            .map(|index| (index == 3 || index == 6).then_some(0))
+            .collect::<Vec<_>>(),
+    );
+    let cases = vec![
+        Samples::from_float(floats.clone()),
+        Samples::try_from_histogram(indices.clone(), table.clone()).unwrap(),
+        Samples::try_from_mixed(
+            floats,
+            crate::series::samples::HistogramSamples::try_new(mixed_indices, table).unwrap(),
+        )
+        .unwrap(),
+    ];
+    for samples in cases {
+        let whole = FrameRow {
+            key: None,
+            metric: Some(metric.clone()),
+            is_last: true,
+            time: RowTime::Spans(vec![GridSpan::new(0, 8), GridSpan::new(10, 1)]),
+            samples: vec![samples.clone()],
+            bytes: 0,
+        };
+        let exact_budget = measure_row(&whole).unwrap();
+        for (budget, expected_rows) in [(exact_budget, 1), (exact_budget - 1, 2)] {
+            let series = evaluated_series(
+                &schema,
+                vec![GridSpan::new(0, 8), GridSpan::new(10, 1)],
+                SeriesFields::one(samples.clone()),
+            );
+            let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+            let mut builder =
+                SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, budget)
+                    .unwrap();
+            let mut batches = Vec::new();
+            while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+                batches.push(batch);
+            }
+            if let Some(batch) = builder.flush().unwrap() {
+                batches.push(batch);
+            }
+            assert_eq!(
+                batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+                expected_rows
+            );
+            let decoded = batches
+                .iter()
+                .flat_map(|batch| {
+                    SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                        .unwrap()
+                        .decode_evaluated(batch)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                decoded
+                    .iter()
+                    .map(|(series, _)| series.time.len())
+                    .sum::<usize>(),
+                9
+            );
+            assert_eq!(decoded.iter().filter(|(_, is_last)| *is_last).count(), 1);
+            assert!(decoded.last().unwrap().1);
+            assert_eq!(
+                decoded
+                    .iter()
+                    .flat_map(|(series, _)| series.time.runs())
+                    .map(|run| (run.position, run.len))
+                    .collect::<Vec<_>>(),
+                [(0, 8), (10, 1)]
+            );
+            let decoded_samples = decoded
+                .iter()
+                .flat_map(|(series, _)| {
+                    (0..series.time.len())
+                        .map(move |index| series.fields.get(0).unwrap().sample(index))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(decoded_samples.len(), 9);
+            for (index, actual) in decoded_samples.into_iter().enumerate() {
+                assert_evaluated_sample_equal(actual, samples.sample(index), index);
+            }
+        }
+    }
+}
+
+#[test]
+fn evaluated_many_sparse_runs_form_one_row_without_losing_positions() {
+    let base = test_schema(&["value"]);
+    let spans = (0..128)
+        .map(|run| GridSpan::new(run * 2, 1))
+        .collect::<Vec<_>>();
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 256).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let missing = |index| matches!(index, 7 | 8 | 63 | 64 | 127);
+    let floats = (0..128)
+        .map(|index| match index {
+            index if missing(index) => None,
+            0 => Some(f64::from_bits(0x7ff8_0000_dead_beef)),
+            1 => Some(-0.0),
+            _ => Some(index as f64),
+        })
+        .collect::<Vec<_>>();
+    let histograms = (0..128)
+        .map(|index| (!missing(index)).then_some(0))
+        .collect::<Vec<_>>();
+    let mixed_floats = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 0).then(|| floats[index].unwrap()))
+        .collect::<Vec<_>>();
+    let mixed_histograms = (0..128)
+        .map(|index| (!missing(index) && index % 2 == 1).then_some(0))
+        .collect::<Vec<_>>();
+    let prefix_float = |values: Vec<Option<f64>>| {
+        Float64Array::from(
+            std::iter::once(Some(999.0))
+                .chain(values)
+                .collect::<Vec<_>>(),
+        )
+        .slice(1, 128)
+    };
+    let prefix_indices = |values: Vec<Option<u32>>| {
+        UInt32Array::from(std::iter::once(Some(999)).chain(values).collect::<Vec<_>>())
+            .slice(1, 128)
+    };
+    let table = histogram_batch();
+    let cases = vec![
+        Samples::from_float(prefix_float(floats)),
+        Samples::try_from_histogram(prefix_indices(histograms), table.clone()).unwrap(),
+        Samples::try_from_mixed(
+            prefix_float(mixed_floats),
+            crate::series::samples::HistogramSamples::try_new(
+                prefix_indices(mixed_histograms),
+                table,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    ];
+    for samples in cases {
+        let series = evaluated_series(&schema, spans.clone(), SeriesFields::one(samples.clone()));
+        let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+        let mut builder =
+            SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1 << 20)
+                .unwrap();
+        while cursor.append_to(&mut builder).unwrap().is_some() {}
+        let batch = builder.flush().unwrap().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+            .unwrap()
+            .decode_evaluated(&batch)
+            .unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert!(decoded[0].1);
+        assert_eq!(
+            decoded[0]
+                .0
+                .time
+                .runs()
+                .map(|run| (run.position, run.len))
+                .collect::<Vec<_>>(),
+            spans
+                .iter()
+                .map(|span| (span.start(), span.len()))
+                .collect::<Vec<_>>()
+        );
+        let decoded_samples = decoded[0].0.fields.get(0).unwrap();
+        for index in 0..128 {
+            assert_evaluated_sample_equal(
+                decoded_samples.sample(index),
+                samples.sample(index),
+                index,
+            );
+        }
+    }
+}
+
+#[test]
+fn evaluated_rows_stop_at_earliest_field_segment_and_builder_bounds() {
+    let base = test_schema(&["a", "b"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 12).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let first = Samples::try_from_chunks(vec![
+        Samples::from_float(Float64Array::from(vec![Some(1.0), Some(2.0)])),
+        Samples::from_float(Float64Array::from(vec![Some(3.0), Some(4.0)])),
+    ])
+    .unwrap();
+    let second = Samples::from_float(Float64Array::from(vec![Some(10.0); 4]));
+    let series = evaluated_series(
+        &schema,
+        vec![
+            GridSpan::new(0, 1),
+            GridSpan::new(3, 1),
+            GridSpan::new(6, 1),
+            GridSpan::new(9, 1),
+        ],
+        SeriesFields::try_from_vec(vec![first, second]).unwrap(),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 1, 4096).unwrap();
+    let mut rows = Vec::new();
+    while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+        rows.extend(
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(&batch)
+                .unwrap(),
+        );
+    }
+    if let Some(batch) = builder.flush().unwrap() {
+        rows.extend(
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(&batch)
+                .unwrap(),
+        );
+    }
+    assert_eq!(
+        rows.iter().map(|(s, _)| s.time.len()).collect::<Vec<_>>(),
+        vec![2, 2]
+    );
+    assert_eq!(
+        rows.iter()
+            .flat_map(|(s, _)| s.fields.get(0).unwrap().iter().map(|v| match v {
+                SampleRef::Float(v) => v,
+                _ => panic!(),
+            }))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
+    assert!(rows.last().unwrap().1);
+}
+
+#[test]
+fn evaluated_available_bytes_preserve_pending_intersection_and_oversized_is_atomic() {
+    let base = test_schema(&["value"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 8).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let series = evaluated_series(
+        &schema,
+        vec![
+            GridSpan::new(0, 1),
+            GridSpan::new(2, 1),
+            GridSpan::new(4, 1),
+            GridSpan::new(6, 1),
+        ],
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(4.0),
+        ]))),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 190).unwrap();
+    let batches = {
+        let mut out = Vec::new();
+        while let Some(batch) = cursor.append_to(&mut builder).unwrap() {
+            out.push(batch);
+        }
+        if let Some(batch) = builder.flush().unwrap() {
+            out.push(batch);
+        }
+        out
+    };
+    let rows = batches
+        .iter()
+        .flat_map(|batch| {
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(batch)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 4);
+    assert_eq!(
+        rows.iter()
+            .flat_map(|(s, _)| s.fields.get(0).unwrap().iter().map(|v| match v {
+                SampleRef::Float(v) => v,
+                _ => panic!(),
+            }))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0, 3.0, 4.0]
+    );
+    assert!(rows.last().unwrap().1);
+
+    let oversized = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 1), GridSpan::new(2, 1)],
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+            Some(1.0),
+            Some(2.0),
+        ]))),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, oversized, true).unwrap();
+    let mut tiny =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 1).unwrap();
+    let first = cursor.append_to(&mut tiny).unwrap().unwrap();
+    assert_eq!(
+        first.num_rows(),
+        1,
+        "oversized atomic intersection cannot absorb another run"
+    );
+    let second = cursor.append_to(&mut tiny).unwrap().unwrap();
+    assert_eq!(second.num_rows(), 1);
+    assert!(cursor.append_to(&mut tiny).unwrap().is_none());
+    let decoded = [first, second]
+        .iter()
+        .flat_map(|batch| {
+            SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+                .unwrap()
+                .decode_evaluated(batch)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        decoded
+            .iter()
+            .flat_map(|(series, _)| series.fields.get(0).unwrap().iter().map(
+                |sample| match sample {
+                    SampleRef::Float(value) => value,
+                    _ => panic!(),
+                }
+            ))
+            .collect::<Vec<_>>(),
+        vec![1.0, 2.0]
+    );
+    assert!(decoded.last().unwrap().1);
+}
+
+#[test]
+fn evaluated_histogram_sparse_row_retains_full_table_and_indices() {
+    let base = test_schema(&["hist"]);
+    let schema = SeriesSchema {
+        fields: base.fields,
+        eval_grid: Some(Arc::new(
+            crate::series::time::EvalGrid::try_new(
+                crate::series::time::GridSpec::try_new(0, 1, 8).unwrap(),
+            )
+            .unwrap(),
+        )),
+    };
+    let table = histogram_batch();
+    let indices = UInt32Array::from(vec![Some(0), None, Some(1)]);
+    let samples = Samples::try_from_histogram(indices.clone(), table.clone()).unwrap();
+    let series = evaluated_series(
+        &schema,
+        vec![GridSpan::new(0, 1), GridSpan::new(3, 2)],
+        SeriesFields::one(samples),
+    );
+    let mut cursor = SeriesFrameCursor::try_new_evaluated(&schema, series, true).unwrap();
+    let mut builder =
+        SeriesFrameBuilder::try_new(&schema, FrameLabelMode::Explicit, None, 8, 4096).unwrap();
+    while cursor.append_to(&mut builder).unwrap().is_some() {}
+    let batch = builder.flush().unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 1);
+    let decoded = SeriesFrameDecoder::try_new(&schema, FrameLabelMode::Explicit, None)
+        .unwrap()
+        .decode_evaluated(&batch)
+        .unwrap();
+    let DenseSamplesRef::Histogram(hist) = decoded[0].0.fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("expected histogram")
+    };
+    assert_eq!(
+        hist.batch().len(),
+        table.len(),
+        "unused histogram table entries remain present"
+    );
+    assert_eq!(hist.indices(), &indices);
+    assert_eq!(
+        decoded[0]
+            .0
+            .time
+            .runs()
+            .map(|run| (run.position, run.len))
+            .collect::<Vec<_>>(),
+        vec![(0, 1), (3, 2)]
     );
 }
 
@@ -3318,7 +3832,7 @@ fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
     for chunk in &chunks {
         let mut cursor =
             SeriesFrameCursor::try_new_raw(&schema, FrameLabelMode::Key, chunk.clone()).unwrap();
-        measured.push(cursor.next_row().unwrap().unwrap().bytes);
+        measured.push(cursor.next_row(None).unwrap().unwrap().bytes);
     }
     let budget = measured[0] + measured[1] - 1;
 

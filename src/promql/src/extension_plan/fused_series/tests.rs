@@ -3637,6 +3637,11 @@ async fn a_partial_fold_exports_state_from_every_partition() {
     .expect("a rate tree with a partial count is executable");
 
     assert_eq!(
+        datafusion::physical_plan::execution_plan::EmissionType::Final,
+        exec.properties().emission_type,
+        "the partial state is emitted only after the input reaches EOF"
+    );
+    assert_eq!(
         2,
         exec.properties().output_partitioning().partition_count(),
         "the node's partition count is its input's"
