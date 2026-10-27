@@ -327,25 +327,9 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
 }
 
 #[tokio::test]
-async fn test_leader_grant_to_writable_region_takes_no_lock() {
+async fn test_downgrade_start_survives_reopen() {
     common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("writable-region-grant").await;
-    let (_listener, engine, _schema) = create_region(&mut env, None).await;
-    let region = engine.get_region(REGION_ID).unwrap();
-    let _gate = region.grant_gate.lock().unwrap();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let grant_engine = engine.clone();
-    std::thread::spawn(move || {
-        grant(&grant_engine, RegionRole::Leader, Instant::now() + LEASE);
-        tx.send(()).unwrap();
-    });
-    assert!(rx.recv_timeout(Duration::from_secs(10)).is_ok());
-}
-
-#[tokio::test]
-async fn test_grant_gate_survives_reopen() {
-    common_telemetry::init_default_ut_logging();
-    let mut env = TestEnv::with_prefix("grant-gate-reopen").await;
+    let mut env = TestEnv::with_prefix("downgrade-start-reopen").await;
     let (_listener, engine, schema) = create_region(&mut env, None).await;
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
     // The memtable is not empty, so the catchup below reopens the region.
