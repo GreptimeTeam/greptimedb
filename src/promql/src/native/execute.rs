@@ -304,13 +304,13 @@ struct OpenSeries {
     last_position: Option<usize>,
 }
 
-/// The input a window with a [`RuntimeOp::Window`] collects until its input ends.
+/// The input a [`RuntimeOp::Window`] or a [`RuntimeOp::Merge`] collects until its input ends.
 ///
-/// Such a window cannot evaluate the series under one canonical label set one after another: its
-/// evaluator closes a series on the chunk carrying `is_last`, and the points a window across the
-/// boundary needs are exactly the ones that closed series held. The fragments are therefore kept
-/// whole, merged into one series per label set with
-/// [`crate::grid_series::merge_same_labelset`], and only then evaluated.
+/// Either node cannot answer one label set at a time: their evaluators and consumers close a series
+/// on the chunk carrying `is_last`, and the points a window across the boundary needs — or the
+/// fragments a canonical merge has to combine — are exactly the ones those closed series held. The
+/// fragments are therefore kept whole, merged into one series per label set with
+/// [`crate::grid_series::merge_same_labelset`], and only then evaluated or emitted.
 ///
 /// Collecting is also where the contract a series keeps is checked, because the merge that follows
 /// would hide a stream that broke it: it sorts the rows by position and groups them by label set, so

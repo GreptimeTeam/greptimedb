@@ -382,10 +382,14 @@ pub struct NativeNode {
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// Four kinds do: an `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two
-/// vectors' series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
-/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
-/// an input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
+/// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
+/// by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`,
+/// ...) reorders or reads the whole vector at a grid point.
+///
+/// `Merge` answers one series per label set, and the label sets it answers span every input series:
+/// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
+/// also cannot be moved below a boundary that holds only part of a metric. Everything else - an
+/// input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
 /// side, whose broadcast reaches each series the other side answers - answers one series from one
 /// series' rows.
 ///

@@ -3086,6 +3086,80 @@ fn merge_canonicalizes_complementary_series_and_flushes_only_at_eof() {
     assert!(execution.next_chunk().unwrap().is_none());
 }
 
+/// A parent reads a merge's answer only once the merge has flushed.
+///
+/// `Merge` is the only node that answers nothing until its input ends, so a parent that treats it
+/// as settled would compute over an empty vector. The tree here is the shape that exposes it: two
+/// merges over complementary pieces of one label set, combined by a binary operation. Each side
+/// answers 3 once merged, and the parent answers only at EOF.
+#[test]
+fn a_parent_of_a_merge_waits_for_the_flush() {
+    let grid = grid(0, 1, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = NativeTree::try_new(binary_of(
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 0)),
+        merge(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
+        binary_matching(BinaryOp::Add),
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    let metric = named_metric("same", "x");
+    // Each side hands its label set over in two complementary pieces, so nothing can be answered
+    // until both arrive and the flush merges them.
+    for source in 0..2 {
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    0,
+                    vec![Some(1.0), Some(1.0)],
+                    false,
+                ),
+            )
+            .unwrap();
+        execution
+            .push_evaluated(
+                InputId::new(source),
+                evaluated_chunk_of(&schema, metric.clone(), 2, vec![Some(1.0), Some(1.0)], true),
+            )
+            .unwrap();
+    }
+    assert!(
+        execution.next_chunk().unwrap().is_none(),
+        "a merge owes its answer until its input ends, so its parent owes its own"
+    );
+    execution.end_of_input().unwrap();
+    let chunk = execution
+        .next_chunk()
+        .unwrap()
+        .expect("the parent answers once both merges flushed");
+    // A binary operation drops `__name__`, as Prometheus does, so the answer carries the tag both
+    // merged sides shared and no metric name.
+    let mut expected_metric = metric.clone();
+    expected_metric.remove("__name__");
+    assert_eq!(chunk.series.metric, expected_metric);
+    let values = chunk
+        .series
+        .fields
+        .get(0)
+        .expect("one field")
+        .iter()
+        .map(|sample| match sample {
+            SampleRef::Float(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        values,
+        vec![Some(2.0), Some(2.0), Some(2.0), Some(2.0)],
+        "each merged side answers 1 at every position, so their sum is 2"
+    );
+    assert!(chunk.is_last);
+    assert!(execution.next_chunk().unwrap().is_none());
+}
+
 #[test]
 fn standalone_merge_keeps_queued_label_bytes_reserved_until_drain() {
     const SERIES: usize = 64;
