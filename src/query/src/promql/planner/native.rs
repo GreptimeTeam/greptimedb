@@ -841,7 +841,7 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => None,
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -894,6 +894,7 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
             matches!(input.expr, NativeExpr::Input(_))
         }
         NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => pointwise_operand(input),
+        NativeExpr::Merge { .. } => false,
         // A constant on one side is broadcast over the vector side's positions. Two vectors are a
         // match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
@@ -1100,6 +1101,7 @@ mod tests {
                 NativeExpr::Input(input) => sources.push(input.source_index),
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
+                | NativeExpr::Merge { input }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Timestamp { input } => collect(input, sources),
                 NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {

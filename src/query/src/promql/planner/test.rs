@@ -2536,6 +2536,7 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 NativeExpr::Input(input) => out.push(input.source_index),
                 NativeExpr::Instant { input, .. }
                 | NativeExpr::Window { input, .. }
+                | NativeExpr::Merge { input }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Timestamp { input } => sources(input, out),
                 NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
