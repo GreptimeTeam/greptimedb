@@ -19,8 +19,8 @@ use datafusion::execution::registry::SerializerRegistry;
 use datafusion_common::DataFusionError;
 use datafusion_expr::UserDefinedLogicalNode;
 use promql::extension_plan::{
-    Absent, EmptyMetric, HistogramFold, InstantManipulate, RangeManipulate, ScalarCalculate,
-    SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    Absent, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate, RangeManipulate,
+    ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
 
 #[derive(Debug)]
@@ -31,6 +31,13 @@ impl SerializerRegistry for ExtensionSerializer {
     /// input plans.
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
         match node.name() {
+            name if name == FusedSeries::name() => {
+                let fused = node
+                    .as_any()
+                    .downcast_ref::<FusedSeries>()
+                    .expect("Failed to downcast to FusedSeries");
+                fused.serialize()
+            }
             name if name == InstantManipulate::name() => {
                 let instant_manipulate = node
                     .as_any()
@@ -105,6 +112,7 @@ impl SerializerRegistry for ExtensionSerializer {
         bytes: &[u8],
     ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
         match name {
+            name if name == FusedSeries::name() => Ok(Arc::new(FusedSeries::deserialize(bytes)?)),
             name if name == InstantManipulate::name() => {
                 let instant_manipulate = InstantManipulate::deserialize(bytes)?;
                 Ok(Arc::new(instant_manipulate))

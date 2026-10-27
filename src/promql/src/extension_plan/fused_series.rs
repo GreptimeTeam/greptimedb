@@ -232,6 +232,173 @@ pub struct FusedSeries {
 }
 
 impl FusedSeries {
+    /// Serializes the native tree and the binding required to reconstruct this plan node.
+    /// The PromQL text is included for diagnostics only and never drives execution; children
+    /// remain ordinary Substrait inputs. Version 1 supports only SeriesFrame without partial folds:
+    /// decoding must rebuild its output schema, and only SeriesFrame derives that schema from the tree.
+    pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
+        if self.format != FusedOutputFormat::SeriesFrame {
+            return Err(DataFusionError::NotImplemented(
+                "FusedSeries serialization does not support PlainRows output schema".into(),
+            ));
+        }
+        if self.partial_fold.is_some() {
+            return Err(DataFusionError::NotImplemented(
+                "FusedSeries serialization does not support partial_fold".into(),
+            ));
+        }
+        fn text(out: &mut Vec<u8>, s: &str) -> DataFusionResult<()> {
+            let n = u32::try_from(s.len())
+                .map_err(|_| DataFusionError::Plan("FusedSeries string too long".into()))?;
+            out.extend(n.to_le_bytes());
+            out.extend(s.as_bytes());
+            Ok(())
+        }
+        let tree = crate::native::wire::encode_prefix(&self.tree)
+            .map_err(|e| DataFusionError::Plan(format!("cannot encode FusedSeries tree: {e}")))?;
+        let mut out = Vec::new();
+        out.extend(1u32.to_le_bytes());
+        out.extend(
+            u32::try_from(tree.len())
+                .map_err(|_| DataFusionError::Plan("FusedSeries tree too large".into()))?
+                .to_le_bytes(),
+        );
+        out.extend(tree);
+        let spec = self.binding.grid.spec();
+        out.extend(spec.start_ms.to_le_bytes());
+        out.extend(spec.step_ms.to_le_bytes());
+        out.extend(spec.len.to_le_bytes());
+        match &self.binding.metric_name {
+            Some(name) => {
+                out.push(1);
+                text(&mut out, name)?;
+            }
+            None => out.push(0),
+        }
+        text(&mut out, &self.binding.time_index)?;
+        out.extend(
+            u32::try_from(self.binding.tags.len())
+                .map_err(|_| DataFusionError::Plan("too many FusedSeries tags".into()))?
+                .to_le_bytes(),
+        );
+        for tag in &self.binding.tags {
+            text(&mut out, tag)?;
+        }
+        out.push(1); // explicit stable tag: SeriesFrame
+        text(&mut out, &self.promql)?;
+        Ok(out)
+    }
+
+    /// Rebuilds a serialized SeriesFrame node. Substrait attaches its child plans separately.
+    pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
+        struct Reader<'a> {
+            b: &'a [u8],
+            p: usize,
+        }
+        impl<'a> Reader<'a> {
+            fn take(&mut self, n: usize) -> DataFusionResult<&'a [u8]> {
+                let e = self
+                    .p
+                    .checked_add(n)
+                    .ok_or_else(|| DataFusionError::Plan("FusedSeries length overflow".into()))?;
+                if e > self.b.len() {
+                    return Err(DataFusionError::Plan(
+                        "truncated FusedSeries payload".into(),
+                    ));
+                }
+                let r = &self.b[self.p..e];
+                self.p = e;
+                Ok(r)
+            }
+            fn u8(&mut self) -> DataFusionResult<u8> {
+                Ok(self.take(1)?[0])
+            }
+            fn u32(&mut self) -> DataFusionResult<u32> {
+                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+            }
+            fn i64(&mut self) -> DataFusionResult<i64> {
+                Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+            }
+            fn u64(&mut self) -> DataFusionResult<u64> {
+                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+            }
+            fn text(&mut self) -> DataFusionResult<String> {
+                let n = self.u32()? as usize;
+                String::from_utf8(self.take(n)?.to_vec())
+                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries UTF-8: {e}")))
+            }
+        }
+        let mut r = Reader { b: bytes, p: 0 };
+        let version = r.u32()?;
+        if version != 1 {
+            return Err(DataFusionError::Plan(format!(
+                "unsupported FusedSeries envelope version {version}"
+            )));
+        }
+        let n = r.u32()? as usize;
+        let tree = crate::native::wire::decode_prefix(r.take(n)?)
+            .map_err(|e| DataFusionError::Plan(format!("cannot decode FusedSeries tree: {e}")))?;
+        let grid = Arc::new(
+            EvalGrid::try_deferred(
+                datatypes::series::time::GridSpec::try_new(r.i64()?, r.i64()?, r.u64()?)
+                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
+            )
+            .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
+        );
+        let metric_name = match r.u8()? {
+            0 => None,
+            1 => Some(Arc::<str>::from(r.text()?)),
+            x => {
+                return Err(DataFusionError::Plan(format!(
+                    "invalid FusedSeries metric-name tag {x}"
+                )));
+            }
+        };
+        let time_index = r.text()?;
+        let count = r.u32()? as usize;
+        if count > 1024 {
+            return Err(DataFusionError::Plan("too many FusedSeries tags".into()));
+        }
+        let mut tags = Vec::with_capacity(count);
+        for _ in 0..count {
+            tags.push(r.text()?)
+        }
+        let format = match r.u8()? {
+            1 => FusedOutputFormat::SeriesFrame,
+            x => {
+                return Err(DataFusionError::Plan(format!(
+                    "unsupported FusedSeries output format tag {x}"
+                )));
+            }
+        };
+        let promql = Arc::<str>::from(r.text()?);
+        if r.p != bytes.len() {
+            return Err(DataFusionError::Plan(
+                "trailing bytes in FusedSeries payload".into(),
+            ));
+        }
+        let children = vec![
+            LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                produce_one_row: false,
+                schema: Arc::new(datafusion::common::DFSchema::empty())
+            });
+            collect_source_schemas(&tree)?.len()
+        ];
+        Self::try_new_with_format(
+            promql,
+            tree,
+            FusedSeriesBinding {
+                grid,
+                metric_name,
+                time_index,
+                tags,
+            },
+            children,
+            Arc::new(datafusion::common::DFSchema::empty()),
+            format,
+        )
+    }
+
     /// The name this node is shown under.
     pub const fn name() -> &'static str {
         "FusedSeries"
@@ -332,6 +499,11 @@ impl FusedSeries {
     /// The PromQL text this node was compiled from.
     pub fn promql(&self) -> &str {
         &self.promql
+    }
+
+    /// The selected output representation.
+    pub fn format(&self) -> FusedOutputFormat {
+        self.format
     }
 
     /// The compiled tree this node runs.

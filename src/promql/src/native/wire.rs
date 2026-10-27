@@ -15,8 +15,8 @@
 //! Native prefix wire format, protocol version 1.
 //!
 //! Layout: `u32 version`, then recursive node. Node tags are 1 Input, 2 Instant, 3 Window,
-//! 4 Map; all integers are little-endian. Input is source index (u64), ordering tag (2 means
-//! KeyThenTime), followed by a raw samples schema: field count (u32), each UTF-8 field name
+//! 4 Map; all integers are little-endian. Input is source index (u64), ordering tag (0
+//! Interleaved, 1 Contiguous, 2 KeyThenTime), followed by a raw samples schema: field count (u32), each UTF-8 field name
 //! (u32 byte length + bytes). Instant stores lookback i64, offset i64, optional-at marker + i64,
 //! timestamp bool byte, then output grid. Window stores function tag and its arguments, range i64,
 //! offset i64, optional-anchor marker + i64, modifier tag (0 none, 1 anchored, 2 smoothed) and
@@ -181,10 +181,14 @@ fn enc_node(n: &NativeNode, w: &mut W, d: usize) -> Result<(), String> {
         NativeExpr::Input(i) => {
             w.u8(1);
             w.u64(i.source_index as u64);
-            if i.ordering != SeriesOrdering::KeyThenTime {
-                return Err("unsupported Input ordering".into());
-            }
-            w.u8(2);
+            // The ordering is data, not a policy of this format: every value is carried so the
+            // tree decides on decode whether it is legal for its consumers (a window refuses only
+            // `Interleaved`). Refusing one here would make the wire narrower than the node.
+            w.u8(match i.ordering {
+                SeriesOrdering::Interleaved => 0,
+                SeriesOrdering::Contiguous => 1,
+                SeriesOrdering::KeyThenTime => 2,
+            });
             let NativeType::Samples(s) = &i.output else {
                 return Err("unsupported Input output type".into());
             };
@@ -377,9 +381,12 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
     match r.u8()? {
         1 => {
             let ix = usize::try_from(r.u64()?).map_err(|_| "source index overflow")?;
-            if r.u8()? != 2 {
-                return Err("unsupported Input ordering".into());
-            }
+            let ordering = match r.u8()? {
+                0 => SeriesOrdering::Interleaved,
+                1 => SeriesOrdering::Contiguous,
+                2 => SeriesOrdering::KeyThenTime,
+                x => return Err(format!("unsupported Input ordering tag {x}")),
+            };
             let n = r.u32()? as usize;
             if n > MAX_COUNT {
                 return Err("operation count exceeds maximum".into());
@@ -396,7 +403,7 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
                 expr: NativeExpr::Input(BoundInput {
                     source_index: ix,
                     output: ty.clone(),
-                    ordering: SeriesOrdering::KeyThenTime,
+                    ordering,
                 }),
                 output: ty,
             })
@@ -820,19 +827,15 @@ mod tests {
                 NativeExecutionState::try_new(tree, Arc::new(UnboundedMemoryPool::default()))
                     .unwrap(),
             );
-            let schema = tree
-                .root()
-                .output
-                .grid()
-                .map(|_| ())
-                .and_then(|()| match &tree.root().expr {
-                    NativeExpr::Window { input, .. } => match &input.output {
-                        NativeType::Samples(schema) => Some(Arc::clone(schema)),
-                        other => panic!("a window reads samples, not {other:?}"),
-                    },
-                    other => panic!("the fixture is a window, not {other:?}"),
-                })
-                .unwrap();
+            // The fixture is a window over raw input, so the schema its samples are addressed on
+            // comes from the window's input, not from the window's own evaluated output.
+            let NativeExpr::Window { input, .. } = &tree.root().expr else {
+                panic!("the fixture is a window");
+            };
+            let NativeType::Samples(schema) = &input.output else {
+                panic!("a window reads samples");
+            };
+            let schema = Arc::clone(schema);
             let chunk = RawSeriesChunk::try_new(
                 &schema,
                 Buffer::from_slice_ref(b"series-a"),

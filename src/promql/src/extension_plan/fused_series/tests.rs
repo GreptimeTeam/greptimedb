@@ -924,6 +924,39 @@ impl Drop for StagedStream {
     }
 }
 
+#[test]
+fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
+    let tree = rate_tree();
+    let original_binding = binding(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree,
+        original_binding.clone(),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let bytes = node.serialize().unwrap();
+    let decoded = FusedSeries::deserialize(&bytes).unwrap();
+    assert_eq!(
+        crate::native::wire::encode_prefix(decoded.tree()).unwrap(),
+        crate::native::wire::encode_prefix(node.tree()).unwrap()
+    );
+    assert_eq!(decoded.binding(), node.binding());
+    assert_eq!(decoded.schema(), node.schema());
+    assert!(fused(rate_tree()).serialize().is_err());
+    let mut bad_version = bytes.clone();
+    bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
+    assert!(
+        FusedSeries::deserialize(&bad_version)
+            .unwrap_err()
+            .to_string()
+            .contains("version")
+    );
+    assert!(FusedSeries::deserialize(&bytes[..5]).is_err());
+}
+
 fn fused(tree: NativeTree) -> FusedSeries {
     let binding = binding(&tree);
     let output_schema = if matches!(&tree.root().expr, NativeExpr::Binary { .. }) {
