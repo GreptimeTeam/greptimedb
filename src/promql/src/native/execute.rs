@@ -434,11 +434,13 @@ pub(super) struct NodeBuffer {
 impl NodeBuffer {
     /// Registers a reservation for the node called `name` with `pool`.
     ///
-    /// The name is what the operator is — `native.input`, `native.window` — rather than where it
-    /// sits in the tree: a consumer is named once, when the node owning it is built, so a tree
-    /// executed twice registers the same consumers again instead of a second set of them.
-    fn new(name: &'static str, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
-        let consumer = MemoryConsumer::new(name);
+    /// The name identifies both the operator and its tree location, such as
+    /// `native.window at root.left`, so a failure names the node that hit it rather than only its
+    /// kind. It labels the reservation, it does not key it: the pool accounts a consumer by its own
+    /// id, so two nodes sharing a name stay separate reservations. This name is what the error
+    /// context and the pool's top-consumer report print.
+    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+        let consumer = MemoryConsumer::new(name.into());
         Self {
             metrics,
             reservation: consumer.register(pool),
@@ -965,12 +967,36 @@ impl InstantRuntime {
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
         if let Some(at_ms) = self.selection.at_ms {
+            let timestamp_window = if self.selection.timestamp && self.selection.lookback_ms >= 0 {
+                let anchor = at_ms as i128;
+                let shifted = anchor - self.selection.offset_ms as i128;
+                let lower = anchor.max(shifted) - self.selection.lookback_ms as i128;
+                let upper = anchor.min(shifted);
+                if lower > upper || (lower == upper && self.selection.lookback_ms != 0) {
+                    None
+                } else {
+                    let effective_lookback = i64::try_from(upper - lower).ok();
+                    effective_lookback.and_then(|lookback| {
+                        i64::try_from(upper).ok().map(|upper| (upper, lookback))
+                    })
+                }
+            } else {
+                Some((at_ms, self.selection.lookback_ms))
+            };
+            let Some((selection_at, selection_lookback)) = timestamp_window else {
+                let metric = drop_metric_name(&metric)?;
+                return no_row_chunk(&self.schema, metric);
+            };
             let Some(index) = select_instant_at(
                 &time,
                 &fields,
-                at_ms,
-                self.selection.lookback_ms,
-                self.selection.offset_ms,
+                selection_at,
+                selection_lookback,
+                if self.selection.timestamp {
+                    0
+                } else {
+                    self.selection.offset_ms
+                },
             )?
             else {
                 let metric = if self.selection.timestamp {
@@ -2206,7 +2232,15 @@ pub struct NativeExecutionState {
 }
 
 impl NodeState {
-    fn new(name: &'static str, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+    fn context(&self, error: DataFusionError) -> DataFusionError {
+        DataFusionError::Context(
+            self.buffer.reservation.consumer().name().to_string(),
+            Box::new(error),
+        )
+    }
+
+    fn new(name: impl Into<String>, metrics: Arc<NodeMetrics>, pool: &Arc<dyn MemoryPool>) -> Self {
+        let name = name.into();
         Self {
             queued: VecDeque::new(),
             queued_tables: 0,
@@ -2221,6 +2255,7 @@ impl RuntimeNode {
         node: &NativeNode,
         pool: &Arc<dyn MemoryPool>,
         inputs: &mut Vec<InputSlot>,
+        location: String,
     ) -> Result<(Self, bool)> {
         let metrics = Arc::new(NodeMetrics::default());
         let (op, shared) = match &node.expr {
@@ -2239,13 +2274,21 @@ impl RuntimeNode {
                     source_index: bound.source_index,
                     schema,
                     open_source_series: false,
-                    state: NodeState::new("native.input", Arc::clone(&metrics), pool),
+                    state: NodeState::new(
+                        format!(
+                            "native.input at {location} (source_index={})",
+                            bound.source_index
+                        ),
+                        Arc::clone(&metrics),
+                        pool,
+                    ),
                 });
                 (RuntimeOp::Input(id), false)
             }
             NativeExpr::Scalar(_) => (RuntimeOp::Scalar, false),
             NativeExpr::Instant { input, op } => {
-                let (child, shared) = Self::build(input, pool, inputs)?;
+                let (child, shared) =
+                    Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution(
                         "instant selection consumes non-sample input".to_string(),
@@ -2256,8 +2299,11 @@ impl RuntimeNode {
                         input: Box::new(child),
                         instant: Some(InstantRuntime::try_new(&input_schema, op)?),
                         state: {
-                            let mut state =
-                                NodeState::new("native.instant", Arc::clone(&metrics), pool);
+                            let mut state = NodeState::new(
+                                format!("native.instant at {location}"),
+                                Arc::clone(&metrics),
+                                pool,
+                            );
                             if op.timestamp {
                                 state.emitted = Some(Emitted::default());
                             }
@@ -2268,11 +2314,15 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Merge { input } => {
-                let (child, _) = Self::build(input, pool, inputs)?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("merge does not produce samples".to_string())
                 })?;
-                let state = NodeState::new("native.merge", Arc::clone(&metrics), pool);
+                let state = NodeState::new(
+                    format!("native.merge at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
                 (
                     RuntimeOp::Merge {
                         input: Box::new(child),
@@ -2283,13 +2333,18 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Window { input, op } => {
-                let (child, child_shared) = Self::build(input, pool, inputs)?;
+                let (child, child_shared) =
+                    Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("window consumes non-sample input".to_string())
                 })?;
                 let merge = child_shared.then(|| MergeInput::new(Arc::clone(&input_schema)));
                 let shared = op.function.drops_metric_name() || !child_shared;
-                let mut state = NodeState::new("native.window", Arc::clone(&metrics), pool);
+                let mut state = NodeState::new(
+                    format!("native.window at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
                 state.emitted = Some(Emitted::default());
                 (
                     RuntimeOp::Window {
@@ -2307,11 +2362,15 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Map { input, op } => {
-                let (child, _) = Self::build(input, pool, inputs)?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("map does not produce samples".to_string())
                 })?;
-                let mut state = NodeState::new("native.map", Arc::clone(&metrics), pool);
+                let mut state = NodeState::new(
+                    format!("native.map at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
                 state.emitted = Some(Emitted::default());
                 (
                     RuntimeOp::Map {
@@ -2326,11 +2385,15 @@ impl RuntimeNode {
                 )
             }
             NativeExpr::Timestamp { input } => {
-                let (child, _) = Self::build(input, pool, inputs)?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("timestamp does not produce samples".to_string())
                 })?;
-                let mut state = NodeState::new("native.timestamp", Arc::clone(&metrics), pool);
+                let mut state = NodeState::new(
+                    format!("native.timestamp at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
                 state.emitted = Some(Emitted::default());
                 (
                     RuntimeOp::Timestamp {
@@ -2362,15 +2425,21 @@ impl RuntimeNode {
                     }
                     _ => (None, Some(broadcast_runtime(left, right, matching)?)),
                 };
-                let (left_node, left_shared) = Self::build(left, pool, inputs)?;
-                let (right_node, right_shared) = Self::build(right, pool, inputs)?;
+                let (left_node, left_shared) =
+                    Self::build(left, pool, inputs, format!("{location}.left"))?;
+                let (right_node, right_shared) =
+                    Self::build(right, pool, inputs, format!("{location}.right"))?;
                 match (binary, broadcast) {
                     (Some(binary), None) => (
                         RuntimeOp::Binary {
                             left: Box::new(left_node),
                             right: Box::new(right_node),
                             binary: Some(binary),
-                            state: NodeState::new("native.binary", Arc::clone(&metrics), pool),
+                            state: NodeState::new(
+                                format!("native.binary at {location}"),
+                                Arc::clone(&metrics),
+                                pool,
+                            ),
                         },
                         false,
                     ),
@@ -2381,7 +2450,11 @@ impl RuntimeNode {
                             } else {
                                 right_shared
                             };
-                        let mut state = NodeState::new("native.binary", Arc::clone(&metrics), pool);
+                        let mut state = NodeState::new(
+                            format!("native.binary at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        );
                         if broadcast.drops_labels() {
                             state.emitted = Some(Emitted::default());
                         }
@@ -2414,15 +2487,20 @@ impl RuntimeNode {
                     PairKernel::Set(op.clone()),
                     [Arc::clone(left_schema), Arc::clone(right_schema)],
                 );
-                let (left_node, _) = Self::build(left, pool, inputs)?;
-                let (right_node, _) = Self::build(right, pool, inputs)?;
+                let (left_node, _) = Self::build(left, pool, inputs, format!("{location}.left"))?;
+                let (right_node, _) =
+                    Self::build(right, pool, inputs, format!("{location}.right"))?;
                 // The kernel files one series per label set, so its output shares none.
                 (
                     RuntimeOp::Binary {
                         left: Box::new(left_node),
                         right: Box::new(right_node),
                         binary: Some(set),
-                        state: NodeState::new("native.set", Arc::clone(&metrics), pool),
+                        state: NodeState::new(
+                            format!("native.set at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
                     },
                     false,
                 )
@@ -2436,13 +2514,17 @@ impl RuntimeNode {
                     .ok_or_else(|| {
                         DataFusionError::Execution("aggregate does not produce samples".to_string())
                     })?;
-                let mut state = NodeState::new("native.aggregate", Arc::clone(&metrics), pool);
+                let mut state = NodeState::new(
+                    format!("native.aggregate at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
                 let aggregate = Some(AggregateRuntime::new(
                     op.clone(),
                     schema,
                     &mut state.buffer,
                 )?);
-                let (child, _) = Self::build(input, pool, inputs)?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 (
                     RuntimeOp::Aggregate {
                         input: Box::new(child),
@@ -2471,7 +2553,8 @@ impl RuntimeNode {
                     ));
                 }
                 let mut vector = VectorRuntime::new(op.clone(), schema);
-                let (child, child_shared) = Self::build(input, pool, inputs)?;
+                let (child, child_shared) =
+                    Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });
                 if limitk && child_shared {
                     vector.merge_input = true;
@@ -2487,7 +2570,11 @@ impl RuntimeNode {
                     RuntimeOp::Vector {
                         input: Box::new(child),
                         vector: Some(vector),
-                        state: NodeState::new("native.vector", Arc::clone(&metrics), pool),
+                        state: NodeState::new(
+                            format!("native.vector at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
                     },
                     child_shared && !whole,
                 )
@@ -2592,7 +2679,10 @@ impl RuntimeNode {
                     let Some(chunk) = input.pull(inputs, inputs_finished)? else {
                         return Ok(None);
                     };
-                    if let Some(output) = state.instant(selection, chunk)? {
+                    if let Some(output) = state
+                        .instant(selection, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2629,7 +2719,7 @@ impl RuntimeNode {
                 // A chunk this window computed while flushing its collected input leaves first: it
                 // was produced before the window was drained, and the pull that hands it up is the
                 // one that empties the queue.
-                if let Some(chunk) = state.take_output()? {
+                if let Some(chunk) = state.take_output().map_err(|error| state.context(error))? {
                     return Ok(Some(chunk));
                 }
                 let Some(evaluator) = window.as_mut() else {
@@ -2641,7 +2731,10 @@ impl RuntimeNode {
                     let Some(chunk) = input.pull(inputs, inputs_finished)? else {
                         return Ok(None);
                     };
-                    if let Some(output) = state.window(evaluator, merge, chunk)? {
+                    if let Some(output) = state
+                        .window(evaluator, merge, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2661,7 +2754,10 @@ impl RuntimeNode {
                             "the map node consumes an evaluated chunk, not raw samples".to_string(),
                         ));
                     };
-                    if let Some(output) = state.map(operation, chunk)? {
+                    if let Some(output) = state
+                        .map(operation, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2683,7 +2779,10 @@ impl RuntimeNode {
                             "timestamp consumes evaluated samples, not raw samples".into(),
                         ));
                     };
-                    if let Some(output) = state.timestamp(schema, chunk)? {
+                    if let Some(output) = state
+                        .timestamp(schema, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2701,10 +2800,14 @@ impl RuntimeNode {
                 // binary node only retains the chunks, because a pair is not decided until both
                 // sides are whole, and after it ends this is the drain that empties the two.
                 while let Some(chunk) = left.pull(inputs, inputs_finished)? {
-                    state.retain_binary(operation, 0, chunk)?;
+                    state
+                        .retain_binary(operation, 0, chunk)
+                        .map_err(|error| state.context(error))?;
                 }
                 while let Some(chunk) = right.pull(inputs, inputs_finished)? {
-                    state.retain_binary(operation, 1, chunk)?;
+                    state
+                        .retain_binary(operation, 1, chunk)
+                        .map_err(|error| state.context(error))?;
                 }
                 // Nothing has settled for a point that has an operand still arriving, and an
                 // operand below a collecting window has not arrived until that window is flushed:
@@ -2712,7 +2815,9 @@ impl RuntimeNode {
                 if !inputs_finished || !left.settled(inputs) || !right.settled(inputs) {
                     return Ok(None);
                 }
-                state.compute_binary(operation)?;
+                state
+                    .compute_binary(operation)
+                    .map_err(|error| state.context(error))?;
                 // A result holds one value per field, and a field may hold none where another
                 // does, so its values are counted rather than read as its positions.
                 state.pop_queued(evaluated_values)
@@ -2740,7 +2845,10 @@ impl RuntimeNode {
                     let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
                         return Ok(None);
                     };
-                    if let Some(output) = state.broadcast(operation, chunk)? {
+                    if let Some(output) = state
+                        .broadcast(operation, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
                         return Ok(Some(NativeChunk::Evaluated(output)));
                     }
                 }
@@ -2758,12 +2866,16 @@ impl RuntimeNode {
                 // bytes. Nothing is answered before the input ends: until then a group's value at a
                 // point is still missing the members that have not arrived.
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
-                    state.retain_aggregate(fold, chunk)?;
+                    state
+                        .retain_aggregate(fold, chunk)
+                        .map_err(|error| state.context(error))?;
                 }
                 if !inputs_finished || !input.settled(inputs) {
                     return Ok(None);
                 }
-                state.compute_aggregate(fold)?;
+                state
+                    .compute_aggregate(fold)
+                    .map_err(|error| state.context(error))?;
                 // A group's series holds one value per field and point it decided, so its values
                 // are counted rather than read as its positions, as a binary result's are.
                 state.pop_queued(evaluated_values)
@@ -2779,12 +2891,16 @@ impl RuntimeNode {
                 // Which samples are kept at a point is not decided until the whole input has
                 // arrived, so the input is read to the end before anything is handed over.
                 while let Some(chunk) = input.pull(inputs, inputs_finished)? {
-                    state.retain_vector(operation, chunk)?;
+                    state
+                        .retain_vector(operation, chunk)
+                        .map_err(|error| state.context(error))?;
                 }
                 if !inputs_finished || !input.settled(inputs) {
                     return Ok(None);
                 }
-                state.compute_vector(operation)?;
+                state
+                    .compute_vector(operation)
+                    .map_err(|error| state.context(error))?;
                 state.pop_queued(evaluated_values)
             }
         }
@@ -2927,7 +3043,9 @@ impl RuntimeNode {
                     let Some(evaluator) = window.as_mut() else {
                         return Err(no_window());
                     };
-                    state.flush_merge(evaluator, merge)?;
+                    state
+                        .flush_merge(evaluator, merge)
+                        .map_err(|error| state.context(error))?;
                     flushed = true;
                 }
                 Ok(flushed)
@@ -2972,10 +3090,10 @@ impl RuntimeNode {
                 left,
                 right,
                 binary,
-                ..
+                state,
             } => {
                 if let Some(operation) = binary {
-                    operation.closed()?;
+                    operation.closed().map_err(|error| state.context(error))?;
                 }
                 left.unclosed()?;
                 right.unclosed()
@@ -2984,9 +3102,16 @@ impl RuntimeNode {
                 left.unclosed()?;
                 right.unclosed()
             }
-            RuntimeOp::Vector { input, vector, .. } => {
+            RuntimeOp::Vector {
+                input,
+                vector,
+                state,
+            } => {
                 if let Some(operation) = vector {
-                    operation.input.ensure_closed(Reader::Vector)?;
+                    operation
+                        .input
+                        .ensure_closed(Reader::Vector)
+                        .map_err(|error| state.context(error))?;
                 }
                 input.unclosed()
             }
@@ -3015,9 +3140,17 @@ impl RuntimeNode {
                 let second = right.finish_windows();
                 first.and(second)
             }
-            RuntimeOp::Window { input, window, .. } => {
+            RuntimeOp::Window {
+                input,
+                window,
+                state,
+                ..
+            } => {
                 let child = input.finish_windows();
-                let own = window.take().map_or(Ok(()), RangeEvaluator::finish);
+                let own = window
+                    .take()
+                    .map_or(Ok(()), RangeEvaluator::finish)
+                    .map_err(|error| state.context(error));
                 child.and(own)
             }
         }
@@ -3124,13 +3257,17 @@ impl RuntimeNode {
 impl NativeExecutionState {
     pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
         let mut inputs = Vec::new();
-        let (root, _) = RuntimeNode::build(tree.root(), &pool, &mut inputs)?;
+        let (root, _) = RuntimeNode::build(tree.root(), &pool, &mut inputs, "root".to_string())?;
         let scalar_root = if inputs.is_empty() {
             match (&tree.root().expr, &tree.root().output) {
                 (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
                     Arc::clone(grid),
                     *value,
-                    NodeState::new("native.scalar", Arc::clone(&root.metrics), &pool),
+                    NodeState::new(
+                        "native.scalar at root".to_string(),
+                        Arc::clone(&root.metrics),
+                        &pool,
+                    ),
                 )),
                 _ => {
                     return Err(DataFusionError::Execution(
@@ -3224,8 +3361,11 @@ impl NativeExecutionState {
                 .ok_or_else(|| {
                     DataFusionError::Execution("scalar allocation size overflow".into())
                 })?;
-            state.buffer.grow(bytes)?;
-            let chunk = scalar_chunk(grid, value)?;
+            state
+                .buffer
+                .grow(bytes)
+                .map_err(|error| state.context(error))?;
+            let chunk = scalar_chunk(grid, value).map_err(|error| state.context(error))?;
             state.buffer.metrics.record_completed_series(1);
             state
                 .queued
@@ -3243,7 +3383,8 @@ impl NativeExecutionState {
     /// terms.
     fn unclosed(&self) -> Result<()> {
         if let Some(index) = self.inputs.iter().position(|slot| slot.open_source_series) {
-            return Err(truncated_input(InputId::new(index)));
+            let slot = &self.inputs[index];
+            return Err(slot.state.context(truncated_input(InputId::new(index))));
         }
         self.root.unclosed()
     }
@@ -4094,7 +4235,7 @@ impl InputSlot {
         let bound = self.schema.eval_grid.is_some();
         let evaluated = matches!(chunk, NativeChunk::Evaluated(_));
         if evaluated != bound {
-            return Err(DataFusionError::Execution(format!(
+            return Err(self.state.context(DataFusionError::Execution(format!(
                 "the native source is bound to {}, but {} chunk was queued at it",
                 if bound {
                     "an evaluated series"
@@ -4102,9 +4243,11 @@ impl InputSlot {
                     "raw samples"
                 },
                 if evaluated { "an evaluated" } else { "a raw" },
-            )));
+            ))));
         }
-        self.state.enqueue(chunk)
+        self.state
+            .enqueue(chunk)
+            .map_err(|error| self.state.context(error))
     }
 
     /// Hands over the next queued source chunk, if there is one.

@@ -314,6 +314,11 @@ mod tests {
                     location: Location::default(),
                 };
                 assert_eq!(error.status_code(), status);
+                let expected_output = match status {
+                    StatusCode::Unknown => "Internal error: 1000",
+                    _ => "neutral error",
+                };
+                assert!(error.output_msg().contains(expected_output));
             }
         }
 
@@ -361,6 +366,15 @@ mod tests {
                 location: Location::default(),
             };
             assert_eq!(error.status_code(), StatusCode::EngineExecuteQuery);
+            if matches!(
+                &error,
+                Error::PollStream {
+                    error: DataFusionError::Internal(_),
+                    ..
+                }
+            ) {
+                assert!(error.output_msg().contains("neutral internal error"));
+            }
         }
     }
 }

@@ -15,16 +15,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use api::v1::SemanticType;
 use common_telemetry::debug;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::series::frame::{LabelDecodeEncoding, LabelDecodeSpec};
 use datatypes::series::{Label, SeriesLabels};
 use datatypes::value::Value;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::is_metric_engine_internal_column;
-use store_api::region_engine::RawLabelSource;
 use store_api::storage::{
     ColumnId,
     consts::{ReservedColumnId, is_internal_column},
@@ -32,30 +30,11 @@ use store_api::storage::{
 
 use crate::error::{
     InvalidDensePrimaryKeySnafu, InvalidLabelDecodeDescriptionSnafu, InvalidSparsePrimaryKeySnafu,
-    Result, UnsupportedOperationSnafu,
+    Result,
 };
 use crate::row_converter::SortField;
 use crate::row_converter::dense::DensePrimaryKeyCodec;
 use crate::row_converter::sparse::{SparseOffsetsCache, SparsePrimaryKeyView};
-
-/// Selects labels materialized from a primary key.
-///
-/// `All` produces a complete metric name and label set. `Only` produces a projected
-/// label vector, including `__name__` only when explicitly requested. Unexplained sparse
-/// column IDs are errors with `All`; `Only` skips them after checking their framing.
-#[derive(Clone, Debug, Default)]
-pub enum LabelProjection {
-    #[default]
-    All,
-    Only(Arc<[Arc<str>]>),
-}
-
-/// Decoded labels: either a complete metric name or a possibly partial label vector.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DecodedLabels {
-    Complete(SeriesLabels),
-    Projected(Vec<Label>),
-}
 
 enum Layout {
     Sparse(SparseOffsetsCache),
@@ -63,6 +42,13 @@ enum Layout {
         codec: DensePrimaryKeyCodec,
         offsets: Vec<usize>,
     },
+}
+
+fn invalid_binding_error(encoding: PrimaryKeyEncoding, reason: String) -> crate::error::Error {
+    match encoding {
+        PrimaryKeyEncoding::Dense => InvalidDensePrimaryKeySnafu { reason }.build(),
+        PrimaryKeyEncoding::Sparse => InvalidSparsePrimaryKeySnafu { reason }.build(),
+    }
 }
 
 struct BoundLabel {
@@ -81,8 +67,8 @@ struct KeyColumn {
 /// Minimal primary-key layout labels can be decoded from.
 ///
 /// It holds only what decoding reads: the metric name, the primary-key encoding, and the ordered
-/// primary-key columns with their physical types. A scan-bound [`RawLabelSource::PrimaryKey`] and a
-/// frame schema's [`LabelDecodeSpec`] both reduce to this view, so both bind the same decoder.
+/// primary-key columns with their physical types. A frame schema's [`LabelDecodeSpec`] reduces
+/// to this view, so decoding binds directly to the described layout.
 /// Every key column is a `Tag` column, which is checked when a decoder is bound, so the layout
 /// carries no per-column role.
 struct KeyLayout {
@@ -106,69 +92,13 @@ impl KeyLayout {
 /// Decodes labels on demand using the minimal primary-key layout bound to a raw-label source.
 pub struct PrimaryKeyLabelDecoder {
     key: KeyLayout,
-    complete: bool,
-    include_name: bool,
     labels: Vec<BoundLabel>,
     value_scratch: Vec<u8>,
     layout: Layout,
 }
 
 impl PrimaryKeyLabelDecoder {
-    /// Binds a decoder to a primary-key source snapshot and projection.
-    ///
-    /// Explicit sources already contain complete labels and are rejected. Dense decoding
-    /// requires the full key layout described by the bound snapshot; compatibility with
-    /// older key layouts must be normalized upstream.
-    ///
-    /// Every primary-key column must be a `Tag` column; [`RegionMetadata::validate`] enforces it, so
-    /// this only rejects a snapshot built without validation.
-    pub fn new(source: &RawLabelSource, projection: LabelProjection) -> Result<Self> {
-        let RawLabelSource::PrimaryKey {
-            metric_name,
-            physical_metadata,
-            logical_tags,
-        } = source
-        else {
-            return UnsupportedOperationSnafu {
-                err_msg: "explicit raw labels are already complete",
-            }
-            .fail();
-        };
-        let metadata = physical_metadata.as_ref();
-        if let Some(column) = metadata
-            .primary_key_columns()
-            .find(|column| column.semantic_type != SemanticType::Tag)
-        {
-            return InvalidSparsePrimaryKeySnafu {
-                reason: format!(
-                    "primary-key column {} is not a tag column",
-                    column.column_schema.name
-                ),
-            }
-            .fail();
-        }
-        let key = KeyLayout {
-            metric_name: metric_name.clone(),
-            encoding: metadata.primary_key_encoding,
-            columns: metadata
-                .primary_key_columns()
-                .map(|column| KeyColumn {
-                    id: column.column_id,
-                    name: column.column_schema.name.clone(),
-                    data_type: column.column_schema.data_type.clone(),
-                })
-                .collect(),
-        };
-        Self::bind(
-            key,
-            logical_tags
-                .iter()
-                .map(|tag| (tag.column_id, tag.name.as_ref())),
-            projection,
-        )
-    }
-
-    /// Binds a decoder to a frame schema's label decode description and projection.
+    /// Binds a decoder to a frame schema's label decode description.
     ///
     /// This is the decoding path for a consumer that received only the raw frame schema: the
     /// description carries the metric name, the primary-key encoding, the ordered key columns with
@@ -180,7 +110,7 @@ impl PrimaryKeyLabelDecoder {
     /// is an encoding position. The logical tags are still checked here, one by one, exactly as
     /// for a typed binding, which is the only place the decoder inspects them (a listed column no
     /// tag selects is not examined).
-    pub fn from_decode_spec(spec: &LabelDecodeSpec, projection: LabelProjection) -> Result<Self> {
+    pub fn from_decode_spec(spec: &LabelDecodeSpec) -> Result<Self> {
         spec.validate()
             .context(InvalidLabelDecodeDescriptionSnafu)?;
         let key = KeyLayout {
@@ -204,12 +134,11 @@ impl PrimaryKeyLabelDecoder {
             spec.logical_tags
                 .iter()
                 .map(|tag| (tag.column_id, tag.name.as_str())),
-            projection,
         )
     }
 
-    /// Binds the ordered logical tags of `key` to one projection and one decode layout.
-    fn bind<'a, I>(key: KeyLayout, tags: I, projection: LabelProjection) -> Result<Self>
+    /// Binds the ordered logical tags of `key` to one decode layout.
+    fn bind<'a, I>(key: KeyLayout, tags: I) -> Result<Self>
     where
         I: IntoIterator<Item = (ColumnId, &'a str)>,
     {
@@ -229,16 +158,17 @@ impl PrimaryKeyLabelDecoder {
                     .column(column_id)
                     .is_some_and(|column| column.name == name)
             {
-                return InvalidSparsePrimaryKeySnafu {
-                    reason: format!("invalid logical tag binding {name}"),
-                }
-                .fail();
+                return Err(invalid_binding_error(
+                    key.encoding,
+                    format!("invalid logical tag binding {name}"),
+                ));
             }
-            let position = key
-                .position(column_id)
-                .context(InvalidSparsePrimaryKeySnafu {
-                    reason: format!("logical tag {name} is not a primary-key column"),
-                })?;
+            let position = key.position(column_id).ok_or_else(|| {
+                invalid_binding_error(
+                    key.encoding,
+                    format!("logical tag {name} is not a primary-key column"),
+                )
+            })?;
             labels.push(BoundLabel {
                 id: column_id,
                 name: Arc::from(name),
@@ -246,17 +176,6 @@ impl PrimaryKeyLabelDecoder {
             });
         }
         labels.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        let complete = matches!(&projection, LabelProjection::All);
-        let include_name = match &projection {
-            LabelProjection::All => false,
-            LabelProjection::Only(requested) => {
-                requested.iter().any(|name| name.as_ref() == "__name__")
-            }
-        };
-        if let LabelProjection::Only(requested) = &projection {
-            let requested: HashSet<_> = requested.iter().map(AsRef::as_ref).collect();
-            labels.retain(|label| requested.contains(label.name.as_ref()));
-        }
         let layout = match key.encoding {
             PrimaryKeyEncoding::Sparse => Layout::Sparse(SparseOffsetsCache::new()),
             PrimaryKeyEncoding::Dense => Layout::Dense {
@@ -273,18 +192,14 @@ impl PrimaryKeyLabelDecoder {
             PrimaryKeyEncoding::Sparse => "sparse",
             PrimaryKeyEncoding::Dense => "dense",
         };
-        let projection_mode = if complete { "all" } else { "only" };
         debug!(
             encoding,
-            projection_mode,
             logical_tag_count,
             selected_tag_count = labels.len(),
             "Constructed primary key label decoder"
         );
         Ok(Self {
             key,
-            complete,
-            include_name,
             labels,
             value_scratch: Vec::new(),
             layout,
@@ -293,16 +208,14 @@ impl PrimaryKeyLabelDecoder {
 
     /// Decodes labels without modifying or consuming `read_key`.
     ///
-    /// `All` returns a complete [`SeriesLabels`]; `Only` returns a partial vector. Dense
-    /// keys are fully checked against the exact snapshot layout even when decoding only
-    /// selected fields. Sparse keys receive a full structural audit before values are read.
-    pub fn decode(&mut self, read_key: &[u8]) -> Result<DecodedLabels> {
-        let mut values = Vec::with_capacity(self.labels.len() + usize::from(self.include_name));
+    /// Returns complete [`SeriesLabels`]. Dense keys are fully checked against the exact
+    /// described layout. Sparse keys receive a full structural audit before values are read.
+    pub fn decode(&mut self, read_key: &[u8]) -> Result<SeriesLabels> {
+        let mut values = Vec::with_capacity(self.labels.len());
         let Self {
             layout,
             key,
             labels,
-            complete,
             value_scratch,
             ..
         } = self;
@@ -310,7 +223,7 @@ impl PrimaryKeyLabelDecoder {
             Layout::Sparse(cache) => {
                 let mut view = SparsePrimaryKeyView::new(read_key, cache)?;
                 view.visit_label_ids(|id| {
-                    if *complete && key.column(id).is_none() {
+                    if key.column(id).is_none() {
                         return InvalidSparsePrimaryKeySnafu {
                             reason: format!("unrecognized sparse tag id {id}"),
                         }
@@ -351,25 +264,12 @@ impl PrimaryKeyLabelDecoder {
                 }
             }
         }
-        if *complete {
-            Ok(DecodedLabels::Complete(
-                SeriesLabels::try_new(Some(key.metric_name.clone()), values).map_err(|error| {
-                    InvalidSparsePrimaryKeySnafu {
-                        reason: error.to_string(),
-                    }
-                    .build()
-                })?,
-            ))
-        } else {
-            if self.include_name {
-                values.push(Label {
-                    name: Arc::from("__name__"),
-                    value: self.key.metric_name.clone(),
-                });
-                values.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        SeriesLabels::try_new(Some(key.metric_name.clone()), values).map_err(|error| {
+            InvalidSparsePrimaryKeySnafu {
+                reason: error.to_string(),
             }
-            Ok(DecodedLabels::Projected(values))
-        }
+            .build()
+        })
     }
 }
 
