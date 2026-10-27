@@ -202,8 +202,6 @@ pub(crate) struct ScanMetricsSet {
     /// Elapsed time before the first poll operation.
     first_poll: Duration,
 
-    /// Number of send timeout in SeriesScan.
-    num_series_send_timeout: usize,
     /// Number of send full in SeriesScan.
     num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
@@ -325,7 +323,6 @@ impl fmt::Debug for ScanMetricsSet {
             num_sst_batches,
             num_sst_rows,
             first_poll,
-            num_series_send_timeout,
             num_series_send_full,
             num_distributor_rows,
             num_distributor_batches,
@@ -459,9 +456,6 @@ impl fmt::Debug for ScanMetricsSet {
         }
 
         // Write non-zero distributor metrics
-        if *num_series_send_timeout > 0 {
-            write!(f, ", \"num_series_send_timeout\":{num_series_send_timeout}")?;
-        }
         if *num_series_send_full > 0 {
             write!(f, ", \"num_series_send_full\":{num_series_send_full}")?;
         }
@@ -775,7 +769,6 @@ impl ScanMetricsSet {
     /// Sets distributor metrics.
     fn set_distributor_metrics(&mut self, distributor_metrics: &SeriesDistributorMetrics) {
         let SeriesDistributorMetrics {
-            num_series_send_timeout,
             num_series_send_full,
             num_rows,
             num_batches,
@@ -784,7 +777,6 @@ impl ScanMetricsSet {
             divider_cost,
         } = distributor_metrics;
 
-        self.num_series_send_timeout += *num_series_send_timeout;
         self.num_series_send_full += *num_series_send_full;
         self.num_distributor_rows += *num_rows;
         self.num_distributor_batches += *num_batches;
@@ -1144,8 +1136,6 @@ impl fmt::Debug for PartitionMetrics {
 /// Metrics for the series distributor.
 #[derive(Default)]
 pub(crate) struct SeriesDistributorMetrics {
-    /// Number of send timeout in SeriesScan.
-    pub(crate) num_series_send_timeout: usize,
     /// Number of send full in SeriesScan.
     pub(crate) num_series_send_full: usize,
     /// Number of rows the series distributor scanned.
