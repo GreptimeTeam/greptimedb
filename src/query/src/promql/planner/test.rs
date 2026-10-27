@@ -2189,6 +2189,34 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
+/// More than one selector over metric-engine logical tables keeps the existing plan, though one
+/// selector over the same tables is native.
+#[tokio::test]
+async fn native_fused_multiple_metric_engine_selectors_fall_back() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    let single =
+        build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
+    assert!(find_fused_series(&single).is_some(), "{single}");
+    for query in [
+        "some_metric / other_metric",
+        "some_metric + some_metric",
+        "some_metric + other_metric + some_metric",
+    ] {
+        let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
+        let legacy = build_native_fused_plan_with_provider(query, false, provider().await).await;
+        assert!(find_fused_series(&native).is_none(), "{query}: {native}");
+        assert_eq!(
+            native.display_indent().to_string(),
+            legacy.display_indent().to_string(),
+            "{query}"
+        );
+    }
+}
+
 /// A metric table without logical-table metadata declines to the legacy plan.
 #[tokio::test]
 async fn native_fused_metric_table_without_logical_metadata_falls_back() {

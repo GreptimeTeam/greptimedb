@@ -3483,6 +3483,18 @@ async fn native_promql_three_selector_trees_bind_every_occurrence() {
             vec!["host", "ts", "val"],
             at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
         ),
+        (
+            "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
+        ),
+        (
+            "(native_3_a{host=\"h0\"} or native_3_b) + native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| if h == 0.0 { 5.0 } else { 10.0 } + (100.0 + h)),
+        ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
