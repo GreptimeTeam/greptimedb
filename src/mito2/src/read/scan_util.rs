@@ -128,6 +128,8 @@ pub(crate) struct ScanMetricsSet {
     num_mem_ranges: usize,
     /// Number of file ranges scanned.
     num_file_ranges: usize,
+    /// Number of series assigned to this partition.
+    assigned_series: usize,
 
     // Memtable related metrics:
     /// Duration to scan memtables.
@@ -295,6 +297,7 @@ impl fmt::Debug for ScanMetricsSet {
             num_batches,
             num_mem_ranges,
             num_file_ranges,
+            assigned_series,
             build_parts_cost,
             sst_scan_cost,
             rg_total,
@@ -374,6 +377,11 @@ impl fmt::Debug for ScanMetricsSet {
             \"num_sst_rows\":{num_sst_rows}, \
             \"first_poll\":\"{first_poll:?}\""
         )?;
+
+        // Write non-zero series assignment counter
+        if *assigned_series > 0 {
+            write!(f, ", \"assigned_series\":{assigned_series}")?;
+        }
 
         // Write convert_cost if present
         if let Some(time) = convert_cost {
@@ -952,6 +960,11 @@ impl PartitionMetricsList {
         list[partition] = Some(metrics);
     }
 
+    /// Returns the metrics already set at `partition`, if any.
+    pub(crate) fn get(&self, partition: usize) -> Option<PartitionMetrics> {
+        self.0.lock().unwrap().get(partition).cloned().flatten()
+    }
+
     /// Format verbose metrics for each partition for explain.
     pub(crate) fn format_verbose_metrics(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let list = self.0.lock().unwrap();
@@ -1016,6 +1029,12 @@ impl PartitionMetrics {
     pub fn inc_num_file_ranges(&self, num: usize) {
         let mut metrics = self.0.metrics.lock().unwrap();
         metrics.num_file_ranges += num;
+    }
+
+    /// Adds `num` series assigned to this partition.
+    pub(crate) fn add_assigned_series(&self, num: usize) {
+        let mut metrics = self.0.metrics.lock().unwrap();
+        metrics.assigned_series += num;
     }
 
     fn record_elapsed_compute(&self, duration: Duration) {

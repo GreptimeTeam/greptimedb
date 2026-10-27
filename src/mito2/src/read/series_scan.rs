@@ -645,6 +645,7 @@ impl SeriesScan {
                 metrics.scan_cost += fetch_start.elapsed();
 
                 let build_start = Instant::now();
+                part_metrics.add_assigned_series(input.assigned_series.series().len());
                 let reader = SeriesReader::try_new(
                     stream_ctx.clone(),
                     partition_ranges.clone(),
@@ -911,6 +912,17 @@ impl RegionScanner for SeriesScan {
             // The costs the split divides are the same for every partition of this scan, so read the
             // copy prepared once with the source instead of rebuilding the whole source per partition.
             let state = self.prepared.clone();
+            // The columnar branch returns before the partition metrics below are created, so
+            // reuse (or register) the metrics for this partition to report its series split.
+            let part_metrics = self.metrics_list.get(partition).unwrap_or_else(|| {
+                new_partition_metrics(
+                    &self.stream_ctx,
+                    ctx.explain_verbose,
+                    metrics_set,
+                    partition,
+                    &self.metrics_list,
+                )
+            });
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
                 let costs = state.costs().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series costs missing after preparation" }.build()))?;
@@ -920,6 +932,7 @@ impl RegionScanner for SeriesScan {
                 // count times grid points, which makes this a count split. Every ordinal still
                 // belongs to exactly one partition, so one series' chunks stay together.
                 let range = partition_balance::partition_range(&costs, partition, partitions);
+                part_metrics.add_assigned_series(range.len());
                 let mut reader = source.read_series(range)?;
                 while let Some(chunk) = reader.try_next().await? { yield chunk; }
             };
@@ -980,13 +993,17 @@ impl RegionScanner for SeriesScan {
             .copied()
             .collect();
         let labels = label_source.clone();
-        let metrics = new_partition_metrics(
-            &self.stream_ctx,
-            ctx.explain_verbose,
-            metrics_set,
-            0,
-            &self.metrics_list,
-        );
+        // Reuse the metrics already registered for partition 0 instead of replacing them, so a
+        // later partition's preparation does not evict the object partition 0 reports into.
+        let metrics = self.metrics_list.get(0).unwrap_or_else(|| {
+            new_partition_metrics(
+                &self.stream_ctx,
+                ctx.explain_verbose,
+                metrics_set,
+                0,
+                &self.metrics_list,
+            )
+        });
         Box::pin(async move {
             let Some((preparation, prepared_columnar)) = preparation? else {
                 return Ok(None);
