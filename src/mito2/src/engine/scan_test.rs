@@ -151,8 +151,11 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::ColumnMetadata;
     use store_api::region_request::AddColumn;
+    use store_api::storage::consts::ReservedColumnId;
 
-    for default_flat_format in [false, true] {
+    for (default_flat_format, reserved_ids) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
         let mut env = TestEnv::new().await;
         let engine = env
             .create_engine(MitoConfig {
@@ -173,6 +176,30 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
         request.column_metadatas[3]
             .column_schema
             .with_extension_type(&Json2ExtensionType::default());
+        if reserved_ids {
+            for (name, column_id, data_type) in [
+                (
+                    "__table_id",
+                    ReservedColumnId::table_id(),
+                    ConcreteDataType::uint32_datatype(),
+                ),
+                (
+                    "__tsid",
+                    ReservedColumnId::tsid(),
+                    ConcreteDataType::uint64_datatype(),
+                ),
+            ] {
+                request.column_metadatas.push(ColumnMetadata {
+                    column_schema: ColumnSchema::new(name, data_type, false),
+                    semantic_type: SemanticType::Tag,
+                    column_id,
+                });
+            }
+            request.primary_key.splice(
+                0..0,
+                [ReservedColumnId::table_id(), ReservedColumnId::tsid()],
+            );
+        }
         let table_dir = request.table_dir.clone();
         let schema = test_util::rows_schema(&request);
         engine
@@ -190,11 +217,21 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
                 ValueData::TimestampMillisecondValue(1),
             ])],
         };
+        if reserved_ids {
+            rows.rows[0].values.extend([
+                ValueData::U32Value(42).into(),
+                ValueData::U64Value(7).into(),
+            ]);
+        }
         // Equal series/timestamp observations are preserved in append mode.
         rows.rows.push(rows.rows[0].clone());
         let mut null_row = rows.rows[0].clone();
         null_row.values[0].value_data = None;
         null_row.values[1].value_data = None;
+        if reserved_ids {
+            // Different source metrics can have the same TSID.
+            null_row.values[5] = ValueData::U32Value(43).into();
+        }
         rows.rows.push(null_row);
         test_util::put_rows(&engine, region_id, rows.clone()).await;
 
@@ -256,11 +293,19 @@ async fn test_exemplar_sparse_storage_lifecycle() -> WhateverResult<()> {
             engine.get_primary_key_encoding(region_id).unwrap(),
             PrimaryKeyEncoding::Sparse
         );
-        for (filters, expected) in [
+        let mut cases = vec![
             (vec![], 6),
             (vec![col("tag_0").eq(lit("metric"))], 4),
             (vec![col("tag_0").is_null()], 2),
-        ] {
+        ];
+        if reserved_ids {
+            cases.extend([
+                (vec![col("__table_id").eq(lit(42u32))], 4),
+                (vec![col("__table_id").eq(lit(43u32))], 2),
+                (vec![col("__tsid").eq(lit(7u64))], 6),
+            ]);
+        }
+        for (filters, expected) in cases {
             let scanner = engine
                 .scanner(
                     region_id,

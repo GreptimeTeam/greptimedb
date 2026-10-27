@@ -185,16 +185,14 @@ impl RegionScanExec {
                 }
                 orderings.push(pk_time_ordering);
 
-                // Metric engine physical tables keep tag columns alongside `__tsid`. When `__tsid`
-                // is present, the scan output is also ordered by `(__tsid, time index)` which can
-                // help eliminate redundant sorts for promql plans (e.g. SeriesDivide).
-                //
-                // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
-                // the same thing, thus present in one `OrderingEquivalenceClass`.
-                if let (Ok(tsid_col), Some(ts)) = (
-                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
-                    ts_col.clone(),
-                ) {
+                // Only logical metric scans constrain the physical key to one source table.
+                // A shared table can have the same TSID under different table IDs.
+                if scanner_props.is_logical_region()
+                    && let (Ok(tsid_col), Some(ts)) = (
+                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                        ts_col.clone(),
+                    )
+                {
                     orderings.push(vec![
                         PhysicalSortExpr::new(
                             Arc::new(tsid_col) as _,
@@ -225,13 +223,13 @@ impl RegionScanExec {
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
                 match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
-                    Ok(tsid_col) => {
+                    Ok(tsid_col) if scanner_props.is_logical_region() => {
                         Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
                     }
-                    Err(_) if pk_columns.len() == pk_names.len() => {
+                    _ if pk_columns.len() == pk_names.len() => {
                         Partitioning::Hash(pk_columns.clone(), num_output_partition)
                     }
-                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
+                    _ => Partitioning::UnknownPartitioning(num_output_partition),
                 }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
@@ -1138,11 +1136,12 @@ mod test {
         ]);
         let metadata = Arc::new(builder.build().unwrap());
 
-        for (projection, partitioned_by_tsid, claimed, unclaimed) in [
+        for (projection, logical_region, partitioned_by_tsid, claimed, unclaimed) in [
             // The logical projection drops the row key prefix, so `A` is not a prefix of the
             // row key and neither `A` nor `ts` is ordered.
             (
                 vec!["A", "marker", "ts"],
+                true,
                 false,
                 vec![],
                 vec![vec!["A"], vec!["marker"], vec!["ts"], vec!["A", "ts"]],
@@ -1151,11 +1150,23 @@ mod test {
             (
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME, "A", "marker", "ts"],
                 true,
+                true,
                 vec![
                     vec![DATA_SCHEMA_TSID_COLUMN_NAME],
                     vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
                 ],
                 vec![vec!["A"], vec!["ts"], vec!["A", "ts"]],
+            ),
+            // Shared exemplar tables project TSID too, but span multiple source tables.
+            (
+                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "A", "marker", "ts"],
+                false,
+                false,
+                vec![],
+                vec![
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME],
+                    vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
+                ],
             ),
         ] {
             let schema = Arc::new(Schema::new(
@@ -1165,7 +1176,7 @@ mod test {
                     .collect(),
             ));
             let mut properties = ScannerProperties::new(vec![vec![], vec![]], false, 0);
-            properties.set_logical_region(true);
+            properties.set_logical_region(logical_region);
             let scanner = Box::new(RepeatableScanner {
                 batches: RecordBatches::try_new(schema, vec![]).unwrap(),
                 properties,
