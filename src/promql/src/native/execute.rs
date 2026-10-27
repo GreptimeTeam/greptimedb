@@ -3161,9 +3161,8 @@ impl RuntimeNode {
                                 "a map produces values without a grid".to_string(),
                             )
                         })?;
-                        let chunk = NativeChunk::Evaluated(scalar_chunk(grid, value)?);
                         state
-                            .hold_scalar(&mut operation.held, slot, chunk)
+                            .hold_constant(&mut operation.held, slot, grid, value)
                             .map_err(|error| state.context(error))?;
                         continue;
                     }
@@ -4220,6 +4219,21 @@ impl NodeState {
         self.buffer.grow(bytes)?;
         held.bytes = held.bytes.saturating_add(bytes);
         *slot = Some(series);
+        Ok(())
+    }
+
+    /// Keeps a constant parameter's values on `grid` in `slot`, reserved before they are built.
+    fn hold_constant(
+        &mut self,
+        held: &mut HeldForScalars,
+        slot: &mut Option<Series>,
+        grid: Arc<EvalGrid>,
+        value: f64,
+    ) -> Result<()> {
+        let bytes = grid_chunk_bytes(&grid)?;
+        self.buffer.grow(bytes)?;
+        held.bytes = held.bytes.saturating_add(bytes);
+        *slot = Some(scalar_chunk(grid, value)?.series);
         Ok(())
     }
 

@@ -1184,6 +1184,29 @@ fn run_parameterized(
     chunks.remove(0)
 }
 
+/// A constant parameter beside a varying one, as in `clamp(vector(1), 0, time())`, is reserved
+/// before its values are built: on a grid whose values could never be allocated, the pool refuses
+/// it instead of the allocation failing.
+#[test]
+fn a_constant_parameter_is_reserved_before_it_is_built() {
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(0, 1, 1 << 60).unwrap()).unwrap());
+    let root = parameterized(
+        vector_of(scalar(1.0, Arc::clone(&grid))),
+        ParameterizedOp::Clamp,
+        vec![scalar(0.0, Arc::clone(&grid)), eval_time(None, grid)],
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
 /// A parameter is read at each point, as Prometheus reads it at each step: `round` rounds every
 /// point to its own nearest, and a NaN nearest makes that point NaN.
 #[test]
