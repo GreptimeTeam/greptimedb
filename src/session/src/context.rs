@@ -437,6 +437,24 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
+    /// Returns the latest procedure ID recorded in this Session.
+    pub fn last_procedure_id(&self) -> Option<String> {
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .last_procedure_id
+            .clone()
+    }
+
+    /// Records a procedure ID after successful statement execution and
+    /// construction of its ID result.
+    ///
+    /// Recording precedes `post_execute` hooks and protocol transmission, which
+    /// may still fail. It does not confirm that the client received the ID.
+    pub fn set_last_procedure_id(&self, procedure_id: String) {
+        self.mutable_session_data.write().unwrap().last_procedure_id = Some(procedure_id);
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }
