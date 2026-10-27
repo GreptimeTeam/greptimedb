@@ -331,6 +331,8 @@ pub enum NativeExpr {
         input: Box<NativeNode>,
         op: BoundInstant,
     },
+    /// Canonicalizes evaluated fragments that share a label set.
+    Merge { input: Box<NativeNode> },
     /// A window function over its input.
     Window {
         input: Box<NativeNode>,
@@ -380,10 +382,14 @@ pub struct NativeNode {
 
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
-/// Four kinds do: an `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two
-/// vectors' series by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`,
-/// `histogram_quantile`, ...) reorders or reads the whole vector at a grid point. Everything else -
-/// an input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
+/// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
+/// by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`,
+/// ...) reorders or reads the whole vector at a grid point.
+///
+/// `Merge` answers one series per label set, and the label sets it answers span every input series:
+/// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
+/// also cannot be moved below a boundary that holds only part of a metric. Everything else - an
+/// input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
 /// side, whose broadcast reaches each series the other side answers - answers one series from one
 /// series' rows.
 ///
@@ -407,7 +413,21 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
             // Two vectors are matched by label, which pairs series of the whole vector.
             (_, _) => true,
         },
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Set { .. } => true,
+        NativeExpr::Aggregate { .. }
+        | NativeExpr::Vector { .. }
+        | NativeExpr::Set { .. }
+        | NativeExpr::Merge { .. } => true,
+    }
+}
+
+/// Whether `node` is a supported child of Merge: only an input with optional windows and maps.
+fn merge_shape_supported(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) => true,
+        NativeExpr::Window { input, .. } | NativeExpr::Map { input, .. } => {
+            merge_shape_supported(input)
+        }
+        _ => false,
     }
 }
 
@@ -479,6 +499,20 @@ impl NativeNode {
                 // field.
                 ensure_same_fields(&input.output, &self.output, "an instant selection")?;
                 ensure_grid(&self.output, &op.output_grid, "an instant selection")?;
+            }
+            NativeExpr::Merge { input } => {
+                input.validate()?;
+                if !merge_shape_supported(input) {
+                    return Err(invalid(
+                        "a merge is only supported over input/window/map trees",
+                    ));
+                }
+                let Some((_input_schema, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid("a merge consumes an evaluated vector"));
+                };
+                ensure_samples(&self.output, "a merge")?;
+                ensure_same_fields(&input.output, &self.output, "a merge")?;
+                ensure_grid(&self.output, input_grid, "a merge")?;
             }
             NativeExpr::Window { input, op } => {
                 input.validate()?;
