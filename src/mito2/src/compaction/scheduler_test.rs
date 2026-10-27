@@ -2131,12 +2131,16 @@ async fn test_pending_ddl_request_failed_on_region_truncated() {
     assert_matches!(result, Err(_));
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn test_on_compaction_finished_returns_pending_ddl_requests() {
+async fn test_on_compaction_finished_returns_pending_ddl_requests(
+    #[values(false, true)] disable_compaction: bool,
+) {
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, _rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
+    scheduler.disable_compaction = disable_compaction;
     let builder = VersionControlBuilder::new();
     let version_control = Arc::new(builder.build());
     let region_id = builder.region_id();
@@ -2400,4 +2404,95 @@ async fn test_concurrent_memory_competition() {
     // Clean up
     drop(results);
     assert_eq!(manager.used_bytes(), 0);
+}
+
+#[test]
+fn test_parse_disable_compaction() {
+    for (value, expected) in [
+        (None, false),
+        (Some("true"), true),
+        (Some("false"), false),
+        (Some(""), false),
+        (Some("1"), false),
+        (Some("TRUE"), false),
+        (Some(" true "), false),
+    ] {
+        assert_eq!(parse_disable_compaction(value), expected, "{value:?}");
+    }
+}
+
+#[rstest::rstest]
+#[case::regular(Options::Regular(Default::default()))]
+#[case::strict_window(Options::StrictWindow(StrictWindow::default()))]
+#[tokio::test]
+async fn test_disable_compaction_scheduling(#[case] options: Options) {
+    let job_scheduler = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    scheduler.disable_compaction = true;
+    let version_control = compactable_version();
+    let region_id = version_control.region_id();
+    let manifest_ctx = env
+        .mock_manifest_context(version_control.current().version.metadata.clone())
+        .await;
+    let (schemas, _kv_backend) = mock_schema_metadata_manager();
+
+    assert!(
+        !scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                &manifest_ctx,
+                schemas.clone(),
+            )
+            .unwrap()
+    );
+    let (output_tx, mut output_rx) = oneshot::channel();
+    assert!(
+        !scheduler
+            .schedule_manual_compaction(
+                options,
+                &version_control,
+                &env.access_layer,
+                OptionOutputTx::from(output_tx),
+                &manifest_ctx,
+                schemas.clone(),
+                1,
+                None,
+            )
+            .unwrap()
+    );
+    let err = output_rx.try_recv().unwrap().unwrap_err();
+    assert_matches!(err, Error::UnsupportedOperation { .. });
+    assert!(err.to_string().contains(DISABLE_COMPACTION_ENV));
+    assert!(!scheduler.schedule_automatic_followup(region_id, &manifest_ctx, schemas.clone()));
+    assert!(!scheduler.region_status.contains_key(&region_id));
+    assert_eq!(job_scheduler.num_jobs(), 0);
+    assert!(rx.try_recv().is_err());
+
+    // The same compactable fixture dispatches planning with the switch off.
+    scheduler.disable_compaction = false;
+    assert!(
+        scheduler
+            .schedule_automatic_compaction(
+                Options::Regular(Default::default()),
+                &version_control,
+                &env.access_layer,
+                &manifest_ctx,
+                schemas,
+            )
+            .unwrap()
+    );
+    let finished = tokio::time::timeout(
+        Duration::from_secs(10),
+        recv_compaction_pick_finished(&mut rx),
+    )
+    .await
+    .expect("enabled compaction should finish planning");
+    assert!(matches!(
+        finished.result,
+        CompactionPlanningResult::Prepared(_)
+    ));
 }
