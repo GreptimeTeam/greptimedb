@@ -846,7 +846,12 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
+        // A merge collects the pieces one canonical label set arrived in and writes no label of its
+        // own, so the labels it hands over are the ones its input's series carried. The pieces it
+        // did not read are not a label set the node invents either: what it emits spans fewer label
+        // sets than it read, never more.
+        NativeExpr::Merge { input } => fused_output_tags(input, source_tags),
+        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -1121,13 +1126,17 @@ mod tests {
 
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
-    use promql::native::plan::{NativeExpr, NativeNode, NativeTree};
+    use promql::extension_plan::AggregateFinalize;
+    use promql::native::canonicalize::insert_native_merge_inside_current_fused;
+    use promql::native::plan::{
+        NativeExpr, NativeNode, NativeProperties, NativeTree, reads_across_series,
+    };
     use session::context::QueryContextBuilder;
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
         collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
-        native_promql_requested, scan_time_filter,
+        native_promql_requested, pointwise_operand, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -1364,6 +1373,175 @@ mod tests {
         // An aggregate's labels are its groups, which this walk does not derive.
         let aggregate = compiled_test_tree("sum by (host) (x)");
         assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
+    }
+
+    /// What a caller knows about a fused input: this execution holds one scan partition's pieces of
+    /// a metric. It is the only thing the planner can say about a scan, because whether one
+    /// partition's series are whole label sets is decided when the region splits its ranges.
+    fn source_pieces() -> NativeProperties {
+        NativeProperties::source_pieces(SeriesOrdering::Contiguous)
+    }
+
+    /// `query`'s tree with the canonical merges the insertion pass puts in it.
+    ///
+    /// The facts are the ones the planner holds for its scans, one per selector occurrence, so this
+    /// is the tree the route would decide on if the pass ran where `compiled.tree` is read today.
+    fn passed_tree(query: &str, selectors: usize) -> NativeTree {
+        insert_native_merge_inside_current_fused(
+            &compiled_test_tree(query),
+            &vec![source_pieces(); selectors],
+        )
+        .expect("the pass keeps the tree legal")
+    }
+
+    /// Whether the route answers `tree` at all, which is the guard chain
+    /// [`PromPlanner::try_plan_native_fused_with_context`] applies in this order: a tree that reads
+    /// across series is offered to the aggregate split, and one the split cannot carry is declined.
+    ///
+    /// `selectors` is how many occurrences the statement has; the raw field layout is the one
+    /// [`compiled_test_tree`] binds.
+    fn native_route_answer(tree: &NativeTree, selectors: usize) -> &'static str {
+        let fields = [FieldSpec { name: "v0".into() }];
+        let per_partition = !reads_across_series(tree.root()) || pointwise_operand(tree.root());
+        if per_partition {
+            return "per-partition";
+        }
+        if selectors == 1 && AggregateFinalize::can_split(tree, &fields, "ts") {
+            return "split aggregate";
+        }
+        "legacy plan"
+    }
+
+    /// A tree the pass rewrote still has to keep the route it had.
+    ///
+    /// This is the conflict the pass can introduce: a merge reads across series, a tree that reads
+    /// across series is offered to the aggregate split, and the split cuts at the innermost
+    /// aggregate. `Merge(Aggregate(..))` above the cut is carried - the split descends through a
+    /// merge and re-wraps the suffix with it - so only what the pass puts *below* the cut can take
+    /// the route away. It must not.
+    ///
+    /// Ignored because it does not hold yet: the pass wraps the child every stateful consumer reads,
+    /// and the cut aggregate's child is exactly that, so the prefix becomes `Merge(Window(..))`,
+    /// which [`AggregateFinalize`]'s `admit_prefix` refuses with "a per-series prefix across a
+    /// canonical merge, which reads the whole vector". Wiring the pass into the route before that is
+    /// fixed turns every `sum(..)`, `avg(..)`, `count(..)`, ... query the split answers today into a
+    /// fallback.
+    #[test]
+    #[ignore = "the pass puts a merge below the cut aggregate, which the split's admit_prefix refuses"]
+    fn an_admitted_aggregate_still_splits_after_the_insertion_pass() {
+        for query in ["sum(rate(x[5m]))", "sum(x)", "avg by (host) (rate(x[5m]))"] {
+            let passed = passed_tree(query, 1);
+            let answer = native_route_answer(&passed, 1);
+            assert_eq!(
+                "split aggregate", answer,
+                "`{query}` no longer takes the native route after the pass:\n{passed}"
+            );
+        }
+    }
+
+    /// The per-series counterpart of the test above, and the other half of the same conflict.
+    ///
+    /// Ignored for the same reason: the pass canonicalizes the root of *every* tree, because a scan's
+    /// pieces prove neither fact and the route supplies no canonical boundary facts. A tree whose
+    /// root is a merge reads across series, so [`reads_across_series`] sends it to the aggregate
+    /// split, which a tree holding no aggregate cannot carry, and the route answers `Ok(None)`.
+    #[test]
+    #[ignore = "the pass wraps the root, which reads_across_series sends to the aggregate split"]
+    fn the_insertion_pass_does_not_take_a_per_series_tree_off_the_route() {
+        for query in ["rate(x[5m])", "x", "abs(x)", "x * 2"] {
+            let passed = passed_tree(query, 1);
+            assert_eq!(
+                "per-partition",
+                native_route_answer(&passed, 1),
+                "`{query}` no longer takes the native route after the pass:\n{passed}"
+            );
+        }
+    }
+
+    /// A per-series tree the pass leaves its shape's route: the window still reads its raw input,
+    /// and what the pass adds is one merge above it.
+    ///
+    /// The pass does insert a merge here - a scan's pieces prove neither that a label set is one
+    /// series nor that duplicates were checked, so the root, which is a consumer too, gains one -
+    /// and a merge writes no label of its own, so the tags the node declares are unchanged.
+    #[test]
+    fn the_insertion_pass_wraps_a_per_series_tree_and_keeps_its_tags() {
+        let query = "rate(x[5m])";
+        let unpassed = compiled_test_tree(query);
+        // The compiled shape: one window reading the scan directly.
+        let NativeExpr::Window { input, .. } = &unpassed.root().expr else {
+            panic!("the root is not a window: {unpassed}");
+        };
+        assert!(matches!(input.expr, NativeExpr::Input(_)), "{unpassed}");
+
+        let passed = passed_tree(query, 1);
+        let NativeExpr::Merge { input } = &passed.root().expr else {
+            panic!("the pass left the window at the root: {passed}");
+        };
+        // One merge, at the root: the window merges the label sets it can make coincide itself, and
+        // the pass has no reason to collect the raw samples a window folds one series at a time.
+        assert_eq!(1, passed.to_string().matches("Merge").count(), "{passed}");
+        let NativeExpr::Window { input, .. } = &input.expr else {
+            panic!("the merge does not sit over the window: {passed}");
+        };
+        assert!(matches!(input.expr, NativeExpr::Input(_)), "{passed}");
+
+        let sources = [vec!["host".to_string()]];
+        assert_eq!(
+            fused_output_tags(unpassed.root(), &sources),
+            fused_output_tags(passed.root(), &sources),
+            "`{query}`: the pass changed the labels the node declares"
+        );
+    }
+
+    /// A canonical merge collects the pieces one label set arrived in and writes no label of its
+    /// own, so a tree the insertion pass wrapped in one reports the labels it reported before: the
+    /// pass inserts merges, it does not rename the columns the node's schema declares.
+    #[test]
+    fn a_merge_forwards_its_input_tags() {
+        let sources = [
+            vec!["host".to_string(), "kind".to_string()],
+            vec!["host".to_string(), "zone".to_string()],
+        ];
+        for (query, expected) in [
+            ("x", Some(sources[0].clone())),
+            ("rate(x[5m])", Some(sources[0].clone())),
+            ("abs(x)", Some(sources[0].clone())),
+            ("x * 2", Some(sources[0].clone())),
+            // A match narrows the left side before a merge sees it, so the merge has to forward the
+            // narrowed list and not the scan's.
+            ("x + on(host) y", Some(vec!["host".to_string()])),
+        ] {
+            let tree = compiled_test_tree(query);
+            assert_eq!(
+                expected,
+                fused_output_tags(tree.root(), &sources),
+                "{query}"
+            );
+            let merged = merge_of(tree.root());
+            assert_eq!(
+                expected,
+                fused_output_tags(&merged, &sources),
+                "{query}: a merge changed the labels it hands over"
+            );
+            // A merge over a merge forwards through both, which is the shape the pass produces when
+            // it runs over a tree that already held one.
+            assert_eq!(
+                expected,
+                fused_output_tags(&merge_of(&merged), &sources),
+                "{query}: a second merge changed the labels"
+            );
+        }
+    }
+
+    /// `node` wrapped in the merge the insertion pass inserts, as a legal node.
+    fn merge_of(node: &NativeNode) -> NativeNode {
+        NativeNode {
+            expr: NativeExpr::Merge {
+                input: Box::new(node.clone()),
+            },
+            output: node.output.clone(),
+        }
     }
 
     #[test]
