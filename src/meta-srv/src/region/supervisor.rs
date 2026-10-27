@@ -1375,9 +1375,9 @@ pub(crate) mod tests {
         };
         let table_route = PhysicalTableRouteValue::new(vec![
             region_route(0, &[]),
-            region_route(1, &[2]),
-            region_route(2, &[2]),
-            region_route(3, &[3]),
+            region_route(1, &[3]),
+            region_route(2, &[4]),
+            region_route(3, &[4]),
         ]);
         let mut task = test_create_physical_table_task("my_physical_table");
         task.set_table_id(table_id);
@@ -1403,8 +1403,8 @@ pub(crate) mod tests {
             *selector.0.lock().unwrap(),
             vec![
                 (StdHashSet::from([8]), 1),
-                (StdHashSet::from([8, 2]), 2),
                 (StdHashSet::from([8, 3]), 1),
+                (StdHashSet::from([8, 4]), 2),
             ]
         );
         // Only the region whose follower is the last candidate is skipped.
@@ -1412,7 +1412,7 @@ pub(crate) mod tests {
             .iter()
             .map(|(task, _)| task.region_id)
             .collect::<Vec<_>>();
-        assert_eq!(failed_over, regions[..3]);
+        assert_eq!(failed_over, [regions[0], regions[2], regions[3]]);
     }
 
     #[tokio::test]
