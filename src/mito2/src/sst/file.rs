@@ -906,6 +906,11 @@ impl UncommittedSsts {
         }
     }
 
+    /// Tracks an SST before it is uploaded, so a cancelled upload is still removed.
+    pub(crate) fn track_before_upload(&self, file_id: FileId, with_index: bool) {
+        self.files.lock().unwrap().insert(file_id, (0, with_index));
+    }
+
     /// Disarms cleanup after the manifest edit has committed or may have committed.
     ///
     /// A manifest update error does not guarantee that the edit was not persisted. Once an edit

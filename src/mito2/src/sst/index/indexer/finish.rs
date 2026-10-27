@@ -57,6 +57,11 @@ impl Indexer {
 
         self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
+        // A failed puffin file must not advertise the indexes written into it. Not covered by
+        // tests: `do_finish_puffin_writer` panics on failure in test builds.
+        if output.file_size == 0 {
+            return IndexOutput::default();
+        }
         output.version = self.index_version;
         output
     }

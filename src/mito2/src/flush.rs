@@ -29,16 +29,17 @@ use smallvec::{SmallVec, smallvec};
 use snafu::{ResultExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::RegionFlushReason;
-use store_api::storage::{FileId, RegionId, SequenceNumber};
+use store_api::storage::{RegionId, SequenceNumber};
 use strum::IntoStaticStr;
 use tokio::sync::{Semaphore, mpsc, watch};
 
 use crate::access_layer::{
-    AccessLayerRef, Metrics, OperationType, SstInfoArray, SstWriteRequest, WriteType,
+    AccessLayerRef, EncodedSstIndexBuildParams, Metrics, OperationType, SstInfoArray,
+    SstWriteRequest, WriteType,
 };
 use crate::cache::CacheManagerRef;
 use crate::compaction::{collect_json2_rewrite_plans, rewrite_json2_batch, rewrite_json2_schema};
-use crate::config::MitoConfig;
+use crate::config::{IndexBuildMode, MitoConfig};
 use crate::engine::region_hook::SstFileInfo;
 use crate::error::{
     Error, FlushCancelledSnafu, FlushRegionSnafu, JoinSnafu, RegionBusySnafu, RegionClosedSnafu,
@@ -66,7 +67,7 @@ use crate::request::{
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileMeta, RegionFileId, UncommittedSsts};
+use crate::sst::file::{FileMeta, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
@@ -391,10 +392,7 @@ impl RegionFlushTask {
         };
 
         let worker_request = match flush_result {
-            Ok(FlushedEdit {
-                edit,
-                unindexed_files,
-            }) => {
+            Ok(edit) => {
                 let memtables_to_remove = version_data
                     .version
                     .memtables
@@ -410,7 +408,6 @@ impl RegionFlushTask {
                     senders: std::mem::take(&mut self.senders),
                     _timer: timer,
                     edit,
-                    unindexed_files,
                     memtables_to_remove,
                     is_staging: self.is_staging,
                 };
@@ -448,7 +445,7 @@ impl RegionFlushTask {
         version_data: &VersionControlData,
         state: &CancellableTaskState,
         uncommitted: &UncommittedSsts,
-    ) -> Result<FlushedEdit> {
+    ) -> Result<RegionEdit> {
         // We must use the immutable memtables list and entry ids from the `version_data`
         // for consistency as others might already modify the version in the `version_control`.
         let version = &version_data.version;
@@ -467,7 +464,6 @@ impl RegionFlushTask {
 
         let DoFlushMemtablesResult {
             file_metas,
-            unindexed_files,
             flushed_bytes,
             series_count,
             encoded_part_count,
@@ -580,10 +576,7 @@ impl RegionFlushTask {
             self.reason.as_str()
         );
 
-        Ok(FlushedEdit {
-            edit,
-            unindexed_files,
-        })
+        Ok(edit)
     }
 
     async fn do_flush_memtables(
@@ -598,7 +591,6 @@ impl RegionFlushTask {
         let mut flushed_bytes = 0;
         let mut series_count = 0;
         let mut encoded_part_count = 0;
-        let mut unindexed_files = Vec::new();
         let mut flush_metrics = Metrics::new(WriteType::Flush);
         let partition_expr = parse_partition_expr(self.partition_expr.as_deref())?;
         let hook = self.manifest_ctx.hook();
@@ -645,12 +637,7 @@ impl RegionFlushTask {
                 .await?;
             encoded_part_count += num_encoded;
             for (source_idx, result) in results.into_iter().enumerate() {
-                let FlushedSsts {
-                    max_sequence,
-                    ssts: ssts_written,
-                    metrics,
-                    indexed,
-                } = result?;
+                let (max_sequence, ssts_written, metrics) = result?;
                 if ssts_written.is_empty() {
                     // No data written.
                     continue;
@@ -669,9 +656,6 @@ impl RegionFlushTask {
 
                 for sst_info in &ssts_written {
                     flushed_bytes += sst_info.file_size;
-                    if !indexed {
-                        unindexed_files.push(sst_info.file_id);
-                    }
                     let pk_range = sst_info
                         .file_metadata
                         .as_ref()
@@ -705,7 +689,6 @@ impl RegionFlushTask {
 
         Ok(DoFlushMemtablesResult {
             file_metas,
-            unindexed_files,
             flushed_bytes,
             series_count,
             encoded_part_count,
@@ -751,41 +734,43 @@ impl RegionFlushTask {
                     .await?;
                 uncommitted.track(&ssts);
                 FLUSH_FILE_TOTAL.inc_by(ssts.len() as u64);
-                Ok(FlushedSsts {
-                    max_sequence,
-                    ssts,
-                    metrics,
-                    indexed: true,
-                })
+                Ok((max_sequence, ssts, metrics))
             });
             tasks.push(task);
         }
-        for (encoded, max_sequence) in flat_sources.encoded {
+        let build_index = self.engine_config.index.build_mode == IndexBuildMode::Sync;
+        for (mut encoded, max_sequence) in flat_sources.encoded {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
             let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.flush_semaphore.clone();
             let uncommitted = uncommitted.clone();
+            let index_build_params = build_index.then(|| EncodedSstIndexBuildParams {
+                metadata: version.metadata.clone(),
+                index_options: self.index_options.clone(),
+                inverted_index_config: self.engine_config.inverted_index.clone(),
+                fulltext_index_config: self.engine_config.fulltext_index.clone(),
+                bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
+            });
+            // Index creation runs after the SST is uploaded, so cancellation can land after the
+            // upload. Own the files before uploading them.
+            uncommitted.track_before_upload(encoded.sst_info.file_id, index_build_params.is_some());
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
                     .put_sst(
                         &encoded.data,
-                        RegionFileId::new(region_id, encoded.sst_info.file_id),
+                        region_id,
+                        &mut encoded.sst_info,
                         &cache_manager,
                         write_buffer_size,
+                        index_build_params,
                     )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
                 FLUSH_FILE_TOTAL.inc();
-                // Encoded parts are uploaded as-is, without passing through the indexer.
-                Ok(FlushedSsts {
-                    max_sequence,
-                    ssts: smallvec![encoded.sst_info],
-                    metrics,
-                    indexed: false,
-                })
+                Ok((max_sequence, smallvec![encoded.sst_info], metrics))
             });
             tasks.push(task);
         }
@@ -921,30 +906,14 @@ impl RegionFlushTask {
     }
 }
 
-struct FlushedEdit {
-    edit: RegionEdit,
-    /// Files in `edit` written without building their indexes.
-    unindexed_files: Vec<FileId>,
-}
-
-struct FlushedSsts {
-    max_sequence: SequenceNumber,
-    ssts: SstInfoArray,
-    metrics: Metrics,
-    /// Whether the indexer ran while writing `ssts`.
-    indexed: bool,
-}
-
 struct FlushFlatMemResult {
     num_encoded: usize,
     num_sources: usize,
-    results: Vec<Result<FlushedSsts>>,
+    results: Vec<Result<(SequenceNumber, SstInfoArray, Metrics)>>,
 }
 
 struct DoFlushMemtablesResult {
     file_metas: Vec<FileMeta>,
-    /// Files written without building their indexes.
-    unindexed_files: Vec<FileId>,
     flushed_bytes: u64,
     series_count: usize,
     encoded_part_count: usize,
@@ -1954,7 +1923,6 @@ mod tests {
                     flushed_sequence: None,
                     committed_sequence: None,
                 },
-                unindexed_files: Vec::new(),
                 memtables_to_remove: smallvec![],
                 is_staging: false,
             }),
