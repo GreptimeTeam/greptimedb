@@ -388,7 +388,17 @@ async fn distributed_native_promql_rate_uses_fe_raw_fan_in() {
             .await
             .unwrap();
             let aggregate_rows = native_result_rows(aggregate_native).await;
+            // The finalize is the fused node's parent, so it is not in the fused subtree the
+            // observer also keeps; the whole plan shows it, the subtree shows the split.
+            let aggregate_root = observer.take_root();
             let aggregate_plan = observer.take();
+            let root_display = datafusion::physical_plan::displayable(aggregate_root.as_ref())
+                .indent(true)
+                .to_string();
+            assert!(
+                root_display.contains("AggregateFinalizeExec"),
+                "{root_display}"
+            );
             let aggregate_display = datafusion::physical_plan::displayable(aggregate_plan.as_ref())
                 .indent(true)
                 .to_string();
@@ -396,8 +406,10 @@ async fn distributed_native_promql_rate_uses_fe_raw_fan_in() {
                 aggregate_display.contains("NativeRawFanInExec: regions=3"),
                 "{aggregate_display}"
             );
+            // The producer exports partial state instead of answering: the cut aggregate is
+            // finalized above it rather than folded per region.
             assert!(
-                aggregate_display.contains("AggregateFinalizeExec"),
+                aggregate_display.contains("partial state: sum by (host) Complete"),
                 "{aggregate_display}"
             );
             assert_eq!(aggregate_plan.output_partitioning().partition_count(), 1);
@@ -1991,23 +2003,28 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
 
 /// The fused node of the last wrapped plan that held one, and every region-side raw source.
 #[derive(Default)]
-struct NativePlanObserver(
-    Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
-    Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
-);
+struct NativePlanObserver {
+    fused: Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    /// The whole wrapped plan, because nodes above the fused one (an aggregate finalize, for
+    /// instance) are what turn the fused node's partial state into the query's answer.
+    root: Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    /// Every `RawSeriesSourceExec` the wrapped plan holds, one per region scan it reads.
+    raw_sources: Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+}
 
 impl NativePlanObserver {
     fn clear(&self) {
-        *self.0.lock().unwrap() = None;
-        self.1.lock().unwrap().clear();
+        *self.fused.lock().unwrap() = None;
+        *self.root.lock().unwrap() = None;
+        self.raw_sources.lock().unwrap().clear();
     }
 
     fn take_raw_sources(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
-        std::mem::take(&mut *self.1.lock().unwrap())
+        std::mem::take(&mut *self.raw_sources.lock().unwrap())
     }
 
     fn take(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
-        self.0
+        self.fused
             .lock()
             .unwrap()
             .take()
@@ -2016,7 +2033,16 @@ impl NativePlanObserver {
 
     /// The fused node the last wrapped plan contained, if any; `take` requires one instead.
     fn fused(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
-        self.0.lock().unwrap().clone()
+        self.fused.lock().unwrap().clone()
+    }
+
+    /// The whole plan of the last wrapped query.
+    fn take_root(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.root
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the wrapped plan was captured")
     }
 }
 
@@ -2026,10 +2052,11 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
         _ctx: session::context::QueryContextRef,
     ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        *self.root.lock().unwrap() = Some(origin.clone());
         let mut stack = vec![origin.clone()];
         while let Some(node) = stack.pop() {
             if node.name() == "FusedSeriesExec" {
-                *self.0.lock().unwrap() = Some(node);
+                *self.fused.lock().unwrap() = Some(node);
                 break;
             }
             stack.extend(node.children().into_iter().cloned());
@@ -2037,7 +2064,7 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         let mut stack = vec![origin.clone()];
         while let Some(node) = stack.pop() {
             if node.name() == "RawSeriesSourceExec" {
-                self.1.lock().unwrap().push(node.clone());
+                self.raw_sources.lock().unwrap().push(node.clone());
             }
             stack.extend(node.children().into_iter().cloned());
         }
