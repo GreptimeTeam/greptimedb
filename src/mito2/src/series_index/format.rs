@@ -85,6 +85,8 @@ pub(crate) trait SeriesIndexFormat: Debug + Send + Sync {
 /// Selection in the stored timestamp unit. No visibility filtering is implicit.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct SamplesReadRequest {
+    /// Native scans account transient read buffers against their query pool.
+    pub(crate) memory_pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
     pub(crate) projection: Vec<String>,
     pub(crate) table_id: Option<u32>,
     pub(crate) ids: Option<BTreeSet<MetricSeriesId>>,

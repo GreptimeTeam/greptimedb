@@ -462,7 +462,8 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     reservation.try_grow(selection_bytes).context(crate::error::MergeCandidateSeriesSnafu)?;
                     let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
                     let mut batches = reader.read(SamplesReadRequest {
-                        projection: reader.schema().fields().iter().map(|f| f.name().clone()).collect(),
+                        projection: sample_projection(&reader.schema(), &context),
+                        memory_pool: Some(context.input.scan_memory_pool.clone()),
                         ids: Some(ids),
                         start,
                         end,
@@ -635,4 +636,20 @@ fn filter_visibility(batch: RecordBatch, context: &StreamContext) -> Result<Reco
             .collect::<Vec<_>>(),
     );
     filter_record_batch(&batch, &filter).context(ComputeArrowSnafu)
+}
+
+/// The mapper includes projected and residual-filter columns. Identity/time and
+/// merge visibility columns are always needed by the native source adapter.
+fn sample_projection(
+    schema: &datatypes::arrow::datatypes::Schema,
+    context: &StreamContext,
+) -> Vec<String> {
+    let input = context.input.mapper.input_arrow_schema(false);
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(index, field)| *index < 5 || input.index_of(field.name()).is_ok())
+        .map(|(_, field)| field.name().clone())
+        .collect()
 }

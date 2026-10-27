@@ -498,8 +498,15 @@ part before opening its successor. Bound the manifest and lifecycle object-list
 growth as parts complete; fail rather than constructing a manifest over 64 MiB.
 
 Use recorded sizes for reads; do not issue object stats just to locate trailers.
-Fetch metadata and selected column ranges only. Reads are sequential in this
-initial port, without speculative adjacent-field fetches or prefetch. Keep
+Fetch metadata and selected column ranges only. A query lazily reuses one OpenDAL
+reader per accessed part across partition streams. Selected block columns are fetched
+in groups of at most 8 MiB with concurrency 8 and zero-gap coalescing; no unselected
+fields or neighboring blocks are prefetched. Boundary blocks read timestamps first
+so empty selections avoid value I/O. Native requests reserve stored/decompressed
+buffers, selection, typed values, and output against the scan memory pool before
+payload reads, releasing the reservation when the yielded batch is consumed or
+the stream is dropped. Mapper-required fields plus identity/time/sequence/operation
+columns determine projection. Keep
 fetch/validate/decode entrypoints for metadata and columns separate so a later
 cache integration can use immutable generation, part, byte range, checksum,
 codec IDs, and representation without changing the format.
