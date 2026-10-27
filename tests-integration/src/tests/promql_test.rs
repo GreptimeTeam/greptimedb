@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1840,6 +1841,10 @@ impl GlobalTopkObserver {
     fn take_select(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
         self.select.lock().unwrap().take().unwrap()
     }
+    /// The selection the last wrapped plan contained, if any; `take_select` requires one instead.
+    fn select(&self) -> Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        self.select.lock().unwrap().clone()
+    }
 }
 
 impl PhysicalPlanWrapper for GlobalTopkObserver {
@@ -1871,6 +1876,53 @@ impl PhysicalPlanWrapper for GlobalTopkObserver {
             stack.extend(node.children().into_iter().cloned());
         }
         plan
+    }
+}
+
+/// The two provenance columns `VectorSelect` sorts its frames by. `promql`'s own constants of these
+/// names are crate-private, so an integration test repeats them.
+const NATIVE_PRODUCER_COLUMN: &str = "__greptime_native_producer";
+const NATIVE_FRAME_ORDINAL_COLUMN: &str = "__greptime_native_frame_ordinal";
+
+/// Keeps the plans one query executed, so a test can count the native node kinds they hold.
+#[derive(Default)]
+struct RouteCountObserver(Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>);
+
+impl RouteCountObserver {
+    fn clear(&self) {
+        self.0.lock().unwrap().clear();
+    }
+
+    /// How many nodes of the plans this query executed have `kind` in their name.
+    fn count(&self, kind: &str) -> usize {
+        self.plans_with(kind).len()
+    }
+
+    /// Every node with `kind` in its name in the plans this query executed, so a test can read what
+    /// it was compiled to. The frontend's merge names itself after its logical node and then `Exec`.
+    fn plans_with(&self, kind: &str) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let mut found = Vec::new();
+        for plan in self.0.lock().unwrap().iter() {
+            let mut stack = vec![Arc::clone(plan)];
+            while let Some(node) = stack.pop() {
+                if node.name().contains(kind) {
+                    found.push(Arc::clone(&node));
+                }
+                stack.extend(node.children().into_iter().cloned());
+            }
+        }
+        found
+    }
+}
+
+impl PhysicalPlanWrapper for RouteCountObserver {
+    fn wrap(
+        &self,
+        origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.0.lock().unwrap().push(origin.clone());
+        origin
     }
 }
 
@@ -2603,6 +2655,596 @@ async fn native_promql_global_topk_preserves_four_real_prefix_partitions() {
     )
     .await;
     assert_eq!(rows, legacy);
+}
+
+/// The metric-engine fixture the global ranking cases rank: one sample per second for a range long
+/// enough that every series arrives as several chunks from several producers.
+const TOPK_RANGE_PHYSICAL: &str = "native_topk_range_phy";
+const TOPK_RANGE_TABLE: &str = "native_topk_range";
+/// How many series the fixture writes, four of them per `grp`.
+const TOPK_RANGE_SERIES: usize = 16;
+/// How many one-second samples each series carries over the fixture's three inserts.
+const TOPK_RANGE_POINTS: i64 = 3_000;
+/// The step of every evaluation, and the spacing of the fixture's samples.
+const TOPK_RANGE_STEP_MS: i64 = 1_000;
+/// The lookback the statements run with — [`PromQuery::default`]'s five minutes — counted in the
+/// fixture's one-second samples.
+const TOPK_RANGE_LOOKBACK_SECS: i64 = 300;
+/// The seconds at which every series of a `grp` carries the same value, so the cut of every query
+/// below splits a tie.
+const TOPK_RANGE_TIE_FROM: i64 = 1_500;
+const TOPK_RANGE_TIE_TO: i64 = 1_600;
+/// The seconds the first four series are missing entirely. The hole is longer than the lookback, so
+/// those series leave the answer instead of carrying their last sample forward.
+const TOPK_RANGE_HOLE_FROM: i64 = 1_000;
+const TOPK_RANGE_HOLE_TO: i64 = 1_500;
+/// A second hole, this one for every series: long enough that each series' evaluated answer breaks
+/// into a new run after it, so one series is handed over as more than one frame. That is what the
+/// sort above the selection exists for; with a single frame per series it could be dropped without
+/// any answer changing.
+const TOPK_RANGE_BREAK_FROM: i64 = 2_000;
+const TOPK_RANGE_BREAK_TO: i64 = 2_400;
+
+/// The `host` of series `index`, which sorts the same way as the series' whole label set: `grp` grows
+/// with the host, so the two label pairs never disagree about which series comes first.
+fn topk_range_host(index: usize) -> String {
+    format!("h{index:02}")
+}
+
+/// The `grp` label of series `index`: the four hosts of one group share it.
+fn topk_range_group(index: usize) -> String {
+    format!("g{:02}", index / 4)
+}
+
+/// The value the fixture writes for series `index` at `second`.
+fn topk_range_value(index: usize, second: i64) -> f64 {
+    if (TOPK_RANGE_TIE_FROM..TOPK_RANGE_TIE_TO).contains(&second) {
+        // Every series of a group carries the same value, so each group's `k` splits a tie.
+        (index / 4) as f64
+    } else {
+        // A permutation of `0..16` per step: distinct values, so no cut outside the tie band is
+        // decided by one.
+        ((index * 37 + second as usize * 11) % TOPK_RANGE_SERIES) as f64
+    }
+}
+
+/// The sample the fixture inserts for series `index` at `second`, if the holes leave it out.
+fn topk_range_sample(index: usize, second: i64) -> Option<f64> {
+    if index < 4 && (TOPK_RANGE_HOLE_FROM..TOPK_RANGE_HOLE_TO).contains(&second) {
+        return None;
+    }
+    if (TOPK_RANGE_BREAK_FROM..TOPK_RANGE_BREAK_TO).contains(&second) {
+        return None;
+    }
+    Some(topk_range_value(index, second))
+}
+
+/// The sample an instant selection reads for series `index` at `second`: the newest sample at or
+/// before it, which the selection drops once it is a whole lookback old, exactly as
+/// `select_instants` does.
+fn topk_range_selected(index: usize, second: i64) -> Option<f64> {
+    let mut candidate = second;
+    while candidate >= 0 && second - candidate < TOPK_RANGE_LOOKBACK_SECS {
+        if let Some(value) = topk_range_sample(index, candidate) {
+            return Some(value);
+        }
+        candidate -= 1;
+    }
+    None
+}
+
+/// The row-insert schema of [`TOPK_RANGE_TABLE`].
+fn topk_range_schema() -> Vec<ColumnSchema> {
+    vec![
+        ColumnSchema {
+            column_name: "host".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "grp".to_string(),
+            datatype: ColumnDataType::String as i32,
+            semantic_type: SemanticType::Tag as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "ts".to_string(),
+            datatype: ColumnDataType::TimestampMillisecond as i32,
+            semantic_type: SemanticType::Timestamp as i32,
+            ..Default::default()
+        },
+        ColumnSchema {
+            column_name: "val".to_string(),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        },
+    ]
+}
+
+/// Sends the rows of the seconds `[from, to)` in requests of 2048 rows, which keeps every request
+/// well under the frontend's insert size.
+async fn insert_topk_range(instance: &Arc<Instance>, from: i64, to: i64) {
+    const TOPK_RANGE_INSERT_BATCH: usize = 2_048;
+    let schema = topk_range_schema();
+    let mut batch: Vec<Row> = Vec::with_capacity(TOPK_RANGE_INSERT_BATCH);
+    for second in from..to {
+        for index in 0..TOPK_RANGE_SERIES {
+            let Some(value) = topk_range_sample(index, second) else {
+                continue;
+            };
+            batch.push(Row {
+                values: vec![
+                    ValueData::StringValue(topk_range_host(index)).into(),
+                    ValueData::StringValue(topk_range_group(index)).into(),
+                    ValueData::TimestampMillisecondValue(second * TOPK_RANGE_STEP_MS).into(),
+                    ValueData::F64Value(value).into(),
+                ],
+            });
+            if batch.len() == TOPK_RANGE_INSERT_BATCH {
+                let rows =
+                    std::mem::replace(&mut batch, Vec::with_capacity(TOPK_RANGE_INSERT_BATCH));
+                send_topk_range_rows(instance, &schema, rows).await;
+            }
+        }
+    }
+    if !batch.is_empty() {
+        send_topk_range_rows(instance, &schema, batch).await;
+    }
+}
+
+/// Sends one request of rows of [`TOPK_RANGE_TABLE`].
+async fn send_topk_range_rows(instance: &Arc<Instance>, schema: &[ColumnSchema], rows: Vec<Row>) {
+    instance
+        .handle_row_inserts(
+            RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: TOPK_RANGE_TABLE.to_string(),
+                    rows: Some(Rows {
+                        schema: schema.to_vec(),
+                        rows,
+                    }),
+                }],
+            },
+            QueryContext::arc(),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+}
+
+/// One query over the fixture, and what the answer to it must be.
+struct TopkCase {
+    /// The PromQL expression, whose `{table}` is replaced with [`TOPK_RANGE_TABLE`].
+    expr: &'static str,
+    /// Whether the query keeps the largest values (`topk`) or the smallest (`bottomk`).
+    top: bool,
+    /// How many series of each group survive, after the truncation Prometheus applies to the
+    /// parameter.
+    keep: usize,
+    /// The label the groups are formed by, or `None` when the whole vector is one group.
+    group: Option<&'static str>,
+}
+
+/// The evaluated answer to one case, worked out from the fixture's samples.
+struct TopkOracle {
+    /// The rows the query must answer, in [`native_result_rows`]' order.
+    rows: Vec<(i64, String, f64)>,
+    /// The steps whose cut splits a tie. The existing planner orders the tied labels in the same
+    /// direction as the values, so which tied series it keeps is its own choice; only the steps
+    /// that decide no tie can be held against it.
+    tie_steps: BTreeSet<i64>,
+}
+
+/// Evaluates `case` from the fixture's samples rather than from either route's answer.
+///
+/// At every step the series holding a sample inside the lookback are grouped, each group is ranked
+/// by value with ties going to the smaller label set, and the first `keep` of it survive.
+fn topk_range_oracle(case: &TopkCase) -> TopkOracle {
+    let mut rows = Vec::new();
+    let mut tie_steps = BTreeSet::new();
+    for point in 0..TOPK_RANGE_POINTS {
+        let mut groups: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
+        for index in 0..TOPK_RANGE_SERIES {
+            let Some(value) = topk_range_selected(index, point) else {
+                continue;
+            };
+            let key = match case.group {
+                Some(_) => topk_range_group(index),
+                None => String::new(),
+            };
+            groups
+                .entry(key)
+                .or_default()
+                .push((topk_range_host(index), value));
+        }
+        for members in groups.values_mut() {
+            // The host decides the label order: `grp` grows with it, so the whole label set of one
+            // series sorts before another's exactly when its host does.
+            members.sort_by(|left, right| {
+                let by_value = if case.top {
+                    right.1.total_cmp(&left.1)
+                } else {
+                    left.1.total_cmp(&right.1)
+                };
+                by_value.then_with(|| left.0.cmp(&right.0))
+            });
+            if case.keep > 0
+                && members.len() > case.keep
+                && members[case.keep - 1].1 == members[case.keep].1
+            {
+                tie_steps.insert(point * TOPK_RANGE_STEP_MS);
+            }
+            for (host, value) in members.iter().take(case.keep) {
+                rows.push((point * TOPK_RANGE_STEP_MS, host.clone(), *value));
+            }
+        }
+    }
+    rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    TopkOracle { rows, tie_steps }
+}
+
+/// The rows of `rows` at the steps whose cut decides no tie.
+fn rows_without_ties<'a>(
+    rows: &'a [(i64, String, f64)],
+    tie_steps: &'a BTreeSet<i64>,
+) -> Vec<&'a (i64, String, f64)> {
+    rows.iter()
+        .filter(|row| !tie_steps.contains(&row.0))
+        .collect()
+}
+
+/// Checks the shape a global selection executed: one sort above the one region, and the region's
+/// fused prefix running on all four scan partitions.
+///
+/// The sort is what puts the frames back in producer-then-ordinal order, so a fixture whose series
+/// arrive as several chunks from several producers cannot pass without it.
+fn assert_global_selection_plan(
+    select: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    prefix: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) {
+    use datafusion::physical_plan::metrics::MetricValue;
+
+    assert_eq!(
+        select.name(),
+        "VectorSelectExec",
+        "the query must execute the global native ranker"
+    );
+    let select_children = select.children();
+    let [input] = select_children.as_slice() else {
+        panic!("VectorSelectExec must have one raw-input child: {select:?}");
+    };
+    let mut frames = Arc::clone(input);
+    if let Some(cooperative) = frames.as_ref().downcast_ref::<CooperativeExec>() {
+        frames = Arc::clone(cooperative.input());
+    }
+    let sort = frames
+        .as_ref()
+        .downcast_ref::<datafusion::physical_plan::sorts::sort::SortExec>()
+        .unwrap_or_else(|| {
+            panic!("the frames must be sorted before the selection, found {frames:?}")
+        });
+    let sort_plan = datafusion::physical_plan::displayable(sort as &dyn ExecutionPlan)
+        .indent(false)
+        .to_string();
+    assert!(
+        sort_plan.contains(NATIVE_PRODUCER_COLUMN),
+        "the sort must restore the producer order: {sort_plan}"
+    );
+    assert!(
+        sort_plan.contains(NATIVE_FRAME_ORDINAL_COLUMN),
+        "the sort must restore the frame ordinal order: {sort_plan}"
+    );
+    let sort_children = sort.children();
+    let [sort_input] = sort_children.as_slice() else {
+        panic!("VectorSelect sort must have one child: {sort:?}");
+    };
+    let mut raw_input = Arc::clone(sort_input);
+    if let Some(coalesce) = raw_input
+        .as_ref()
+        .downcast_ref::<datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec>(
+    ) {
+        let children = coalesce.children();
+        let [child] = children.as_slice() else {
+            panic!("VectorSelect coalesce must have one child");
+        };
+        raw_input = Arc::clone(child);
+    }
+    if let Some(cooperative) = raw_input.as_ref().downcast_ref::<CooperativeExec>() {
+        raw_input = Arc::clone(cooperative.input());
+    }
+    let merge = raw_input
+        .as_ref()
+        .downcast_ref::<query::dist_plan::MergeScanExec>()
+        .unwrap_or_else(|| {
+            panic!("VectorSelect raw input is a real MergeScanExec, found {raw_input:?}")
+        });
+    assert_eq!(
+        merge.region_count(),
+        1,
+        "the logical metric resolves to one physical region"
+    );
+    // Each series arrives as more than one frame: the selection reads more frame rows than there
+    // are series, which is what makes the order above them necessary.
+    let mut frame_rows = 0_u64;
+    for metric in select.metrics().expect("the selection's metrics").iter() {
+        if metric.value().name() == "native.root.input.input_batches"
+            && let MetricValue::Count { count, .. } = metric.value()
+        {
+            frame_rows += count.value() as u64;
+        }
+    }
+    assert!(
+        frame_rows >= 2 * TOPK_RANGE_SERIES as u64,
+        "the prefix must hand over several chunks per series, but only {frame_rows} frame rows \
+         arrived for {TOPK_RANGE_SERIES} series"
+    );
+    assert_four_native_partitions(prefix);
+}
+
+/// Ranks thousands of grid points of several series, each arriving as several chunks from four real
+/// producer partitions, and compares every answer with one computed from the fixture.
+///
+/// The fixture carries ties as well as gaps, so the comparison is the test's own ranking rather than
+/// the existing planner's answer: ties go to the series whose label set sorts first, which legacy
+/// does not do. Legacy is still compared at the steps whose cut decides no tie.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_global_topk_range_multi_chunk() {
+    common_telemetry::init_default_ut_logging();
+    const CASES: [TopkCase; 6] = [
+        TopkCase {
+            expr: "topk(3, {table})",
+            top: true,
+            keep: 3,
+            group: None,
+        },
+        TopkCase {
+            expr: "bottomk(2, {table})",
+            top: false,
+            keep: 2,
+            group: None,
+        },
+        TopkCase {
+            expr: "topk by (grp) (1, {table})",
+            top: true,
+            keep: 1,
+            group: Some("grp"),
+        },
+        // `2.9` truncates to `2`, as Prometheus truncates the parameter.
+        TopkCase {
+            expr: "topk(2.9, {table})",
+            top: true,
+            keep: 2,
+            group: None,
+        },
+        // A parameter below one keeps nothing at all.
+        TopkCase {
+            expr: "topk(0, {table})",
+            top: true,
+            keep: 0,
+            group: None,
+        },
+        TopkCase {
+            expr: "topk(-1, {table})",
+            top: true,
+            keep: 0,
+            group: None,
+        },
+    ];
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let observer = Arc::new(GlobalTopkObserver::default());
+    let plugins = Plugins::new();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_global_topk_range")
+        .with_mito_config(config)
+        .with_plugin(plugins)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TOPK_RANGE_PHYSICAL} (ts TIMESTAMP(3) TIME INDEX, val DOUBLE) \
+             ENGINE=metric WITH ('physical_metric_table' = 'true'); \
+             CREATE TABLE {TOPK_RANGE_TABLE} (\
+                host STRING, \
+                grp STRING, \
+                ts TIMESTAMP(3) TIME INDEX, \
+                val DOUBLE, \
+                PRIMARY KEY (host, grp)) \
+             ENGINE=metric WITH ('on_physical_table' = '{TOPK_RANGE_PHYSICAL}')"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    // Three inserts with a flush between them leave several chunks per series, so no series arrives
+    // contiguously from one producer.
+    for (from, to) in [
+        (0, TOPK_RANGE_POINTS / 3),
+        (TOPK_RANGE_POINTS / 3, TOPK_RANGE_POINTS * 2 / 3),
+        (TOPK_RANGE_POINTS * 2 / 3, TOPK_RANGE_POINTS),
+    ] {
+        insert_topk_range(&instance, from, to).await;
+        if to < TOPK_RANGE_POINTS {
+            execute_all(
+                &instance,
+                &format!("ADMIN FLUSH_TABLE('{TOPK_RANGE_PHYSICAL}')"),
+                QueryContext::arc(),
+            )
+            .await;
+        }
+    }
+    // The hole really leaves the first four series out of part of the range, so the fixture has
+    // gaps rather than only values.
+    let gapped = (0..TOPK_RANGE_POINTS)
+        .filter(|second| topk_range_selected(0, *second).is_none())
+        .count();
+    assert!(
+        gapped > 0,
+        "the fixture's hole must leave the first four series out of the answer at some steps"
+    );
+
+    for (index, case) in CASES.iter().enumerate() {
+        let query = PromQuery {
+            query: case.expr.replace("{table}", TOPK_RANGE_TABLE),
+            start: "0".to_string(),
+            end: (TOPK_RANGE_POINTS - 1).to_string(),
+            step: "1s".to_string(),
+            ..PromQuery::default()
+        };
+        let oracle = topk_range_oracle(case);
+        observer.clear();
+        let rows = native_result_rows(
+            instance
+                .do_promql_query(&query, native_query_context(true, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        // Every case must run the global selection rather than fall back to the existing planner.
+        let select = observer
+            .select()
+            .unwrap_or_else(|| panic!("`{}` must execute the global native ranker", query.query));
+        assert_eq!(
+            "VectorSelectExec",
+            select.name(),
+            "`{}` must execute the global native ranker",
+            query.query
+        );
+        if index == 0 {
+            // The plan is read after the answer was drained, so the counters describe execution.
+            assert_global_selection_plan(&select, &observer.take_fused());
+        }
+        assert_eq!(
+            rows, oracle.rows,
+            "`{}` must answer what the fixture's ranking implies",
+            query.query
+        );
+        if case.keep > 0 {
+            assert!(
+                !oracle.tie_steps.is_empty(),
+                "`{}` must have steps whose cut splits a tie",
+                query.query
+            );
+        }
+        let legacy = native_result_rows(
+            instance
+                .do_promql_query(&query, native_query_context(false, 4))
+                .await
+                .remove(0)
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            rows_without_ties(&rows, &oracle.tie_steps),
+            rows_without_ties(&legacy, &oracle.tie_steps),
+            "`{}` must match the existing planner at the steps that decide no tie",
+            query.query
+        );
+    }
+}
+
+/// A `topk` over a global aggregate keeps the merged-aggregate route #9972 added: the global
+/// selection only answers a `topk` over one scan, so it must not claim the state split.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_topk_over_global_aggregate_keeps_the_aggregate_finalize() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_topk_aggregate";
+    let observer = Arc::new(RouteCountObserver::default());
+    let plugins = Plugins::new();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_promql_topk_aggregate")
+        .with_plugin(plugins)
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .build()
+        .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        &format!(
+            "CREATE TABLE {TABLE} (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+             PRIMARY KEY (host)); \
+             INSERT INTO {TABLE} (host, ts, val) VALUES \
+             ('a', 0, 1), ('a', 1, 2), ('b', 0, 3), ('b', 1, 4), ('c', 0, 5), ('c', 1, 6)"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+    let sql = format!("TQL EVAL (1, 1, '1s') topk(2, sum by (host) ({TABLE}))");
+    observer.clear();
+    let rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(
+        1,
+        observer.count("FusedSeriesExec"),
+        "the aggregate's partition-local producer must still run: `{sql}`"
+    );
+    assert_eq!(
+        1,
+        observer.count("AggregateFinalize"),
+        "the frontend must still merge the partial states: `{sql}`"
+    );
+    assert_eq!(
+        0,
+        observer.count("VectorSelectExec"),
+        "the global selection must not claim a `topk` over a global aggregate: `{sql}`"
+    );
+    // The cut is the aggregate: the producer folds it, and the merge runs the ranking above it.
+    let finalize_plan = observer
+        .plans_with("AggregateFinalize")
+        .first()
+        .map(|plan| {
+            datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(false)
+                .to_string()
+        })
+        .expect("the frontend merge was captured");
+    assert!(
+        finalize_plan.to_ascii_lowercase().contains("topk"),
+        "the merge must run the ranking above the cut: {finalize_plan}"
+    );
+    let producer_plan = observer
+        .plans_with("FusedSeriesExec")
+        .first()
+        .map(|plan| {
+            datafusion::physical_plan::displayable(plan.as_ref())
+                .indent(false)
+                .to_string()
+        })
+        .expect("the partition-local producer was captured");
+    assert!(
+        producer_plan.contains("partial state:"),
+        "the producer must export partition-local aggregate state: {producer_plan}"
+    );
+    // The plan line opens with the statement, whose text names the ranking; the tree below it is
+    // what the producer actually compiled, and that must stop at the cut.
+    let producer_tree = producer_plan
+        .split_once("NativeTree")
+        .map(|(_, tree)| tree.split("partial state:").next().unwrap_or(tree))
+        .unwrap_or(&producer_plan);
+    assert!(
+        !producer_tree.to_ascii_lowercase().contains("topk"),
+        "the producer must fold only the aggregate, not the ranking: {producer_plan}"
+    );
+    // `c` and `b` hold the two largest sums at the single evaluation point.
+    let expected = vec![(1_000, "b".to_string(), 4.0), (1_000, "c".to_string(), 6.0)];
+    assert_eq!(rows, expected, "`{sql}`");
+    let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(rows, legacy, "`{sql}` must match the existing planner");
 }
 
 /// Native instant selectors preserve anchored evaluation and sample timestamps in standalone.

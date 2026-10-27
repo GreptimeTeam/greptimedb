@@ -13,7 +13,9 @@
 // limitations under the License.
 
 use super::*;
-use datafusion::arrow::array::{Float64Array, UInt64Array};
+use datafusion::arrow::array::{
+    Array, Float64Array, StringArray, TimestampMillisecondArray, UInt64Array,
+};
 use datafusion::arrow::datatypes::{DataType, Field, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
@@ -41,7 +43,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use crate::native::plan::{
-    BoundInput, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundInput, BoundInstant, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 
 const GRID_START: i64 = 300_000;
@@ -646,26 +649,160 @@ async fn eof_releases_decoder_and_drop_releases_pool() {
         "dropping the stream releases upstream"
     );
 }
-#[test]
-fn provenance_ordering_uses_producer_then_row_ordinal() {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("payload", DataType::Utf8, true),
-        Field::new(NATIVE_PRODUCER_COLUMN, DataType::UInt64, false),
-        Field::new(NATIVE_FRAME_ORDINAL_COLUMN, DataType::UInt64, false),
-    ]));
-    let ordering = frame_ordering(&schema).unwrap();
-    assert_eq!(2, ordering.len());
-    assert!(
-        ordering[0]
-            .expr
-            .to_string()
-            .starts_with(NATIVE_PRODUCER_COLUMN)
-    );
-    assert!(
-        ordering[1]
-            .expr
-            .to_string()
-            .starts_with(NATIVE_FRAME_ORDINAL_COLUMN)
+/// The frame rows of `batches` in one batch, in the order they are given.
+fn concat_frames(batches: &[RecordBatch]) -> RecordBatch {
+    datafusion::arrow::compute::concat_batches(&batches[0].schema(), batches).unwrap()
+}
+
+/// The logical node [`suffix`] is the suffix of.
+///
+/// The prefix tree must read raw samples and produce evaluated ones, as the real compiled tree
+/// does; an instant selection is the smallest such tree. Its physical input is the frames this test
+/// builds, so the prefix is never executed here.
+fn logical_select() -> VectorSelect {
+    let raw = NativeType::Samples(schema(true));
+    let evaluated = NativeType::Samples(schema(false));
+    let prefix = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: raw,
+            }),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                timestamp: false,
+                output_grid: grid(),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let full_tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(prefix),
+            op: BoundVectorOp::TopK {
+                k: 2.0,
+                top: true,
+                group: Grouping::By(Arc::from([])),
+            },
+        },
+        output: evaluated,
+    })
+    .unwrap();
+    VectorSelect::try_new(
+        Arc::from("topk(2, x)"),
+        full_tree,
+        FusedSeriesBinding {
+            grid: grid(),
+            metric_name: Some(Arc::from(METRIC)),
+            time_index: TIME.into(),
+            tags: vec![HOST.into(), NAME.into()],
+        },
+        datafusion_expr::LogicalPlanBuilder::empty(false)
+            .build()
+            .unwrap(),
+        Arc::new(datafusion::common::DFSchema::try_from(output_schema()).unwrap()),
+    )
+    .unwrap()
+}
+
+/// `(host, time, value)` of every row the selection answered.
+fn answered_rows(batches: &[RecordBatch]) -> Vec<(String, i64, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let host = batch
+                .column_by_name(HOST)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let time = batch
+                .column_by_name(TIME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let value = batch
+                .column_by_name(VALUE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        host.value(row).to_string(),
+                        time.value(row),
+                        value.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1)));
+    rows
+}
+
+/// Frames that arrive interleaved across producers are put back in producer-then-ordinal order by
+/// the sort [`VectorSelect::to_execution_plan`] places under the node.
+///
+/// Three producers hand over two chunks each, one chunk per producer per batch, so no producer's
+/// series is contiguous in the input. The stream below this node refuses that: a producer may only
+/// change once its last frame arrived, which the control below pins. Through `to_execution_plan` the
+/// same frames are sorted first, each series' chunks are consecutive again, and the whole vector is
+/// ranked.
+#[tokio::test]
+async fn interleaved_producers_are_ordered_before_the_selection() {
+    // `a` and `c` outrank `b`, so `topk(2)` keeps two of the three series over the whole grid.
+    let interleaved = [
+        concat_frames(&[
+            frame_chunk(chunk("a", &[Some(10.0); 4], 0, false), 0, 0),
+            frame_chunk(chunk("b", &[Some(1.0); 4], 0, false), 1, 0),
+            frame_chunk(chunk("c", &[Some(100.0); 4], 0, false), 2, 0),
+        ]),
+        concat_frames(&[
+            frame_chunk(chunk("a", &[Some(10.0); 4], 4, true), 0, 1),
+            frame_chunk(chunk("b", &[Some(1.0); 4], 4, true), 1, 1),
+            frame_chunk(chunk("c", &[Some(100.0); 4], 4, true), 2, 1),
+        ]),
+    ];
+    // Control: the same frames without the sort are refused rather than ranked from part of the
+    // vector.
+    let unsorted = collect(
+        Arc::new(exec_with_input(memory_exec(vec![interleaved.to_vec()]))),
+        SessionContext::default().task_ctx(),
+    )
+    .await
+    .unwrap_err();
+    assert!(unsorted.to_string().contains("producer"), "{unsorted}");
+    // `to_execution_plan` sorts them into producer-then-ordinal order before the node reads them.
+    let plan = logical_select()
+        .to_execution_plan(memory_exec(vec![interleaved.to_vec()]))
+        .unwrap();
+    let batches = collect(plan, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let rows = answered_rows(&batches);
+    let mut expected = Vec::new();
+    for (host, value) in [("a", 10.0), ("c", 100.0)] {
+        for position in 0..GRID_LEN {
+            expected.push((
+                host.to_string(),
+                GRID_START + position as i64 * GRID_STEP,
+                value,
+            ));
+        }
+    }
+    expected.sort_by(|left, right| (left.0.as_str(), left.1).cmp(&(right.0.as_str(), right.1)));
+    assert_eq!(
+        rows, expected,
+        "each producer's chunks must be read as one series again"
     );
 }
 #[test]
