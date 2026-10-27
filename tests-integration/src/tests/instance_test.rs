@@ -4569,3 +4569,786 @@ async fn test_exemplar_source_identity_policy() {
         .collect::<Vec<_>>();
     assert_eq!(ids, vec![source.table_id(), replacement.table_id()]);
 }
+
+async fn create_exemplar_source(frontend: &Arc<Instance>, schema: &str, name: &str) {
+    execute_sql(frontend, &format!(
+        "CREATE TABLE IF NOT EXISTS {schema}.exemplar_sources (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')"
+    )).await;
+    execute_sql(frontend, &format!(
+        "CREATE TABLE {schema}.{name} (greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('on_physical_table'='exemplar_sources')"
+    )).await;
+}
+
+#[rstest]
+#[case::standalone(false, false, false, false)]
+#[case::standalone_batched(false, true, false, false)]
+#[case::distributed_batched(true, true, false, false)]
+#[case::precreated_json_settings(false, true, true, false)]
+#[case::standalone_batched_sync(false, true, false, true)]
+#[case::distributed_batched_sync(true, true, false, true)]
+#[test]
+fn test_exemplar_protocol_storage_lifecycle(
+    #[case] distributed: bool,
+    #[case] batching: bool,
+    #[case] precreated: bool,
+    #[case] sync: bool,
+) {
+    temp_env::with_var(
+        "PENDING_ROWS_BATCH_SYNC",
+        Some(if sync { "true" } else { "false" }),
+        || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(exemplar_protocol_storage_lifecycle(
+                    distributed,
+                    batching,
+                    precreated,
+                ));
+        },
+    );
+}
+
+async fn exemplar_protocol_storage_lifecycle(distributed: bool, batching: bool, precreated: bool) {
+    use api::prom_store::remote::{Exemplar, Label, Sample, TimeSeries, WriteRequest};
+    use axum::body::{Body, to_bytes};
+    use frontend::service_config::BatcherOptions;
+    use http::Request;
+    use prost::Message;
+    use servers::batcher::BatchingProtocol;
+    use servers::http::{HttpOptions, HttpServerBuilder};
+    use servers::prom_remote_write::v2::test_util as v2;
+    use servers::prom_remote_write::validation::PromValidationMode;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::cluster::GreptimeDbClusterBuilder;
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+    use crate::test_util::build_test_prom_server;
+    use crate::tests::test_util::{MockInstanceBuilder, RebuildableMockInstance, TestContext};
+
+    let name = format!("exemplar_lifecycle_{distributed}_{batching}_{precreated}");
+    let protocols = if batching {
+        vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+    } else {
+        Vec::new()
+    };
+    let table_batcher = BatcherOptions {
+        protocols: protocols.clone(),
+        pending_rows_flush_interval: std::time::Duration::from_millis(20),
+        ..Default::default()
+    };
+    let builder = if distributed {
+        MockInstanceBuilder::Distributed(
+            GreptimeDbClusterBuilder::new(&name)
+                .await
+                .with_datanodes(3)
+                .with_table_batcher(table_batcher),
+        )
+    } else {
+        MockInstanceBuilder::Standalone(
+            GreptimeDbStandaloneBuilder::new(&name).with_table_batcher(table_batcher),
+        )
+    };
+    let mut context = TestContext::new(builder).await;
+    if precreated {
+        execute_sql(
+            &context.frontend(),
+            "CREATE TABLE metrics_exemplars (
+            __table_id INT UNSIGNED NOT NULL,
+            __tsid BIGINT UNSIGNED NOT NULL,
+            greptime_timestamp TIMESTAMP(6) TIME INDEX,
+            greptime_metric STRING,
+            greptime_value DOUBLE,
+            exemplar_labels JSON2(max_auto_expanded_paths = 0, trace_id STRING),
+            PRIMARY KEY (__table_id, __tsid, greptime_metric)
+        ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse', 'sst_format'='primary_key')",
+        )
+        .await;
+    }
+    let router = |frontend: Arc<Instance>| {
+        let builder = if batching {
+            build_test_prom_server(frontend.clone(), true, None)
+        } else {
+            HttpServerBuilder::new(HttpOptions::default())
+                .with_prometheus_handler(frontend.clone())
+                .with_prom_handler(
+                    frontend.clone(),
+                    None,
+                    true,
+                    PromValidationMode::Strict,
+                    None,
+                )
+        };
+        let server = builder
+            .with_batching_protocols(protocols.clone())
+            .with_otlp_handler(frontend, true)
+            .build();
+        server.build(server.make_app()).unwrap()
+    };
+    let mut app = router(context.frontend());
+    let request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".into(),
+                    value: "exemplar_metric".into(),
+                },
+                Label {
+                    name: "job".into(),
+                    value: "api".into(),
+                },
+            ],
+            samples: vec![Sample {
+                timestamp: 1720000000123,
+                value: 1.0,
+            }],
+            exemplars: vec![
+                Exemplar {
+                    timestamp: i64::MAX,
+                    ..Default::default()
+                },
+                Exemplar {
+                    timestamp: 1720000000123,
+                    value: 0.32,
+                    labels: vec![Label {
+                        name: "trace_id".into(),
+                        value: "abc".into(),
+                    }],
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    for _ in 0..2 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/write")
+                    .header("Content-Encoding", "snappy")
+                    .header("Content-Type", "application/x-protobuf")
+                    .body(Body::from(
+                        snappy_compress(&request.encode_to_vec()).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        assert_eq!(
+            status,
+            204,
+            "{:?}",
+            to_bytes(response.into_body(), usize::MAX).await.unwrap()
+        );
+    }
+    // Exemplar-only series require an existing source and must not register a sample kind.
+    create_exemplar_source(&context.frontend(), "public", "retained_exemplar").await;
+    let mut request = v2::request_with_labels_and_samples(
+        vec![("__name__", "retained_exemplar"), ("zone", "east")],
+        vec![],
+    );
+    request.timeseries[0].exemplars.push(
+        api::greptime_proto::io::prometheus::write::v2::Exemplar {
+            timestamp: i64::MAX,
+            ..Default::default()
+        },
+    );
+    request.timeseries[0].exemplars.push(
+        api::greptime_proto::io::prometheus::write::v2::Exemplar {
+            timestamp: 1720000000124,
+            value: 2.0,
+            ..Default::default()
+        },
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/prometheus/write")
+                .header("Content-Encoding", "snappy")
+                .header(
+                    "Content-Type",
+                    "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                )
+                .body(Body::from(
+                    snappy_compress(&request.encode_to_vec()).unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    assert_eq!(
+        response
+            .headers()
+            .get("x-prometheus-remote-write-exemplars-written")
+            .unwrap(),
+        "1"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-prometheus-remote-write-samples-written")
+            .unwrap(),
+        "0"
+    );
+    assert_eq!(
+        status,
+        204,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+    let output = execute_sql(
+        &context.frontend(),
+        "SELECT COUNT(*) FROM retained_exemplar",
+    )
+    .await;
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 0        |\n+----------+",
+    )
+    .await;
+
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1 as otlp;
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![otlp::ResourceMetrics {
+            scope_metrics: vec![otlp::ScopeMetrics {
+                metrics: vec![otlp::Metric {
+                    name: "otlp_exemplar".into(),
+                    data: Some(otlp::metric::Data::Gauge(otlp::Gauge {
+                        data_points: vec![otlp::NumberDataPoint {
+                            time_unix_nano: 1720000000999999999,
+                            value: Some(otlp::number_data_point::Value::AsDouble(10.0)),
+                            exemplars: vec![
+                                otlp::Exemplar::default(),
+                                otlp::Exemplar {
+                                    time_unix_nano: 1720000000123456789,
+                                    value: Some(otlp::exemplar::Value::AsDouble(0.5)),
+                                    trace_id: vec![0xab; 16],
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/otlp/v1/metrics")
+                .header("Content-Type", "application/x-protobuf")
+                .body(Body::from(request.encode_to_vec()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        200,
+        "{:?}",
+        to_bytes(response.into_body(), usize::MAX).await.unwrap()
+    );
+
+    let expression = urlencoding::encode(
+        "rate(exemplar_metric{job=\"api\"}[5m]) + retained_exemplar + otlp_exemplar",
+    );
+    let path = format!(
+        "/v1/prometheus/api/v1/query_exemplars?query={expression}&start=1720000000.123&end=1720000000.124"
+    );
+    let mut baseline = None;
+    for phase in ["memory", "wal", "sst", "compaction", "reopen"] {
+        match phase {
+            "wal" | "reopen" => {
+                drop(app);
+                context.rebuild().await;
+                app = router(context.frontend());
+            }
+            "sst" => {
+                execute_sql(
+                    &context.frontend(),
+                    "admin flush_table('metrics_exemplars')",
+                )
+                .await;
+            }
+            "compaction" => {
+                execute_sql(
+                    &context.frontend(),
+                    "admin compact_table('metrics_exemplars', 'strict_window', 'window=3600')",
+                )
+                .await;
+            }
+            _ => {}
+        }
+        let response = app
+            .clone()
+            .oneshot(Request::get(&path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, 200, "{phase}: {}", String::from_utf8_lossy(&bytes));
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["status"], "success", "{phase}: {value}");
+        for series in value["data"].as_array().unwrap() {
+            assert!(series["seriesLabels"].get("__table_id").is_none());
+            assert!(series["seriesLabels"].get("__tsid").is_none());
+        }
+        assert_eq!(
+            value["data"].as_array().unwrap().len(),
+            3,
+            "{phase}: {value}"
+        );
+        assert!(
+            String::from_utf8_lossy(&bytes).contains(if precreated {
+                "1720000000.123456"
+            } else {
+                "1720000000.123456789"
+            }),
+            "{phase}: {value}"
+        );
+        assert_eq!(
+            value["data"][0]["exemplars"].as_array().unwrap().len(),
+            1,
+            "exact duplicates: {value}"
+        );
+        assert_eq!(
+            value["data"][0]["exemplars"][0]["labels"]["trace_id"],
+            "abc"
+        );
+        if let Some(baseline) = &baseline {
+            assert_eq!(&value, baseline, "{phase}");
+        } else {
+            baseline = Some(value);
+        }
+    }
+    execute_sql(&context.frontend(), "DROP TABLE exemplar_metric").await;
+    // Storage columns are absent labels; ordinary null tags have empty-label semantics.
+    for (expression, count) in [
+        ("exemplar_metric{zone=\"\"}", 1),
+        ("exemplar_metric{zone!~\".+\"}", 1),
+        ("exemplar_metric{greptime_value=\"\"}", 1),
+        ("exemplar_metric{greptime_metric=\"\"}", 1),
+        ("exemplar_metric{__table_id=\"\"}", 1),
+        ("exemplar_metric{__tsid=\"\"}", 1),
+        ("exemplar_metric{__table_id!=\"\"}", 0),
+        ("exemplar_metric{__tsid=~\".+\"}", 0),
+    ] {
+        let form = format!(
+            "query={}&start=1720000000.123&end=1720000000.123",
+            urlencoding::encode(expression)
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/prometheus/api/v1/query_exemplars")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(Body::from(form))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        assert_eq!(
+            value["data"].as_array().unwrap().len(),
+            count,
+            "{expression}: {value}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_query_skips_malformed_rows_with_warning() {
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use servers::http::{HttpOptions, HttpServerBuilder};
+    use tower::ServiceExt;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_malformed_rows")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    execute_sql(frontend, "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(9) TIME INDEX, greptime_metric STRING, job STRING, greptime_value DOUBLE, exemplar_labels JSON2, PRIMARY KEY (__table_id, __tsid, greptime_metric, job)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')").await;
+    execute_sql(
+        frontend,
+        r#"INSERT INTO metrics_exemplars VALUES
+        (42, 7, 1, 'metric', 'api', 1, '{"trace_id":"good"}'),
+        (42, 7, 2, 'metric', 'api', 2, '{"trace_id":42}'),
+        (42, 7, 3, 'metric', 'api', NULL, '{}'),
+        (42, 7, 4, 'metric', 'api', 4, NULL),
+        (42, 7, 5, NULL, 'api', 5, '{}'),
+        (42, 7, 6, 'bad_only', 'api', NULL, '{}')"#,
+    )
+    .await;
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_prometheus_handler(frontend.clone())
+        .build();
+    let app = server.build(server.make_app()).unwrap();
+    for (query, end, skipped, series) in [
+        ("metric", "1", 3, 1),
+        ("%7Bjob%3D%22api%22%7D", "1", 5, 1),
+        ("metric", "0.000000001", 0, 1),
+        ("missing", "1", 0, 0),
+        ("bad_only", "1", 1, 0),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/prometheus/api/v1/query_exemplars?query={query}&start=0&end={end}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            response["data"].as_array().unwrap().len(),
+            series,
+            "{response}"
+        );
+        if skipped > 0 {
+            assert_eq!(
+                response["warnings"],
+                serde_json::json!([format!("Skipped {skipped} malformed stored exemplars")])
+            );
+        } else {
+            assert!(response.get("warnings").is_none(), "{response}");
+        }
+        if series > 0 {
+            assert_eq!(
+                response["data"][0]["exemplars"].as_array().unwrap().len(),
+                1
+            );
+            assert_eq!(
+                response["data"][0]["exemplars"][0]["labels"]["trace_id"],
+                "good"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_concurrent_ddl_and_precreated_contract() {
+    use std::collections::BTreeMap;
+
+    use servers::exemplar::query::Query;
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_concurrent_ddl")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    create_exemplar_source(frontend, "public", "concurrent").await;
+    let request = |tag: String, timestamp: i64| {
+        into_rows(vec![Exemplar {
+            metric: "concurrent".into(),
+            series_labels: BTreeMap::from([(tag, "present".into())]),
+            timestamp,
+            value: 1.0,
+            labels: BTreeMap::from([("trace_id".into(), "abc".into())]),
+        }])
+        .unwrap()
+        .0
+    };
+    // Disjoint first creators and repeated additions must converge on one schema.
+    for repeated in [false, true] {
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let writes = (0..8).map(|i| {
+            let barrier = barrier.clone();
+            let request = request(
+                if repeated {
+                    "shared".into()
+                } else {
+                    format!("tag_{i}")
+                },
+                i,
+            );
+            async move {
+                barrier.wait().await;
+                frontend
+                    .write_exemplars_prepared(
+                        request,
+                        Arc::new(QueryContext::arc().with_confirmed_writes()),
+                    )
+                    .await
+                    .unwrap()
+                    .write_progress()
+                    .await
+                    .into_result()
+                    .unwrap()
+            }
+        });
+        assert_eq!(futures::future::join_all(writes).await, vec![1; 8]);
+    }
+    let info = frontend
+        .catalog_manager()
+        .table("greptime", "public", "metrics_exemplars", None)
+        .await
+        .unwrap()
+        .unwrap()
+        .table_info();
+    assert_eq!(info.meta.primary_key_indices.len(), 12);
+    operator::insert::validate_exemplar_table(&info).unwrap();
+    let response = frontend
+        .query_exemplars(
+            Query::parse("concurrent".into(), "0", "1", "public").unwrap(),
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.iter().map(|s| s.exemplars.len()).sum::<usize>(),
+        16
+    );
+
+    // Incompatible pre-created tables must be rejected before adding inherited tags.
+    let definition = "CREATE TABLE metrics_exemplars (__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, greptime_timestamp TIMESTAMP(6) TIME INDEX, greptime_metric STRING, greptime_value DOUBLE, exemplar_labels JSON2(max_auto_expanded_paths=0, trace_id STRING), PRIMARY KEY (__table_id, __tsid, greptime_metric)) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')";
+    for definition in [
+        definition.replace("greptime_value DOUBLE", "greptime_value BIGINT"),
+        definition.replace("__tsid, greptime_metric)", "__tsid)"),
+        definition.replace("JSON2(max_auto_expanded_paths=0, trace_id STRING)", "JSON"),
+        definition.replace("trace_id STRING", "trace_id BIGINT"),
+        definition
+            .replace(
+                "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ",
+                "",
+            )
+            .replace("__table_id, __tsid, ", ""),
+    ] {
+        execute_sql(frontend, "DROP TABLE metrics_exemplars").await;
+        execute_sql(frontend, &definition).await;
+        let before = frontend
+            .catalog_manager()
+            .table("greptime", "public", "metrics_exemplars", None)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_info();
+        assert!(
+            frontend
+                .write_exemplars_prepared(request("must_not_add".into(), 0), QueryContext::arc())
+                .await
+                .is_err(),
+            "{definition}"
+        );
+        let after = frontend
+            .catalog_manager()
+            .table("greptime", "public", "metrics_exemplars", None)
+            .await
+            .unwrap()
+            .unwrap()
+            .table_info();
+        assert_eq!(before, after, "incompatible table must not be altered");
+    }
+
+    let disabled = GreptimeDbStandaloneBuilder::new("exemplar_disabled_ddl")
+        .with_auto_create_table(false)
+        .build()
+        .await;
+    let frontend = disabled.fe_instance();
+    create_exemplar_source(frontend, "public", "concurrent").await;
+    assert!(
+        frontend
+            .write_exemplars_prepared(request("tag".into(), 0), QueryContext::arc())
+            .await
+            .is_err()
+    );
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "metrics_exemplars", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[rstest]
+#[case::auto_create(true, false, false)]
+#[case::auto_create_disabled(false, false, false)]
+#[case::hint_disabled(true, true, false)]
+#[case::batched(true, false, true)]
+#[case::batched_auto_create_disabled(false, false, true)]
+#[case::batched_hint_disabled(true, true, true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_precreated_precision_and_label_defaults(
+    #[case] auto_create: bool,
+    #[case] hint_disabled: bool,
+    #[case] batching: bool,
+) {
+    use std::collections::BTreeMap;
+
+    use frontend::service_config::BatcherOptions;
+    use servers::batcher::BatchingProtocol;
+    use servers::exemplar::query::Query;
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
+    use table::requests::AUTO_CREATE_TABLE_KEY;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let mut builder = GreptimeDbStandaloneBuilder::new("exemplar_precreated_contract")
+        .with_auto_create_table(auto_create);
+    if batching {
+        builder = builder.with_table_batcher(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: std::time::Duration::from_millis(10),
+            ..Default::default()
+        });
+    }
+    let instance = builder.build().await;
+    let frontend = instance.fe_instance();
+    create_exemplar_source(frontend, "public", "metric").await;
+    let mut ctx = QueryContext::arc().with_confirmed_writes();
+    ctx.set_batching_enabled(batching);
+    if hint_disabled {
+        ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false");
+    }
+    let ctx = Arc::new(ctx);
+    for default in ["", "DEFAULT NULL", "DEFAULT 'east'"] {
+        execute_sql(
+            frontend,
+            &format!(
+                "CREATE TABLE metrics_exemplars (
+                    __table_id INT UNSIGNED NOT NULL,
+                    __tsid BIGINT UNSIGNED NOT NULL,
+                    greptime_timestamp TIMESTAMP(6) TIME INDEX,
+                    greptime_metric STRING, site STRING {default},
+                    greptime_value DOUBLE, exemplar_labels JSON2,
+                    PRIMARY KEY (__table_id, __tsid, greptime_metric, site)
+                ) WITH ('append_mode'='true', 'primary_key_encoding'='sparse')"
+            ),
+        )
+        .await;
+        let request = into_rows(vec![Exemplar {
+            metric: "metric".into(),
+            series_labels: BTreeMap::new(),
+            timestamp: -1,
+            value: 1.0,
+            labels: BTreeMap::new(),
+        }])
+        .unwrap()
+        .0;
+        let result = frontend
+            .write_exemplars_prepared(request, ctx.clone())
+            .await;
+        if default == "DEFAULT 'east'" {
+            let error = result.unwrap_err();
+            assert!(
+                error.output_msg().contains("non-NULL defaults"),
+                "{error:?}"
+            );
+        } else {
+            assert_eq!(
+                result
+                    .unwrap()
+                    .write_progress()
+                    .await
+                    .into_result()
+                    .unwrap(),
+                1
+            );
+            let series = frontend
+                .query_exemplars(
+                    Query::parse("metric{site=\"\"}".into(), "-0.000001", "0", "public").unwrap(),
+                    QueryContext::arc(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(series.len(), 1);
+            assert!(!series[0].series_labels.contains_key("site"));
+            assert_eq!(series[0].exemplars[0].timestamp.0, -1000);
+        }
+        execute_sql(frontend, "DROP TABLE metrics_exemplars").await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_cross_schema_exact_identity() {
+    use std::collections::BTreeMap;
+
+    use servers::exemplar::query::Query;
+    use servers::exemplar::{Exemplar, into_rows};
+    use servers::prometheus_handler::PrometheusHandler;
+    use servers::query_handler::PromStoreProtocolHandler;
+
+    use crate::standalone::GreptimeDbStandaloneBuilder;
+
+    let instance = GreptimeDbStandaloneBuilder::new("exemplar_cross_schema_identity")
+        .build()
+        .await;
+    let frontend = instance.fe_instance();
+    execute_sql(frontend, "CREATE DATABASE exemplar_other").await;
+    let values = [
+        0.0,
+        -0.0,
+        f64::from_bits(0x7ff8_0000_0000_0001),
+        f64::from_bits(0x7ff8_0000_0000_0002),
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for schema in ["public", "exemplar_other"] {
+        create_exemplar_source(frontend, schema, "identity").await;
+        let observations = values
+            .into_iter()
+            .flat_map(|value| {
+                (0..2).map(move |_| Exemplar {
+                    metric: "identity".into(),
+                    series_labels: BTreeMap::new(),
+                    timestamp: -1,
+                    value,
+                    labels: BTreeMap::from([
+                        ("z".into(), "last".into()),
+                        ("a".into(), "first".into()),
+                    ]),
+                })
+            })
+            .collect();
+        let requests = into_rows(observations).unwrap().0;
+        let ctx = Arc::new(QueryContext::with("greptime", schema));
+        frontend
+            .write_exemplars_prepared(requests, ctx)
+            .await
+            .unwrap()
+            .write_progress()
+            .await
+            .into_result()
+            .unwrap();
+    }
+    let query = Query::parse("identity{__schema__=\"public\" or __database__=\"exemplar_other\" or __schema__=\"missing\"}".into(), "-1e-9", "-1e-9", "public").unwrap();
+    let response = frontend
+        .query_exemplars(query, QueryContext::arc())
+        .await
+        .unwrap();
+    assert_eq!(response.len(), 1);
+    assert_eq!(response[0].exemplars.len(), values.len());
+    let encoded = serde_json::to_string(&response).unwrap();
+    for value in ["0", "-0", "NaN", "+Inf", "-Inf"] {
+        assert!(
+            response[0].exemplars.iter().any(|e| e.value == value),
+            "{encoded}"
+        );
+    }
+    assert!(encoded.contains("\"timestamp\":-0.000000001"), "{encoded}");
+}

@@ -2468,3 +2468,74 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
 
     let _ = fe_grpc_server.shutdown().await;
 }
+
+#[apply(both_deployment_cases)]
+async fn test_exemplar_otel_arrow_rejects_non_metric_source(distributed: bool) {
+    use datatypes::arrow::array::BinaryArray;
+    use servers::query_handler::sql::SqlQueryHandler;
+    use session::context::QueryContext;
+
+    let env = MockInstanceImpl::new("exemplar_otel_arrow", distributed).await;
+    let frontend = env.frontend();
+    let server = setup_grpc_server_for_frontend_instance(frontend.clone(), None).await;
+    let mut client =
+        ArrowMetricsServiceClient::connect(format!("http://{}", server.bind_addr().unwrap()))
+            .await
+            .unwrap();
+    let exemplars = ArrowRecordBatch::try_from_iter(vec![
+        (
+            arrow_consts::PARENT_ID,
+            Arc::new(UInt32Array::from(vec![0])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TIME_UNIX_NANO,
+            Arc::new(TimestampNanosecondArray::from(vec![1_123_456_789])) as ArrayRef,
+        ),
+        (
+            arrow_consts::DOUBLE_VALUE,
+            Arc::new(Float64Array::from(vec![0.25])) as ArrayRef,
+        ),
+        (
+            arrow_consts::TRACE_ID,
+            Arc::new(BinaryArray::from(vec![&[0xab; 16][..]])) as ArrayRef,
+        ),
+        (
+            arrow_consts::SPAN_ID,
+            Arc::new(BinaryArray::from(vec![&[0xcd; 8][..]])) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let mut batch = gauge_arrow_batch(1, false);
+    batch.arrow_payloads.push(ArrowPayload {
+        schema_id: "exemplars-1".into(),
+        r#type: ArrowPayloadType::NumberDpExemplars as i32,
+        record: serialize_arrow_record_batch(&exemplars),
+    });
+    let mut response = client
+        .arrow_metrics(Request::new(futures::stream::iter([batch])))
+        .await
+        .unwrap()
+        .into_inner();
+    let error = response.message().await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    // Arrow currently selects ordinary-engine ingestion; metric rows still complete independently.
+    let output = frontend
+        .do_query("SELECT COUNT(*) FROM otel_arrow_gauge", QueryContext::arc())
+        .await
+        .remove(0)
+        .unwrap();
+    common_test_util::recordbatch::check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+",
+    )
+    .await;
+    assert!(
+        frontend
+            .catalog_manager()
+            .table("greptime", "public", "metrics_exemplars", None)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    server.shutdown().await.unwrap();
+}

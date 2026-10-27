@@ -120,7 +120,7 @@ rustls-pemfile = "2.0"
 rustls-pki-types = "1.0"
 ryu.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 session.workspace = true
 simd-json.workspace = true
 smallvec.workspace = true
