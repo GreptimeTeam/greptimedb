@@ -538,7 +538,8 @@ max_running_procedures = 128
 ## The query engine options.
 [query]
 
-## Whether to enable experimental native PromQL execution.
+## Enable experimental native PromQL execution for compatible queries.
+## Requires the per-request query.experimental_native_promql=true extension.
 ## Default: false
 #+ experimental_native_promql = false
 ## Parallelism of the query engine.

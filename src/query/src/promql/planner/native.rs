@@ -969,11 +969,13 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
     match expr {
         PromExpr::VectorSelector(selector) => out.push(selector),
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
-        PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(expr, out),
+        PromExpr::Paren(ParenExpr { expr }) => {
+            return collect_selectors(expr, out);
+        }
         PromExpr::Call(call)
             if matches!(
                 call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs"
+                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
             ) && call.args.args.len() == 1 =>
         {
             return collect_selectors(&call.args.args[0], out);
@@ -983,7 +985,9 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
         }
         // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
         PromExpr::NumberLiteral(_) => return true,
-        PromExpr::Unary(unary) => return collect_selectors(&unary.expr, out),
+        PromExpr::Unary(unary) => {
+            return collect_selectors(&unary.expr, out);
+        }
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
                 return false;
@@ -994,7 +998,9 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
                 }
             }
         }
-        PromExpr::Aggregate(aggregate) => return collect_selectors(&aggregate.expr, out),
+        PromExpr::Aggregate(aggregate) => {
+            return collect_selectors(&aggregate.expr, out);
+        }
         PromExpr::Subquery(_) => return false,
         _ => {}
     }
@@ -1131,6 +1137,32 @@ mod tests {
             .iter()
             .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn selector_walk_keeps_plain_selector_identity() {
+        for (query, expected) in [
+            ("timestamp((x @ 2 offset -1s))", vec!["x"]),
+            ("abs(timestamp(x @ 2 offset -1s))", vec!["x"]),
+            ("timestamp(x @ start() offset 1s)", vec!["x"]),
+            ("timestamp(x @ end() offset -1s)", vec!["x"]),
+            (
+                "timestamp(x @ 2 offset 1s) + y @ 2 offset 1s",
+                vec!["x", "y"],
+            ),
+        ] {
+            let expr = promql_parser::parser::parse(query).unwrap();
+            let mut selectors = Vec::new();
+            assert!(collect_selectors(&expr, &mut selectors));
+            assert_eq!(
+                selectors
+                    .iter()
+                    .map(|s| s.name.as_deref().unwrap())
+                    .collect::<Vec<_>>(),
+                expected,
+                "{query}"
+            );
+        }
     }
 
     #[test]

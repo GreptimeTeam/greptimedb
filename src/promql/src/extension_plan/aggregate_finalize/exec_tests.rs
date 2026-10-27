@@ -485,6 +485,87 @@ async fn the_state_of_two_producers_merges_into_one_series() {
     );
 }
 
+/// The metric name participates in the same sorted label comparison as ordinary tags.
+#[test]
+fn finalized_label_comparison_includes_metric_name() {
+    let schema = cut_schema();
+    let make = |name: Option<&str>| {
+        Series::try_new(
+            &schema,
+            SeriesLabels::try_new(
+                name.map(Arc::from),
+                vec![Label {
+                    name: K0.into(),
+                    value: LABEL.into(),
+                }],
+            )
+            .unwrap(),
+            TimeAxis::Grid(GridRange::try_new(grid(), POINT, 1).unwrap()),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![1.0]))])
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let absent = make(None);
+    let a_name = make(Some("a"));
+    let z_name = make(Some("z"));
+    assert_eq!(
+        compare_series_labels(&absent, &a_name),
+        std::cmp::Ordering::Greater
+    );
+    assert_eq!(
+        compare_series_labels(&a_name, &z_name),
+        std::cmp::Ordering::Less
+    );
+}
+
+/// Final groups are presented by label order, not by the order partitions return their states.
+#[tokio::test]
+async fn finalized_groups_are_ordered_independently_of_partition_arrival() {
+    let kind = AggregateKind::Avg;
+    let schema = cut_schema();
+    let make_state = |value: &str, sample: f64| {
+        let metric = SeriesLabels::try_new(
+            Some(METRIC.into()),
+            vec![Label {
+                name: K0.into(),
+                value: value.into(),
+            }],
+        )
+        .unwrap();
+        let series = Series::try_new(
+            &schema,
+            metric,
+            TimeAxis::Grid(GridRange::try_new(grid(), POINT, 1).unwrap()),
+            SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![sample]))])
+                .unwrap(),
+        )
+        .unwrap();
+        state_of_series(&schema, cut_op(kind), &[K0], vec![series])
+    };
+    let a = make_state("a", 2.0);
+    let z = make_state("z", 8.0);
+    let run = |states| async move {
+        let plan = finalize(avg_tree(kind), output_schema(VALUE, &[K0]))
+            .to_execution_plan(state_input(states))
+            .unwrap();
+        assert_eq!(plan.properties().emission_type, EmissionType::Final);
+        collect(plan, SessionContext::default().task_ctx())
+            .await
+            .unwrap()
+    };
+    let forward = rows(&run(vec![a.clone(), z.clone()]).await);
+    let reverse = rows(&run(vec![z, a]).await);
+    assert_eq!(forward, reverse);
+    assert_eq!(
+        forward
+            .iter()
+            .map(|row| row.2.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("a"), Some("z")]
+    );
+}
+
 /// Every fixed-width accumulator merges the producers' state, whichever fields it keeps.
 #[tokio::test]
 async fn every_fixed_width_kind_merges_across_producers() {

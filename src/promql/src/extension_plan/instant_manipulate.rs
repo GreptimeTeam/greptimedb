@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod native;
-mod native_exec;
-
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -22,7 +19,7 @@ use std::task::{Context, Poll};
 use common_query::prelude::{greptime_native_histogram, greptime_value};
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, LargeListArray, LargeStringArray, ListArray, StringArray,
-    StructArray, TimestampMillisecondArray, UInt64Array,
+    StringViewArray, StructArray, TimestampMillisecondArray, UInt64Array,
 };
 use datafusion::arrow::datatypes::{DataType, SchemaRef};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -80,14 +77,12 @@ fn mixed_sample_fields(field: Option<&str>) -> [Option<&str>; 2] {
 /// `start` and `end` with step `interval`. Find in the `lookback` range if data
 /// is missing at the given timestamp.
 ///
-/// The memory pool bounds one instant query, not a point count: the execution reserves the
-/// workspace its selection allocates before allocating it, and a pool that cannot meet the
-/// reservation refuses the query with `ResourcesExhausted` (see
-/// [`InstantManipulateStream::manipulate_reserved`]). That bound exists only where the pool does:
-/// a resolved `query.memory_pool_size` of zero leaves DataFusion's unbounded pool attached, whose
-/// growth always succeeds, so an operator that leaves the option unset has no bound on this path
-/// at all. What one query can cost still grows with the number of series, which no reservation of
-/// a single series accounts for.
+/// The memory pool admits this operator's per-series selection workspace: the execution reserves
+/// the estimate before allocating that workspace and a pool that cannot meet it refuses the
+/// operation with `ResourcesExhausted` (see [`InstantManipulateStream::manipulate_reserved`]).
+/// The reservation is released as soon as the output batch is built; it does not bound the child's
+/// input, the returned output batch, or total memory retained by an instant query. Its effect also
+/// depends on the attached pool: an unbounded pool always accepts the reservation.
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub struct InstantManipulate {
     start: Millisecond,
@@ -906,9 +901,9 @@ impl InstantManipulateStream {
 
     /// What one selected series' workspace holds, in bytes, before it is allocated.
     ///
-    /// The figure follows the reasoning of `InstantRuntime::gather_bytes` in `native::execute` and
-    /// of `NativeInstantStream::finish_series` in `native_exec`: a selection decides one point of
-    /// its grid per sample position it reads, so what it allocates grows with the points of the
+    /// The figure follows the reasoning of `InstantRuntime::gather_bytes` in `native::execute`: a
+    /// selection decides one point of its grid per sample position it reads, so what it allocates
+    /// grows with the points of the
     /// clipped grid and not with the samples of the series. Each term below is one allocation, and
     /// the ones this path shares with those are named as they are there.
     ///
@@ -952,7 +947,20 @@ impl InstantManipulateStream {
                 continue;
             }
             bytes = bytes.saturating_add(match row_bytes(column.as_ref()) {
-                Some(width) => points.saturating_mul(width.saturating_add(1)),
+                Some(width) => {
+                    let output_offsets = match column.data_type() {
+                        DataType::Utf8 => points
+                            .saturating_add(1)
+                            .saturating_mul(std::mem::size_of::<i32>()),
+                        DataType::LargeUtf8 => points
+                            .saturating_add(1)
+                            .saturating_mul(std::mem::size_of::<i64>()),
+                        _ => 0,
+                    };
+                    points
+                        .saturating_mul(width.saturating_add(1))
+                        .saturating_add(output_offsets)
+                }
                 None => column.get_buffer_memory_size(),
             });
         }
@@ -1053,9 +1061,12 @@ impl InstantManipulateStream {
 /// carry.
 ///
 /// `take` allocates one row of the column per point, so one point costs the widest row the column
-/// holds: the width of its value for a fixed-width column, the longest value for a byte column, and
-/// the whole row for a struct such as a native histogram -- its scalar columns, the offsets of its
-/// list columns and the values those lists hold for the widest row of the column.
+/// holds: the width of its value for a fixed-width column; value bytes for Utf8 or LargeUtf8 (the
+/// output offsets buffer is accounted once in `workspace_bytes`), a view descriptor plus value
+/// bytes for Utf8View (a conservative allowance because short views may point into shared buffers),
+/// dictionary key bytes for string dictionaries (whose values remain shared),
+/// and the whole row for a struct such as a native histogram -- its scalar columns, the offsets of
+/// its list columns and their widest values.
 fn row_bytes(column: &dyn Array) -> Option<usize> {
     if let Some(width) = column.data_type().primitive_width() {
         return Some(width);
@@ -1069,6 +1080,28 @@ fn row_bytes(column: &dyn Array) -> Option<usize> {
     }
     if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
         return Some(values.offsets().lengths().max().unwrap_or(0));
+    }
+    if let Some(values) = column.as_any().downcast_ref::<StringViewArray>() {
+        return Some(
+            std::mem::size_of::<u128>().saturating_add(
+                values
+                    .iter()
+                    .map(|value| value.map_or(0, str::len))
+                    .max()
+                    .unwrap_or(0),
+            ),
+        );
+    }
+    if let DataType::Dictionary(key_type, value_type) = column.data_type() {
+        // `take` copies dictionary keys per output row and shares the dictionary values.
+        // Instant tags supported by the producer use string dictionary values.
+        if matches!(
+            value_type.as_ref(),
+            DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+        ) {
+            return key_type.primitive_width();
+        }
+        return None;
     }
     let values = column.as_any().downcast_ref::<StructArray>()?;
     Some(
@@ -1135,7 +1168,8 @@ mod test {
     use common_query::native_histogram::build_histogram_array;
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
     use datafusion::arrow::array::{
-        Float64Array, TimestampMicrosecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        Float64Array, LargeStringArray, StringArray, StringViewArray, TimestampMicrosecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
     };
     use datafusion::arrow::buffer::NullBuffer;
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -1949,6 +1983,83 @@ mod test {
             rows, 6,
             "the series spanning the whole grid was not decided"
         );
+    }
+
+    #[test]
+    fn row_bytes_accounts_for_string_representation_storage() {
+        use datafusion::arrow::array::{DictionaryArray, Int8Array};
+        use datafusion::arrow::datatypes::Int8Type;
+
+        let utf8 = StringArray::from(vec!["a", "long"]);
+        // `row_bytes` is the per-row value width; workspace offsets are charged separately.
+        assert_eq!(row_bytes(&utf8), Some(4));
+
+        let large_utf8 = LargeStringArray::from(vec!["a", "long"]);
+        assert_eq!(row_bytes(&large_utf8), Some(4));
+
+        let view = StringViewArray::from(vec!["a", "long"]);
+        assert_eq!(row_bytes(&view), Some(16 + 4));
+
+        let dictionary = DictionaryArray::<Int8Type>::try_new(
+            Int8Array::from(vec![Some(0), Some(1)]),
+            Arc::new(StringArray::from(vec!["a", "long"])),
+        )
+        .unwrap();
+        assert_eq!(row_bytes(&dictionary), Some(std::mem::size_of::<i8>()));
+    }
+
+    #[test]
+    fn workspace_bytes_charges_utf8_output_offsets_once() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("utf8", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["payload", "payload"])),
+            ],
+        )
+        .unwrap();
+        let stream = InstantManipulateStream {
+            offset: 0,
+            start: 0,
+            end: 1,
+            lookback_delta: 1,
+            interval: 1,
+            time_index: 0,
+            time_unit: TimeUnit::Millisecond,
+            field_indices: [None, None],
+            tsid_index: None,
+            reuse_tsid_column: false,
+            schema,
+            input: Box::pin(
+                datafusion::physical_plan::memory::MemoryStream::try_new(
+                    vec![],
+                    batch.schema(),
+                    None,
+                )
+                .unwrap(),
+            ),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+            reservation: unbounded(),
+        };
+        let points = stream.clipped_points(&batch);
+        assert_eq!(points, 2);
+        let estimate = stream.workspace_bytes(&batch);
+        let output = stream.manipulate(batch.clone()).unwrap();
+        let output_buffers = output
+            .columns()
+            .iter()
+            .map(|column| column.get_buffer_memory_size())
+            .sum::<usize>();
+        assert!(estimate >= output_buffers);
     }
 
     /// The figure `manipulate_reserved` grows is the clipped one: 262 bytes for a series that ends
