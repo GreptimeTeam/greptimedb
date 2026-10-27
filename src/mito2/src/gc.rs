@@ -929,7 +929,7 @@ impl LocalGcWorker {
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> Vec<RemovedFile> {
         let mut ready_for_delete = vec![];
-        // Any live reference protects both the SST and every generation of its indexes.
+        // Every index-version reader needs the same Parquet file.
         let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
 
         let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> = may_linger_files
@@ -982,8 +982,8 @@ impl LocalGcWorker {
                     )
                 }
                 FileType::Puffin(version) => {
-                    let is_in_manifest = in_manifest.contains_key(&file_id);
-                    let is_in_tmp_ref = referenced_ssts.contains(&file_id);
+                    let is_in_manifest = in_manifest.get(&file_id) == Some(&Some(version));
+                    let is_in_tmp_ref = in_tmp_ref.contains(&(file_id, Some(version)));
                     let is_linger = may_linger_files
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
@@ -1093,8 +1093,16 @@ impl LocalGcWorker {
             let files_to_delete: Vec<RemovedFile> = eligible_for_removal
                 .iter()
                 .filter(|file| {
-                    let file_id = file.file_id();
-                    !in_manifest.contains_key(&file_id) && !referenced_ssts.contains(&file_id)
+                    let in_use = match file {
+                        RemovedFile::File(file_id, _) => {
+                            in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
+                        }
+                        RemovedFile::Index(file_id, version) => {
+                            in_manifest.get(file_id) == Some(&Some(*version))
+                                || in_tmp_ref.contains(&(*file_id, Some(*version)))
+                        }
+                    };
+                    !in_use
                 })
                 .map(|&f| f.clone())
                 .collect();

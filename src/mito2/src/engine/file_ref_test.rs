@@ -55,18 +55,26 @@ async fn get_snapshot_of_file_refs_skips_missing_file_handle_region() {
 }
 
 #[tokio::test]
-async fn get_snapshot_protects_all_shared_file_indexes_from_related_manifest() {
+async fn get_snapshot_preserves_related_region_old_index_readers() {
     use store_api::region_engine::{RegionEngine, RegionRole};
     use store_api::region_request::RegionRequest;
     use store_api::storage::{FileId, FileRef};
 
     use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
     use crate::region::RegionLeaderState;
-    use crate::sst::file::{FileMeta, IndexType};
+    use crate::sst::file::{FileHandle, FileMeta, IndexType};
     use crate::test_util::CreateRequestBuilder;
 
     let mut env = TestEnv::new().await;
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            gc: crate::gc::GcConfig {
+                enable: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
     let source_region = RegionId::new(1, 1);
     let target_region = RegionId::new(1, 2);
     engine
@@ -87,6 +95,13 @@ async fn get_snapshot_protects_all_shared_file_indexes_from_related_manifest() {
         ..Default::default()
     };
     let target = engine.get_region(target_region).unwrap();
+    let old_reader = FileHandle::new(
+        FileMeta {
+            index_version: 0,
+            ..meta.clone()
+        },
+        target.file_purger.clone(),
+    );
     target
         .manifest_ctx
         .update_manifest(
@@ -105,29 +120,39 @@ async fn get_snapshot_protects_all_shared_file_indexes_from_related_manifest() {
         .await
         .unwrap();
 
-    // The source region need not be open: the destination manifest owns the shared SST.
+    // The source is not open here, but a query on the destination still uses its v0 index.
+    let related_regions = HashMap::from([(source_region, HashSet::from([target_region]))]);
     let snapshot = engine
-        .get_snapshot_of_file_refs(
-            [],
-            HashMap::from([(source_region, HashSet::from([target_region]))]),
-        )
+        .get_snapshot_of_file_refs([], related_regions.clone())
         .await
         .unwrap();
     assert_eq!(
         snapshot.file_refs[&source_region],
-        [None, Some(0), Some(1), Some(2)]
+        [0, 2]
             .into_iter()
-            .map(|version| FileRef::new(source_region, meta.file_id, version))
+            .map(|version| FileRef::new(source_region, meta.file_id, Some(version)))
             .collect()
     );
     assert_eq!(
         snapshot.cross_region_refs[&source_region],
         HashSet::from([target_region])
     );
+    drop(old_reader);
+    let snapshot = engine
+        .get_snapshot_of_file_refs([], related_regions)
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot.file_refs[&source_region],
+        HashSet::from([FileRef::new(source_region, meta.file_id, Some(2))])
+    );
 }
 
+#[rstest::rstest]
 #[tokio::test]
-async fn get_snapshot_keeps_all_index_versions_until_sst_lifetime_ends() {
+async fn get_snapshot_preserves_old_index_readers_until_release(
+    #[values(false, true)] old_has_index: bool,
+) {
     use store_api::region_engine::{RegionEngine, RegionRole};
     use store_api::region_request::RegionRequest;
     use store_api::storage::{FileId, FileRef};
@@ -163,7 +188,11 @@ async fn get_snapshot_keeps_all_index_versions_until_sst_lifetime_ends() {
     let meta = FileMeta {
         region_id,
         file_id: FileId::random(),
-        available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+        available_indexes: if old_has_index {
+            smallvec::smallvec![IndexType::InvertedIndex]
+        } else {
+            Default::default()
+        },
         ..Default::default()
     };
     let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
@@ -171,6 +200,7 @@ async fn get_snapshot_keeps_all_index_versions_until_sst_lifetime_ends() {
     let old_reader = version.levels()[0].files[&meta.file_id].clone();
     let current_meta = FileMeta {
         index_version: 1,
+        available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
         ..meta.clone()
     };
     version.add_files(
@@ -198,12 +228,12 @@ async fn get_snapshot_keeps_all_index_versions_until_sst_lifetime_ends() {
         .get_snapshot_of_file_refs([region_id], HashMap::new())
         .await
         .unwrap();
-    // The current manifest covers v1; the snapshot protects no-index and v0 readers
-    // even when consumed by a GC worker that still matches exact index versions.
-    let expected = HashSet::from([
-        FileRef::new(region_id, meta.file_id, None),
-        FileRef::new(region_id, meta.file_id, Some(0)),
-    ]);
+    // Only v1 is covered by the manifest; keep the older view's exact reference.
+    let expected = HashSet::from([FileRef::new(
+        region_id,
+        meta.file_id,
+        old_has_index.then_some(0),
+    )]);
     assert_eq!(snapshot.file_refs[&region_id], expected);
     // Closing the current view without retirement must keep the old reader protected.
     drop(version);

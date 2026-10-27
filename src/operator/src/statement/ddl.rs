@@ -72,6 +72,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -92,7 +93,10 @@ use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, UnaryOperator,
+    Value as ParserValue,
+};
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
@@ -146,8 +150,7 @@ const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
 
-fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
-    let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
+fn build_procedure_id_output(procedure_id: &str) -> Result<Output> {
     let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         "Procedure ID",
@@ -1775,12 +1778,15 @@ impl StatementExecutor {
                 table_id,
                 time_ranges,
                 ddl_options,
-                query_context,
+                query_context.clone(),
             )
             .await?;
 
         if !ddl_options.wait {
-            return build_procedure_id_output(response.key);
+            let procedure_id = String::from_utf8_lossy(&response.key).into_owned();
+            let output = build_procedure_id_output(&procedure_id)?;
+            query_context.set_last_procedure_id(procedure_id);
+            return Ok(output);
         }
 
         Ok(Output::new_with_affected_rows(0))
@@ -2062,7 +2068,10 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)?;
 
         if !ddl_options.wait {
-            return build_procedure_id_output(response.key);
+            let procedure_id = String::from_utf8_lossy(&response.key).into_owned();
+            let output = build_procedure_id_output(&procedure_id)?;
+            query_context.set_last_procedure_id(procedure_id);
+            return Ok(output);
         }
 
         // Only invalidate cache if wait is true.
@@ -2914,6 +2923,15 @@ fn ensure_partition_operand_columns_in_target(
             ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
             ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
         }
+        Operand::IcebergHash(hash) => ensure!(
+            target_partition_columns.contains(&hash.column().to_string()),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "partition expression references column '{}' that is not in target partition columns",
+                    hash.column()
+                )
+            }
+        ),
         Operand::Value(_) => {}
     }
 
@@ -2965,6 +2983,22 @@ fn convert_one_expr(
             let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
+        // func, val
+        (Expr::Function(function), literal)
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::IcebergHash(hash), op, Operand::Value(value))
+        }
+        // val, func
+        (literal, Expr::Function(function))
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::Value(value), op, Operand::IcebergHash(hash))
+        }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
             // sub-expr must against another sub-expr
             let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
@@ -2980,6 +3014,70 @@ fn convert_one_expr(
     };
 
     Ok(PartitionExpr::new(lhs, op, rhs))
+}
+
+/// Converts an `iceberg_hash` call, which takes exactly one partition column.
+fn convert_iceberg_hash(
+    function: &Function,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<IcebergHash> {
+    let invalid = || {
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function call {function}"),
+        }
+        .build()
+    };
+    let FunctionArguments::List(args) = &function.args else {
+        return Err(invalid());
+    };
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))] =
+        args.args.as_slice()
+    else {
+        return Err(invalid());
+    };
+    if function.filter.is_some()
+        || function.over.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+        || !matches!(function.parameters, FunctionArguments::None)
+        || args.duplicate_treatment.is_some()
+        || !args.clauses.is_empty()
+    {
+        return Err(invalid());
+    }
+    ensure!(
+        function
+            .name
+            .to_string()
+            .eq_ignore_ascii_case(IcebergHash::NAME),
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function {}", function.name),
+        }
+    );
+    let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+    ensure!(
+        IcebergHash::accepts(&data_type),
+        InvalidPartitionRuleSnafu {
+            reason: format!(
+                "partition function {} does not support column type {data_type}",
+                IcebergHash::NAME
+            ),
+        }
+    );
+    Ok(IcebergHash::new(column_name))
+}
+
+fn convert_literal(expr: &Expr, data_type: ConcreteDataType, timezone: &Timezone) -> Result<Value> {
+    match expr {
+        Expr::Value(value) => convert_value(&value.value, data_type, timezone, None),
+        Expr::UnaryOp { op, expr } if let Expr::Value(value) = &**expr => {
+            convert_value(&value.value, data_type, timezone, Some(*op))
+        }
+        _ => InvalidPartitionRuleSnafu {
+            reason: format!("expect a literal in partition expr, got {expr}"),
+        }
+        .fail(),
+    }
 }
 
 fn convert_identifier(
@@ -3744,6 +3842,66 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
+    fn test_convert_iceberg_hash() {
+        let names = ["host", "count", "device", "measure", "host-name"].map(String::from);
+        let column_name_and_type = HashMap::from([
+            (&names[0], ConcreteDataType::string_datatype()),
+            (&names[1], ConcreteDataType::int16_datatype()),
+            (&names[2], ConcreteDataType::uint64_datatype()),
+            (&names[3], ConcreteDataType::float64_datatype()),
+            (&names[4], ConcreteDataType::string_datatype()),
+        ]);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+        let parse = |sql: &str| {
+            Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+
+        for sql in [
+            "iceberg_hash(host) < 0",
+            "ICEBERG_HASH(device) >= -1073741824",
+            "0 > iceberg_hash(count)",
+            "iceberg_hash(host) < 100 AND host < 'm'",
+            r#"iceberg_hash("host-name") < 0 AND "host-name" < 'm'"#,
+        ] {
+            let expr = convert_one_expr(&parse(sql), &column_name_and_type, &timezone).unwrap();
+            // SHOW CREATE TABLE prints the rule back as SQL, quoting identifiers.
+            let mut partitions = Partitions {
+                column_list: vec![],
+                exprs: vec![expr.to_parser_expr()],
+            };
+            partitions.set_quote('"');
+            let restored = parse(&partitions.exprs[0].to_string());
+            assert_eq!(
+                convert_one_expr(&restored, &column_name_and_type, &timezone).unwrap(),
+                expr,
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "iceberg_hash(measure) < 0",
+            "iceberg_hash(host, count) < 0",
+            "iceberg_hash('a') < 0",
+            "iceberg_hash(missing) < 0",
+            "iceberg_hash(DISTINCT host) < 0",
+            "md5(host) < 0",
+            "iceberg_hash(host) < host",
+            "iceberg_hash(host) < 'abc'",
+            "iceberg_hash(host) < 2147483648",
+        ] {
+            assert!(
+                convert_one_expr(&parse(sql), &column_name_and_type, &timezone).is_err(),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn test_partition_expr_equivalence_with_swapped_operands() {
         let column_name = "device_id".to_string();
         let column_name_and_type =
@@ -3813,25 +3971,28 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             (&area, ConcreteDataType::string_datatype()),
         ]);
         let dialect = GreptimeDbDialect {};
-        let mut parser = Parser::new(&dialect)
-            .try_with_sql("device_id >= 100")
-            .unwrap();
-        let remaining_old_expr = convert_one_expr(
-            &parser.parse_expr().unwrap(),
-            &column_name_and_type,
-            &timezone,
-        )
-        .unwrap();
         let target_partition_columns = HashSet::from([&area]);
+        for sql in ["device_id >= 100", "iceberg_hash(device_id) >= 0"] {
+            let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+            let remaining_old_expr = convert_one_expr(
+                &parser.parse_expr().unwrap(),
+                &column_name_and_type,
+                &timezone,
+            )
+            .unwrap();
 
-        let err = ensure_partition_expr_columns_in_target(
-            &[remaining_old_expr],
-            &target_partition_columns,
-        )
-        .unwrap_err();
+            let err = ensure_partition_expr_columns_in_target(
+                &[remaining_old_expr],
+                &target_partition_columns,
+            )
+            .unwrap_err();
 
-        assert!(err.to_string().contains("device_id"));
-        assert!(err.to_string().contains("target partition columns"));
+            assert!(err.to_string().contains("device_id"), "{sql}");
+            assert!(
+                err.to_string().contains("target partition columns"),
+                "{sql}"
+            );
+        }
     }
 
     #[test]

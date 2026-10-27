@@ -30,13 +30,13 @@ use crate::sst::range_index::RangeIndexDeleter;
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
     /// Purges a retired SST and its indexes after all metadata views release their readers.
-    /// The lifetime's file reference has already been released.
+    /// Each metadata view has already released its reader reference.
     fn purge_file(&self, file_meta: FileMeta);
 
     /// Retire cached scan results immediately, without waiting for physical deletion.
     fn invalidate_file(&self, _: &FileMeta) {}
 
-    /// Returns the object-store reference manager used by SST lifetimes.
+    /// Returns the object-store reference manager used by SST metadata views.
     /// Local and no-op purgers do not track GC references.
     fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
         None

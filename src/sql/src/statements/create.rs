@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter, Write};
+use std::ops::ControlFlow;
 
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
@@ -22,7 +23,7 @@ use datatypes::schema::{CompressionOptions, FulltextOptions, SkippingIndexOption
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
-use sqlparser::ast::{ColumnOptionDef, DataType, Expr};
+use sqlparser::ast::{ColumnOptionDef, DataType, Expr, visit_expressions_mut};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName};
@@ -395,11 +396,17 @@ pub struct Partitions {
 }
 
 impl Partitions {
-    /// set quotes to all [Ident]s from column list
+    /// Sets quotes to all column [Ident]s, in the column list and in the expressions.
     pub fn set_quote(&mut self, quote_style: char) {
         self.column_list
             .iter_mut()
             .for_each(|c| c.quote_style = Some(quote_style));
+        let _ = visit_expressions_mut(&mut self.exprs, |expr| {
+            if let Expr::Identifier(ident) = expr {
+                ident.quote_style = Some(quote_style);
+            }
+            ControlFlow::<()>::Continue(())
+        });
     }
 }
 
