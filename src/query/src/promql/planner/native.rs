@@ -589,8 +589,8 @@ impl PromPlanner {
             &root.expr,
             NativeExpr::Vector {
                 op: BoundVectorOp::TopK { .. },
-                ..
-            }
+                input
+            } if !reads_across_series(input)
         );
         let ranked_fields = series_schema
             .fields

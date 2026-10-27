@@ -476,8 +476,7 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
                 self.promql,
                 render_partial_fold(op)
             ),
-            None if self.format.is_frame() =>
-            {
+            None if self.format.is_frame() => {
                 write!(f, "FusedSeries: {} (output: series_frame)", self.promql)
             }
             None => write!(f, "FusedSeries: {}", self.promql),
@@ -998,10 +997,7 @@ impl FusedSeriesExec {
         partial_fold: Option<BoundAggregate>,
         format: FusedOutputFormat,
     ) -> DataFusionResult<Self> {
-        if partial_fold.is_none()
-            && format.is_frame()
-            && inputs.len() > 1
-        {
+        if partial_fold.is_none() && format.is_frame() && inputs.len() > 1 {
             return Err(DataFusionError::Plan(
                 "FusedSeries SeriesFrame output does not yet support multiple sources".into(),
             ));
@@ -1026,6 +1022,7 @@ impl FusedSeriesExec {
                 "FusedSeries partial fold requires one raw source and a per-series prefix".into(),
             ));
         }
+
         let frame_schema = if partial_fold.is_none() && format.is_frame() {
             let evaluated = evaluated_output(&tree)?;
             let declared = if format == FusedOutputFormat::SeriesFrameWithProvenance {
@@ -1735,11 +1732,11 @@ impl Stream for ProvenanceStream {
                     self.producer;
                     rows
                 ])) as ArrayRef);
-                columns.push(Arc::new(
-                    datafusion::arrow::array::UInt64Array::from_iter_values(
+                columns.push(
+                    Arc::new(datafusion::arrow::array::UInt64Array::from_iter_values(
                         self.next_ordinal..end,
-                    ),
-                ) as ArrayRef);
+                    )) as ArrayRef,
+                );
                 self.next_ordinal = end;
                 match RecordBatch::try_new(self.schema.clone(), columns) {
                     Ok(batch) => Poll::Ready(Some(Ok(batch))),
