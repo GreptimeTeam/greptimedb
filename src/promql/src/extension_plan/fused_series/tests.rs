@@ -4710,3 +4710,189 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
         );
     }
 }
+
+/// `x` over the tree's input, which is bound to the grid: the tree a Fused reads when its child
+/// already decided the values.
+///
+/// A map is point-wise over an evaluated vector, so this is the smallest tree whose input node
+/// reads evaluated chunks rather than raw samples. The absolute value is its own inverse on the
+/// non-negative values the tests below feed, which is what keeps the comparison to the raw-fed
+/// tree about the input path rather than about the kernel.
+fn abs_over_evaluated_input_tree() -> NativeTree {
+    let evaluated = evaluated_of(&raw_schema(), &grid());
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: evaluated.clone(),
+                    ordering: SeriesOrdering::Contiguous,
+                }),
+                output: evaluated.clone(),
+            }),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+            },
+        },
+        output: evaluated,
+    })
+    .expect("a map over an evaluated input is a legal tree")
+}
+
+/// `abs(rate(x[5m]))`: the raw-fed tree that answers what [`abs_over_evaluated_input_tree`] answers
+/// once its child has decided `rate(x[5m])`.
+fn abs_rate_tree() -> NativeTree {
+    let rate = rate_tree();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(rate.root().clone()),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Math(crate::map::MathOp::Abs)]),
+            },
+        },
+        output: rate.root().output.clone(),
+    })
+    .expect("a map over a rate tree is a legal tree")
+}
+
+/// The logical node of `tree` in `format`, over one child carrying that tree's input frames.
+fn formatted(tree: &NativeTree, format: FusedOutputFormat) -> FusedSeries {
+    let output_schema = if format == FusedOutputFormat::SeriesFrame {
+        canonical_frame_schema(tree)
+    } else {
+        output_schema().to_dfschema_ref().unwrap()
+    };
+    FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(tree),
+        vec![input_plan(frame_schema())],
+        output_schema,
+        format,
+    )
+    .expect("the binding matches the tree")
+}
+
+/// A [`Row`] with the value held as its bits, so the whole row is ordered.
+type OrderedRow = (i64, Option<u64>, Option<String>, Option<String>);
+
+/// The rows of a node, ordered by every column, so two runs that differ only in arrival order
+/// compare equal.
+fn sorted_rows(batches: &[RecordBatch]) -> Vec<OrderedRow> {
+    let mut rows = rows(batches)
+        .into_iter()
+        .map(|(time, value, host, name)| (time, value.map(f64::to_bits), host, name))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+/// A Fused whose child is another Fused's evaluated frame answers the same rows as the raw-fed one.
+///
+/// This is the RFC's `Fused A -> Fused B` shape without the repartition between them: `A` is
+/// `abs(rate(x[5m]))` fed the raw series, it exports an evaluated frame, and `B` is `abs(x)` whose
+/// only child is that frame. `B` therefore has to decode an evaluated frame rather than raw
+/// samples, and its answer has to be exactly `A`'s own row answer: the values are the same points
+/// on the same grid under the same labels, so anything the evaluated path dropped, re-addressed or
+/// closed twice shows up as a different row.
+#[tokio::test]
+async fn a_fused_reads_another_fuseds_evaluated_frame() {
+    let raw_tree = abs_rate_tree();
+    // What the raw-fed tree answers on its own, which is the answer the frame has to carry over.
+    let plain = plan_of(
+        formatted(&raw_tree, FusedOutputFormat::PlainRows),
+        memory_exec(two_series_frames()),
+    )
+    .expect("the runtime executes the raw-fed tree");
+    let expected = sorted_rows(
+        &collect(plain, SessionContext::default().task_ctx())
+            .await
+            .expect("the raw-fed tree runs"),
+    );
+    assert_eq!(2 * GRID_LEN as usize, expected.len(), "{expected:?}");
+
+    // `A` exports the same answer as an evaluated frame.
+    let exported = plan_of(
+        formatted(&raw_tree, FusedOutputFormat::SeriesFrame),
+        memory_exec(two_series_frames()),
+    )
+    .expect("the runtime executes the frame-exporting tree");
+    let frame_schema = exported.schema();
+    let frames = collect(exported, SessionContext::default().task_ctx())
+        .await
+        .expect("the exporting tree runs");
+    assert!(!frames.is_empty(), "the frame carries the answer");
+
+    // `B` reads that frame: its input node is bound to the grid, so the node has to decode the
+    // frame as evaluated values and queue them at the evaluated input path.
+    let evaluated_tree = abs_over_evaluated_input_tree();
+    let read = plan_of(
+        formatted(&evaluated_tree, FusedOutputFormat::PlainRows),
+        memory_exec_with(frame_schema, frames),
+    )
+    .expect("the runtime executes the evaluated-fed tree");
+    let actual = sorted_rows(
+        &collect(read, SessionContext::default().task_ctx())
+            .await
+            .expect("the evaluated-fed tree runs"),
+    );
+
+    assert_eq!(expected, actual);
+    // The labels travel in the frame, so the same series are named on the way out.
+    assert!(
+        actual
+            .iter()
+            .any(|(_, _, host, _)| host.as_deref() == Some("web-1")),
+        "the frame's labels reach the output: {actual:?}"
+    );
+    assert!(
+        actual.iter().all(|(_, _, _, name)| name.is_none()),
+        "rate dropped the metric name before the frame was written: {actual:?}"
+    );
+}
+
+/// A frame that declares the other content than its consumer reads fails the query.
+///
+/// The frame says what its rows are and the tree's input node says what it was compiled to read;
+/// the two decoders refuse a frame that declares the other content, so the plan is refused when it
+/// is built rather than run with a child decoded as something it is not. Both directions are
+/// checked, and each one asserts the decoder's own words: nothing here is silently skipped.
+#[tokio::test]
+async fn a_frame_of_the_other_content_fails_the_query() {
+    // An evaluated frame: what `A` exports, which a raw-bound input may not read.
+    let raw_tree = abs_rate_tree();
+    let exporting = plan_of(
+        formatted(&raw_tree, FusedOutputFormat::SeriesFrame),
+        memory_exec(two_series_frames()),
+    )
+    .expect("the runtime executes the frame-exporting tree");
+    let frame_schema = exporting.schema();
+    let frames = collect(exporting, SessionContext::default().task_ctx())
+        .await
+        .expect("the exporting tree runs");
+    assert!(!frames.is_empty());
+
+    let error = plan_of(
+        formatted(&raw_tree, FusedOutputFormat::PlainRows),
+        memory_exec_with(frame_schema, frames),
+    )
+    .expect_err("a raw-bound input cannot read evaluated values");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("expected a raw frame, found an evaluated one"),
+        "refused for another reason: {message}"
+    );
+
+    // Raw frames where the input node was compiled to read evaluated values.
+    let evaluated_tree = abs_over_evaluated_input_tree();
+    let error = plan_of(
+        formatted(&evaluated_tree, FusedOutputFormat::PlainRows),
+        memory_exec(two_series_frames()),
+    )
+    .expect_err("a grid-bound input cannot read raw samples");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("expected an evaluated frame, found a raw one"),
+        "refused for another reason: {message}"
+    );
+}

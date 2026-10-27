@@ -12,14 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! One node that runs a compiled native tree over raw series.
+//! One node that runs a compiled native tree over a series frame.
 //!
 //! [`FusedSeries`] is the logical half: it holds the PromQL text the tree was compiled from, the
 //! tree itself and the binding its input was compiled against. [`FusedSeriesExec`] is the physical
 //! half: it runs that tree over the node's input - once per input partition for a tree that answers
 //! one series from one series' rows, once over all of them for a tree that reads the whole vector -
-//! and decodes its input frames into raw series chunks and converts its evaluated chunks back into
-//! batches.
+//! and decodes its input frames into the chunks its tree's input node reads, then converts its
+//! evaluated chunks back into batches.
 //!
 //! The two halves show different things in `EXPLAIN`, which is the point of having both. The
 //! logical node prints the query a reader wrote ([`FusedSeries`]'s `fmt_for_explain`), and the
@@ -28,15 +28,19 @@
 //! can therefore see whether a query was compiled the way they expected without decoding node
 //! names.
 //!
-//! Scope of this layer: the input is a stream of native raw series frames
-//! ([`raw_series_frame_schema`](datatypes::series::frame::raw_series_frame_schema)) — one row per
-//! chunk, carrying the series' encoded key, its finality, its timestamps and its fields, plus the
-//! complete labels when the frame is explicit — with each series' rows contiguous and its
-//! timestamps ascending, which is what the caller's [`SeriesOrdering`] names. The output is one
-//! batch per evaluated chunk, with the statement's grid timestamps in the declared time column.
-//! Everything the tree cannot do is rejected when the execution plan is built, not when the first
-//! batch arrives: a tree the native runtime does not execute, a frame whose schema the tree's input
-//! was not compiled against, or an output schema the conversion cannot classify.
+//! Scope of this layer: the input is a stream of native series frames, and the frame's own
+//! declaration says which kind. A raw frame
+//! ([`raw_series_frame_schema`](datatypes::series::frame::raw_series_frame_schema)) holds one row
+//! per chunk, carrying the series' encoded key, its finality, its timestamps and its fields, plus
+//! the complete labels when the frame is explicit; an evaluated frame
+//! ([`pack_evaluated_series`](common_query::series_frame::pack_evaluated_series)) holds values a
+//! producer already decided, one row per position on the grid the frame declares. Both keep each
+//! series' rows contiguous and its positions ascending, which is what the caller's
+//! [`SeriesOrdering`] names. The output is one batch per evaluated chunk, with the statement's grid
+//! timestamps in the declared time column. Everything the tree cannot do is rejected when the
+//! execution plan is built, not when the first batch arrives: a tree the native runtime does not
+//! execute, a frame whose schema the tree's input was not compiled against, or an output schema the
+//! conversion cannot classify.
 
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -46,9 +50,10 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use common_error::ext::BoxedError;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, ensure_frame_matches_label_source, pack_evaluated_series,
-    unpack_raw_series,
+    unpack_evaluated_series, unpack_raw_series,
 };
 use datafusion::arrow::array::{ArrayRef, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::ScalarBuffer;
@@ -69,6 +74,7 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::{FrameContent, SeriesFrameDeclaration};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
@@ -568,7 +574,13 @@ fn tree_input_fields(tree: &NativeTree) -> Vec<(usize, Vec<String>)> {
         .collect()
 }
 
-/// The schemas read by distinct raw sources, in dense source-index order.
+/// The schemas read by distinct sources, in dense source-index order.
+///
+/// A schema names the kind of chunk its source's input node reads: one without a grid reads raw
+/// samples and one bound to a grid reads values a producer already evaluated. Both are series
+/// frames, and [`FusedSeriesExec`] decodes a child by the child's own declaration rather than by
+/// this list, so neither kind is refused here. Which kinds may appear together is the physical
+/// node's to check, because only it sees the frames the children declare.
 fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
     let mut schemas: Vec<(usize, Arc<SeriesSchema>)> = Vec::new();
     for input in tree_inputs(tree) {
@@ -577,11 +589,6 @@ fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
                 "FusedSeries input is not samples".into(),
             ));
         };
-        if found.eval_grid.is_some() {
-            return Err(DataFusionError::Plan(
-                "FusedSeries input is not raw samples".into(),
-            ));
-        }
         if let Some((_, expected)) = schemas
             .iter()
             .find(|(index, _)| *index == input.source_index)
@@ -691,7 +698,26 @@ fn same_fields(left: &SeriesSchema, right: &SeriesSchema) -> bool {
             .all(|(a, b)| a.name == b.name)
 }
 
-/// Fields read by each distinct raw source in source-index order.
+/// Whether the frame declared by `frame` carries evaluated values rather than raw samples.
+///
+/// The frame schema is the authority, so this asks the declaration parser the two decoders use
+/// themselves: a frame that declares neither content is refused here with the parser's own reason
+/// rather than defaulted to raw, and the decoder the answer selects re-checks the same declaration
+/// before it reads a row. Nothing about the tree's input binding or the caller's label source takes
+/// part: a producer says what its rows are, and a mismatch with what the input node was compiled
+/// for is the decoder's to refuse.
+fn input_frames_are_evaluated(
+    frame: &datafusion::arrow::datatypes::Schema,
+) -> DataFusionResult<bool> {
+    let declaration = SeriesFrameDeclaration::parse(frame).map_err(|error| {
+        DataFusionError::Plan(format!(
+            "FusedSeries input frame is not a series frame: {error}"
+        ))
+    })?;
+    Ok(declaration.content() == FrameContent::Evaluated)
+}
+
+/// Fields read by each distinct source in source-index order.
 pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
     Ok(collect_source_schemas(tree)?
         .into_iter()
@@ -887,13 +913,14 @@ pub(crate) fn classify_output(
     Ok(classification)
 }
 
-/// The physical node that runs a compiled native tree over its input's raw series.
+/// The physical node that runs a compiled native tree over its input's series frames.
 pub struct FusedSeriesExec {
     /// The PromQL text the tree was compiled from, which is what the plan line shows.
     promql: Arc<str>,
     /// The tree this node runs, shared by every partition's execution.
     tree: Arc<NativeTree>,
-    /// Each source's compiled raw schema, used to decode only that source's frames.
+    /// Each source's compiled schema, which names the kind of chunk its input node reads and is
+    /// used to decode only that source's frames.
     series_schemas: Vec<Arc<SeriesSchema>>,
     /// Physical input plans, preserving each source's frame binding and ordering.
     inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
@@ -918,10 +945,13 @@ pub struct FusedSeriesExec {
 impl FusedSeriesExec {
     /// Creates the node, rejecting whatever this node cannot execute or convert.
     ///
-    /// `input` produces native raw series frames: the series' encoded key, its finality, its
-    /// timestamps and its fields, plus the complete labels when `label_source` is
-    /// [`RawLabelSource::Explicit`]. `time_column` and `tags` name the columns of the output, which
-    /// is a row table rather than a frame.
+    /// `input` produces native series frames, and each child's own frame declaration says which
+    /// kind: a raw frame carries the series' encoded key, its finality, its timestamps and its
+    /// fields, plus the complete labels when `label_source` is [`RawLabelSource::Explicit`], while
+    /// an evaluated frame carries values a producer already decided on the grid it declares. Which
+    /// kind each child's input node reads is fixed by the tree; the frame has to agree with it.
+    /// `time_column` and `tags` name the columns of the output, which is a row table rather than a
+    /// frame.
     ///
     /// The parameters stay separate because each is a fact its own caller has: the query, the plan
     /// below, the frame's label binding and ordering, the tree, and the three things the output
@@ -978,7 +1008,7 @@ impl FusedSeriesExec {
         let raw_schemas = validate_physical_tree(&tree)?;
         if inputs.len() != raw_schemas.len() {
             return Err(DataFusionError::Plan(format!(
-                "FusedSeries physical input count {} does not match its {} raw sources",
+                "FusedSeries physical input count {} does not match its {} sources",
                 inputs.len(),
                 raw_schemas.len()
             )));
@@ -1027,6 +1057,7 @@ impl FusedSeriesExec {
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {
             input.properties().partitioning.partition_count()
         });
+        let mut evaluated_sources = 0usize;
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if count == 0 {
@@ -1049,13 +1080,33 @@ impl FusedSeriesExec {
                 )));
             }
             ensure_frame_matches_label_source(input.schema().as_ref(), label_source)?;
-            unpack_raw_series(
+            // The child is validated with the decoder the tree's input node was compiled against:
+            // a raw-bound leaf reads raw samples and a grid-bound one reads evaluated values, and
+            // each decoder parses the frame's own declaration first, so a frame that declares the
+            // other content is refused here - by name, in the decoder's words - rather than read as
+            // though it held what this leaf promised.
+            let empty = || {
                 Box::pin(RecordBatchStreamAdapter::new(
                     input.schema(),
                     futures::stream::empty(),
-                )),
-                Some(raw_schemas[index].clone()),
-            )?;
+                ))
+            };
+            if raw_schemas[index].eval_grid.is_some() {
+                evaluated_sources += 1;
+                let _ = unpack_evaluated_series(empty(), Some(Arc::clone(&raw_schemas[index])))?;
+            } else {
+                unpack_raw_series(empty(), Some(Arc::clone(&raw_schemas[index])))?;
+            }
+        }
+        // One evaluated source at a time is what this node reads: a raw source is gathered across
+        // its partitions by series, because one of its series may span them, while an evaluated
+        // source is read partition after partition, because each frame is contiguous by
+        // declaration. Combining the two, or evaluating more than one source, would need a routing
+        // this node does not have, so it is refused instead of run with one side read wrongly.
+        if evaluated_sources > 1 || (evaluated_sources == 1 && inputs.len() > 1) {
+            return Err(DataFusionError::Plan(
+                "FusedSeries reads one evaluated source alone, not beside another source".into(),
+            ));
         }
         // One execution over every input partition, rather than one execution per partition: a tree
         // that reads the whole vector has to see every series at once, and more than one source is
@@ -1214,6 +1265,7 @@ impl ExecutionPlan for FusedSeriesExec {
         // of them here; a per-partition execution does, and must name one the input has.
         let single_execution = Self::requires_single_execution(self.inputs.len(), &self.tree);
         let mut streams = Vec::new();
+        let mut evaluated: Option<(usize, VecDeque<SendableEvaluatedSeriesStream>)> = None;
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if !single_execution && partition >= count {
@@ -1226,13 +1278,31 @@ impl ExecutionPlan for FusedSeriesExec {
             } else {
                 partition..partition + 1
             };
+            // The frame's own declaration says which content its rows carry, and the kind is the
+            // one the plan was built against: [`Self::build`] refused a frame that declares the
+            // other, and the decoder chosen here re-reads the same declaration before a row.
+            let decoded_input = input_frames_are_evaluated(input.schema().as_ref())?;
             for child_partition in partitions {
                 let frames = input.execute(child_partition, Arc::clone(&context))?;
-                let raw =
-                    unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
-                let raw = materialize_raw_labels(raw)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                streams.push((source, raw));
+                if decoded_input {
+                    // An evaluated frame carries values its producer already decided on the grid,
+                    // so its chunks are queued at the input node as they are: there are no scan
+                    // labels to materialize and no series to hold back.
+                    let stream = unpack_evaluated_series(
+                        frames,
+                        Some(Arc::clone(&self.series_schemas[source])),
+                    )?;
+                    evaluated
+                        .get_or_insert_with(|| (source, VecDeque::new()))
+                        .1
+                        .push_back(stream);
+                } else {
+                    let raw =
+                        unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
+                    let raw = materialize_raw_labels(raw)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    streams.push((source, raw));
+                }
             }
         }
         let input_ids = (0..self.series_schemas.len())
@@ -1260,16 +1330,20 @@ impl ExecutionPlan for FusedSeriesExec {
             })
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
-        let inputs = if streams.is_empty() {
+        let inputs = if let Some((source, partitions)) = evaluated {
+            // One evaluated source, read partition after partition: its frames are contiguous by
+            // declaration, so the order its partitions arrive in is the only order there is.
+            Some(FusedInputs::Evaluated { source, partitions })
+        } else if streams.is_empty() {
             executor.end_of_input()?;
             None
         } else {
             let reservation = MemoryConsumer::new(format!("FusedSeriesGather[{partition}]"))
                 .register(&context.runtime_env().memory_pool);
-            Some(SeriesGather::new(
+            Some(FusedInputs::Raw(SeriesGather::new(
                 spawn_partitions(streams, &context.runtime_env().memory_pool),
                 reservation,
-            ))
+            )))
         };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
@@ -1393,14 +1467,79 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
     }
 }
 
+/// One chunk a child handed over, in the form the child's frame declared it in.
+enum FusedChunk {
+    /// Raw samples: one scan series, with its own timestamps.
+    Raw(RawSeriesChunk),
+    /// Values a producer already evaluated on the grid the frame declares.
+    Evaluated(EvaluatedChunk),
+}
+
+/// One chunk and the source index it belongs to.
+struct FusedFeed {
+    source: usize,
+    chunk: FusedChunk,
+}
+
+/// The input of one execution: its raw partitions gathered together, or one evaluated source's
+/// partitions read in order.
+///
+/// [`SeriesGather`] interleaves the partitions of one raw source while keeping every series
+/// contiguous, because a series read from storage may span them. An evaluated frame is contiguous
+/// by declaration and only one evaluated source is read at a time, so its partitions are read one
+/// after another: the series of one are its own, and nothing has to route them to keep one whole.
+enum FusedInputs {
+    Raw(SeriesGather),
+    Evaluated {
+        source: usize,
+        partitions: VecDeque<SendableEvaluatedSeriesStream>,
+    },
+}
+
+impl Stream for FusedInputs {
+    type Item = Result<FusedFeed, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match &mut *self {
+            Self::Raw(gather) => match Pin::new(gather).poll_next(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok((source, chunk)))) => Poll::Ready(Some(Ok(FusedFeed {
+                    source,
+                    chunk: FusedChunk::Raw(chunk),
+                }))),
+            },
+            Self::Evaluated { source, partitions } => loop {
+                let Some(stream) = partitions.front_mut() else {
+                    return Poll::Ready(None);
+                };
+                match stream.as_mut().poll_next(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    // A partition that ended is one series set fewer, not the end of the source.
+                    Poll::Ready(None) => {
+                        partitions.pop_front();
+                    }
+                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                    Poll::Ready(Some(Ok((series, is_last)))) => {
+                        return Poll::Ready(Some(Ok(FusedFeed {
+                            source: *source,
+                            chunk: FusedChunk::Evaluated(EvaluatedChunk { series, is_last }),
+                        })));
+                    }
+                }
+            },
+        }
+    }
+}
+
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    /// Every input partition, read concurrently, or `None` once they all ended.
+    /// Every input partition, or `None` once they all ended.
     ///
     /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
-    /// error releases them even if the consumer keeps the terminated stream; a partition read on a
-    /// spawned task is released once its runtime cancels the task, not by the time this returns.
-    inputs: Option<SeriesGather>,
+    /// error releases them even if the consumer keeps the terminated stream.
+    inputs: Option<FusedInputs>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Runtime input IDs for each source index.
@@ -1424,32 +1563,50 @@ pub struct FusedSeriesStream {
 }
 
 impl FusedSeriesStream {
-    /// Hands one raw chunk over and queues what it settled.
-    fn push(&mut self, source: usize, chunk: RawSeriesChunk) -> DataFusionResult<()> {
+    /// Hands one chunk a child produced over and queues what it settled.
+    fn push(&mut self, feed: FusedFeed) -> DataFusionResult<()> {
         let Some(executor) = self.executor.as_mut() else {
             return Err(DataFusionError::Execution(
                 "FusedSeriesExec stream pushed a chunk after its execution closed".to_string(),
             ));
         };
-        for input_id in self.input_ids.get(source).ok_or_else(|| {
+        for input_id in self.input_ids.get(feed.source).ok_or_else(|| {
             DataFusionError::Execution(format!(
-                "FusedSeries has no runtime input IDs for source {source}"
+                "FusedSeries has no runtime input IDs for source {}",
+                feed.source
             ))
         })? {
-            executor.push_raw(*input_id, chunk.clone())?;
+            match &feed.chunk {
+                // A raw chunk opens, continues or closes one series the scan read.
+                FusedChunk::Raw(chunk) => executor.push_raw(*input_id, chunk.clone())?,
+                // An evaluated chunk carries values a producer already decided, and the input node
+                // it is queued at was compiled against a grid: the runtime refuses it anywhere else.
+                FusedChunk::Evaluated(chunk) => {
+                    executor.push_evaluated(*input_id, chunk.clone())?
+                }
+            }
         }
+        self.settle()
+    }
+
+    /// Queues what the tree settled after the chunk just handed over, unless it answers frames.
+    ///
+    /// A frame-mode run hands its chunks out as the tree produces them, so nothing is drained here.
+    fn settle(&mut self) -> DataFusionResult<()> {
         if self.frame_mode {
-            Ok(())
-        } else {
-            let mut settled = Vec::new();
-            while let Some(chunk) = executor.next_chunk()? {
-                settled.push(chunk);
-            }
-            for chunk in settled {
-                self.convert_rows(chunk)?;
-            }
-            Ok(())
+            return Ok(());
         }
+        let Some(executor) = self.executor.as_mut() else {
+            return Ok(());
+        };
+        let mut settled = Vec::new();
+        while let Some(chunk) = executor.next_chunk()? {
+            settled.push(chunk);
+        }
+        for chunk in settled {
+            self.convert_rows(chunk)?;
+        }
+        Ok(())
     }
 
     /// Ends the input, so the tree settles what it was holding.
@@ -1600,8 +1757,8 @@ impl FusedSeriesStream {
                     self.fail();
                     return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                Poll::Ready(Some(Ok((source, chunk)))) => {
-                    if let Err(error) = self.push(source, chunk) {
+                Poll::Ready(Some(Ok(feed))) => {
+                    if let Err(error) = self.push(feed) {
                         self.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
