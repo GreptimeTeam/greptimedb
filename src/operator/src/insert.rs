@@ -36,6 +36,7 @@ use api::v1::{
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use arrow_schema::extension::ExtensionType;
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_base::readable_size::ReadableSize;
@@ -54,12 +55,17 @@ use common_meta::peer::Peer;
 use common_meta::rpc::ddl::TriggerReason;
 use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
-use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_query::prelude::{
+    EXEMPLAR_LABELS_COLUMN, EXEMPLAR_METRIC_COLUMN, METRICS_EXEMPLARS_TABLE, greptime_timestamp,
+    greptime_value,
+};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
-use datatypes::schema::{ColumnEncoding, CompressionOptions, SkippingIndexOptions};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnEncoding, CompressionOptions, SkippingIndexOptions,
+};
 use futures_util::future;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
@@ -71,12 +77,14 @@ use sql::partition::partition_rule_for_hexstring;
 use sql::statements::create::Partitions;
 use sql::statements::insert::Insert;
 use store_api::metric_engine_consts::{
-    LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
+    METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, COMPACTION_OPTION_KEYS, COMPACTION_TWCS_PREFIX, COMPACTION_TYPE,
     COMPACTION_TYPE_TWCS, MERGE_MODE_KEY, TTL_KEY,
 };
+use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
 use table::metadata::{TableInfo, TableInfoRef};
@@ -130,6 +138,8 @@ pub enum AutoCreateTableType {
     Logical(String),
     /// A physical table.
     Physical,
+    /// The ordinary sparse append table for metric exemplars.
+    Exemplar,
     /// A log table which is append-only.
     Log,
     /// A table that merges rows by `last_non_null` strategy.
@@ -143,6 +153,7 @@ impl AutoCreateTableType {
         match self {
             AutoCreateTableType::Logical(_) => "logical",
             AutoCreateTableType::Physical => "physical",
+            AutoCreateTableType::Exemplar => "exemplar",
             AutoCreateTableType::Log => "log",
             AutoCreateTableType::LastNonNull => "last_non_null",
             AutoCreateTableType::Trace { .. } => "trace",
@@ -165,13 +176,27 @@ impl AutoCreateTableType {
 /// and normal requests are requests with ttl set to other values.
 ///
 /// This is used to split requests for different processing.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct InstantAndNormalInsertRequests {
     /// Requests with normal ttl.
     pub normal_requests: RegionInsertRequests,
     /// Requests with ttl=instant.
     /// Will be discarded immediately at frontend, wouldn't even insert into memtable, and only sent to flow node if needed.
     pub instant_requests: RegionInsertRequests,
+}
+
+/// Metric writes bound to the same resolved tables used by their exemplars.
+#[derive(Default)]
+pub struct PreparedMetricInserts {
+    requests: InstantAndNormalInsertRequests,
+    table_infos: HashMap<TableId, TableInfoRef>,
+}
+
+impl PreparedMetricInserts {
+    /// Returns the source tables captured during routing, including auto-created tables.
+    pub fn source_tables(&self) -> impl Iterator<Item = &TableInfoRef> {
+        self.table_infos.values()
+    }
 }
 
 impl Inserter {
@@ -371,6 +396,123 @@ impl Inserter {
         .await
     }
 
+    /// Inserts exemplars using ordinary Mito storage and nanosecond auto-create defaults.
+    pub async fn handle_exemplar_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+        sources: &[TableInfoRef],
+    ) -> Result<Output> {
+        ensure!(
+            requests
+                .inserts
+                .iter()
+                .all(|r| r.table_name == METRICS_EXEMPLARS_TABLE),
+            InvalidInsertRequestSnafu {
+                reason: "invalid exemplar destination"
+            }
+        );
+        self.bind_exemplar_table_ids(&mut requests, &ctx, sources)
+            .await?;
+        preprocess_row_insert_requests(&mut requests.inserts)?;
+        self.handle_row_inserts_with_create_type(
+            requests,
+            ctx,
+            statement_executor,
+            AutoCreateTableType::Exemplar,
+            false,
+            false,
+        )
+        .await
+    }
+
+    async fn bind_exemplar_table_ids(
+        &self,
+        requests: &mut RowInsertRequests,
+        ctx: &QueryContextRef,
+        sources: &[TableInfoRef],
+    ) -> Result<()> {
+        validate_column_count_match(requests)?;
+        let mut tables = HashMap::new();
+        for info in sources.iter().filter(|info| {
+            info.catalog_name == ctx.current_catalog() && info.schema_name == ctx.current_schema()
+        }) {
+            if let Some(previous) = tables.insert(info.name.clone(), info.clone()) {
+                ensure!(
+                    previous.table_id() == info.table_id(),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {} changed during write preparation",
+                            info.name
+                        ),
+                    }
+                );
+            }
+        }
+        for request in &mut requests.inserts {
+            let Some(rows) = request.rows.as_mut() else {
+                continue;
+            };
+            ensure!(
+                !rows
+                    .schema
+                    .iter()
+                    .any(|c| c.column_name == DATA_SCHEMA_TABLE_ID_COLUMN_NAME),
+                InvalidInsertRequestSnafu {
+                    reason: "exemplar table IDs must be resolved from their source tables",
+                }
+            );
+            let metric_index = rows
+                .schema
+                .iter()
+                .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN)
+                .context(InvalidInsertRequestSnafu {
+                    reason: "missing exemplar source metric",
+                })?;
+            for row in &mut rows.rows {
+                let Some(ValueData::StringValue(name)) = &row.values[metric_index].value_data
+                else {
+                    return InvalidInsertRequestSnafu {
+                        reason: "invalid exemplar source metric",
+                    }
+                    .fail();
+                };
+                if !tables.contains_key(name) {
+                    let table = self.get_table(ctx.current_catalog(), &ctx.current_schema(), name).await?
+                        .with_context(|| InvalidInsertRequestSnafu {
+                            reason: format!("exemplar source {name} must be an existing logical metric-engine table"),
+                        })?;
+                    tables.insert(name.clone(), table.table_info());
+                }
+                let info = &tables[name];
+                ensure!(
+                    info.meta.engine == METRIC_ENGINE_NAME
+                        && info
+                            .meta
+                            .options
+                            .extra_options
+                            .contains_key(LOGICAL_TABLE_METADATA_KEY),
+                    InvalidInsertRequestSnafu {
+                        reason: format!(
+                            "exemplar source {name} must be an existing logical metric-engine table"
+                        ),
+                    }
+                );
+                row.values
+                    .insert(0, ValueData::U32Value(info.table_id()).into());
+            }
+            rows.schema.insert(
+                0,
+                api::v1::helper::tag_column_schema(
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    ColumnDataType::Uint32,
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// Handles row inserts request and creates a log table on demand.
     pub async fn handle_log_inserts(
         &self,
@@ -439,6 +581,8 @@ impl Inserter {
         is_single_value: bool,
     ) -> Result<Output> {
         let skip_wal = ctx.skip_wal();
+        let align_time_index_unit =
+            matches!(create_type, AutoCreateTableType::Exemplar).then_some(TimeUnit::Nanosecond);
 
         let batcher = self
             .pending_rows_batcher
@@ -465,7 +609,7 @@ impl Inserter {
                 statement_executor,
                 accommodate_existing_schema,
                 is_single_value,
-                None,
+                align_time_index_unit,
             )
             .await?;
 
@@ -612,11 +756,25 @@ impl Inserter {
     /// Existing targets retain their backing tables and time-index units.
     pub async fn handle_metric_row_inserts(
         &self,
-        mut requests: RowInsertRequests,
+        requests: RowInsertRequests,
         ctx: QueryContextRef,
         statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
+        let prepared = self
+            .prepare_metric_row_inserts(requests, ctx.clone(), statement_executor, physical_table)
+            .await?;
+        self.handle_prepared_metric_inserts(prepared, ctx).await
+    }
+
+    /// Resolves schemas and routes metric rows before dependent exemplar writes start.
+    pub async fn prepare_metric_row_inserts(
+        &self,
+        mut requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        statement_executor: &StatementExecutor,
+        physical_table: String,
+    ) -> Result<PreparedMetricInserts> {
         let skip_wal = ctx.skip_wal();
 
         // remove empty requests
@@ -674,7 +832,20 @@ impl Inserter {
             .convert(requests, skip_wal)
             .await?;
 
-        self.do_request(inserts, &table_infos, &ctx).await
+        Ok(PreparedMetricInserts {
+            requests: inserts,
+            table_infos,
+        })
+    }
+
+    /// Dispatches metric rows using the source table definitions captured during preparation.
+    pub async fn handle_prepared_metric_inserts(
+        &self,
+        prepared: PreparedMetricInserts,
+        ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.do_request(prepared.requests, &prepared.table_infos, &ctx)
+            .await
     }
 
     fn table_batcher(
@@ -781,6 +952,7 @@ pub async fn admit_row_insert_batches(
     for (ctx, requests) in batches.iter() {
         let catalog = ctx.current_catalog();
         let schema = ctx.current_schema();
+
         if ctx.write_rows_to_admit(catalog, &schema, 1) == 0 {
             continue;
         }
@@ -1151,6 +1323,7 @@ impl Inserter {
         is_single_value: bool,
         align_time_index_unit: Option<TimeUnit>,
     ) -> Result<CreateAlterTableResult> {
+        let is_exemplar = matches!(&auto_create_table_type, AutoCreateTableType::Exemplar);
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
             .start_timer();
@@ -1190,16 +1363,19 @@ impl Inserter {
                         .fail();
                     }
                 };
-                // Metric path: an existing destination table keeps its own
-                // time index unit (it may be bound to another physical
-                // table than the one selected by this request).
-                if matches!(auto_create_table_type, AutoCreateTableType::Logical(_))
-                    && let Some(rows) = req.rows.as_mut()
+                // Existing metric and exemplar destinations keep their time index unit.
+                if matches!(
+                    auto_create_table_type,
+                    AutoCreateTableType::Logical(_) | AutoCreateTableType::Exemplar
+                ) && let Some(rows) = req.rows.as_mut()
                     && let Some(target_unit) = table_time_index_unit(&table)
                 {
                     convert_rows_time_unit(rows, target_unit)?;
                 }
                 let table_info = table.table_info();
+                if matches!(auto_create_table_type, AutoCreateTableType::Exemplar) {
+                    validate_exemplar_table(&table_info)?;
+                }
                 if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
                     validate_trace_table_model(&table_info, ctx)?;
                 }
@@ -1228,6 +1404,9 @@ impl Inserter {
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
+                    if matches!(auto_create_table_type, AutoCreateTableType::Exemplar) {
+                        validate_exemplar_table(&table_info)?;
+                    }
                     if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
                         validate_trace_table_model(&table_info, ctx)?;
                     }
@@ -1334,6 +1513,7 @@ impl Inserter {
                 }
             }
             AutoCreateTableType::Physical
+            | AutoCreateTableType::Exemplar
             | AutoCreateTableType::Log
             | AutoCreateTableType::LastNonNull => {
                 // note that auto create table shouldn't be ttl instant table
@@ -1342,6 +1522,39 @@ impl Inserter {
                     let table = self
                         .create_physical_table(create_table, None, ctx, statement_executor)
                         .await?;
+                    // A concurrent CREATE can return our proposed schema with the winner's ID.
+                    let table = if is_exemplar {
+                        let name = table.table_info().name.clone();
+                        self.get_table(catalog, &schema, &name)
+                            .await?
+                            .context(TableNotFoundSnafu { table_name: name })?
+                    } else {
+                        table
+                    };
+                    if matches!(auto_create_table_type, AutoCreateTableType::Exemplar) {
+                        validate_exemplar_table(&table.table_info())?;
+                        if let Some(req) = requests
+                            .inserts
+                            .iter_mut()
+                            .find(|r| r.table_name == table.table_info().name)
+                        {
+                            if let Some(rows) = req.rows.as_mut()
+                                && let Some(unit) = table_time_index_unit(&table)
+                            {
+                                convert_rows_time_unit(rows, unit)?;
+                            }
+                            if let Some(alter) = self.get_alter_table_expr_on_demand(
+                                req, &table, ctx, false, false, true,
+                            )? {
+                                alter_tables.push(alter);
+                                need_refresh_table_infos.insert((
+                                    catalog.to_string(),
+                                    schema.clone(),
+                                    req.table_name.clone(),
+                                ));
+                            }
+                        }
+                    }
                     let table_info = table.table_info();
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
@@ -1515,6 +1728,27 @@ impl Inserter {
             table_infos.insert(table_info.table_id(), table.table_info());
         }
 
+        if is_exemplar {
+            for info in table_infos.values() {
+                validate_exemplar_table(info)?;
+                if let Some(unit) = info
+                    .meta
+                    .schema
+                    .timestamp_column()
+                    .and_then(|column| column.data_type.as_timestamp())
+                    .map(|timestamp| timestamp.unit())
+                {
+                    for request in &mut requests.inserts {
+                        if request.table_name == info.name
+                            && let Some(rows) = request.rows.as_mut()
+                        {
+                            convert_rows_time_unit(rows, unit)?;
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(CreateAlterTableResult {
             instant_table_ids,
             table_infos,
@@ -1617,12 +1851,14 @@ impl Inserter {
         let schema = ctx.current_schema();
         let mut table_options = std::collections::HashMap::with_capacity(4);
         fill_table_options_for_create(&mut table_options, create_type, ctx);
-        apply_per_table_semantic_options(
-            &mut table_options,
-            semantic_index,
-            ctx.current_schema().as_str(),
-            &req.table_name,
-        );
+        if !matches!(create_type, AutoCreateTableType::Exemplar) {
+            apply_per_table_semantic_options(
+                &mut table_options,
+                semantic_index,
+                ctx.current_schema().as_str(),
+                &req.table_name,
+            );
+        }
 
         let engine_name = if let AutoCreateTableType::Logical(_) = create_type {
             // engine should be metric engine when creating logical tables.
@@ -1636,6 +1872,19 @@ impl Inserter {
         let request_schema = req.rows.as_ref().unwrap().schema.as_slice();
         let mut create_table_expr =
             build_create_table_expr(&table_ref, request_schema, engine_name)?;
+
+        if matches!(create_type, AutoCreateTableType::Exemplar) {
+            for column in &mut create_table_expr.column_defs {
+                if [
+                    DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+                    DATA_SCHEMA_TSID_COLUMN_NAME,
+                ]
+                .contains(&column.name.as_str())
+                {
+                    column.is_nullable = false;
+                }
+            }
+        }
 
         // extension set by the Splunk HEC handler for identity path
         if ctx.extension(SPLUNK_PK_METADATA_ORDER_KEY).is_some() {
@@ -1975,6 +2224,145 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
     Ok(())
 }
 
+/// Validates the fixed exemplar contract before writing or scanning a shared table.
+pub fn validate_exemplar_table(table: &TableInfo) -> Result<()> {
+    let meta = &table.meta;
+    let options = &meta.options.extra_options;
+    ensure!(
+        meta.engine == default_engine()
+            && options
+                .get(APPEND_MODE_KEY)
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            && options
+                .get(store_api::metric_engine_consts::PRIMARY_KEY_ENCODING)
+                .is_some_and(|v| v == "sparse"),
+        InvalidInsertRequestSnafu {
+            reason: "metrics_exemplars requires Mito, append_mode=true and primary_key_encoding=sparse"
+        }
+    );
+    let columns = meta.schema.column_schemas();
+    let lookup = |name: &str| {
+        columns
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.name == name)
+            .with_context(|| InvalidInsertRequestSnafu {
+                reason: format!("missing exemplar column {name}"),
+            })
+    };
+    let (_, timestamp) = lookup(greptime_timestamp())?;
+    for (position, name, id, data_type) in [
+        (
+            0,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            ReservedColumnId::table_id(),
+            datatypes::prelude::ConcreteDataType::uint32_datatype(),
+        ),
+        (
+            1,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+            ReservedColumnId::tsid(),
+            datatypes::prelude::ConcreteDataType::uint64_datatype(),
+        ),
+    ] {
+        let (index, column) = lookup(name)?;
+        ensure!(
+            meta.primary_key_indices.get(position) == Some(&index)
+                && meta.column_ids.get(index) == Some(&id)
+                && column.data_type == data_type
+                && !column.is_nullable()
+                && column.default_constraint().is_none(),
+            InvalidInsertRequestSnafu {
+                reason: format!("invalid exemplar source identity column {name}"),
+            }
+        );
+    }
+    ensure!(
+        timestamp.is_time_index() && timestamp.data_type.is_timestamp(),
+        InvalidInsertRequestSnafu {
+            reason: "invalid exemplar time index"
+        }
+    );
+    let (metric_index, metric) = lookup(EXEMPLAR_METRIC_COLUMN)?;
+    ensure!(
+        metric.data_type.is_string() && meta.primary_key_indices.contains(&metric_index),
+        InvalidInsertRequestSnafu {
+            reason: "exemplar metric name must be a string tag"
+        }
+    );
+    let (value_index, value) = lookup(greptime_value())?;
+    ensure!(
+        value.data_type == datatypes::prelude::ConcreteDataType::float64_datatype()
+            && !meta.primary_key_indices.contains(&value_index),
+        InvalidInsertRequestSnafu {
+            reason: "exemplar value must be a DOUBLE field"
+        }
+    );
+    let (labels_index, labels) = lookup(EXEMPLAR_LABELS_COLUMN)?;
+    ensure!(
+        labels.data_type.is_json2() && !meta.primary_key_indices.contains(&labels_index),
+        InvalidInsertRequestSnafu {
+            reason: "exemplar_labels must be a JSON2 field"
+        }
+    );
+    if let Some(extension) = labels
+        .extension_type::<datatypes::extension::json::Json2ExtensionType>()
+        .map_err(|error| {
+            InvalidInsertRequestSnafu {
+                reason: error.to_string(),
+            }
+            .build()
+        })?
+    {
+        ensure!(
+            extension
+                .metadata()
+                .json_settings()
+                .type_hints()
+                .iter()
+                .all(|hint| hint.path.len() == 1 && hint.data_type.is_string()),
+            InvalidInsertRequestSnafu {
+                reason: "exemplar JSON2 hints must preserve string labels"
+            }
+        );
+    }
+    for (index, column) in columns.iter().enumerate() {
+        if [
+            greptime_timestamp(),
+            greptime_value(),
+            EXEMPLAR_METRIC_COLUMN,
+            EXEMPLAR_LABELS_COLUMN,
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
+            DATA_SCHEMA_TSID_COLUMN_NAME,
+        ]
+        .contains(&column.name.as_str())
+        {
+            continue;
+        }
+        ensure!(
+            meta.primary_key_indices.contains(&index)
+                && column.data_type.is_string()
+                && column.is_nullable(),
+            InvalidInsertRequestSnafu {
+                reason: "inherited exemplar labels must be nullable string tags"
+            }
+        );
+        // An absent inherited label must remain absent from the source series identity.
+        ensure!(
+            matches!(
+                column.default_constraint(),
+                None | Some(ColumnDefaultConstraint::Value(
+                    datatypes::value::Value::Null
+                ))
+            ),
+            InvalidInsertRequestSnafu {
+                reason: "inherited exemplar labels must not have non-NULL defaults"
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Rejects writes from a different built-in trace model before schema mutation.
 /// Unstamped, explicitly created tables remain subject to normal schema validation.
 pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef) -> Result<()> {
@@ -2036,6 +2424,21 @@ pub fn fill_table_options_for_create(
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
                 physical_table.clone(),
+            );
+        }
+        AutoCreateTableType::Exemplar => {
+            table_options.retain(|key, _| {
+                !is_semantic_option_key(key)
+                    && key != SEMANTIC_PER_TABLE_INDEX_KEY
+                    && key != LOGICAL_TABLE_METADATA_KEY
+                    && key != PHYSICAL_TABLE_METADATA_KEY
+                    && key != MERGE_MODE_KEY
+                    && key != "otlp_metric_compat"
+            });
+            table_options.insert(APPEND_MODE_KEY.to_string(), "true".to_string());
+            table_options.insert(
+                store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.to_string(),
+                "sparse".to_string(),
             );
         }
         AutoCreateTableType::Physical => {
@@ -3252,6 +3655,39 @@ mod tests {
                 .map(String::as_str)
         );
         assert!(!table_options.contains_key("compaction.unknown"));
+    }
+
+    #[test]
+    fn test_exemplar_create_options_isolate_metric_context() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        for (key, value) in [
+            (APPEND_MODE_KEY, "false"),
+            (MERGE_MODE_KEY, "last_non_null"),
+            (PHYSICAL_TABLE_METADATA_KEY, "true"),
+            (LOGICAL_TABLE_METADATA_KEY, "physical_metrics"),
+            ("otlp_metric_compat", "prometheus"),
+            (table::requests::SEMANTIC_SIGNAL_TYPE, "metric"),
+            (SEMANTIC_PER_TABLE_INDEX_KEY, "{}"),
+            ("ttl", "7d"),
+            ("compaction.twcs.time_window", "1h"),
+        ] {
+            ctx.set_extension(key, value);
+        }
+        let mut options = Default::default();
+        fill_table_options_for_create(&mut options, &AutoCreateTableType::Exemplar, &Arc::new(ctx));
+        assert_eq!(
+            options,
+            std::collections::HashMap::from([
+                (APPEND_MODE_KEY.into(), "true".into()),
+                (
+                    store_api::metric_engine_consts::PRIMARY_KEY_ENCODING.into(),
+                    "sparse".into()
+                ),
+                ("ttl".into(), "7d".into()),
+                (COMPACTION_TYPE.into(), "twcs".into()),
+                ("compaction.twcs.time_window".into(), "1h".into()),
+            ])
+        );
     }
 
     #[test]

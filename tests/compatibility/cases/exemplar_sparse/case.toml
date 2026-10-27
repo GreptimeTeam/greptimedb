@@ -1,5 +1,5 @@
 name = "exemplar_sparse"
-reason = "Preserve ordinary sparse string keys, append duplicates, nanosecond timestamps and JSON2 across restart."
+reason = "Preserve sparse string and reserved source identity keys, append duplicates, nanosecond timestamps and JSON2 across restart."
 introduced_by = "persistent_metric_exemplars"
 topologies = ["standalone", "distributed"]
 from_range = [">=v1.4.0-alpha.0"]
