@@ -300,6 +300,9 @@ pub(crate) fn make_stream(
                     Err(error) => { yield Err(boxed(ComputeArrowSnafu.into_error(error))); return; }
                 }
             };
+            // The concatenated arrays own their buffers, so the source records can go now instead of
+            // staying alive across this round's filtering and per-chunk yields.
+            drop(group);
             for predicate in &predicates {
                 record = match filter::batch_filter(&record, predicate) {
                     Ok(record) => record,
