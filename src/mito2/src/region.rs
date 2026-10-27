@@ -2317,6 +2317,7 @@ mod tests {
                 manifest_cache: None,
             },
             FormatType::PrimaryKey,
+            false,
             &Default::default(),
         )
         .await
@@ -2855,6 +2856,7 @@ mod tests {
                     manifest_cache: None,
                 },
                 FormatType::PrimaryKey,
+                false,
                 &Default::default(),
             )
             .await
@@ -2923,6 +2925,7 @@ mod tests {
                 manifest_cache: None,
             },
             FormatType::PrimaryKey,
+            false,
             &Default::default(),
         )
         .await

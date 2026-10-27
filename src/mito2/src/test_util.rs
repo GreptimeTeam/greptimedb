@@ -841,6 +841,7 @@ impl TestEnv {
                 0,
                 manifest_opts,
                 FormatType::PrimaryKey,
+                false,
                 &Default::default(),
             )
             .await
