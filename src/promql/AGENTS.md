@@ -59,15 +59,15 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   `PromExtensionPlanner`, and `check_extension_plan`
   (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` and
   `RawSeriesSource` are the exception: they are not serialized to a datanode. A
-  `FusedSeries` is placed in the region only over direct scans of one table, with
-  a bound metric name and a tree that reads one series at a time. A tree over two
-  tables stays on the frontend over one merge scan per table, each carrying a
-  `RawSeriesSource` that answers explicit-label raw frames; the frame schema is
-  compared exactly at the merge scan, so its declaration and the region's output
-  change together. Native admission requires partition columns to be tags,
-  but region/partition-local execution does not merge a logical series across
-  regions or scan partitions; do not treat that placement guard as a global
-  series-merge or final-label guarantee.
+  `FusedSeries` is placed in the region only over direct scans of one table,
+  with a bound metric name and a tree that reads one series at a time. A tree
+  over more than one table stays on the frontend over one merge scan per
+  selector, each carrying a `RawSeriesSource` that answers explicit-label raw
+  frames; the frame schema is compared exactly at the merge scan, so its
+  declaration and the region's output change together. Native admission requires
+  partition columns to be tags, but region/partition-local execution does not
+  merge a logical series across regions or scan partitions; do not treat that
+  placement guard as a global series-merge or final-label guarantee.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.

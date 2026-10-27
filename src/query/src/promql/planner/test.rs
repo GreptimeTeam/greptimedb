@@ -2783,6 +2783,89 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
     }
 }
 
+/// A tree of more than two selectors binds one input per occurrence: under the node directly when
+/// they all read one table, through a raw source each when any reads another table.
+#[tokio::test]
+async fn native_fused_three_selector_trees_bind_every_occurrence() {
+    for (query, tables) in [
+        (
+            "some_metric + some_metric + some_metric",
+            ["some_metric", "some_metric", "some_metric"],
+        ),
+        (
+            "(some_metric - some_metric) / on(tag_0) some_metric",
+            ["some_metric", "some_metric", "some_metric"],
+        ),
+        (
+            "some_metric / other_metric * some_metric",
+            ["some_metric", "other_metric", "some_metric"],
+        ),
+        (
+            "100 * (some_metric - some_metric) / on(tag_0) other_metric",
+            ["some_metric", "some_metric", "other_metric"],
+        ),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        let cross_table = tables.iter().any(|table| *table != tables[0]);
+        let read_tables = fused
+            .inputs()
+            .iter()
+            .map(|input| match input {
+                LogicalPlan::TableScan(scan) if !cross_table => scan.table_name.table().to_string(),
+                LogicalPlan::Extension(Extension { node }) if cross_table => {
+                    let source = node
+                        .as_any()
+                        .downcast_ref::<RawSeriesSource>()
+                        .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
+                    let [LogicalPlan::TableScan(scan)] =
+                        UserDefinedLogicalNodeCore::inputs(source)[..]
+                    else {
+                        panic!("{query}: the raw source reads its table scan directly");
+                    };
+                    assert_eq!(source.metric_name(), scan.table_name.table(), "{query}");
+                    scan.table_name.table().to_string()
+                }
+                other => panic!("{query}: unexpected input {other}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(read_tables, tables, "{query}");
+        assert_eq!(
+            cross_table,
+            fused.binding().metric_name.is_none(),
+            "{query}"
+        );
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{query}"
+        );
+    }
+}
+
+/// More than two selectors over tables split into regions keep the existing plan, on one table as
+/// across two.
+#[tokio::test]
+async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
+    for query in [
+        "some_metric + some_metric + some_metric",
+        "some_metric / other_metric * some_metric",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![0]).await,
+        )
+        .await;
+        assert!(find_fused_series(&plan).is_none(), "{query}: {plan}");
+    }
+}
+
 /// The merge half of a split aggregate, when the plan is one.
 fn find_aggregate_finalize(plan: &LogicalPlan) -> Option<&AggregateFinalize> {
     if let LogicalPlan::Extension(Extension { node }) = plan

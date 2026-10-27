@@ -56,7 +56,7 @@ use crate::metrics::PUSH_DOWN_FALLBACK_ERRORS_TOTAL;
 use crate::optimizer::expr_depth;
 use crate::options::ScheduledTimeExtension;
 use crate::plan::ExtractExpr;
-use crate::promql::planner::native::{independent_scan_pair, same_table_scan};
+use crate::promql::planner::native::{independent_scan_pair, same_table_scans};
 use crate::query_engine::DefaultSerializer;
 
 #[cfg(test)]
@@ -516,14 +516,7 @@ fn is_admitted_pair_plan(plan: &LogicalPlan) -> bool {
         return false;
     };
     let children = fused.children();
-    children.len() == 2
-        && children
-            .iter()
-            .all(|child| matches!(child, LogicalPlan::TableScan(_)))
-        && {
-            same_table_scan(&children[0], &children[1])
-                && independent_scan_pair(fused.tree().root())
-        }
+    children.len() > 1 && same_table_scans(children) && independent_scan_pair(fused.tree().root())
 }
 
 fn is_fused_series_plan(plan: &LogicalPlan) -> bool {

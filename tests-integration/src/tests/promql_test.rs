@@ -3388,6 +3388,123 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
     }
 }
 
+/// A tree of three selectors binds one input per occurrence: above one merge scan per selector
+/// when they read three tables, in the region over three scans when they read one, and an outer
+/// `on(host)` keeps only `host` of the labels the inner match reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_three_selector_trees_bind_every_occurrence() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_three_selectors",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // At second `t` of host `h`: `a` is `10 * h + t`, `b` is `2 * t` and `c` is `100 + h`, each in
+    // its own table and as kinds `x`, `y` and `z` of one table.
+    fn a(host: i64, second: i64) -> i64 {
+        10 * host + second
+    }
+    fn b(_: i64, second: i64) -> i64 {
+        2 * second
+    }
+    fn c(host: i64, _: i64) -> i64 {
+        100 + host
+    }
+    let values = [
+        ("native_3_a", "x", a as fn(i64, i64) -> i64),
+        ("native_3_b", "y", b),
+        ("native_3_c", "z", c),
+    ];
+    let mut shared = Vec::new();
+    for (table, kind, value) in values {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+                 val DOUBLE, PRIMARY KEY(host, kind))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        let mut rows = Vec::new();
+        for host in 0..3 {
+            for second in 0..6 {
+                let sample = value(host, second);
+                rows.push(format!("('h{host}', 'x', {}, {sample})", second * 1_000));
+                shared.push(format!(
+                    "('h{host}', '{kind}', {}, {sample})",
+                    second * 1_000
+                ));
+            }
+        }
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", rows.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        "CREATE TABLE native_3_s (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host, kind))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &format!("INSERT INTO native_3_s VALUES {}", shared.join(", ")),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let at_five = |value: fn(f64) -> f64| {
+        (0..3)
+            .map(|host| (5_000, format!("h{host}"), value(host as f64)))
+            .collect::<Vec<_>>()
+    };
+    for (query, raw_sources, columns, expected) in [
+        (
+            "native_3_a + native_3_b + native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| 10.0 * h + 5.0 + 10.0 + (100.0 + h)),
+        ),
+        (
+            "(native_3_a - native_3_b) / on(host) native_3_c",
+            3,
+            vec!["host", "ts", "val"],
+            at_five(|h| (10.0 * h + 5.0 - 10.0) / (100.0 + h)),
+        ),
+        (
+            "native_3_s{kind=\"x\"} - on(host) native_3_s{kind=\"y\"} + on(host) \
+             native_3_s{kind=\"z\"}",
+            0,
+            vec!["host", "ts", "val"],
+            at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 3, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), raw_sources, "{query}");
+        let mut plan_columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        plan_columns.sort();
+        assert_eq!(plan_columns, columns, "{query}");
+        assert_eq!(native, expected, "{query}");
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "legacy: {query}");
+    }
+}
+
 /// A two-selector query over a table split into regions keeps the existing plan: the two-scan
 /// native node has no placement there, and the query used to fail in the dist analyzer.
 #[tokio::test(flavor = "multi_thread")]
