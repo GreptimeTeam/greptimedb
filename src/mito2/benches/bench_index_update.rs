@@ -35,6 +35,7 @@ use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use index::target::IndexTarget;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
+use mito2::sst::index::IndexBuildType;
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{BloomFilterIndexer, InvertedIndexer};
@@ -254,7 +255,7 @@ fn bench_index_update(c: &mut Criterion) {
                                 &metadata,
                                 intermediate.clone(),
                                 None,
-                                true,
+                                IndexBuildType::Flush,
                             )
                             .unwrap()
                         } else {

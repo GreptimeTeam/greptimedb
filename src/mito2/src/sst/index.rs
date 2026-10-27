@@ -625,10 +625,7 @@ impl IndexerBuilderImpl {
             &self.metadata,
             self.intermediate_manager.clone(),
             mem_limit,
-            matches!(
-                self.build_type,
-                IndexBuildType::Flush | IndexBuildType::Compact
-            ),
+            self.build_type.clone(),
         );
 
         let err = match indexer {

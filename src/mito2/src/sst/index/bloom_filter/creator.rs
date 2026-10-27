@@ -40,7 +40,6 @@ use crate::error::{
     OperateAbortedIndexSnafu, PuffinAddBlobSnafu, PushBloomFilterValueSnafu, Result,
 };
 use crate::read::Batch;
-use crate::sst::index::TYPE_BLOOM_FILTER_INDEX;
 use crate::sst::index::bloom_filter::INDEX_BLOB_TYPE;
 use crate::sst::index::column::{column_index_rows, extract_json_type_hint_values};
 use crate::sst::index::intermediate::{
@@ -49,6 +48,7 @@ use crate::sst::index::intermediate::{
 use crate::sst::index::primary_key::PrimaryKeyRuns;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
+use crate::sst::index::{IndexBuildType, TYPE_BLOOM_FILTER_INDEX};
 
 /// The buffer size for the pipe used to send index data to the puffin blob.
 const PIPE_BUFFER_SIZE_FOR_SENDING_BLOB: usize = 8192;
@@ -89,7 +89,7 @@ impl BloomFilterIndexer {
         metadata: &RegionMetadataRef,
         intermediate_manager: IntermediateManager,
         memory_usage_threshold: Option<usize>,
-        include_json_paths: bool,
+        build_type: IndexBuildType,
     ) -> Result<Option<Self>> {
         let mut creators = HashMap::new();
 
@@ -112,7 +112,11 @@ impl BloomFilterIndexer {
             if let Some(options) = options {
                 targets.push((IndexTarget::ColumnId(column.column_id), options));
             }
-            if include_json_paths && column.column_schema.data_type.is_json2() {
+            // Only flush and compaction builds collect JSON targets; manual and schema-change
+            // rebuilds skip them because existing SSTs may not materialize the current hints.
+            if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
+                && column.column_schema.data_type.is_json2()
+            {
                 let extension = column
                     .column_schema
                     .extension_type::<Json2ExtensionType>()
@@ -675,7 +679,7 @@ pub(crate) mod tests {
             &region_metadata,
             intm_mgr,
             memory_usage_threshold,
-            true,
+            IndexBuildType::Flush,
         )
         .unwrap()
         .unwrap();

@@ -499,6 +499,7 @@ mod tests {
 
     use super::*;
     use crate::sst::file::RegionFileId;
+    use crate::sst::index::IndexBuildType;
     use crate::sst::index::bloom_filter::creator::BloomFilterIndexer;
     use crate::sst::index::bloom_filter::creator::tests::{
         mock_object_store, mock_region_metadata, new_batch, new_intm_mgr,
@@ -555,7 +556,7 @@ mod tests {
                 &metadata,
                 new_intm_mgr(dir.path().to_string_lossy()).await,
                 None,
-                true,
+                IndexBuildType::Flush,
             )
             .unwrap()
             .unwrap();
@@ -874,7 +875,7 @@ mod tests {
             &region_metadata,
             intm_mgr,
             memory_usage_threshold,
-            true,
+            IndexBuildType::Flush,
         )
         .unwrap()
         .unwrap();
