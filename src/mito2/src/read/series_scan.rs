@@ -1071,10 +1071,15 @@ impl SenderList {
 
     async fn send_error(&self, error: Error) {
         let error = Arc::new(error);
-        for sender in self.senders.iter().flatten() {
+        // Sends to all partitions concurrently. Awaiting a full partition the consumer is not
+        // polling would keep the error from the partition it is waiting on.
+        let sends = self.senders.iter().flatten().map(|sender| {
             let result = Err(error.clone()).context(ScanSeriesSnafu);
-            let _ = sender.send(result).await;
-        }
+            async move {
+                let _ = sender.send(result).await;
+            }
+        });
+        futures::future::join_all(sends).await;
     }
 
     fn fetch_add_sender_idx(&mut self) -> usize {
@@ -1305,6 +1310,27 @@ mod tests {
             .expect("the distributor stalled on partitions the consumer was not reading");
         producer.await.unwrap();
         assert_eq!(NUM_BATCHES, received);
+    }
+
+    #[tokio::test]
+    async fn send_error_reaches_a_partition_behind_a_full_unpolled_one() {
+        let (senders, mut receivers) = new_legacy_channel_list(2);
+        senders.senders[0]
+            .as_ref()
+            .unwrap()
+            .try_send(Ok(SeriesBatch::Flat(FlatSeriesBatch::default())))
+            .unwrap();
+        // The consumer never polls partition 0 while it waits on partition 1.
+        let _unpolled = receivers[0].take().unwrap();
+        let mut polled = receivers[1].take().unwrap();
+        tokio::spawn(async move {
+            senders.send_error(InvalidSenderSnafu.build()).await;
+        });
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), polled.recv())
+            .await
+            .expect("the error never reached partition 1");
+        assert!(matches!(received, Some(Err(_))));
     }
 
     fn new_test_record_batch(
