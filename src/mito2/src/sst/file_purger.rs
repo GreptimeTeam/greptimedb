@@ -23,28 +23,23 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::error::Result;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::sst::file::{FileMeta, delete_files, delete_index};
+use crate::sst::file::{FileMeta, delete_files};
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::range_index::RangeIndexDeleter;
 
 /// A worker to delete files in background.
 pub trait FilePurger: Send + Sync + fmt::Debug {
-    /// Releases one metadata version's reference, deleting its index if outdated.
-    /// This never deletes the SST itself.
-    fn remove_file(&self, file_meta: FileMeta, index_outdated: bool);
-
-    /// Purges a retired SST after all metadata versions release their readers.
-    /// This does not release a reference; each version already did so on drop.
+    /// Purges a retired SST and its indexes after all metadata views release their readers.
+    /// The lifetime's file reference has already been released.
     fn purge_file(&self, file_meta: FileMeta);
 
     /// Retire cached scan results immediately, without waiting for physical deletion.
     fn invalidate_file(&self, _: &FileMeta) {}
 
-    /// Notify the purger of a new file created.
-    /// This is useful for object store based storage, where we need to track the file references
-    /// The default implementation is a no-op.
-    fn new_file(&self, _: &FileMeta) {
-        // noop
+    /// Returns the object-store reference manager used by SST lifetimes.
+    /// Local and no-op purgers do not track GC references.
+    fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+        None
     }
 }
 
@@ -55,8 +50,6 @@ pub type FilePurgerRef = Arc<dyn FilePurger>;
 pub struct NoopFilePurger;
 
 impl FilePurger for NoopFilePurger {
-    fn remove_file(&self, _file_meta: FileMeta, _index_outdated: bool) {}
-
     fn purge_file(&self, _file_meta: FileMeta) {}
 }
 
@@ -188,31 +181,12 @@ impl LocalFilePurger {
             error!(e; "Failed to schedule the file purge request");
         }
     }
-
-    fn delete_index(&self, file_meta: FileMeta) {
-        let sst_layer = self.sst_layer.clone();
-        let cache_manager = self.cache_manager.clone();
-        if let Err(e) = self.scheduler.schedule(Box::pin(async move {
-            let index_id = file_meta.index_id();
-            if let Err(e) = delete_index(index_id, &sst_layer, &cache_manager).await {
-                error!(e; "Failed to delete index for file {:?} from storage", file_meta);
-            }
-        })) {
-            error!(e; "Failed to schedule the index purge request");
-        }
-    }
 }
 
 impl FilePurger for LocalFilePurger {
     fn invalidate_file(&self, file_meta: &FileMeta) {
         if let Some(cache) = &self.cache_manager {
             cache.invalidate_range_results(file_meta.file_id);
-        }
-    }
-
-    fn remove_file(&self, file_meta: FileMeta, index_outdated: bool) {
-        if index_outdated {
-            self.delete_index(file_meta);
         }
     }
 
@@ -267,11 +241,6 @@ impl FilePurger for ObjectStoreFilePurger {
         }
     }
 
-    fn remove_file(&self, file_meta: FileMeta, _index_outdated: bool) {
-        // GC handles physical SST and index deletion after references are released.
-        self.file_ref_manager.remove_file(&file_meta);
-    }
-
     fn purge_file(&self, file_meta: FileMeta) {
         schedule_range_index_deletion(
             &self.scheduler,
@@ -280,16 +249,18 @@ impl FilePurger for ObjectStoreFilePurger {
         );
     }
 
-    fn new_file(&self, file_meta: &FileMeta) {
-        self.file_ref_manager.add_file(file_meta);
+    fn file_ref_manager(&self) -> Option<FileReferenceManagerRef> {
+        Some(self.file_ref_manager.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU64;
+    use std::sync::Barrier;
+    use std::thread;
 
-    use common_test_util::temp_dir::create_temp_dir;
+    use common_test_util::temp_dir::{TempDir, create_temp_dir};
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use smallvec::SmallVec;
@@ -307,6 +278,133 @@ mod tests {
     use crate::sst::index::puffin_manager::PuffinManagerFactory;
     use crate::sst::location;
 
+    struct PurgeTestEnv {
+        layer: AccessLayerRef,
+        scheduler: Arc<LocalScheduler>,
+        file_id: RegionFileId,
+        _dir: TempDir,
+    }
+
+    impl PurgeTestEnv {
+        async fn new() -> Self {
+            common_telemetry::init_default_ut_logging();
+            let dir = create_temp_dir("file-purge");
+            let index_aux_path = dir.path().join("index_aux");
+            let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
+                .await
+                .unwrap();
+            let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
+                .await
+                .unwrap();
+            let store =
+                ObjectStore::new(Fs::default().root(&dir.path().display().to_string())).unwrap();
+            let env = Self {
+                layer: Arc::new(AccessLayer::new(
+                    "table1",
+                    PathType::Bare,
+                    store,
+                    puffin_mgr,
+                    intm_mgr,
+                )),
+                scheduler: Arc::new(LocalScheduler::new(1)),
+                file_id: RegionFileId::new(RegionId::new(0, 0), FileId::random()),
+                _dir: dir,
+            };
+            env.layer
+                .object_store()
+                .write(&env.sst_path(), vec![0; 4096])
+                .await
+                .unwrap();
+            env
+        }
+
+        fn sst_path(&self) -> String {
+            location::sst_file_path(self.layer.table_dir(), self.file_id, self.layer.path_type())
+        }
+
+        fn index_path(&self, version: u64) -> String {
+            location::index_file_path(
+                self.layer.table_dir(),
+                RegionIndexId::new(self.file_id, version),
+                self.layer.path_type(),
+            )
+        }
+
+        async fn wait_for_purges(&self) {
+            // The single worker finishes all earlier purge jobs before this barrier.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.scheduler
+                .schedule(Box::pin(async move {
+                    tx.send(()).unwrap();
+                }))
+                .unwrap();
+            rx.await.unwrap();
+        }
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn test_concurrent_index_view_release_keeps_live_files_and_purges_retired_files(
+        #[values(false, true)] retired: bool,
+    ) {
+        let env = PurgeTestEnv::new().await;
+        let store = env.layer.object_store();
+        let purger = Arc::new(LocalFilePurger::new(
+            env.scheduler.clone(),
+            env.layer.clone(),
+            None,
+        ));
+        let meta = FileMeta {
+            region_id: env.file_id.region_id(),
+            file_id: env.file_id.file_id(),
+            ..Default::default()
+        };
+        let old_reader = FileHandle::new(meta.clone(), purger);
+        let mut readers = vec![old_reader];
+        for index_version in 1..=2 {
+            store
+                .write(&env.index_path(index_version), "index")
+                .await
+                .unwrap();
+            readers.push(readers.last().unwrap().with_updated_index(FileMeta {
+                index_version,
+                available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+                ..meta.clone()
+            }));
+        }
+        if retired {
+            readers.last().unwrap().mark_deleted();
+        }
+        // Dropping one view must not remove files still needed by the other views.
+        drop(readers.remove(1));
+        env.wait_for_purges().await;
+        assert!(store.exists(&env.sst_path()).await.unwrap());
+        for version in 1..=2 {
+            assert!(store.exists(&env.index_path(version)).await.unwrap());
+        }
+
+        // Regression coverage for final releases on different threads. The start barrier
+        // encourages overlap; it does not exhaustively control destructor interleavings.
+        let barrier = Barrier::new(readers.len());
+        thread::scope(|scope| {
+            for reader in readers {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    drop(reader);
+                });
+            }
+        });
+        env.scheduler.stop(true).await.unwrap();
+        assert_eq!(store.exists(&env.sst_path()).await.unwrap(), !retired);
+        for version in 1..=2 {
+            assert_eq!(
+                store.exists(&env.index_path(version)).await.unwrap(),
+                !retired
+            );
+        }
+    }
+
     #[rstest::rstest]
     #[case(false)]
     #[case(true)]
@@ -316,35 +414,11 @@ mod tests {
         #[values(false, true)] is_delete: bool,
         #[values(false, true)] update_index: bool,
     ) {
-        common_telemetry::init_default_ut_logging();
-
-        let dir = create_temp_dir("file-purge");
-        let dir_path = dir.path().display().to_string();
-        let builder = Fs::default().root(&dir_path);
-        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
-        let sst_dir = "table1";
-
-        let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-
-        let object_store = ObjectStore::new(builder).unwrap();
-
-        let layer = Arc::new(AccessLayer::new(
-            sst_dir,
-            PathType::Bare,
-            object_store.clone(),
-            puffin_mgr,
-            intm_mgr,
-        ));
-        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
-        object_store.write(&path, vec![0; 4096]).await.unwrap();
-
-        let scheduler = Arc::new(LocalScheduler::new(1));
+        let env = PurgeTestEnv::new().await;
+        let object_store = env.layer.object_store();
+        let path = env.sst_path();
+        let sst_file_id = env.file_id;
+        let scheduler = &env.scheduler;
 
         let index_store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
         let owner = RegionId::new(9, 1);
@@ -367,7 +441,7 @@ mod tests {
             gc_enabled,
             PathType::Bare,
             scheduler.clone(),
-            layer,
+            env.layer.clone(),
             Some(cache.clone()),
             Arc::new(crate::sst::file_ref::FileReferenceManager::new(None)),
             Some(RangeIndexDeleter::new(index_store.clone(), owner)),
@@ -391,7 +465,7 @@ mod tests {
                     let mut meta = reader.meta_ref().clone();
                     meta.index_version = index_version;
                     meta.available_indexes.push(IndexType::InvertedIndex);
-                    let path = location::index_file_path(sst_dir, meta.index_id(), PathType::Bare);
+                    let path = env.index_path(index_version);
                     object_store.write(&path, "index").await.unwrap();
                     version.add_files(reader.file_purger(), [meta].into_iter());
                 }
@@ -402,23 +476,12 @@ mod tests {
             // Invalidate before any old index-version reader releases the SST.
             assert_eq!(cache.get_range_result(&cache_key).is_none(), is_delete);
             drop(version);
-            // A single-worker queue barrier makes premature purging deterministic.
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            scheduler
-                .schedule(Box::pin(async move {
-                    tx.send(()).unwrap();
-                }))
-                .unwrap();
-            rx.await.unwrap();
+            env.wait_for_purges().await;
             assert!(object_store.exists(&path).await.unwrap());
             assert!(index_store.exists(&index_path).await.unwrap());
             if update_index {
                 for index_version in 1..=2 {
-                    let path = location::index_file_path(
-                        sst_dir,
-                        RegionIndexId::new(sst_file_id, index_version),
-                        PathType::Bare,
-                    );
+                    let path = env.index_path(index_version);
                     assert!(object_store.exists(&path).await.unwrap());
                 }
             }
@@ -434,11 +497,7 @@ mod tests {
         assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
         if update_index {
             for index_version in 1..=2 {
-                let path = location::index_file_path(
-                    sst_dir,
-                    RegionIndexId::new(sst_file_id, index_version),
-                    PathType::Bare,
-                );
+                let path = env.index_path(index_version);
                 assert_eq!(
                     object_store.exists(&path).await.unwrap(),
                     gc_enabled || !is_delete
@@ -449,44 +508,22 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_purge_with_index() {
-        common_telemetry::init_default_ut_logging();
-
-        let dir = create_temp_dir("file-purge");
-        let dir_path = dir.path().display().to_string();
-        let builder = Fs::default().root(&dir_path);
-        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
-        let index_file_id = RegionIndexId::new(sst_file_id, 0);
-        let sst_dir = "table1";
-
-        let index_aux_path = dir.path().join("index_aux");
-        let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
-            .await
-            .unwrap();
-        let intm_mgr = IntermediateManager::init_fs(index_aux_path.to_str().unwrap())
-            .await
-            .unwrap();
-
-        let object_store = ObjectStore::new(builder).unwrap();
-
-        let layer = Arc::new(AccessLayer::new(
-            sst_dir,
-            PathType::Bare,
-            object_store.clone(),
-            puffin_mgr,
-            intm_mgr,
-        ));
-        let path = location::sst_file_path(sst_dir, sst_file_id, layer.path_type());
-        object_store.write(&path, vec![0; 4096]).await.unwrap();
-
-        let index_path = location::index_file_path(sst_dir, index_file_id, layer.path_type());
+        let env = PurgeTestEnv::new().await;
+        let object_store = env.layer.object_store();
+        let sst_file_id = env.file_id;
+        let path = env.sst_path();
+        let index_path = env.index_path(0);
         object_store
             .write(&index_path, vec![0; 4096])
             .await
             .unwrap();
 
-        let scheduler = Arc::new(LocalScheduler::new(3));
-
-        let file_purger = Arc::new(LocalFilePurger::new(scheduler.clone(), layer, None));
+        let scheduler = &env.scheduler;
+        let file_purger = Arc::new(LocalFilePurger::new(
+            scheduler.clone(),
+            env.layer.clone(),
+            None,
+        ));
 
         {
             let handle = FileHandle::new(

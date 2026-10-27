@@ -39,6 +39,7 @@ use crate::cache::CacheManagerRef;
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::region::options::IndexOptions;
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
@@ -583,6 +584,9 @@ impl FileHandle {
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
         let lifetime = self.inner.lifetime.clone();
+        if let Some(manager) = &lifetime.file_ref_manager {
+            manager.update_index_version(meta.file_id(), meta.index_version());
+        }
         *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
@@ -654,16 +658,6 @@ impl FileHandle {
             .compacting
             .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
-    }
-
-    pub fn index_outdated(&self) -> bool {
-        self.inner.index_outdated.load(Ordering::Relaxed)
-    }
-
-    pub fn set_index_outdated(&self, index_outdated: bool) {
-        self.inner
-            .index_outdated
-            .store(index_outdated, Ordering::Relaxed);
     }
 
     /// Returns a reference to the [FileMeta].
@@ -798,18 +792,8 @@ impl PrimaryKeyRange {
 struct FileHandleInner {
     meta: FileMeta,
     compacting: AtomicBool,
-    index_outdated: AtomicBool,
     primary_key_range: RwLock<PrimaryKeyRange>,
     lifetime: Arc<SstLifetime>,
-}
-
-impl Drop for FileHandleInner {
-    fn drop(&mut self) {
-        self.lifetime.file_purger.remove_file(
-            self.meta.clone(),
-            self.index_outdated.load(Ordering::Acquire),
-        );
-    }
 }
 
 impl FileHandleInner {
@@ -818,10 +802,15 @@ impl FileHandleInner {
         file_purger: FilePurgerRef,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
+        let file_ref_manager = file_purger.file_ref_manager();
+        if let Some(manager) = &file_ref_manager {
+            manager.register_file(&meta);
+        }
         let lifetime = Arc::new(SstLifetime {
             meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
             file_purger,
+            file_ref_manager,
         });
         Self::with_lifetime(meta, lifetime, primary_key_range)
     }
@@ -831,11 +820,9 @@ impl FileHandleInner {
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
-        lifetime.file_purger.new_file(&meta);
         Self {
             meta,
             compacting: AtomicBool::new(false),
-            index_outdated: AtomicBool::new(false),
             primary_key_range: RwLock::new(
                 primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
             ),
@@ -851,13 +838,18 @@ struct SstLifetime {
     meta: Mutex<FileMeta>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
+    /// Registers one reference per lifetime, also released on normal close.
+    file_ref_manager: Option<FileReferenceManagerRef>,
 }
 
 impl Drop for SstLifetime {
     fn drop(&mut self) {
+        let meta = self.meta.get_mut().unwrap();
+        if let Some(manager) = &self.file_ref_manager {
+            manager.remove_file(meta.file_id());
+        }
         if self.deleted.load(Ordering::Acquire) {
-            self.file_purger
-                .purge_file(self.meta.get_mut().unwrap().clone());
+            self.file_purger.purge_file(meta.clone());
         }
     }
 }

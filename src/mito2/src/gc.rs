@@ -920,17 +920,8 @@ impl LocalGcWorker {
         unknown_file_may_linger_until: chrono::DateTime<chrono::Utc>,
     ) -> Vec<RemovedFile> {
         let mut ready_for_delete = vec![];
-        // all group by file id for easier checking
-        let in_tmp_ref: HashMap<FileId, HashSet<IndexVersion>> =
-            in_tmp_ref
-                .iter()
-                .fold(HashMap::new(), |mut acc, (file, version)| {
-                    let indices = acc.entry(*file).or_default();
-                    if let Some(version) = version {
-                        indices.insert(*version);
-                    }
-                    acc
-                });
+        // Any live reference protects both the SST and every generation of its indexes.
+        let referenced_ssts: HashSet<_> = in_tmp_ref.iter().map(|(file_id, _)| *file_id).collect();
 
         let may_linger_files: HashMap<FileId, HashSet<&RemovedFile>> = may_linger_files
             .iter()
@@ -967,7 +958,7 @@ impl LocalGcWorker {
             let should_delete = match file_type {
                 FileType::Parquet => {
                     let is_in_manifest = in_manifest.contains_key(&file_id);
-                    let is_in_tmp_ref = in_tmp_ref.contains_key(&file_id);
+                    let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files.contains_key(&file_id);
                     let is_eligible_for_delete = eligible_for_delete.contains_key(&file_id);
 
@@ -982,15 +973,8 @@ impl LocalGcWorker {
                     )
                 }
                 FileType::Puffin(version) => {
-                    // notice need to check both file id and version
-                    let is_in_manifest = in_manifest
-                        .get(&file_id)
-                        .map(|opt_ver| *opt_ver == Some(version))
-                        .unwrap_or(false);
-                    let is_in_tmp_ref = in_tmp_ref
-                        .get(&file_id)
-                        .map(|versions| versions.contains(&version))
-                        .unwrap_or(false);
+                    let is_in_manifest = in_manifest.contains_key(&file_id);
+                    let is_in_tmp_ref = referenced_ssts.contains(&file_id);
                     let is_linger = may_linger_files
                         .get(&file_id)
                         .map(|files| files.contains(&&RemovedFile::Index(file_id, version)))
@@ -1099,18 +1083,9 @@ impl LocalGcWorker {
             // 3. Have passed the lingering time
             let files_to_delete: Vec<RemovedFile> = eligible_for_removal
                 .iter()
-                .filter(|file_id| {
-                    let in_use = match file_id {
-                        RemovedFile::File(file_id, _) => {
-                            // Any index-version reader still needs the same Parquet file.
-                            in_manifest.contains_key(file_id) || referenced_ssts.contains(file_id)
-                        }
-                        RemovedFile::Index(file_id, index_version) => {
-                            in_manifest.get(file_id) == Some(&Some(*index_version))
-                                || in_tmp_ref.contains(&(*file_id, Some(*index_version)))
-                        }
-                    };
-                    !in_use
+                .filter(|file| {
+                    let file_id = file.file_id();
+                    !in_manifest.contains_key(&file_id) && !referenced_ssts.contains(&file_id)
                 })
                 .map(|&f| f.clone())
                 .collect();

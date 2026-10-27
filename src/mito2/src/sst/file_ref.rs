@@ -17,30 +17,32 @@ use std::sync::Arc;
 
 use common_telemetry::debug;
 use dashmap::{DashMap, Entry};
-use store_api::storage::{FileRef, FileRefsManifest, RegionId};
+use store_api::storage::{FileId, FileRef, FileRefsManifest, IndexVersion, RegionId};
 
 use crate::error::Result;
 use crate::metrics::GC_REF_FILE_CNT;
 use crate::region::MitoRegionRef;
-use crate::sst::file::FileMeta;
+use crate::sst::file::{FileMeta, RegionFileId};
 
-/// File references for a region.
-/// It contains all files referenced by the region.
-#[derive(Debug, Clone, Default)]
-pub struct RegionFileRefs {
-    /// (FileRef, Ref Count) meaning how many FileHandleInner is opened for this file.
-    pub files: HashMap<FileRef, usize>,
+/// Independent logical lifetimes referencing a physical SST.
+#[derive(Debug, Clone)]
+struct FileReference {
+    count: usize,
+    /// High-water mark retained until all lifetimes release this file.
+    max_index_version: Option<IndexVersion>,
 }
 
-/// Manages all file references in one datanode.
-/// It keeps track of which files are referenced and group by table ids.
-/// This is useful for ensuring that files are not deleted while they are still in use by any
-/// query.
+/// File references grouped by their physical source region.
+#[derive(Debug, Clone, Default)]
+struct RegionFileRefs {
+    files: HashMap<FileId, FileReference>,
+}
+
+/// Manages file-level reader references in one datanode for object-store GC.
 #[derive(Debug)]
 pub struct FileReferenceManager {
     /// Datanode id. used to determine tmp ref file name.
     node_id: Option<u64>,
-    /// TODO(discord9): use no hash hasher since table id is sequential.
     files_per_region: DashMap<RegionId, RegionFileRefs>,
     /// Whether global GC is enabled.
     /// This is only meaningful when using object store (not local filesystem).
@@ -48,6 +50,23 @@ pub struct FileReferenceManager {
 }
 
 pub type FileReferenceManagerRef = Arc<FileReferenceManager>;
+
+/// Older GC workers match index references by exact version. Expand file-level protection
+/// into the existing wire format, including the no-index reference used by old SST metadata.
+/// This is a conservative snapshot, not a reference count for each index version.
+fn file_refs(
+    region_id: RegionId,
+    file_id: FileId,
+    max_index_version: Option<IndexVersion>,
+) -> impl Iterator<Item = FileRef> {
+    std::iter::once(None)
+        .chain(
+            max_index_version
+                .into_iter()
+                .flat_map(|max| (0..=max).map(Some)),
+        )
+        .map(move |version| FileRef::new(region_id, file_id, version))
+}
 
 impl FileReferenceManager {
     pub fn new(node_id: Option<u64>) -> Self {
@@ -68,47 +87,36 @@ impl FileReferenceManager {
     }
 
     /// Returns whether global GC is enabled.
-    ///
-    /// This is useful for determining the file deletion strategy:
-    /// - If GC is enabled (and using object store), files are tracked but not immediately deleted
-    /// - If GC is disabled (or using local filesystem), files are deleted immediately
     pub fn is_gc_enabled(&self) -> bool {
         self.gc_enabled
     }
 
     fn ref_file_set(&self, region_id: RegionId) -> Option<HashSet<FileRef>> {
-        // region id not found.
-        let file_refs = self.files_per_region.get(&region_id)?.clone();
-
-        if file_refs.files.is_empty() {
-            // still return an empty manifest to indicate no files are referenced.
-            // and differentiate from error case where table_id not found.
-            return Some(HashSet::new());
-        }
-
-        let ref_file_set: HashSet<FileRef> = file_refs.files.keys().cloned().collect();
-
+        // Copy before expanding so snapshot construction does not hold the registry lock.
+        let region_refs = self.files_per_region.get(&region_id)?.clone();
+        let refs: HashSet<_> = region_refs
+            .files
+            .iter()
+            .flat_map(|(file_id, reference)| {
+                file_refs(region_id, *file_id, reference.max_index_version)
+            })
+            .collect();
         debug!(
             "Get file refs for region {}, node {:?}, {} files",
             region_id,
             self.node_id,
-            ref_file_set.len(),
+            region_refs.files.len(),
         );
-
-        Some(ref_file_set)
+        Some(refs)
     }
 
-    /// Gets all ref files for the given regions, meaning all open FileHandles for those regions
-    /// and from related regions' manifests.
-    /// `query_regions_for_mem` queries for in memory file handles.
-    /// `related_regions_in_manifest` queries for related regions' manifests to get more file refs of given region ids.
+    /// Gets references from open SST lifetimes and related regions' manifests.
     pub(crate) async fn get_snapshot_of_file_refs(
         &self,
         query_regions_for_mem: Vec<MitoRegionRef>,
         dst_region_to_src_regions: Vec<(MitoRegionRef, HashSet<RegionId>)>,
     ) -> Result<FileRefsManifest> {
         let mut ref_files = HashMap::new();
-        // get from in memory file handles
         for region_id in query_regions_for_mem.iter().map(|r| r.region_id()) {
             if let Some(files) = self.ref_file_set(region_id) {
                 ref_files.insert(region_id, files);
@@ -116,10 +124,8 @@ impl FileReferenceManager {
         }
 
         let mut manifest_version = HashMap::new();
-
         let mut cross_region_refs = HashMap::new();
 
-        // get file refs from related regions' manifests
         for (dst_region, src_regions) in &dst_region_to_src_regions {
             let manifest = dst_region.manifest_ctx.manifest().await;
             for meta in manifest.files.values() {
@@ -128,42 +134,36 @@ impl FileReferenceManager {
                         .entry(meta.region_id)
                         .or_insert_with(HashSet::new)
                         .insert(dst_region.region_id());
-                    // since gc couldn't happen together with repartition
-                    // (both the queries and related_region acquire region read lock), no need to worry about
-                    // staging manifest in repartition here.
+                    // GC and repartition hold region read locks, so staging manifests
+                    // cannot change ownership while these references are collected.
                     ref_files
                         .entry(meta.region_id)
                         .or_insert_with(HashSet::new)
-                        .insert(FileRef::new(
+                        .extend(file_refs(
                             meta.region_id,
                             meta.file_id,
                             meta.index_version(),
                         ));
                 }
             }
-            // not sure if related region's manifest version is needed, but record it for now.
             manifest_version.insert(dst_region.region_id(), manifest.manifest_version);
         }
 
         for r in &query_regions_for_mem {
             let manifest = r.manifest_ctx.manifest().await;
-            // Only omit references covered by the exact index version in the manifest.
-            // Older index readers still need their temporary references.
+            // Keep older index versions in the snapshot for older GC workers, which
+            // only protect the exact index version present in their manifest.
             ref_files.entry(r.region_id()).and_modify(|refs| {
-                *refs = std::mem::take(refs)
-                    .into_iter()
-                    .filter(|f| {
-                        !manifest
-                            .files
-                            .get(&f.file_id)
-                            .is_some_and(|meta| meta.index_version() == f.index_version)
-                    })
-                    .collect();
+                refs.retain(|f| {
+                    !manifest
+                        .files
+                        .get(&f.file_id)
+                        .is_some_and(|meta| meta.index_version() == f.index_version)
+                });
             });
             manifest_version.insert(r.region_id(), manifest.manifest_version);
         }
 
-        // simply return all ref files, no manifest version filtering for now.
         Ok(FileRefsManifest {
             file_refs: ref_files,
             manifest_version,
@@ -171,77 +171,52 @@ impl FileReferenceManager {
         })
     }
 
-    /// Adds a new file reference.
-    /// Also records the access layer for the table if not exists.
-    /// The access layer will be used to upload ref file to object storage.
-    pub fn add_file(&self, file_meta: &FileMeta) {
-        let region_id = file_meta.region_id;
-        let mut is_new = false;
-        {
-            let file_ref = FileRef::new(
-                file_meta.region_id,
-                file_meta.file_id,
-                file_meta.index_version(),
-            );
-            self.files_per_region
-                .entry(region_id)
-                .and_modify(|refs| {
-                    refs.files
-                        .entry(file_ref.clone())
-                        .and_modify(|count| *count += 1)
-                        .or_insert_with(|| {
-                            is_new = true;
-                            1
-                        });
-                })
-                .or_insert_with(|| RegionFileRefs {
-                    files: HashMap::from_iter([(file_ref, 1)]),
-                });
-        }
-        if is_new {
+    /// Registers a logical SST lifetime, paired with `remove_file` when that lifetime ends.
+    /// Index replacements reuse the reference; independent lifetimes register separately.
+    pub(crate) fn register_file(&self, file_meta: &FileMeta) {
+        let mut region = self
+            .files_per_region
+            .entry(file_meta.region_id)
+            .or_default();
+        let file = region.files.entry(file_meta.file_id).or_insert_with(|| {
             GC_REF_FILE_CNT.inc();
+            FileReference {
+                count: 0,
+                max_index_version: None,
+            }
+        });
+        file.count += 1;
+        file.max_index_version = file.max_index_version.max(file_meta.index_version());
+    }
+
+    /// Extends snapshot protection without registering another reader reference.
+    pub(crate) fn update_index_version(
+        &self,
+        file_id: RegionFileId,
+        index_version: Option<IndexVersion>,
+    ) {
+        if let Some(mut region) = self.files_per_region.get_mut(&file_id.region_id())
+            && let Some(file) = region.files.get_mut(&file_id.file_id())
+        {
+            file.max_index_version = file.max_index_version.max(index_version);
         }
     }
 
-    /// Removes a file reference.
-    /// If the reference count reaches zero, the file reference will be removed from the manager.
-    pub fn remove_file(&self, file_meta: &FileMeta) {
-        let region_id = file_meta.region_id;
-        let file_ref = FileRef::new(region_id, file_meta.file_id, file_meta.index_version());
-
-        let mut remove_table_entry = false;
-        let mut remove_file_ref = false;
-        let mut file_cnt = 0;
-
-        let region_ref = self.files_per_region.entry(region_id).and_modify(|refs| {
-            let entry = refs.files.entry(file_ref.clone()).and_modify(|count| {
-                if *count > 0 {
-                    *count -= 1;
-                }
-                if *count == 0 {
-                    remove_file_ref = true;
-                }
-            });
-            if let std::collections::hash_map::Entry::Occupied(o) = entry
-                && remove_file_ref
+    /// Releases a logical SST reference, regardless of whether the file was retired.
+    pub(crate) fn remove_file(&self, file_id: RegionFileId) {
+        if let Entry::Occupied(mut region) = self.files_per_region.entry(file_id.region_id()) {
+            if let std::collections::hash_map::Entry::Occupied(mut file) =
+                region.get_mut().files.entry(file_id.file_id())
             {
-                o.remove_entry();
+                file.get_mut().count -= 1;
+                if file.get().count == 0 {
+                    file.remove();
+                    GC_REF_FILE_CNT.dec();
+                }
             }
-
-            file_cnt = refs.files.len();
-
-            if refs.files.is_empty() {
-                remove_table_entry = true;
+            if region.get().files.is_empty() {
+                region.remove();
             }
-        });
-
-        if let Entry::Occupied(o) = region_ref
-            && remove_table_entry
-        {
-            o.remove_entry();
-        }
-        if remove_file_ref {
-            GC_REF_FILE_CNT.dec();
         }
     }
 
@@ -252,135 +227,40 @@ impl FileReferenceManager {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
-
-    use smallvec::SmallVec;
-    use store_api::storage::{FileId, RegionId};
-
     use super::*;
-    use crate::sst::file::{ColumnIndexMetadata, FileMeta, FileTimeRange, IndexType, RegionFileId};
+    use crate::sst::file::IndexType;
 
-    #[tokio::test]
-    async fn test_file_ref_mgr() {
-        common_telemetry::init_default_ut_logging();
-
-        let sst_file_id = RegionFileId::new(RegionId::new(0, 0), FileId::random());
-
-        let file_ref_mgr = FileReferenceManager::new(None);
-
-        let file_meta = FileMeta {
-            region_id: sst_file_id.region_id(),
-            file_id: sst_file_id.file_id(),
-            time_range: FileTimeRange::default(),
-            level: 0,
-            file_size: 4096,
-            max_row_group_uncompressed_size: 4096,
-            available_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
-            indexes: vec![ColumnIndexMetadata {
-                column_id: 0,
-                created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
-                ..Default::default()
-            }],
-            index_file_size: 4096,
-            index_version: 0,
-            num_rows: 1024,
-            num_row_groups: 1,
-            sequence: NonZeroU64::new(4096),
-            partition_expr: None,
-            num_series: 0,
+    #[test]
+    fn test_file_references_keep_all_versions_until_last_release() {
+        let manager = FileReferenceManager::new(None);
+        let meta = FileMeta {
+            region_id: RegionId::new(1, 1),
+            file_id: FileId::random(),
             ..Default::default()
         };
-
-        file_ref_mgr.add_file(&file_meta);
-
+        manager.register_file(&meta);
         assert_eq!(
-            file_ref_mgr
-                .files_per_region
-                .get(&file_meta.region_id)
-                .unwrap()
-                .files,
-            HashMap::from_iter([(
-                FileRef::new(
-                    file_meta.region_id,
-                    file_meta.file_id,
-                    file_meta.index_version()
-                ),
-                1
-            )])
+            manager.ref_file_set(meta.region_id).unwrap(),
+            HashSet::from([FileRef::new(meta.region_id, meta.file_id, None)])
         );
+        manager.update_index_version(meta.file_id(), Some(2));
+        let updated = FileMeta {
+            index_version: 2,
+            available_indexes: smallvec::smallvec![IndexType::InvertedIndex],
+            ..meta.clone()
+        };
+        manager.register_file(&updated);
+        // A stale independent lifetime must not lower the protected index generation.
+        manager.update_index_version(meta.file_id(), Some(0));
+        let expected: HashSet<_> = [None, Some(0), Some(1), Some(2)]
+            .into_iter()
+            .map(|version| FileRef::new(meta.region_id, meta.file_id, version))
+            .collect();
+        assert_eq!(manager.ref_file_set(meta.region_id).unwrap(), expected);
 
-        file_ref_mgr.add_file(&file_meta);
-
-        let expected_region_ref_manifest = HashSet::from_iter([FileRef::new(
-            file_meta.region_id,
-            file_meta.file_id,
-            file_meta.index_version(),
-        )]);
-
-        assert_eq!(
-            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
-            expected_region_ref_manifest
-        );
-
-        assert_eq!(
-            file_ref_mgr
-                .files_per_region
-                .get(&file_meta.region_id)
-                .unwrap()
-                .files,
-            HashMap::from_iter([(
-                FileRef::new(
-                    file_meta.region_id,
-                    file_meta.file_id,
-                    file_meta.index_version()
-                ),
-                2
-            )])
-        );
-
-        assert_eq!(
-            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
-            expected_region_ref_manifest
-        );
-
-        file_ref_mgr.remove_file(&file_meta);
-
-        assert_eq!(
-            file_ref_mgr
-                .files_per_region
-                .get(&file_meta.region_id)
-                .unwrap()
-                .files,
-            HashMap::from_iter([(
-                FileRef::new(
-                    file_meta.region_id,
-                    file_meta.file_id,
-                    file_meta.index_version()
-                ),
-                1
-            )])
-        );
-
-        assert_eq!(
-            file_ref_mgr.ref_file_set(file_meta.region_id).unwrap(),
-            expected_region_ref_manifest
-        );
-
-        file_ref_mgr.remove_file(&file_meta);
-
-        assert!(
-            file_ref_mgr
-                .files_per_region
-                .get(&file_meta.region_id)
-                .is_none(),
-            "{:?}",
-            file_ref_mgr.files_per_region
-        );
-
-        assert!(
-            file_ref_mgr.ref_file_set(file_meta.region_id).is_none(),
-            "{:?}",
-            file_ref_mgr.files_per_region
-        );
+        manager.remove_file(updated.file_id());
+        assert_eq!(manager.ref_file_set(meta.region_id).unwrap(), expected);
+        manager.remove_file(meta.file_id());
+        assert!(manager.ref_file_set(meta.region_id).is_none());
     }
 }
