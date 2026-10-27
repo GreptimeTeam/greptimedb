@@ -67,23 +67,32 @@
 //! existing plan. [`check_fallback_case`] pins that the computed scalars do, and that a fold over a
 //! second source and a subquery keep it too.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::util::collect_batches;
-use datafusion::physical_plan::ExecutionPlan;
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::execution::TaskContext;
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
+};
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
+use datatypes::arrow::record_batch::RecordBatch;
 use frontend::instance::Instance;
+use futures::StreamExt;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
@@ -182,6 +191,8 @@ const COUNTER_EAST_REGION: &str = "us-east-1";
 #[derive(Default)]
 struct NativePlanObserver {
     seen: Mutex<Vec<Arc<dyn ExecutionPlan>>>,
+    record_original_streams: bool,
+    partial_batches: Arc<Mutex<Vec<(usize, RecordBatch)>>>,
 }
 
 impl NativePlanObserver {
@@ -194,6 +205,10 @@ impl NativePlanObserver {
     fn since(&self, mark: usize) -> Vec<Arc<dyn ExecutionPlan>> {
         self.seen.lock().unwrap()[mark..].to_vec()
     }
+
+    fn partial_batches(&self) -> Vec<(usize, RecordBatch)> {
+        std::mem::take(&mut *self.partial_batches.lock().unwrap())
+    }
 }
 
 impl PhysicalPlanWrapper for NativePlanObserver {
@@ -202,8 +217,84 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn ExecutionPlan>,
         _ctx: QueryContextRef,
     ) -> Arc<dyn ExecutionPlan> {
-        self.seen.lock().unwrap().push(Arc::clone(&origin));
-        origin
+        if origin.name() == FUSED_EXEC_NAME && self.record_original_streams {
+            let recorder = Arc::new(PartialStateRecorder {
+                input: Arc::clone(&origin),
+                properties: Arc::clone(origin.properties()),
+                batches: Arc::clone(&self.partial_batches),
+            });
+            self.seen
+                .lock()
+                .unwrap()
+                .push(Arc::clone(&recorder) as Arc<dyn ExecutionPlan>);
+            recorder
+        } else {
+            self.seen.lock().unwrap().push(Arc::clone(&origin));
+            origin
+        }
+    }
+}
+
+/// Transparent test wrapper that records the fused producer's original partition streams.
+#[derive(Debug)]
+struct PartialStateRecorder {
+    input: Arc<dyn ExecutionPlan>,
+    properties: Arc<PlanProperties>,
+    batches: Arc<Mutex<Vec<(usize, RecordBatch)>>>,
+}
+
+impl DisplayAs for PartialStateRecorder {
+    fn fmt_as(&self, format: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.input.fmt_as(format, f)
+    }
+}
+
+impl ExecutionPlan for PartialStateRecorder {
+    fn name(&self) -> &str {
+        "PartialStateRecorder"
+    }
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        vec![&self.input]
+    }
+    fn apply_expressions(
+        &self,
+        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
+    ) -> datafusion::common::Result<TreeNodeRecursion> {
+        self.input.apply_expressions(f)
+    }
+    fn with_new_children(
+        self: Arc<Self>,
+        mut children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
+        if children.len() != 1 {
+            return Err(datafusion::error::DataFusionError::Internal(
+                "PartialStateRecorder expects one child".into(),
+            ));
+        }
+        Ok(Arc::new(Self {
+            input: children.remove(0),
+            properties: Arc::clone(&self.properties),
+            batches: Arc::clone(&self.batches),
+        }))
+    }
+    fn execute(
+        &self,
+        partition: usize,
+        context: Arc<TaskContext>,
+    ) -> datafusion::common::Result<SendableRecordBatchStream> {
+        let stream = self.input.execute(partition, context)?;
+        let batches = Arc::clone(&self.batches);
+        let schema = stream.schema();
+        let recorded = stream.map(move |result| {
+            if let Ok(batch) = &result {
+                batches.lock().unwrap().push((partition, batch.clone()));
+            }
+            result
+        });
+        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, recorded)))
     }
 }
 
@@ -947,6 +1038,197 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
                 root_values - (SCAN_PARTITIONS - 1)
             );
         }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_aggregate_topk_over_global_partitions() {
+    common_telemetry::init_default_ut_logging();
+    const TABLE: &str = "native_topk_counters";
+    const T1: i64 = BASE_SECS + 180;
+    const T2: i64 = BASE_SECS + 600;
+    let observer = Arc::new(NativePlanObserver {
+        record_original_streams: true,
+        ..Default::default()
+    });
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_topk")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    execute_sql(&instance, &format!(
+        "CREATE TABLE {TABLE} (ts TIMESTAMP(3) TIME INDEX, hostname STRING, device STRING, \"region\" STRING, v DOUBLE, PRIMARY KEY (hostname, device, \"region\")) WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '100')"
+    )).await;
+    // Flush host00/dev0 first and host00/dev1 last; flush each of the 28 series independently.
+    let order = std::iter::once((0usize, 0usize))
+        .chain((1..14).flat_map(|host| (0..2).map(move |device| (host, device))))
+        .chain(std::iter::once((0usize, 1usize)));
+    for (host, device) in order {
+        let slope_before = 140 - 10 * host as i64;
+        let slope_after = 10 + 10 * host as i64;
+        let mut values = Vec::new();
+        for elapsed in (0i64..=600).step_by(30) {
+            let value =
+                100_000 + slope_before * elapsed.min(300) + slope_after * (elapsed - 300).max(0);
+            values.push(format!(
+                "({}, 'host{host:02}', 'dev{device}', 'us-west-2', {value}.0)",
+                (BASE_SECS + elapsed) * 1000
+            ));
+        }
+        execute_sql(
+            &instance,
+            &format!(
+                "INSERT INTO {TABLE} (ts, hostname, device, \"region\", v) VALUES {}",
+                values.join(",")
+            ),
+        )
+        .await;
+        execute_sql(&instance, &format!("ADMIN FLUSH_TABLE('{TABLE}')")).await;
+    }
+    let promql = format!(
+        "topk(10, sum by(hostname)(rate({TABLE}{{device!=\"lo\",region=\"us-west-2\"}}[5m])))"
+    );
+    let sql = format!("TQL EVAL ({T1}, {T2}, '7m') {promql}");
+    let run = async |native: bool| {
+        let mark = observer.mark();
+        let mut ctx = QueryContext::with_db_name(None);
+        ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
+        ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+        let output = instance
+            .do_query(&sql, Arc::new(ctx))
+            .await
+            .remove(0)
+            .unwrap();
+        let batches = match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            other => panic!("unexpected output: {other:?}"),
+        };
+        (
+            QueryResult::from_batches(&batches, &sql),
+            NativeCapture::from_plans(&observer.since(mark)),
+        )
+    };
+    let (legacy, legacy_capture) = run(false).await;
+    assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
+    let (native, capture) = run(true).await;
+    let partial_batches = observer.partial_batches();
+    assert_same_columns(&native, &legacy, &sql);
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("native vs legacy `{sql}`"),
+    );
+    assert_eq!(20, native.rows.len(), "both timestamps return ten rows");
+    let distinct_timestamps = native
+        .rows
+        .iter()
+        .map(|row| row.ts_millis)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        [T1 * 1000, T2 * 1000]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        distinct_timestamps
+    );
+    let mut expected = Vec::new();
+    for (ts, hosts, post) in [(T1 * 1000, 0..10, false), (T2 * 1000, 4..14, true)] {
+        for host in hosts {
+            let slope = if post {
+                10 + 10 * host
+            } else {
+                140 - 10 * host
+            };
+            let scale = if post { 2.0 } else { 1.3 };
+            expected.push(ResultRow {
+                ts_millis: ts,
+                labels: [("hostname".to_string(), format!("host{host:02}"))].into(),
+                value: Some(slope as f64 * scale),
+            });
+        }
+    }
+    expected.sort_by(|a, b| (a.ts_millis, &a.labels).cmp(&(b.ts_millis, &b.labels)));
+    assert_rows(&native.rows, &expected, &format!("expected `{sql}`"));
+    assert_eq!(1, capture.fused.len());
+    assert_eq!(1, capture.finalize.len());
+    let fused_plan = displayable(capture.fused[0].as_ref())
+        .indent(false)
+        .to_string();
+    assert!(
+        fused_plan.contains("partial state: sum by (hostname) Complete"),
+        "{fused_plan}"
+    );
+    let producer_tree = fused_plan
+        .split_once("NativeTree")
+        .map(|(_, tree)| tree.split("partial state:").next().unwrap_or(tree))
+        .unwrap_or(&fused_plan);
+    assert!(
+        !producer_tree.to_ascii_lowercase().contains("topk"),
+        "{fused_plan}"
+    );
+    let finalize_plan = displayable(capture.finalize[0].as_ref())
+        .indent(false)
+        .to_string();
+    assert!(
+        finalize_plan.to_ascii_lowercase().contains("topk"),
+        "{finalize_plan}"
+    );
+    let per_partition = fused_output_values_per_partition(&capture, &sql);
+    assert!(
+        per_partition
+            .iter()
+            .all(|count| count.is_some_and(|count| count > 0)),
+        "{per_partition:?}"
+    );
+    // Prove the partition-local states overlap without decoding or summing their values: at each
+    // evaluation point, at least one selected hostname/point/field was emitted by distinct original
+    // producer partitions.
+    let mut owners = BTreeMap::<(String, u64, u32), BTreeSet<usize>>::new();
+    for (partition, batch) in &partial_batches {
+        let schema = batch.schema();
+        // `state_schema` names its fixed columns and labels `metric_name`, `tag_N`, `point` and
+        // `field`; use those names rather than baking their positions into this assertion.
+        let hostname = batch
+            .column(schema.index_of("tag_0").unwrap())
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let batch_point = batch
+            .column(schema.index_of("point").unwrap())
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
+            .unwrap();
+        let field = batch
+            .column(schema.index_of("field").unwrap())
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
+            .unwrap();
+        for row in 0..batch.num_rows() {
+            owners
+                .entry((
+                    hostname.value(row).to_string(),
+                    batch_point.value(row),
+                    field.value(row),
+                ))
+                .or_default()
+                .insert(*partition);
+        }
+    }
+    for (point, expected_hosts) in [(0u64, 0..10), (1u64, 4..14)] {
+        assert!(
+            expected_hosts.into_iter().any(|host| {
+                owners
+                    .get(&(format!("host{host:02}"), point, 0))
+                    .is_some_and(|partitions| partitions.len() >= 2)
+            }),
+            "no selected hostname has rows from distinct original producer partitions at point {point}: {owners:?}"
+        );
     }
 }
 
