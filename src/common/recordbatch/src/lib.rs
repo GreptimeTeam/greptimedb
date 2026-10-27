@@ -223,14 +223,19 @@ pub fn map_dictionary_to_values_schema(schema: SchemaRef) -> (SchemaRef, bool) {
         .arrow_schema()
         .fields()
         .iter()
+        .zip(schema.column_schemas())
         .zip(&columns)
-        .map(|(field, column)| {
-            Arc::new(
-                field
-                    .as_ref()
-                    .clone()
-                    .with_data_type(column.data_type.as_arrow_type()),
-            )
+        .map(|((field, original), column)| {
+            if original.data_type == column.data_type {
+                field.clone()
+            } else {
+                Arc::new(
+                    field
+                        .as_ref()
+                        .clone()
+                        .with_data_type(column.data_type.as_arrow_type()),
+                )
+            }
         })
         .collect::<Vec<_>>();
     let arrow_schema =
@@ -1232,6 +1237,42 @@ mod tests {
             vec![Some("a"), None, Some("a")],
             tag_values.iter().collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn test_map_dictionary_to_values_preserves_timestamp_timezone() {
+        let dictionary = DictionaryArray::<Int32Type>::new(
+            Int32Array::from(vec![Some(0), None]),
+            Arc::new(StringArray::from(vec!["a"])),
+        );
+        let timestamps = datatypes::arrow::array::TimestampSecondArray::from(vec![Some(42), None])
+            .with_timezone("Europe/Paris");
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new("label", dictionary.data_type().clone(), true),
+            Field::new("instant", timestamps.data_type().clone(), true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = DfRecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![Arc::new(dictionary), Arc::new(timestamps)],
+        )
+        .unwrap();
+        let batch = RecordBatch::from_df_record_batch(schema.clone(), batch);
+
+        let (mapped_schema, apply_mapper) = map_dictionary_to_values_schema(schema.clone());
+        assert!(apply_mapper);
+        assert_eq!(arrow_schema.field(1), mapped_schema.arrow_schema().field(1));
+        let mapped = map_dictionary_to_values(batch.clone(), &schema, &mapped_schema).unwrap();
+        assert_eq!(&ArrowDataType::Utf8, mapped.column(0).data_type());
+        assert_eq!(
+            &StringArray::from(vec![Some("a"), None]),
+            mapped
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+        );
+        assert!(Arc::ptr_eq(batch.column(1), mapped.column(1)));
     }
 
     #[test]

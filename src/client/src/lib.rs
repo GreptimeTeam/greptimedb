@@ -35,7 +35,7 @@ use snafu::OptionExt;
 pub use self::client::{Client, ClientOptions};
 pub use self::database::{Database, OutputMetrics, OutputWithMetrics};
 pub use self::error::{Error, Result};
-use crate::error::{IllegalDatabaseResponseSnafu, ServerSnafu};
+use crate::error::IllegalDatabaseResponseSnafu;
 
 pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
     let header = response.header.context(IllegalDatabaseResponseSnafu {
@@ -53,14 +53,6 @@ pub fn from_grpc_response(response: GreptimeResponse) -> Result<u32> {
             Response::AffectedRows(AffectedRows { value }) => Ok(value),
         }
     } else {
-        let status_code =
-            StatusCode::from_u32(status.status_code).context(IllegalDatabaseResponseSnafu {
-                err_msg: format!("invalid status: {:?}", status),
-            })?;
-        ServerSnafu {
-            code: status_code,
-            msg: status.err_msg,
-        }
-        .fail()
+        Err(Error::try_from_response_status(&status)?)
     }
 }
