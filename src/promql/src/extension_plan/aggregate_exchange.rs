@@ -327,16 +327,17 @@ pub(crate) fn decode_state(
                 grid.spec().len
             )));
         }
-        // A row repeating the labels of the row before it, on the same point, is that point's next
-        // field; a change of either opens a group.
+        // The encoder writes a group's points in ascending order and its fields together, so only a
+        // label change opens a group: a row repeating the labels of the row before it is the same
+        // group, and is that point's next field or the group's next point. Comparing a label change
+        // against a change of point would open one group per row, since consecutive points of one
+        // group differ by definition.
         let differs = |column: &StringArray| {
             column.is_null(row - 1) != column.is_null(row)
                 || (!column.is_null(row) && column.value(row - 1) != column.value(row))
         };
-        let opens = row == 0
-            || groups.last().is_none_or(|group| group.points[0].0 != at)
-            || differs(metric_name)
-            || tag_columns.iter().any(|column| differs(column));
+        let opens =
+            row == 0 || differs(metric_name) || tag_columns.iter().any(|column| differs(column));
         if opens {
             // A push outgrowing the group vector doubles it, so the block it is about to allocate
             // is admitted here; the point's tuple and state vector and the label scratch follow
@@ -387,11 +388,48 @@ pub(crate) fn decode_state(
                 metric,
                 points: vec![(at, vec![None; width])],
             });
+        } else {
+            // The same group as the row before: this row's point is the one its state belongs to.
+            // The encoder emits a group's points in ascending order, so a later point is appended
+            // to the group and a repeated one is that point's next field.
+            let group = groups.last_mut().ok_or_else(|| {
+                DataFusionError::Execution(format!("aggregate state row {row} continued no group"))
+            })?;
+            let opens_point = match group.points.last() {
+                Some((last, _)) if *last == at => false,
+                Some((last, _)) if *last < at => true,
+                Some((last, _)) => {
+                    return Err(DataFusionError::Execution(format!(
+                        "aggregate state row {row} is of point {at}, before its group's point {last}"
+                    )));
+                }
+                None => true,
+            };
+            if opens_point {
+                // The point vector doubles when it outgrows itself, then the point's tuple and its
+                // state vector follow, both admitted before either allocates.
+                let growth = if group.points.len() == group.points.capacity() {
+                    group.points.capacity().max(1)
+                        * 2
+                        * size_of::<(usize, Vec<Option<AccumulatorState>>)>()
+                } else {
+                    0
+                };
+                total = total.saturating_add(
+                    growth
+                        + size_of::<(usize, Vec<Option<AccumulatorState>>)>()
+                        + width * size_of::<Option<AccumulatorState>>(),
+                );
+                budget(total)?;
+                group.points.push((at, vec![None; width]));
+            }
         }
         let group = groups.last_mut().ok_or_else(|| {
             DataFusionError::Execution(format!("aggregate state row {row} opened no group"))
         })?;
-        let states = &mut group.points[0].1;
+        let (_, states) = group.points.last_mut().ok_or_else(|| {
+            DataFusionError::Execution(format!("aggregate state row {row} continued no point"))
+        })?;
         if states[field].is_some() {
             return Err(DataFusionError::Execution(format!(
                 "aggregate state row {row} repeats field {field} of its group's point"

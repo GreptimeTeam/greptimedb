@@ -399,6 +399,164 @@ fn roundtrip_keeps_the_name_and_absent_labels() {
 }
 
 #[test]
+fn a_group_keeps_its_points_instead_of_opening_one_per_row() {
+    // The encoder writes a group's points in ascending order, so a decode that opened a group per
+    // row would answer the same states through one group per row - correct but with a label set,
+    // a hash and a map lookup repeated for every point. Three points of one series decode to one
+    // group of three points, and a second series after them opens its own.
+    let schema = series_schema(&["a"], 3);
+    let tags = tags(&["job"]);
+    let batch = state_batch(
+        &tags,
+        &[
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 0,
+                field: 0,
+                state: Some(state(1.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 1,
+                field: 0,
+                state: Some(state(2.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 2,
+                field: 0,
+                state: Some(state(3.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("y")],
+                point: 0,
+                field: 0,
+                state: Some(state(4.0)),
+            },
+        ],
+    );
+    let decoded = decode(&batch, &schema, AggregateOp::Sum, &tags).unwrap();
+    assert_eq!(decoded.groups.len(), 2);
+    assert_eq!(decoded.groups[0].metric.get("job"), Some("x"));
+    assert_eq!(
+        decoded.groups[0].points,
+        vec![
+            (0, vec![Some(state(1.0))]),
+            (1, vec![Some(state(2.0))]),
+            (2, vec![Some(state(3.0))]),
+        ]
+    );
+    assert_eq!(decoded.groups[1].metric.get("job"), Some("y"));
+    assert_eq!(decoded.groups[1].points, vec![(0, vec![Some(state(4.0))])]);
+}
+
+#[test]
+fn decode_keeps_both_fields_of_one_point_in_one_group() {
+    let schema = series_schema(&["a", "b"], 2);
+    let tags = tags(&["job"]);
+    let batch = state_batch(
+        &tags,
+        &[
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 0,
+                field: 0,
+                state: Some(state(1.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 0,
+                field: 1,
+                state: Some(state(2.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 1,
+                field: 0,
+                state: Some(state(3.0)),
+            },
+        ],
+    );
+    let decoded = decode(&batch, &schema, AggregateOp::Sum, &tags).unwrap();
+    assert_eq!(decoded.groups.len(), 1);
+    assert_eq!(
+        decoded.groups[0].points,
+        vec![
+            (0, vec![Some(state(1.0)), Some(state(2.0))]),
+            (1, vec![Some(state(3.0)), None]),
+        ]
+    );
+}
+
+#[test]
+fn a_point_going_backwards_within_a_group_is_refused() {
+    let schema = series_schema(&["a"], 3);
+    let tags = tags(&["job"]);
+    let batch = state_batch(
+        &tags,
+        &[
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 1,
+                field: 0,
+                state: Some(state(1.0)),
+            },
+            Row {
+                name: Some("up"),
+                labels: &[Some("x")],
+                point: 0,
+                field: 0,
+                state: Some(state(2.0)),
+            },
+        ],
+    );
+    let error = decode(&batch, &schema, AggregateOp::Sum, &tags)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("before its group's point"), "{error}");
+}
+
+#[test]
+fn decode_admits_the_points_it_appends() {
+    // Every appended point and its state vector is admitted before it allocates, so a budget that
+    // runs out part way through the points still refuses the batch instead of overrunning it.
+    let schema = series_schema(&["a"], 4);
+    let tags = tags(&["job"]);
+    let rows: Vec<Row> = (0..4)
+        .map(|point| Row {
+            name: Some("up"),
+            labels: &[Some("x")],
+            point,
+            field: 0,
+            state: Some(state(1.0)),
+        })
+        .collect();
+    let batch = state_batch(&tags, &rows);
+    let mut tallest = 0usize;
+    decode_state(&batch, &schema, AggregateOp::Sum, &tags, |total| {
+        tallest = tallest.max(total);
+        Ok(())
+    })
+    .unwrap();
+    let refused = decode_state(&batch, &schema, AggregateOp::Sum, &tags, |total| {
+        if total > tallest / 2 {
+            Err(DataFusionError::ResourcesExhausted("budget".into()))
+        } else {
+            Ok(())
+        }
+    });
+    assert!(refused.is_err());
+}
+
+#[test]
 fn decoded_rows_keep_an_empty_label_beside_an_absent_one() {
     let schema = series_schema(&["a"], 2);
     let tags = tags(&["job", "instance"]);
@@ -491,13 +649,15 @@ fn a_point_is_assembled_from_its_fields() {
     fold.update(chunks[0].clone()).unwrap();
     let batches = fold.finish().unwrap();
     let decoded = decode(&batches[0], &schema, AggregateOp::Sum, &tags).unwrap();
-    // One group per point, each holding one field-wide state vector, rather than one per row.
-    assert_eq!(decoded.groups.len(), 64);
+    // One group for the series, holding one state vector per point, rather than one group per
+    // point or one per row.
+    assert_eq!(decoded.groups.len(), 1);
     assert!(
-        decoded
-            .groups
-            .iter()
-            .all(|group| group.points.len() == 1 && group.points[0].1.len() == 64)
+        decoded.groups[0].points.len() == 64
+            && decoded.groups[0]
+                .points
+                .iter()
+                .all(|(_, states)| states.len() == 64)
     );
     assert_eq!(rows(&decoded).len(), 64 * 64);
     assert_eq!(
