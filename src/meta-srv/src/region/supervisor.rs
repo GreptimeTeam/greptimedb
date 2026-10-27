@@ -1375,8 +1375,11 @@ pub(crate) mod tests {
             }
         }
 
+        /// A batch of regions with their excluded peers.
+        type Batch = (Vec<RegionId>, HashMap<RegionId, BTreeSet<u64>>);
+
         /// Records each batch, and places a region on datanode 3 unless the region excludes it.
-        struct StatAwareRecorder(Mutex<Vec<(Vec<RegionId>, HashMap<RegionId, BTreeSet<u64>>)>>);
+        struct StatAwareRecorder(Mutex<Vec<Batch>>);
 
         #[async_trait::async_trait]
         impl RegionStatAwareSelector for StatAwareRecorder {
