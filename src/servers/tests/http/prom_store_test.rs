@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use api::greptime_proto::io::prometheus::write::v2::{
-    Request as RemoteWriteV2Request, Sample as RemoteWriteV2Sample,
-    TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan as RemoteWriteV2BucketSpan, Request as RemoteWriteV2Request,
+    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::{
     LabelMatcher, Query, QueryResult, ReadRequest, ReadResponse, WriteRequest,
@@ -28,6 +28,7 @@ use async_trait::async_trait;
 use axum::Router;
 use axum::http::HeaderMap;
 use common_query::Output;
+use common_query::native_histogram::CUSTOM_BUCKETS_SCHEMA;
 use common_query::prelude::{
     GREPTIME_PHYSICAL_TABLE, greptime_native_histogram, greptime_timestamp, greptime_value,
 };
@@ -315,6 +316,59 @@ async fn test_prometheus_remote_write_v2_convert_error_has_written_headers() {
     assert_remote_write_v2_written_headers(&result.headers(), "0");
     assert!(result.text().await.contains("missing '__name__'"));
     assert!(write_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn test_prometheus_remote_write_v2_rejects_incompatible_histogram_before_writes() {
+    common_telemetry::init_default_ut_logging();
+    let (read_tx, _read_rx) = mpsc::channel(100);
+    let (write_tx, mut write_rx) = mpsc::channel(100);
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
+    let client = TestClient::new(app).await;
+
+    for (schema, offset, message) in [
+        (0, i32::MIN, "initial span offset i32::MIN"),
+        (
+            CUSTOM_BUCKETS_SCHEMA,
+            2,
+            "span extent exceeds custom_values",
+        ),
+    ] {
+        let mut histogram = remote_write_v2::histogram(2000);
+        histogram.schema = schema;
+        histogram.positive_spans = vec![RemoteWriteV2BucketSpan { offset, length: 0 }];
+        let write_request = RemoteWriteV2Request {
+            symbols: vec![
+                String::new(),
+                prom_store::METRIC_NAME_LABEL.to_string(),
+                "http_requests_total".to_string(),
+                "http_request_duration_seconds".to_string(),
+            ],
+            timeseries: vec![
+                RemoteWriteV2TimeSeries {
+                    labels_refs: vec![1, 2],
+                    samples: vec![RemoteWriteV2Sample {
+                        value: 42.0,
+                        timestamp: 1000,
+                        start_timestamp: 0,
+                    }],
+                    ..Default::default()
+                },
+                RemoteWriteV2TimeSeries {
+                    labels_refs: vec![1, 3],
+                    histograms: vec![remote_write_v2::histogram(1000), histogram],
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let result = post_remote_write_v2(&client, &write_request).await;
+
+        assert_eq!(result.status(), 400);
+        assert_remote_write_v2_written_headers(&result.headers(), "0");
+        assert!(result.text().await.contains(message));
+        assert!(write_rx.try_recv().is_err());
+    }
 }
 
 #[tokio::test]
