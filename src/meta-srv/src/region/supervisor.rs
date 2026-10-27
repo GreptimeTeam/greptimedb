@@ -787,10 +787,17 @@ impl RegionSupervisor {
             .map(|region_id| region_id.table_id())
             .unique()
             .collect::<Vec<_>>();
-        let table_routes = TableRouteStorage::new(self.kv_backend.clone())
+        let table_routes = match TableRouteStorage::new(self.kv_backend.clone())
             .batch_get(&table_ids)
             .await
-            .context(error::TableMetadataManagerSnafu)?;
+        {
+            Ok(table_routes) => table_routes,
+            // Select without followers, as before; the submit still rejects them.
+            Err(err) => {
+                warn!(err; "Failed to read the routes of failover regions: {:?}", regions);
+                vec![]
+            }
+        };
         let followers = table_routes
             .iter()
             .flatten()
@@ -798,7 +805,7 @@ impl RegionSupervisor {
             .flatten()
             .map(|route| {
                 let peers = route.follower_peers.iter().map(|peer| peer.id);
-                (route.region.id, peers.sorted().dedup().collect::<Vec<_>>())
+                (route.region.id, peers.sorted().collect::<Vec<_>>())
             })
             .collect::<HashMap<_, _>>();
         let mut groups = BTreeMap::<_, Vec<_>>::new();
@@ -814,7 +821,7 @@ impl RegionSupervisor {
                 Ok(peers) => region_peers.extend(peers),
                 // Other groups may still have candidates.
                 Err(err @ error::Error::NoEnoughAvailableNode { .. }) => {
-                    error!(err; "Failed to select failover targets for regions: {:?}", regions)
+                    warn!(err; "No failover target for regions: {:?}, followers: {:?}", regions, followers)
                 }
                 Err(err) => return Err(err),
             }
@@ -1323,6 +1330,10 @@ pub(crate) mod tests {
     async fn test_failover_excludes_route_followers() {
         use std::collections::HashSet as StdHashSet;
 
+        use common_meta::key::MetadataKey;
+        use common_meta::key::table_route::TableRouteKey;
+        use common_meta::rpc::store::PutRequest;
+
         use crate::error::{self, Result};
         use crate::metasrv::SelectTarget;
         use crate::selector::{Selector, SelectorOptions};
@@ -1390,9 +1401,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        let regions = (0..4)
+        let mut regions = (0..4)
             .map(|number| RegionId::new(table_id, number))
             .collect::<Vec<_>>();
+        // A region of a table without a route has no followers.
+        regions.push(RegionId::new(table_id + 1, 0));
         let tasks = supervisor
             .generate_failover_tasks(8, &regions, &[8])
             .await
@@ -1402,7 +1415,7 @@ pub(crate) mod tests {
         assert_eq!(
             *selector.0.lock().unwrap(),
             vec![
-                (StdHashSet::from([8]), 1),
+                (StdHashSet::from([8]), 2),
                 (StdHashSet::from([8, 3]), 1),
                 (StdHashSet::from([8, 4]), 2),
             ]
@@ -1412,7 +1425,31 @@ pub(crate) mod tests {
             .iter()
             .map(|(task, _)| task.region_id)
             .collect::<Vec<_>>();
-        assert_eq!(failed_over, [regions[0], regions[2], regions[3]]);
+        assert_eq!(
+            failed_over,
+            [regions[0], regions[4], regions[2], regions[3]]
+        );
+
+        // A route that can't be read leaves every region without followers, as before.
+        supervisor
+            .kv_backend
+            .put(
+                PutRequest::new()
+                    .with_key(TableRouteKey::new(table_id + 1).to_bytes())
+                    .with_value(b"corrupted".to_vec()),
+            )
+            .await
+            .unwrap();
+        selector.0.lock().unwrap().clear();
+        let tasks = supervisor
+            .generate_failover_tasks(8, &regions, &[8])
+            .await
+            .unwrap();
+        assert_eq!(
+            *selector.0.lock().unwrap(),
+            vec![(StdHashSet::from([8]), 5)]
+        );
+        assert_eq!(tasks.len(), 5);
     }
 
     #[tokio::test]
