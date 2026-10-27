@@ -1960,13 +1960,22 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
         promql::extension_plan::FusedOutputFormat::PlainRows,
         promql::extension_plan::FusedOutputFormat::SeriesFrame,
     ] {
-        scan_plan.clone().reset_state().unwrap();
+        let scan_plan = scan_plan.clone().reset_state().unwrap();
         let exec = promql::extension_plan::FusedSeries::try_new_with_format(
             Arc::from("native_demo"),
             tree.clone(),
             binding.clone(),
             vec![logical_child.clone()],
-            row_schema.clone().to_dfschema_ref().unwrap(),
+            if format == promql::extension_plan::FusedOutputFormat::SeriesFrame {
+                let packed = common_query::series_frame::pack_evaluated_series(
+                    Box::pin(futures::stream::empty()),
+                    Arc::clone(&output_schema),
+                )
+                .unwrap();
+                Arc::new(DFSchema::try_from(packed.schema()).unwrap())
+            } else {
+                row_schema.clone().to_dfschema_ref().unwrap()
+            },
             format,
         )
         .unwrap()

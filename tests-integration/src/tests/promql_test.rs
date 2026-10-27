@@ -3388,6 +3388,85 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
     }
 }
 
+/// A comparison between two tables runs above both regions: without `bool` it keeps the left
+/// sample where the comparison holds, with `bool` it reports 1 or 0 at every matched point, and
+/// `on(host)` narrows the labels to `host` either way.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_comparisons() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_cross_table_comparisons",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xc_a (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(host, kind))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE native_xc_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host))",
+        QueryContext::arc(),
+    )
+    .await;
+    // `a` is the second, `b` is `2 + host`: `a` passes `b` at second 3 on h0 and 4 on h1.
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for second in 0..6 {
+        for host in 0..2 {
+            a.push(format!("('h{host}', 'x', {}, {second})", second * 1_000));
+            b.push(format!("('h{host}', {}, {})", second * 1_000, 2 + host));
+        }
+    }
+    for (table, values) in [("native_xc_a", a), ("native_xc_b", b)] {
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let mut filtered = Vec::new();
+    let mut bools = Vec::new();
+    for host in 0..2_i64 {
+        let labels = std::collections::BTreeMap::from([("host".to_string(), format!("h{host}"))]);
+        for second in 0..6_i64 {
+            let holds = second > 2 + host;
+            if holds {
+                filtered.push((second * 1_000, labels.clone(), second as f64));
+            }
+            let equal = second == 2 + host;
+            bools.push((
+                second * 1_000,
+                labels.clone(),
+                if equal { 1.0 } else { 0.0 },
+            ));
+        }
+    }
+    for (query, expected) in [
+        ("native_xc_a > on(host) native_xc_b", filtered),
+        ("native_xc_a == bool on(host) native_xc_b", bools),
+    ] {
+        let sql = format!("TQL EVAL (0, 5, '1s') {query}");
+        observer.clear();
+        let (_, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), 2, "{query}");
+        assert_eq!(native, expected, "{query}");
+        let (_, legacy) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(legacy, expected, "legacy: {query}");
+    }
+}
+
 /// `info()` over a base table and a `target_info` table whose time index and field are named
 /// differently, answered natively above both regions with Prometheus' answer, which the existing
 /// plan does not give: it has no `info`.
@@ -3523,8 +3602,9 @@ async fn native_promql_info_enriches_from_the_info_table() {
     }
 }
 
-/// A two-selector query over a table split into regions keeps the existing plan: the two-scan
-/// native node has no placement there, and the query used to fail in the dist analyzer.
+/// A two-selector query over a table split into regions is not planned as one two-scan native node:
+/// that node has no placement there, and the query used to fail in the dist analyzer. The hybrid
+/// route may still run each operand natively under the existing join.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan() {
     let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
@@ -3562,7 +3642,12 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_legacy_plan
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
         let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
-        assert!(observer.fused().is_none(), "`{query}` was planned natively");
+        assert!(
+            observer
+                .fused()
+                .is_none_or(|plan| plan.children().len() < 2),
+            "`{query}` was planned as one two-scan native node"
+        );
         assert_eq!(native, expected, "{query}");
         let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native, legacy, "{query}");

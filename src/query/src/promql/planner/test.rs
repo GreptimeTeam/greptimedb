@@ -2492,6 +2492,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
         "some_metric + some_metric",
         "some_metric{tag_0=\"a\"} + on(tag_0) some_metric{tag_0=\"b\"}",
         "rate(some_metric[5m]) + on(tag_0) rate(some_metric[10m] offset 2m)",
+        "some_metric != some_metric",
+        "some_metric < on(tag_0) some_metric",
+        "some_metric >= bool on(tag_0) some_metric",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("the plan holds a native node");
@@ -2604,6 +2607,9 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
         "100 * (1 - some_metric{tag_0=\"a\"} / other_metric)",
         "some_metric unless on(tag_0) other_metric",
         "some_metric or other_metric",
+        "some_metric > on(tag_0) other_metric",
+        "some_metric == bool other_metric",
+        "(some_metric <= on(tag_0) other_metric) * 100",
     ] {
         let plan = build_native_fused_plan_with_provider(
             query,
@@ -2662,16 +2668,26 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
-/// Two selectors over tables split into regions keep the existing plan, across tables as on one.
+/// Two selectors over tables split into regions are not one two-input node, across tables as on
+/// one; the hybrid route may still plan each operand natively under the existing join.
 #[tokio::test]
 async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
+    fn has_pair_node(plan: &LogicalPlan) -> bool {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+            && fused.inputs().len() > 1
+        {
+            return true;
+        }
+        plan.inputs().into_iter().any(has_pair_node)
+    }
     let plan = build_native_fused_plan_with_provider(
         "some_metric / other_metric",
         true,
         native_two_table_provider(vec![0]).await,
     )
     .await;
-    assert!(find_fused_series(&plan).is_none(), "{plan}");
+    assert!(!has_pair_node(&plan), "{plan}");
 }
 
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
@@ -2870,6 +2886,7 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
         "1 - some_metric / some_metric",
         "(some_metric / some_metric) * 100",
         "abs(some_metric - on(tag_0) some_metric)",
+        "(some_metric > some_metric) * 100",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));

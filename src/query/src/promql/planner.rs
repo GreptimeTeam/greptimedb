@@ -586,7 +586,11 @@ impl PromPlanner {
             // schema.
             self.ctx.start = end;
             self.ctx.end = end;
-            let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
+            let native_fused = self.native_fused;
+            self.native_fused = false;
+            let plan_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+            self.native_fused = native_fused;
+            let plan = plan_result?;
             return Ok(LogicalPlan::EmptyRelation(EmptyRelation {
                 produce_one_row: false,
                 schema: plan.schema().clone(),
@@ -594,7 +598,11 @@ impl PromPlanner {
         };
         self.ctx.start = start;
         self.ctx.end = end;
-        self.prom_expr_to_plan(expr, query_engine_state).await
+        let native_fused = self.native_fused;
+        self.native_fused = false;
+        let plan_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+        self.native_fused = native_fused;
+        plan_result
     }
 
     async fn prom_subquery_expr_to_plan(
@@ -646,10 +654,14 @@ impl PromPlanner {
             self.ctx.start = child_start;
             self.ctx.end = child_end;
         }
-        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let native_fused = self.native_fused;
+        self.native_fused = false;
+        let input_result = self.prom_expr_to_plan(expr, query_engine_state).await;
+        self.native_fused = native_fused;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        let input = input_result?;
         // Return no rows with the child schema so enclosing fallbacks still work.
         let input = match child_window {
             Some(_) => input,
@@ -1365,32 +1377,57 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let mut left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
-                let left_field_columns = self.ctx.field_columns.clone();
-                let left_time_index_column = self.ctx.time_index_column.clone();
+                let native_pair =
+                    self.native_fused && native::hybrid_binary_admitted(*op, modifier, lhs, rhs);
+                let native = if native_pair {
+                    match (
+                        self.try_plan_native_operand(lhs, query_engine_state)
+                            .await?,
+                        self.try_plan_native_operand(rhs, query_engine_state)
+                            .await?,
+                    ) {
+                        (Some(left), Some(right)) => Some((left, right)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let used_native = native.is_some();
+                let (mut left_input, mut left_context, mut right_input, mut right_context) =
+                    if let Some(((left, left_ctx), (right, right_ctx))) = native {
+                        (left, left_ctx, right, right_ctx)
+                    } else {
+                        let left = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                        let left_ctx = self.ctx.clone();
+                        let right = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                        let right_ctx = self.ctx.clone();
+                        (left, left_ctx, right, right_ctx)
+                    };
+                let left_field_columns = left_context.field_columns.clone();
+                let left_time_index_column = left_context.time_index_column.clone();
+                self.ctx = left_context.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let mut left_context = self.ctx.clone();
-
-                let mut right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
-                let right_field_columns = self.ctx.field_columns.clone();
-                let right_time_index_column = self.ctx.time_index_column.clone();
+                let right_field_columns = right_context.field_columns.clone();
+                let right_time_index_column = right_context.time_index_column.clone();
+                self.ctx = right_context.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let mut right_context = self.ctx.clone();
 
                 // Both operands are planned first because only the planned contexts tell a tag
                 // from a value field. The rewrite merely adds matchers to a selector, so the
                 // table reference, time index and field columns captured above stay valid.
-                if let Some(rewritten) = matching_filters::propagate(
-                    binary_expr,
-                    &left_context.tag_columns,
-                    &right_context.tag_columns,
-                    &left_context.aggregation_field_labels,
-                    &right_context.aggregation_field_labels,
-                ) {
+                if !used_native
+                    && let Some(rewritten) = matching_filters::propagate(
+                        binary_expr,
+                        &left_context.tag_columns,
+                        &right_context.tag_columns,
+                        &left_context.aggregation_field_labels,
+                        &right_context.aggregation_field_labels,
+                    )
+                {
                     // A copied matcher belongs to the scan, not to the operand's identity:
                     // `absent()` turns `selector_matcher` into the labels it reports, so the
                     // re-planned context keeps the matchers the operand was written with.

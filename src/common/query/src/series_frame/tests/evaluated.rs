@@ -27,7 +27,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, PlainError};
 use common_error::status_code::StatusCode;
 use common_recordbatch::DfSendableRecordBatchStream;
 use datatypes::arrow::array::{
@@ -68,8 +68,31 @@ fn labels(host: &str) -> SeriesLabels {
 
 /// One validated evaluated chunk: `values` on the runs `spans` of the shared test grid.
 fn series(spans: &[(usize, usize)], values: Vec<Option<f64>>, metric: SeriesLabels) -> Series {
+    series_on(&evaluated_schema(), spans, values, metric)
+}
+
+/// An evaluated schema large enough for multi-batch lifecycle fixtures.
+fn large_evaluated_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: evaluated_schema().fields.clone(),
+        eval_grid: Some(Arc::new(
+            datatypes::series::time::EvalGrid::try_new(
+                datatypes::series::time::GridSpec::try_new(0, 1000, 1600).unwrap(),
+            )
+            .unwrap(),
+        )),
+    })
+}
+
+/// One validated evaluated chunk on the supplied schema's grid.
+fn series_on(
+    schema: &SeriesSchema,
+    spans: &[(usize, usize)],
+    values: Vec<Option<f64>>,
+    metric: SeriesLabels,
+) -> Series {
     let time = TimeAxis::from_grid_spans(
-        evaluated_grid(),
+        schema.eval_grid.as_ref().unwrap().clone(),
         spans
             .iter()
             .map(|(start, len)| GridSpan::new(*start, *len))
@@ -77,13 +100,39 @@ fn series(spans: &[(usize, usize)], values: Vec<Option<f64>>, metric: SeriesLabe
     )
     .unwrap();
     let fields = SeriesFields::one(Samples::from_float(Float64Array::from(values)));
-    Series::try_new(&evaluated_schema(), metric, time, fields).unwrap()
+    Series::try_new(schema, metric, time, fields).unwrap()
 }
 
 /// An evaluated producer stream over the supplied chunks and their finality.
 fn source(items: Vec<(Series, bool)>) -> SendableEvaluatedSeriesStream {
     Box::pin(futures_util::stream::iter(
         items.into_iter().map(Ok::<_, BoxedError>),
+    ))
+}
+
+/// A counted source whose guard records when the packer releases its upstream stream.
+fn observed_source(
+    items: Vec<Result<(Series, bool), BoxedError>>,
+    polls: Arc<std::sync::atomic::AtomicUsize>,
+    dropped: Arc<std::sync::atomic::AtomicBool>,
+) -> SendableEvaluatedSeriesStream {
+    struct DropGuard(Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for DropGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    Box::pin(futures_util::stream::unfold(
+        (items.into_iter(), DropGuard(dropped)),
+        move |(mut items, guard)| {
+            let polls = polls.clone();
+            async move {
+                polls.fetch_add(1, Ordering::SeqCst);
+                let item = items.next()?;
+                Some((item, (items, guard)))
+            }
+        },
     ))
 }
 
@@ -330,6 +379,102 @@ fn single_position_spans(start: usize, count: usize) -> Vec<(usize, usize)> {
     (0..count).map(|offset| (start + offset, 1)).collect()
 }
 
+/// The evaluated packer drains one large sparse chunk in bounded batches without re-polling upstream.
+#[tokio::test]
+async fn evaluated_pack_drains_large_sparse_chunk_before_polling_again() {
+    let schema = large_evaluated_schema();
+    let positions: Vec<usize> = (0..1600).step_by(2).collect();
+    let spans: Vec<(usize, usize)> = positions.iter().map(|position| (*position, 1)).collect();
+    let expected: Vec<Option<f64>> = (0..positions.len())
+        .map(|index| Some(index as f64))
+        .collect();
+    let chunk = series_on(&schema, &spans, expected.clone(), labels("large"));
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream = observed_source(vec![Ok((chunk, true))], polls.clone(), dropped.clone());
+    let mut stream = pack_evaluated_series(upstream, schema.clone()).unwrap();
+    let mut batches = Vec::new();
+    let mut batch = stream.next().await.unwrap().unwrap();
+    assert_eq!(batch.num_rows(), SeriesFrameBuilder::DEFAULT_MAX_ROWS);
+    batches.push(batch);
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    for _ in 0..2 {
+        batch = stream.next().await.unwrap().unwrap();
+        assert_eq!(batch.num_rows(), SeriesFrameBuilder::DEFAULT_MAX_ROWS);
+        batches.push(batch);
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+    }
+    while let Some(batch) = stream.next().await {
+        batches.push(batch.unwrap());
+    }
+    assert!(batches.len() > 1);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(stream.next().await.is_none());
+    assert!(stream.next().await.is_none());
+    let declared = batches[0].schema();
+    let (source, _, _) = df_source(batches, declared);
+    let rows = drain(unpack_evaluated_series(source, Some(schema)).unwrap()).await;
+    let (actual_positions, actual_values) = flat(&rows);
+    assert_eq!(actual_positions, positions);
+    assert_float_payload_eq(&actual_values, &expected, "large sparse values");
+    assert_eq!(rows.iter().filter(|(_, last)| *last).count(), 1);
+    assert!(rows.last().unwrap().1);
+}
+
+/// Dropping a partially drained output releases both upstream and buffered label ownership.
+#[tokio::test]
+async fn evaluated_pack_drop_releases_unfinished_large_chunk() {
+    let identity: Arc<str> = Arc::from("drop-aware");
+    let weak = Arc::downgrade(&identity);
+    let metric = SeriesLabels::try_new(Some(identity.clone()), vec![]).unwrap();
+    let schema = large_evaluated_schema();
+    let positions: Vec<usize> = (0..1600).step_by(2).collect();
+    let spans: Vec<(usize, usize)> = positions.iter().map(|position| (*position, 1)).collect();
+    let chunk = series_on(&schema, &spans, vec![Some(1.0); spans.len()], metric);
+    drop(identity);
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream = observed_source(vec![Ok((chunk, true))], polls, dropped.clone());
+    let mut stream = pack_evaluated_series(upstream, schema).unwrap();
+    assert!(stream.next().await.unwrap().unwrap().num_rows() > 0);
+    assert!(!dropped.load(Ordering::SeqCst), "output is unfinished");
+    assert!(weak.upgrade().is_some(), "buffered output retains labels");
+    drop(stream);
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(
+        weak.upgrade().is_none(),
+        "drop releases buffered label owner"
+    );
+}
+
+/// A source error discards buffered success rather than publishing it before the error.
+#[tokio::test]
+async fn evaluated_pack_error_discards_buffer_and_releases_source() {
+    let identity: Arc<str> = Arc::from("error-owner");
+    let weak = Arc::downgrade(&identity);
+    let metric = SeriesLabels::try_new(Some(identity.clone()), vec![]).unwrap();
+    let chunk = series(&[(0, 1)], vec![Some(1.0)], metric);
+    drop(identity);
+    let error = BoxedError::new(PlainError::new(
+        "source failed".into(),
+        StatusCode::Unsupported,
+    ));
+    let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let upstream = observed_source(
+        vec![Ok((chunk, false)), Err(error)],
+        polls.clone(),
+        dropped.clone(),
+    );
+    let mut stream = pack_evaluated_series(upstream, evaluated_schema()).unwrap();
+    assert!(stream.next().await.unwrap().is_err());
+    assert!(dropped.load(Ordering::SeqCst));
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert!(weak.upgrade().is_none());
+    assert!(stream.next().await.is_none());
+    assert!(stream.next().await.is_none());
+}
+
 /// Rows split across batches keep their order and finality: every position appears once and in
 /// order, and only the last row of the source's final chunk closes the chain.
 #[tokio::test]
@@ -409,6 +554,75 @@ async fn consecutive_chains_with_equal_labels_each_close_independently() {
     assert_eq!(values(&rows[0].0), vec![Some(1.0), Some(2.0)]);
     assert_eq!(positions(&rows[1].0), vec![2, 3]);
     assert_eq!(values(&rows[1].0), vec![Some(3.0), Some(4.0)]);
+}
+
+/// Malformed chunks are rejected before buffered rows escape, and terminal failures release the
+/// producer and any label owners held by its chunks.
+#[tokio::test]
+async fn evaluated_pack_rejects_malformed_sequences_before_publishing() {
+    let cases = [
+        (
+            "identity changed",
+            vec![
+                (series(&[(0, 1)], vec![Some(1.0)], labels("first")), false),
+                (series(&[(1, 1)], vec![Some(2.0)], labels("other")), true),
+            ],
+            "identity changed",
+        ),
+        (
+            "overlap",
+            vec![
+                (
+                    series(&[(1, 2)], vec![Some(1.0), Some(2.0)], labels("same")),
+                    false,
+                ),
+                (series(&[(2, 1)], vec![Some(3.0)], labels("same")), true),
+            ],
+            "positions are not increasing",
+        ),
+        (
+            "backward",
+            vec![
+                (series(&[(3, 1)], vec![Some(1.0)], labels("same")), false),
+                (series(&[(1, 1)], vec![Some(2.0)], labels("same")), true),
+            ],
+            "positions are not increasing",
+        ),
+    ];
+    for (name, mut items, expected_error) in cases {
+        let owner: Arc<str> = Arc::from("tracked-label-owner");
+        let weak = Arc::downgrade(&owner);
+        if name != "identity changed" {
+            let metric_name = items[0].0.metric.name().map(Arc::<str>::from);
+            let tracked = SeriesLabels::try_new(
+                metric_name,
+                vec![Label {
+                    name: Arc::from("tracked"),
+                    value: owner.clone(),
+                }],
+            )
+            .unwrap();
+            for (chunk, _) in &mut items {
+                chunk.metric = tracked.clone();
+            }
+        }
+        drop(owner);
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let upstream = observed_source(items.into_iter().map(Ok).collect(), polls, dropped.clone());
+        let mut stream = pack_evaluated_series(upstream, evaluated_schema()).unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains(expected_error),
+            "{name}: {error}"
+        );
+        assert!(dropped.load(Ordering::SeqCst), "{name}: source dropped");
+        if name != "identity changed" {
+            assert!(weak.upgrade().is_none(), "{name}: label owner released");
+        }
+        assert!(stream.next().await.is_none(), "{name}: stable EOF");
+        assert!(stream.next().await.is_none(), "{name}: repeated EOF");
+    }
 }
 
 /// A chain still open at EOF is an error on both sides: a producer that never closed a series cannot

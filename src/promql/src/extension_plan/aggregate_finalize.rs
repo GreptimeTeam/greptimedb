@@ -187,7 +187,8 @@ impl AggregateFinalize {
     /// its binding: its `Utf8` columns are the labels it writes, and its `Float64` columns name the
     /// merged fields by position, since the merge folds the cut aggregate's fields in the order the
     /// statement declares them. Building rejects an input that is not state, a suffix the runtime
-    /// does not execute and a schema [`classify_output`] cannot convert.
+    /// does not execute (the supported suffix operations are maps, aggregates, TopK and
+    /// constant-sided binary operations) and a schema [`classify_output`] cannot convert.
     pub fn to_execution_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
@@ -346,12 +347,18 @@ struct Split {
 
 /// Splits the innermost aggregate out of `node`.
 ///
-/// `Ok(None)` is a subtree holding no aggregate. Only a map, an aggregate and a binary operation with
-/// a constant on one side may sit above the cut: a map is point-wise and so is the same operation over
-/// merged values, an aggregate runs over the complete merge, and a constant is broadcast over whatever
-/// the other side answers - while an instant selection, a window, a vector-wide operation or a binary
-/// operation between two vectors would read evaluated values, the whole vector or a matched pair,
-/// shapes the merge does not produce.
+/// `Ok(None)` is a subtree holding no aggregate. The currently verified suffix operations are maps,
+/// aggregates, TopK/BottomK and binary operations with a constant on one side. TopK/BottomK run once
+/// in the suffix over the fully merged aggregate series, per evaluation timestamp, and never in the
+/// partition-local producer. A map is point-wise and an aggregate runs over the complete merge.
+/// LimitK is declined because it selects the first `k` series in input order
+/// ([`crate::select::limitk`]), while this merge does not preserve the storage input order. Other
+/// vector operations have not yet been verified/supported by this split.
+///
+/// An instant selection or window above the cut cannot be applied to the merged values under the
+/// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
+/// A binary operation between two vectors would require matching the cut's merged output against a
+/// vector sibling, but this merge only gathers the cut's state.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => Ok(None),
@@ -411,6 +418,22 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
                     }))
                 }
             }
+        }
+        NativeExpr::Vector {
+            input,
+            op: op @ crate::native::plan::BoundVectorOp::TopK { .. },
+        } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Vector {
+                    input: Box::new(inner.suffix),
+                    op: op.clone(),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
@@ -635,9 +658,9 @@ const STRING_CAPACITY: usize = 1024;
 /// first item rather than a row the error invalidates after it. What the answer holds is charged to
 /// that stream, which is the only owner it has: the plan answers once.
 ///
-/// The cut is the innermost aggregate of a tree of inputs, maps and aggregates, so the suffix the
-/// runtime is asked to build is one of those; [`ExecutionPlan::execute`] builds its state and is
-/// where a shape the runtime cannot run is refused.
+/// The suffix above the cut is built from the aggregate's output and may contain maps, aggregates,
+/// TopK/BottomK or a binary operation with a constant on one side. [`ExecutionPlan::execute`]
+/// builds its state and is where a shape the runtime cannot run is refused.
 ///
 /// The plain state-batch input is temporary. The final design consumes series frames directly
 /// from FusedSeries instead of decoding and rebuilding this intermediate state-row layout.
