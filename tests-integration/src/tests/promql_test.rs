@@ -3329,6 +3329,7 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
         };
         let mut union = Vec::new();
         let mut ratio = Vec::new();
+        let mut filled = Vec::new();
         for host in 0..2_i64 {
             let name = format!("h{host}");
             for second in 3..10_i64 {
@@ -3337,10 +3338,12 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 union.push((second * 1_000, labels(&[("host", &name), ("kind", "x")]), a));
                 union.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
                 ratio.push((second * 1_000, labels(&[("host", &name)]), a / b));
+                filled.push((second * 1_000, labels(&[("host", &name), ("az", "z")]), b));
             }
         }
         union.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         ratio.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        filled.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
         // The existing plan fails to execute the match over two differently named time indexes
         // (it reads a tag column as the time index), so only the native answer is checked there.
         for (query, legacy_answers, columns, expected) in [
@@ -3355,6 +3358,14 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
                 false,
                 vec!["host", "ts", "val"],
                 ratio,
+            ),
+            // `kind` and `az` keep every pair apart, so each result is a filled right series and
+            // carries `az`.
+            (
+                "native_xs_a + fill_left(0) native_xs_b",
+                false,
+                vec!["az", "host", "kind", "ts", "val"],
+                filled,
             ),
         ] {
             let context = format!("{query} (series_scan_v2={series_scan_v2})");
