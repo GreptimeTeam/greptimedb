@@ -1821,6 +1821,15 @@ async fn build_native_fused_plan_with_provider(
     native_fused: bool,
     table_provider: DfTableSourceProvider,
 ) -> LogicalPlan {
+    build_native_fused_plan_with_transport(query, native_fused, table_provider, true).await
+}
+
+async fn build_native_fused_plan_with_transport(
+    query: &str,
+    native_fused: bool,
+    table_provider: DfTableSourceProvider,
+    in_process_region_transport: bool,
+) -> LogicalPlan {
     let eval_stmt = build_eval_stmt(query);
     let state = QueryEngineState::try_new_with_region_transport(
         new_memory_catalog_manager().unwrap(),
@@ -1830,7 +1839,7 @@ async fn build_native_fused_plan_with_provider(
         None,
         None,
         false,
-        true,
+        in_process_region_transport,
         Plugins::default(),
         QueryOptions::default(),
     )
@@ -2631,6 +2640,8 @@ fn sorted_column_names(plan: &LogicalPlan) -> Vec<String> {
 /// route answered it.
 #[tokio::test]
 async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
+    // The local route remains split as before; remote admission shares the same aggregate
+    // completeness condition because FE raw fan-in presents all selected regions together.
     for query in [
         "sum(some_metric)",
         "avg(some_metric)",
@@ -2683,6 +2694,27 @@ async fn native_fused_aggregate_splits_into_a_merge_over_a_partial_producer() {
             "`{query}` must report the columns the existing plan reports"
         );
     }
+}
+
+#[tokio::test]
+async fn native_fused_remote_aggregate_splits_into_frontend_finalize() {
+    let table_provider = build_test_table_provider_with_options(
+        &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+        1,
+        1,
+        vec![],
+        ConcreteDataType::timestamp_millisecond_datatype(),
+        false,
+        ConcreteDataType::float64_datatype(),
+        NATIVE_ENGINE,
+    )
+    .await;
+    let query = "sum by (tag_0) (rate(some_metric[5m]))";
+    let plan = build_native_fused_plan_with_transport(query, true, table_provider, false).await;
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("AggregateFinalize: "), "{display}");
+    assert!(display.contains("[partial "), "{display}");
+    assert!(find_aggregate_finalize(&plan).is_some(), "{display}");
 }
 
 /// Only the innermost aggregate is cut out: everything above it, a map included, runs in the suffix
