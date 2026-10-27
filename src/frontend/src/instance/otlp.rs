@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::v1::RowInsertRequests;
+use api::v1::value::ValueData;
 use async_trait::async_trait;
 use auth::{
     OTLP_WRITE, PermissionChecker, PermissionCheckerRef, PermissionReq, PermissionTableTarget,
@@ -28,8 +29,9 @@ use auth::{
 use client::Output;
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
-use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
-use common_query::{OutputData, OutputMeta};
+use common_query::prelude::{
+    EXEMPLAR_METRIC_COLUMN, GREPTIME_PHYSICAL_TABLE, METRICS_EXEMPLARS_TABLE,
+};
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -122,12 +124,20 @@ impl OpenTelemetryProtocolHandler for Instance {
             let catalog = ctx.current_catalog();
             let schema = ctx.current_schema();
             let mut table_names = HashSet::new();
-            prepared
+            let mut targets = prepared
                 .requests
                 .iter()
                 .filter(|request| table_names.insert(request.table_name.as_str()))
                 .map(|request| PermissionTableTarget::new(catalog, &schema, &request.table_name))
-                .collect()
+                .collect::<Vec<_>>();
+            if prepared.has_exemplars() && table_names.insert(METRICS_EXEMPLARS_TABLE) {
+                targets.push(PermissionTableTarget::new(
+                    catalog,
+                    &schema,
+                    METRICS_EXEMPLARS_TABLE,
+                ));
+            }
+            targets
         };
         self.check_table_permission(
             &ctx,
@@ -152,6 +162,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         let otlp::metrics::MetricsConversion {
             requests,
             rows,
+            exemplars,
+            exemplar_rows,
             semantic_index,
             resource_info,
             mut outcome,
@@ -167,7 +179,13 @@ impl OpenTelemetryProtocolHandler for Instance {
             return Ok(outcome);
         }
 
-        let ctx = admit_write(rows as u64, &ctx)
+        let total_rows = rows.checked_add(exemplar_rows).ok_or_else(|| {
+            error::InvalidOtlpMetricInputSnafu {
+                reason: "combined metric and exemplar row count overflow",
+            }
+            .build()
+        })?;
+        let ctx = admit_write(total_rows as u64, &ctx)
             .await
             .map_err(BoxedError::new)
             .context(error::ExecuteGrpcQuerySnafu)?;
@@ -187,10 +205,114 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
-        let output = self
-            .handle_otlp_metric_row_inserts(requests, ctx.clone(), &metric_ctx)
-            .await?;
-        outcome.write_cost = output.meta.cost;
+        if exemplar_rows > 0 {
+            let confirmed = Arc::new(ctx.with_confirmed_writes());
+            let source_names = exemplars
+                .inserts
+                .iter()
+                .filter_map(|request| request.rows.as_ref())
+                .flat_map(|rows| {
+                    let index = rows
+                        .schema
+                        .iter()
+                        .position(|c| c.column_name == EXEMPLAR_METRIC_COLUMN);
+                    rows.rows.iter().filter_map(move |row| {
+                        match &row.values.get(index?)?.value_data {
+                            Some(ValueData::StringValue(name)) => Some(name.as_str()),
+                            _ => None,
+                        }
+                    })
+                })
+                .collect::<HashSet<_>>();
+            let (source_requests, other): (Vec<_>, Vec<_>) =
+                requests.inserts.into_iter().partition(|request| {
+                    metric_ctx.with_metric_engine
+                        && source_names.contains(request.table_name.as_str())
+                });
+            let prepared = if metric_ctx.with_metric_engine {
+                self.inserter
+                    .prepare_metric_row_inserts(
+                        RowInsertRequests {
+                            inserts: source_requests,
+                        },
+                        confirmed.clone(),
+                        &self.statement_executor,
+                        ctx.extension(PHYSICAL_TABLE_PARAM)
+                            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+                            .to_string(),
+                    )
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(error::ExecuteGrpcQuerySnafu)
+            } else {
+                error::NotSupportedSnafu {
+                    feat: "exemplars require metric-engine ingestion",
+                }
+                .fail()
+            };
+            let source_ready = prepared.is_ok();
+            let sources = prepared
+                .as_ref()
+                .map(|request| request.source_tables().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let (metric_output, other_output, exemplar_output) = tokio::join!(
+                async {
+                    self.inserter
+                        .handle_prepared_metric_inserts(prepared?, confirmed.clone())
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteGrpcQuerySnafu)
+                },
+                async {
+                    if other.is_empty() {
+                        Ok(Output::new_with_affected_rows(0))
+                    } else {
+                        self.handle_otlp_metric_row_inserts(
+                            RowInsertRequests { inserts: other },
+                            confirmed.clone(),
+                            &metric_ctx,
+                        )
+                        .await
+                    }
+                },
+                async {
+                    // Failed source preparation must not bind exemplars to a later replacement table.
+                    if !source_ready {
+                        return Ok(Output::new_with_affected_rows(0));
+                    }
+                    self.inserter
+                        .handle_exemplar_inserts(
+                            exemplars,
+                            confirmed.clone(),
+                            &self.statement_executor,
+                            &sources,
+                        )
+                        .await
+                        .map_err(BoxedError::new)
+                        .context(error::ExecuteGrpcQuerySnafu)
+                },
+            );
+            let mut progress = common_query::WriteProgress::default();
+            for output in [metric_output, other_output, exemplar_output] {
+                match output {
+                    Ok(output) => {
+                        outcome.write_cost += output.meta.cost;
+                        progress.merge(output.write_progress().await);
+                    }
+                    Err(error) => {
+                        progress.merge(common_query::WriteProgress::failed(BoxedError::new(error)))
+                    }
+                }
+            }
+            progress
+                .into_result()
+                .context(error::ExecuteGrpcQuerySnafu)?;
+        } else {
+            let output = self
+                .handle_otlp_metric_row_inserts(requests, ctx.clone(), &metric_ctx)
+                .await?;
+            outcome.write_cost = output.meta.cost;
+        }
 
         // Derived enrichment follows the accepted metric submission, which may
         // still be queued in asynchronous mode. Failures remain warning-only
@@ -369,8 +491,8 @@ impl Instance {
 
         // OTLP tables have one sample field in both the ordinary and physical paths.
         if let Some(batcher) = batcher {
-            let (rows, cost) = batcher
-                .submit_with(requests, ctx.clone(), |mut requests| {
+            let (mut output, cost) = batcher
+                .submit_output_with(requests, ctx.clone(), |mut requests| {
                     let ctx = ctx.clone();
                     async move {
                         Inserter::meter_row_inserts(&mut requests, &ctx)
@@ -380,10 +502,8 @@ impl Instance {
                     }
                 })
                 .await?;
-            Ok(Output::new(
-                OutputData::AffectedRows(rows as usize),
-                OutputMeta::new_with_cost(cost as _),
-            ))
+            output.meta.cost = cost as _;
+            Ok(output)
         } else if !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx.clone(), false, true)
                 .await
