@@ -2115,7 +2115,11 @@ mod tests {
             .await
             .err()
             .expect("malformed control must be rejected");
-        assert!(error.to_string().contains("DataFusion"));
+        // Pin the control decoder, not whichever layer happened to fail first.
+        assert!(
+            format!("{error:?}").contains("invalid internal raw-series control"),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[tokio::test]
