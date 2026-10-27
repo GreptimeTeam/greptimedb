@@ -472,6 +472,81 @@ async fn assert_append_count(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_exemplar_sparse_repartition_compaction() {
+    let (cluster, _home_guard) = repartition_cluster("exemplar_sparse_repartition").await;
+    let instance = cluster.fe_instance();
+    let ctx = QueryContext::arc();
+    for sql in [
+        "CREATE TABLE exemplar_sparse_repartition (
+            __table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL,
+            host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (__table_id, __tsid, host)
+         ) PARTITION ON COLUMNS(host) (host < 'm', host >= 'm')
+         WITH ('primary_key_encoding'='sparse', 'append_mode'='true')",
+        "INSERT INTO exemplar_sparse_repartition VALUES (42, 7, 'a', 1, 1), (42, 7, 'h', 1, 2), (43, 7, 'z', 1, 3)",
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
+        "INSERT INTO exemplar_sparse_repartition VALUES (42, 7, 'a', 1, 4), (42, 7, 'h', 1, 5), (43, 7, 'z', 1, 6)",
+        "ADMIN FLUSH_TABLE('exemplar_sparse_repartition')",
+        "ALTER TABLE exemplar_sparse_repartition SPLIT PARTITION (host < 'm')
+         INTO (host < 'g', host >= 'g' AND host < 'm')",
+    ] {
+        run_sql(instance, sql, ctx.clone()).await.unwrap();
+    }
+    // Refresh routes synchronously instead of depending on heartbeat timing.
+    instance.cache_invalidator().invalidate_all().unwrap();
+    let mut inherited_ssts = 0;
+    for datanode in cluster.datanode_instances.values() {
+        inherited_ssts += datanode
+            .region_server()
+            .mito_engine()
+            .unwrap()
+            .all_ssts_from_manifest()
+            .await
+            .into_iter()
+            .filter(|entry| entry.origin_region_id != entry.region_id)
+            .count();
+    }
+    assert!(inherited_ssts > 0);
+    run_sql(
+        instance,
+        "ADMIN COMPACT_TABLE('exemplar_sparse_repartition', 'swcs', '3600')",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let output = run_sql(
+        instance,
+        "SELECT host, COUNT(*) AS n, SUM(val) AS total
+         FROM exemplar_sparse_repartition GROUP BY host ORDER BY host",
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+------+---+-------+\n\
+         | host | n | total |\n\
+         +------+---+-------+\n\
+         | a    | 2 | 5.0   |\n\
+         | h    | 2 | 7.0   |\n\
+         | z    | 2 | 9.0   |\n\
+         +------+---+-------+",
+    )
+    .await;
+    let output = run_sql(
+        instance,
+        "SELECT COUNT(*) FROM exemplar_sparse_repartition WHERE __table_id=42 AND __tsid=7",
+        ctx,
+    )
+    .await
+    .unwrap();
+    check_output_stream(
+        output.data,
+        "+----------+\n| count(*) |\n+----------+\n| 4        |\n+----------+",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_repartition_multi_hop_fulltext_index_gc_file() {
     if StorageType::File.test_on() {
         common_telemetry::init_default_ut_logging();

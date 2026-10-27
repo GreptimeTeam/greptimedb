@@ -670,6 +670,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_exemplar_authorizes_every_resolved_branch_before_missing_table() {
+        use common_catalog::consts::METRICS_EXEMPLARS_TABLE;
         use servers::exemplar::query::Query;
         use servers::prometheus_handler::PrometheusHandler;
         use std::sync::Mutex;
@@ -697,7 +698,7 @@ mod tests {
                     auth::PermissionTableTargets::Unresolved => true,
                     auth::PermissionTableTargets::Resolved(targets) => targets.iter().any(|t| {
                         t.schema == "secret" && t.table == "metric"
-                            || t.schema == "shared_denied" && t.table == "metrics_exemplars"
+                            || t.schema == "shared_denied" && t.table == METRICS_EXEMPLARS_TABLE
                     }),
                 };
                 Ok(if denied {
@@ -751,7 +752,7 @@ mod tests {
         );
         let checks = checker.0.lock().unwrap();
         for schema in ["public", "other"] {
-            for table in ["metric", "metrics_exemplars"] {
+            for table in ["metric", METRICS_EXEMPLARS_TABLE] {
                 assert!(checks.iter().any(|c| matches!(c, auth::PermissionTableTargets::Resolved(t) if t.iter().any(|t| t.schema == schema && t.table == table))));
             }
         }
