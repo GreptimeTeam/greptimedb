@@ -2433,7 +2433,6 @@ async fn test_disable_compaction_scheduling(#[case] options: Options) {
     scheduler.disable_compaction = true;
     let version_control = compactable_version();
     let region_id = version_control.region_id();
-    scheduler.register_region(&version_control, &env.access_layer);
     let manifest_ctx = env
         .mock_manifest_context(version_control.current().version.metadata.clone())
         .await;
@@ -2469,7 +2468,7 @@ async fn test_disable_compaction_scheduling(#[case] options: Options) {
     assert_matches!(err, Error::UnsupportedOperation { .. });
     assert!(err.to_string().contains(DISABLE_COMPACTION_ENV));
     assert!(!scheduler.schedule_automatic_followup(region_id, &manifest_ctx, schemas.clone()));
-    assert!(!scheduler.is_compacting(region_id));
+    assert!(!scheduler.region_status.contains_key(&region_id));
     assert_eq!(job_scheduler.num_jobs(), 0);
     assert!(rx.try_recv().is_err());
 
