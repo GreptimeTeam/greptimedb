@@ -132,11 +132,13 @@ fn info_inner(
         budget.hold(points.saturating_add(base.len().saturating_mul(PATTERN_BYTES)))?;
     }
     let mut base_present = vec![false; points];
-    for series in base {
+    let mut sampled = vec![false; base.len()];
+    for (series, sampled) in base.iter().zip(&mut sampled) {
         for field in series.fields.iter() {
             for ((point, _), sample) in series.time.positions().zip(field.iter()) {
                 if !matches!(sample, SampleRef::Missing) {
                     base_present[point] = true;
+                    *sampled = true;
                 }
             }
         }
@@ -148,8 +150,10 @@ fn info_inner(
     // base series it enriches: a present label matches any value the pattern's base series have,
     // an absent one matches only absence. An info series no pattern admits is never fetched, so
     // it neither enriches nor conflicts.
+    // A base series without a sample is not in Prometheus' base matrix at all, so it selects no
+    // info series.
     let mut patterns: HashMap<Vec<bool>, Vec<BTreeSet<Arc<str>>>> = HashMap::new();
-    for series in base {
+    for (series, _) in base.iter().zip(&sampled).filter(|(_, sampled)| **sampled) {
         if is_info_metric(series.metric.name().unwrap_or("")) {
             continue;
         }

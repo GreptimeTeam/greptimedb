@@ -239,6 +239,54 @@ fn results_with_one_label_set_merge_by_field() {
     assert!(error.to_string().contains("same labelset"), "{error}");
 }
 
+/// A base series a filter emptied, such as `b` in `info(up > 0)`, selects no info series: its two
+/// info series would otherwise collide for the series that does have a sample.
+#[test]
+fn a_base_series_without_samples_selects_no_info_series() {
+    let schema = grid_schema(1);
+    let labels = |pairs: &[(&str, &str)]| -> Labels {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    };
+    let kept = one_point(
+        &schema,
+        &[("__name__", "up"), ("instance", "a"), ("job", "j")],
+        vec![Some(GridSample::Float(1.0))],
+    );
+    let filtered = sparse_series(
+        &schema,
+        &labels(&[("__name__", "up"), ("instance", "b"), ("job", "j")]),
+        &Points::new(),
+    )
+    .unwrap();
+    let info_of = |version| {
+        one_point(
+            &schema,
+            &[
+                ("__name__", "target_info"),
+                ("instance", "b"),
+                ("job", "j"),
+                ("version", version),
+            ],
+            vec![Some(GridSample::Float(1.0))],
+        )
+    };
+    let result = info(
+        &schema,
+        &[kept, filtered],
+        &[info_of("v1"), info_of("v2")],
+        &all_labels(),
+    )
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(
+        labels_of(&result[0].metric),
+        labels(&[("__name__", "up"), ("instance", "a"), ("job", "j")])
+    );
+}
+
 /// A native histogram base sample is enriched like a float one.
 #[test]
 fn histogram_base_samples_are_enriched() {
