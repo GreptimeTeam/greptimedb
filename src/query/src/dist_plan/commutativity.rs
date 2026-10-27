@@ -245,6 +245,7 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                let root = fused.tree().root();
                 // The raw-series reader supports one scan, or the narrow same-table two-scan
                 // one-to-one case. This classification is for region-local execution only.
                 let children = fused.children();
@@ -265,7 +266,6 @@ impl Categorizer {
                 if binding.metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
-                let root = fused.tree().root();
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
                 if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
@@ -950,6 +950,13 @@ mod tests {
             !any_remote_input_holds(&encoded, holds_fused_series),
             "the analyzer placed the node although its plan has to encode: {encoded}"
         );
+        assert!(
+            any_remote_input_holds(&encoded, holds_table_scan),
+            "the remote MergeScan child is the bare scan, not the fused node: {encoded}"
+        );
+        let merge = first_merge_scan(&encoded).expect("the plan has a MergeScan");
+        assert!(holds_table_scan(merge.input()));
+        assert!(!holds_fused_series(merge.input()));
 
         // In process nothing is encoded, so the categorizer places the node.
         let in_process = analyze(DistPlannerAnalyzer::new(true), plan);

@@ -42,7 +42,8 @@ use datafusion::logical_expr::{Expr, Extension, LogicalPlan};
 use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
 pub use fused_series::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
+    FusedInputBinding, FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec,
+    FusedSeriesStream,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,

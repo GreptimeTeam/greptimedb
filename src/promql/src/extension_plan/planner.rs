@@ -24,8 +24,9 @@ use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use table::table::scan::RegionScanExec;
 
 use crate::extension_plan::{
-    Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
-    RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize, UnionDistinctOn,
+    Absent, AggregateFinalize, EmptyMetric, FusedInputBinding, FusedSeries, HistogramFold,
+    InstantManipulate, RangeManipulate, ScalarCalculate, SeriesDivide, SeriesNormalize,
+    UnionDistinctOn,
 };
 
 pub struct PromExtensionPlanner;
@@ -173,7 +174,7 @@ fn plan_fused_series(
         };
         series_inputs.push((
             series_scan.clone() as Arc<dyn ExecutionPlan>,
-            series_scan.label_source().clone(),
+            FusedInputBinding::Local(series_scan.label_source().clone()),
             series_scan.raw_series_ordering(),
         ));
     }

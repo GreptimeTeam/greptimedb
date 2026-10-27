@@ -284,7 +284,18 @@ impl PromPlanner {
                     },
                 };
                 let table = self.table_from_source(&scan.source)?;
-                let table_meta = &table.table_info().meta;
+                let table_info = table.table_info();
+                let table_meta = &table_info.meta;
+                // The ordinary in-process route retains its existing selector/tag/pair shapes.
+                // Across transport, admit one ordinary base-table raw source; Substrait
+                // encodability keeps the fused extension on the frontend.
+                if !native_remote_route_allowed(
+                    query_engine_state.in_process_region_transport(),
+                    selectors.len(),
+                    &table_info,
+                ) {
+                    return Ok(None);
+                }
                 // An engine without a raw-series scanner has no frame to give this node, and by the
                 // time the physical planner asks, the logical plan is already this node: the refusal
                 // there is a planning error, not a fallback. So the engine is checked here, where the
@@ -315,8 +326,11 @@ impl PromPlanner {
                 {
                     return Ok(None);
                 }
-                // Preserve the existing single-selector guard that its partition keys are tags.
-                if selectors.len() == 1
+                // Keep the existing in-process partition policy: only tag-partitioned
+                // tables have complete series in a region. Remote admission does not
+                // use this region-local placement rule.
+                if query_engine_state.in_process_region_transport()
+                    && selectors.len() == 1
                     && !table_meta
                         .partition_column_names()
                         .all(|column| tags.iter().any(|tag| tag == column))
@@ -484,6 +498,7 @@ impl PromPlanner {
             || (selectors.len() == 2 && independent_scan_pair(root));
         if !per_partition {
             if selectors.len() != 1
+                || !query_engine_state.in_process_region_transport()
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
                 return Ok(None);
@@ -823,6 +838,19 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
     true
 }
 
+/// Whether the captured table may use the native route. In-process routing preserves its
+/// existing tag and same-table pair shapes; remote routing admits one ordinary base source.
+fn native_remote_route_allowed(
+    in_process: bool,
+    selector_count: usize,
+    info: &table::metadata::TableInfo,
+) -> bool {
+    in_process
+        || (selector_count == 1
+            && info.table_type == table::metadata::TableType::Base
+            && matches!(info.meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
+}
+
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
 /// A whitelist avoids probing a region from logical planning; declining only costs the native route.
@@ -896,7 +924,7 @@ mod tests {
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
         collect_selectors, fused_output_tags, independent_scan_pair, native_promql_requested,
-        scan_time_filter,
+        native_remote_route_allowed, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -952,6 +980,49 @@ mod tests {
             .iter()
             .map(|selector| selector.name.clone().unwrap_or_default())
             .collect()
+    }
+
+    #[test]
+    fn remote_native_route_admits_single_selector_ordinary_base() {
+        use datatypes::data_type::ConcreteDataType;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![1])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let base = TableInfoBuilder::new("cpu", meta.clone()).build().unwrap();
+        assert!(native_remote_route_allowed(false, 1, &base));
+        assert!(!native_remote_route_allowed(false, 2, &base));
+
+        let tagged_meta = TableMetaBuilder::empty()
+            .schema(meta.schema.clone())
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![0])
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let tagged = TableInfoBuilder::new("cpu", tagged_meta).build().unwrap();
+        assert!(native_remote_route_allowed(false, 1, &tagged));
+        assert!(native_remote_route_allowed(true, 1, &tagged));
+        assert!(native_remote_route_allowed(true, 2, &base));
     }
 
     #[test]

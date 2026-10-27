@@ -374,7 +374,6 @@ impl DfLogicalPlanner {
             native_route_allowed
                 && !allow_query_fallback
                 && self.engine_state.experimental_native_promql()
-                && self.engine_state.in_process_region_transport()
                 && crate::promql::planner::native::native_promql_requested(&query_ctx),
         )
         .await

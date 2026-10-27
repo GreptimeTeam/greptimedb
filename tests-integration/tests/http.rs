@@ -1970,7 +1970,11 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
             format,
         )
         .unwrap()
-        .to_execution_plan(vec![(scan_plan.clone(), label_source.clone(), ordering)])
+        .to_execution_plan(vec![(
+            scan_plan.clone(),
+            promql::extension_plan::FusedInputBinding::Local(label_source.clone()),
+            ordering,
+        )])
         .unwrap();
         let context = "standalone raw SeriesScanExec replay";
         let mut actual = Vec::new();

@@ -212,6 +212,141 @@ async fn promql_query_as_batches(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn distributed_native_promql_rate_uses_fe_raw_fan_in() {
+    common_telemetry::init_default_ut_logging();
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    let wrapper: PhysicalPlanWrapperRef = observer.clone();
+    plugins.insert(wrapper);
+    let options = QueryOptions {
+        experimental_native_promql: true,
+        ..Default::default()
+    };
+    let distributed = crate::cluster::GreptimeDbClusterBuilder::new(
+        "distributed_native_promql_rate_uses_fe_raw_fan_in",
+    )
+    .await
+    .with_frontend_query_options(options, plugins)
+    .with_real_datanode_grpc_addr(true)
+    .with_datanode_tcp_transport(true)
+    .with_datanodes(2)
+    .build(false)
+    .await;
+    let instance = distributed.fe_instance().clone();
+
+    // Keep the fixtures together so each storage layout exercises the identical rows/query.
+    for (table, partition) in [
+        (
+            "distributed_rate",
+            "PARTITION ON COLUMNS (ts) (ts < '1970-01-01 00:05:00', ts >= '1970-01-01 00:05:00' AND ts < '1970-01-01 00:06:30', ts >= '1970-01-01 00:06:30')",
+        ),
+        (
+            "distributed_rate_tagged",
+            "PARTITION ON COLUMNS (host) (host < 'second', host >= 'second')",
+        ),
+        ("distributed_rate_unpartitioned", ""),
+    ] {
+        execute_all(
+            &instance,
+            &format!("CREATE TABLE {table} (host STRING, ts TIMESTAMP(3) NOT NULL, val DOUBLE, TIME INDEX (ts), PRIMARY KEY(host)) {partition} ENGINE=mito"),
+            QueryContext::arc(),
+        )
+        .await;
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES ('same', '1970-01-01 00:03:00', 180), ('same', '1970-01-01 00:04:00', 240), ('same', '1970-01-01 00:06:00', 360), ('same', '1970-01-01 00:07:00', 420), ('second-only', '1970-01-01 00:06:00', 360), ('second-only', '1970-01-01 00:07:00', 420)"),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let start = UNIX_EPOCH + Duration::from_secs(7 * 60);
+    let baseline_rpc_requests = distributed
+        .datanode_options
+        .iter()
+        .map(|options| {
+            let datanode_id = options.node_id.unwrap();
+            (
+                datanode_id,
+                distributed
+                    .datanode_rpc_stats(datanode_id)
+                    .unwrap()
+                    .requests(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (table, expected_regions) in [
+        ("distributed_rate", 3),
+        ("distributed_rate_tagged", 2),
+        ("distributed_rate_unpartitioned", 1),
+    ] {
+        observer.clear();
+        let query = format!("rate({table}[5m])");
+        let native = promql_query(
+            instance.clone(),
+            &query,
+            None,
+            native_query_context(true, 4),
+            start,
+            start,
+            Duration::from_secs(1),
+            Duration::from_secs(5 * 60),
+        )
+        .await
+        .unwrap();
+        let native_rows = native_result_rows(native).await;
+
+        if table == "distributed_rate" {
+            for (datanode_id, baseline) in &baseline_rpc_requests {
+                let actual = distributed
+                    .datanode_rpc_stats(*datanode_id)
+                    .unwrap()
+                    .requests();
+                assert!(
+                    actual > *baseline,
+                    "expected native FE query to reach datanode {datanode_id} over TCP: {actual} requests, baseline {baseline}"
+                );
+            }
+        }
+
+        let plan = observer.take();
+        let display = datafusion::physical_plan::displayable(plan.as_ref())
+            .indent(true)
+            .to_string();
+        assert!(display.contains("FusedSeriesExec"), "{display}");
+        assert!(
+            display.contains(&format!("NativeRawFanInExec: regions={expected_regions}")),
+            "{display}"
+        );
+        assert_eq!(plan.output_partitioning().partition_count(), 1);
+
+        // The explicitly legacy route is the oracle for each table's results.
+        let legacy = promql_query(
+            instance.clone(),
+            &query,
+            None,
+            native_query_context(false, 4),
+            start,
+            start,
+            Duration::from_secs(1),
+            Duration::from_secs(5 * 60),
+        )
+        .await
+        .unwrap();
+        let legacy_rows = native_result_rows(legacy).await;
+        assert_eq!(native_rows, legacy_rows);
+        assert_eq!(native_rows.len(), 2);
+        assert_eq!(native_rows[0].0, 420_000);
+        assert_eq!(native_rows[0].1, "same");
+        assert!((native_rows[0].2 - 1.0).abs() < 1e-10);
+        assert_eq!(native_rows[1].0, 420_000);
+        assert_eq!(native_rows[1].1, "second-only");
+        assert!((native_rows[1].2 - 0.3).abs() < 1e-10);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn histogram_fraction_binary_join_preserves_partitioned_rows() {
     common_telemetry::init_default_ut_logging();
 

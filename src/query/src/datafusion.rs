@@ -29,15 +29,18 @@ use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
 use common_function::function::FunctionContext;
 use common_function::function_factory::ScalarFunctionFactory;
+use common_query::request::RawSeriesRead;
 use common_query::{Output, OutputData, OutputMeta};
 use common_recordbatch::adapter::{RecordBatchStreamAdapter, RegionQueryStatCounters};
 use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
 use common_telemetry::tracing;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::analyze::AnalyzeExec;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
+use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion_common::ResolvedTableReference;
 use datafusion_expr::{
     AggregateUDF, DmlStatement, LogicalPlan as DfLogicalPlan, LogicalPlan, WindowUDF, WriteOp,
@@ -48,6 +51,7 @@ use futures_util::StreamExt;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::AnalyzeFormat;
+use store_api::storage::TimeSeriesDistribution;
 use table::TableRef;
 use table::requests::{DeleteRequest, InsertRequest};
 use table::table::scan::{REGION_SCAN_EXEC_NAME, RegionScanExec};
@@ -148,6 +152,120 @@ pub struct DatafusionQueryEngine {
 impl DatafusionQueryEngine {
     pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn exec_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        read: RawSeriesRead,
+    ) -> Result<SendableRecordBatchStream> {
+        let plan_error = |message: &str| -> crate::error::Error {
+            datafusion::error::DataFusionError::Plan(message.to_string()).into()
+        };
+        if read.version != 1 || read.fields.is_empty() {
+            return Err(plan_error("invalid raw-series read"));
+        }
+        let plan = match plan {
+            LogicalPlan::TableScan(mut table_scan) => {
+                if let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
+                    && let Some(provider) = source
+                        .table_provider
+                        .downcast_ref::<crate::dummy_catalog::DummyTableProvider>(
+                    )
+                {
+                    let provider = provider.clone_for_scan();
+                    provider.with_distribution(TimeSeriesDistribution::PerSeries);
+                    table_scan.source = Arc::new(DefaultTableSource::new(Arc::new(provider)));
+                }
+                LogicalPlan::TableScan(table_scan)
+            }
+            other => other,
+        };
+        let mut ctx = self.engine_context(query_ctx);
+        let physical = self.create_physical_plan(&mut ctx, &plan).await?;
+        // DataFusion's physical optimizer adds this scheduling-only wrapper to scans.
+        // Preserve the optimized scan itself for raw-series execution and binding.
+        let physical = physical
+            .downcast_ref::<CooperativeExec>()
+            .map(|cooperative| cooperative.input())
+            .unwrap_or(&physical);
+        let Some(scan) = physical.downcast_ref::<RegionScanExec>() else {
+            return Err(plan_error("raw-series read requires a direct region scan"));
+        };
+        let partitions =
+            table::table::scan::assign_partition_ranges(scan.get_partition_ranges(), 1);
+        let scan = Arc::new(
+            scan.with_new_partitions(partitions, 1)
+                .map_err(|e| datafusion::error::DataFusionError::External(e.into_inner()))?,
+        );
+        let fields = read
+            .fields
+            .iter()
+            .map(|field| field.name.clone())
+            .collect::<Vec<_>>();
+        let tags = read
+            .tags
+            .iter()
+            .map(|tag| tag.name.clone())
+            .collect::<Vec<_>>();
+        let Some((binding, series_scan)) =
+            scan.try_to_named_series_binding(&read.metric_name, &tags, &fields)?
+        else {
+            return Err(plan_error("region scanner refused raw-series binding"));
+        };
+        let metadata = binding.physical_metadata;
+        let expected_source = read
+            .bind(metadata.into())
+            .map_err(|error| plan_error(&error))?;
+        let source_matches = match (series_scan.label_source(), &expected_source) {
+            (
+                store_api::region_engine::RawLabelSource::PrimaryKey {
+                    metric_name: actual_metric,
+                    physical_metadata: actual_metadata,
+                    logical_tags: actual_tags,
+                },
+                store_api::region_engine::RawLabelSource::PrimaryKey {
+                    metric_name: expected_metric,
+                    physical_metadata: expected_metadata,
+                    logical_tags: expected_tags,
+                },
+            ) => {
+                actual_metric == expected_metric
+                    && actual_metadata.region_id == expected_metadata.region_id
+                    && actual_metadata.primary_key == expected_metadata.primary_key
+                    && actual_tags.len() == expected_tags.len()
+                    && actual_tags
+                        .iter()
+                        .zip(expected_tags.iter())
+                        .all(|(actual, expected)| {
+                            actual.column_id == expected.column_id && actual.name == expected.name
+                        })
+            }
+            _ => false,
+        };
+        if !source_matches {
+            return Err(plan_error("raw-series label binding mismatch"));
+        }
+        if read.fields.len() != series_scan.series_schema().fields.len()
+            || read
+                .fields
+                .iter()
+                .zip(series_scan.series_schema().fields.iter())
+                .any(|(expected, actual)| expected.name.as_str() != actual.name.as_ref())
+            || series_scan.raw_series_ordering() != datatypes::series::SeriesOrdering::KeyThenTime
+        {
+            return Err(plan_error("raw-series schema or ordering mismatch"));
+        }
+        let stream = series_scan.execute(0, ctx.build_task_ctx())?;
+        let stream = datafusion::physical_plan::coop::make_cooperative(stream);
+        Ok(Box::pin(
+            RecordBatchStreamAdapter::try_new_with_span(stream, Span::current())
+                .context(error::ConvertDfRecordBatchStreamSnafu)
+                .map_err(BoxedError::new)
+                .context(QueryExecutionSnafu)?,
+        ))
     }
 
     #[tracing::instrument(skip_all)]
@@ -521,6 +639,15 @@ impl QueryEngine for DatafusionQueryEngine {
             LogicalPlan::Dml(dml) => self.exec_dml_statement(dml, query_ctx).await,
             _ => self.exec_query_plan(plan, query_ctx).await,
         }
+    }
+
+    async fn execute_raw_series(
+        &self,
+        plan: LogicalPlan,
+        query_ctx: QueryContextRef,
+        read: RawSeriesRead,
+    ) -> Result<SendableRecordBatchStream> {
+        self.exec_raw_series(plan, query_ctx, read).await
     }
 
     /// Note in SQL queries, aggregate names are looked up using

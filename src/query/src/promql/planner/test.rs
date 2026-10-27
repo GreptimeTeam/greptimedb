@@ -1822,10 +1822,23 @@ async fn build_native_fused_plan_with_provider(
     table_provider: DfTableSourceProvider,
 ) -> LogicalPlan {
     let eval_stmt = build_eval_stmt(query);
+    let state = QueryEngineState::try_new_with_region_transport(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        true,
+        Plugins::default(),
+        QueryOptions::default(),
+    )
+    .unwrap();
     PromPlanner::stmt_to_plan_with_annotations(
         table_provider,
         &eval_stmt,
-        &build_query_engine_state(),
+        &state,
         None,
         native_fused,
     )
@@ -1982,7 +1995,7 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
 }
 
 #[tokio::test]
-async fn native_fused_time_partitioned_table_falls_back() {
+async fn native_fused_time_partitioned_table_keeps_existing_fallback() {
     let table_provider = native_engine_provider(vec![1]).await;
     let native =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", true, table_provider).await;

@@ -25,21 +25,21 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   `EmptyMetric` and `UnionDistinctOn`. `PromExtensionPlanner`
   (`src/promql/src/extension_plan/planner.rs`) maps the logical nodes to their
   execution plans.
-- **Experimental fused native-series POC (default off):** the query planner offers
-  a PromQL statement only when the engine's `in_process_region_transport` and
-  `QueryOptions::experimental_native_promql` options are enabled and the per-request
-  `query.experimental_native_promql` extension is true. Admission is limited to a
-  bare vector selector (parentheses allowed) and unary `rate`, `increase`,
-  `sum_over_time`, and `abs` calls over a selector; range selectors occur only
-  inside those calls. It is a standalone route: unsupported expressions and all
-  other cases use the existing planner. Accepted plans use process-local
-  `FusedSeries`, with ordinary `RecordBatch` output collected through DataFusion.
-  Scan N→Fused N retains region/partition parallelism, but this POC does not merge
-  one logical series across regions or scan partitions, guarantee canonical final
-  labels across them, or use global label-set occupancy; `NativeExecutor` retains
-  its partition-local `Emitted` state. Repartitioning redistributes rows but does not perform
-  semantic series merging. A future gather/repartition plus merge/finalize is
-  outside this POC. Metric scans retain the static `__table_id` predicate.
+- **Experimental fused native-series path (default off):** admission requires
+  `QueryOptions::experimental_native_promql` and the per-request
+  `query.experimental_native_promql` extension. It covers a bare vector selector
+  (parentheses allowed) and unary `rate`, `increase`, `sum_over_time`, and `abs`
+  over a selector; range selectors occur only inside those calls. A remote single-source
+  ordinary Mito base-table scan is admitted regardless of partition layout; metric-engine
+  remote admission is not implemented. Other expressions and unsupported sources use
+  the existing planner. For remote scans, `NativeRawFanInExec` gathers all ordinarily
+  selected regions into one frontend partition and merges raw samples by complete raw
+  identity and time before the native tree executes. Remote schema and label decoding are
+  validated strictly; an older datanode that ignores the control is rejected if its
+  schema mismatches. This is experimental, not production-default or performance-parity
+  work. Still missing are datanode prefix pushdown, frontend repartition/hash shuffle,
+  remote `NativeTree` serialization, and evaluated cross-region canonical merging beyond
+  local `Merge`; metric-engine remote admission also remains unsupported.
 - **Admission and SQL output:** the guards live in
   `src/query/src/promql/planner/native.rs`. Non-`Float64` fields, alternative
   (`or`) matchers and `rate`/`increase` on temporality-tagged tables keep the
@@ -58,12 +58,11 @@ operators. Statement-to-plan translation lives in `src/query/src/promql/`.
   serializer (`src/common/substrait/src/extension_serializer.rs`), the physical
   `PromExtensionPlanner`, and `check_extension_plan`
   (`src/query/src/dist_plan/commutativity.rs`). Process-local `FusedSeries` is
-  the exception: it is not serialized to a datanode. Its distributed placement
-  is restricted to a direct table scan, a bound metric name and trees that read
-  one series at a time. Native admission requires partition columns to be tags,
-  but region/partition-local execution does not merge a logical series across
-  regions or scan partitions; do not treat that placement guard as a global
-  series-merge or final-label guarantee.
+  not serialized to a datanode. Remote single-source ordinary Mito scans gather
+  selected regions and merge raw samples by complete identity and time before
+  native execution; this is not evaluated cross-region canonical merging beyond
+  local `Merge`. The existing in-process route still uses its region-local
+  partition policy and does not imply a global series or final-label guarantee.
 - A new logical node also needs its physical planner reachable from
   `DfQueryPlanner::create_physical_plan`, assembled in
   `src/query/src/query_engine/state.rs`.

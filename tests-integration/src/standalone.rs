@@ -77,6 +77,11 @@ impl GreptimeDbStandalone {
     pub fn fe_instance(&self) -> &Arc<Instance> {
         &self.frontend.instance
     }
+
+    /// Returns the region server used by this standalone datanode.
+    pub fn region_server(&self) -> datanode::region_server::RegionServer {
+        self.datanode.region_server()
+    }
 }
 
 pub struct GreptimeDbStandaloneBuilder {

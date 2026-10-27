@@ -14,8 +14,10 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
+mod raw_series_read;
 mod raw_series_request;
 
+pub use self::raw_series_read::{RawSeriesRead, RawSeriesReadColumn};
 pub use self::raw_series_request::{RawSeriesRequest, RawSeriesTag};
 
 use std::cell::Cell;

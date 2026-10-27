@@ -28,6 +28,14 @@ side effects live in `operator`.
   it.
 - DataFusion dependency changes follow the pinned-fork rule in the repo-wide
   invariants.
+- Experimental native PromQL placement is process-local: remote admission covers
+  single-source ordinary Mito base tables, with the frontend gathering ordinarily
+  selected regions into one partition and merging raw samples by complete raw
+  identity and time before native execution. Keep remote schema/label-decode
+  validation strict; mixed-version datanodes that ignore control are rejected on
+  schema mismatch. Datanode prefix pushdown, frontend repartition/hash shuffle,
+  remote `NativeTree` serialization, metric-engine remote admission, and evaluated
+  cross-region canonical merging beyond local `Merge` are not implemented.
 
 ## Testing
 

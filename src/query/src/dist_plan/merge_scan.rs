@@ -77,6 +77,7 @@ use crate::metrics::{MERGE_SCAN_ERRORS_TOTAL, MERGE_SCAN_POLL_ELAPSED, MERGE_SCA
 use crate::options::{FlowQueryExtensions, remote_dyn_filter_pushdown_enabled_from_extensions};
 use crate::query_engine::QueryEngineState;
 use crate::region_query::RegionQueryHandlerRef;
+use table::metadata::TableInfo;
 
 fn query_engine_state_from_task_context(context: &TaskContext) -> Option<Arc<QueryEngineState>> {
     context.session_config().get_extension()
@@ -218,7 +219,7 @@ fn json_fields_compatible(expected_field: &Field, actual_field: &Field) -> bool 
 /// Schemas carrying any `greptime.series.*` top-level marker instead use exact
 /// frame identity for all reserved top-level metadata and every field, including
 /// nested field metadata. This compares identity, not frame validity.
-fn validate_remote_schema(
+pub(super) fn validate_remote_schema(
     expected: &ArrowSchema,
     actual: &ArrowSchema,
     source: &str,
@@ -495,10 +496,10 @@ pub struct MergeScanExec {
     captured_remote_dyn_filters: Arc<Mutex<Vec<CapturedDynFilter>>>,
     target_partition: usize,
     enable_per_region_metrics: bool,
-    /// Optional route provenance captured by the distributed planner from the
-    /// same physical route that selected `regions`. Ordinary execution never
-    /// reads it, so `None` keeps every existing plan unchanged.
-    native_raw_route: Option<CaptureNativeRawRoute>,
+    /// Optional route provenance and authorized table snapshot captured by the
+    /// distributed planner from the same physical route that selected `regions`.
+    /// Ordinary execution never reads it, so `None` keeps every existing plan unchanged.
+    native_raw_route: Option<(CaptureNativeRawRoute, Arc<TableInfo>)>,
 }
 
 /// Borrowed handoff view over the ordinary plan state a native raw consumer
@@ -507,16 +508,13 @@ pub struct MergeScanExec {
 /// It borrows the existing [`MergeScanExec`] fields instead of duplicating them;
 /// the output schema is available from the public `ExecutionPlan::schema()` of
 /// the plan this source came from.
-// TODO(narthex): remove this allowance once the remote native PromQL planner
-// (#9670) consumes the captured route; this PR only captures it.
-#[allow(dead_code)]
 pub(crate) struct NativeRawSource<'a> {
     /// Frozen route provenance in ordinary region order.
     pub(crate) route: &'a CaptureNativeRawRoute,
+    /// Authorized table snapshot captured while planning this route.
+    pub(crate) table_info: &'a Arc<TableInfo>,
     /// The exact ordinary input logical plan sent to every region.
     pub(crate) plan: &'a LogicalPlan,
-    /// The table the ordinary plan scans.
-    pub(crate) table: &'a TableName,
     /// The handler that performs the region reads.
     pub(crate) region_query_handler: &'a RegionQueryHandlerRef,
     /// The query context of the ordinary execution.
@@ -613,8 +611,12 @@ impl MergeScanExec {
     ///
     /// The artifact is provenance for a native raw consumer; ordinary execution
     /// never reads it.
-    pub(crate) fn with_native_raw_route(mut self, native_raw_route: CaptureNativeRawRoute) -> Self {
-        self.native_raw_route = Some(native_raw_route);
+    pub(crate) fn with_native_raw_route(
+        mut self,
+        native_raw_route: CaptureNativeRawRoute,
+        table_info: Arc<TableInfo>,
+    ) -> Self {
+        self.native_raw_route = Some((native_raw_route, table_info));
         self
     }
 
@@ -626,19 +628,16 @@ impl MergeScanExec {
     /// filters, or a flow sink scan, keeps its ordinary path, so a consumer must
     /// fall back as well. An assigned producer id alone is not active intent,
     /// because the analyzer assigns one to every merge scan.
-    // TODO(narthex): remove this allowance once the remote native PromQL planner
-    // (#9670) consumes the captured route; this PR only captures it.
-    #[allow(dead_code)]
     pub(crate) fn native_raw_source(&self) -> Option<NativeRawSource<'_>> {
         if !self.captured_remote_dyn_filters.lock().unwrap().is_empty() || self.is_flow_sink_scan()
         {
             return None;
         }
-        let route = self.native_raw_route.as_ref()?;
+        let (route, table_info) = self.native_raw_route.as_ref()?;
         Some(NativeRawSource {
             route,
+            table_info,
             plan: &self.plan,
-            table: &self.table,
             region_query_handler: &self.region_query_handler,
             query_ctx: &self.query_ctx,
         })
@@ -1456,6 +1455,15 @@ mod tests {
         QueryId::from(Uuid::from_u128(value))
     }
 
+    fn native_raw_test_table_info() -> Arc<TableInfo> {
+        use table::metadata::TableInfoBuilder;
+        Arc::new(
+            TableInfoBuilder::new("table", table::metadata::TableMeta::empty())
+                .build()
+                .unwrap(),
+        )
+    }
+
     fn merge_scan_exec_with_sorted_input(
         region_count: u64,
         target_partition: usize,
@@ -1622,16 +1630,18 @@ mod tests {
     #[test]
     fn merge_scan_keeps_captured_native_raw_route() {
         let region_id = RegionId::new(1024, 1);
-        let exec =
-            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
+        let exec = merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(
+            CaptureNativeRawRoute {
                 targets: vec![(region_id, test_target(1))],
-            });
+            },
+            native_raw_test_table_info(),
+        );
 
         let source = exec.native_raw_source().unwrap();
         assert_eq!(vec![(region_id, test_target(1))], source.route.targets);
         // The bundle borrows the ordinary plan state, not a copy of it.
         assert_eq!(1, source.plan.schema().fields().len());
-        assert_eq!("table", source.table.table_name);
+        assert_eq!("table", source.table_info.name);
         assert_eq!(1, exec.partition_count());
     }
 
@@ -1645,9 +1655,12 @@ mod tests {
             Arc::new(TestRegionQueryHandler::default()),
             QueryContext::arc(),
         )
-        .with_native_raw_route(CaptureNativeRawRoute {
-            targets: vec![(region_id, test_target(1))],
-        });
+        .with_native_raw_route(
+            CaptureNativeRawRoute {
+                targets: vec![(region_id, test_target(1))],
+            },
+            native_raw_test_table_info(),
+        );
 
         assert!(exec.captured_remote_dyn_filters().is_empty());
         assert!(exec.native_raw_source().is_some());
@@ -1672,7 +1685,7 @@ mod tests {
         let exec = replaced.downcast_ref::<MergeScanExec>().unwrap();
         assert_eq!(
             vec![(region_id, test_target(1))],
-            exec.native_raw_route.as_ref().unwrap().targets
+            exec.native_raw_route.as_ref().unwrap().0.targets
         );
         assert_eq!(1, exec.captured_remote_dyn_filters().len());
         assert!(exec.native_raw_source().is_none());
@@ -1732,13 +1745,16 @@ mod tests {
                 handler.clone(),
                 1,
             )
-            .with_native_raw_route(CaptureNativeRawRoute {
-                targets: vec![
-                    (regions[2], test_target(7)),
-                    (regions[0], test_target(8)),
-                    (regions[1], test_target(9)),
-                ],
-            }),
+            .with_native_raw_route(
+                CaptureNativeRawRoute {
+                    targets: vec![
+                        (regions[2], test_target(7)),
+                        (regions[0], test_target(8)),
+                        (regions[1], test_target(9)),
+                    ],
+                },
+                native_raw_test_table_info(),
+            ),
         )
         .await
         .unwrap();
@@ -1764,9 +1780,12 @@ mod tests {
     fn merge_scan_with_new_children_preserves_native_raw_route() {
         let region_id = RegionId::new(1024, 1);
         let plan: Arc<dyn ExecutionPlan> = Arc::new(
-            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(CaptureNativeRawRoute {
-                targets: vec![(region_id, test_target(3))],
-            }),
+            merge_scan_exec_with_sorted_input(1, 1).with_native_raw_route(
+                CaptureNativeRawRoute {
+                    targets: vec![(region_id, test_target(3))],
+                },
+                native_raw_test_table_info(),
+            ),
         );
 
         let replaced = plan
@@ -1813,9 +1832,12 @@ mod tests {
             false,
         )
         .unwrap()
-        .with_native_raw_route(CaptureNativeRawRoute {
-            targets: vec![(region_id, test_target(1))],
-        });
+        .with_native_raw_route(
+            CaptureNativeRawRoute {
+                targets: vec![(region_id, test_target(1))],
+            },
+            native_raw_test_table_info(),
+        );
 
         assert!(exec.is_flow_sink_scan());
         assert!(exec.native_raw_source().is_none());
