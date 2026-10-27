@@ -249,23 +249,36 @@ impl FlatCompatBatch {
 
         // Encoded sparse tags are not materialized during compaction. Preserve
         // the projected JSON2 types: metadata only describes their logical shape.
-        let actual_schema: Vec<_> = actual_schema
-            .iter()
-            .filter(|(id, _)| actual.column_by_id(*id).unwrap().semantic_type != SemanticType::Tag)
-            .cloned()
-            .collect();
-        let expect_schema: Vec<_> = mapper
-            .batch_schema()
-            .iter()
-            .filter(|(id, _)| {
-                mapper.metadata().column_by_id(*id).unwrap().semantic_type != SemanticType::Tag
-            })
-            .cloned()
-            .collect();
+        let mut actual_fields = Vec::with_capacity(actual_schema.len());
+        for (id, data_type) in actual_schema {
+            let column = actual
+                .column_by_id(*id)
+                .with_context(|| CompatReaderSnafu {
+                    region_id: actual.region_id,
+                    reason: format!("column {id} is absent from region metadata"),
+                })?;
+            if column.semantic_type != SemanticType::Tag {
+                actual_fields.push((*id, data_type.clone()));
+            }
+        }
+        let mut expect_fields = Vec::with_capacity(mapper.batch_schema().len());
+        for (id, data_type) in mapper.batch_schema() {
+            let column =
+                mapper
+                    .metadata()
+                    .column_by_id(*id)
+                    .with_context(|| CompatReaderSnafu {
+                        region_id: mapper.metadata().region_id,
+                        reason: format!("column {id} is absent from region metadata"),
+                    })?;
+            if column.semantic_type != SemanticType::Tag {
+                expect_fields.push((*id, data_type.clone()));
+            }
+        }
 
         let (index_or_defaults, fields) = Self::compute_index_and_fields(
-            &actual_schema,
-            &expect_schema,
+            &actual_fields,
+            &expect_fields,
             mapper.metadata(),
             mapper.input_arrow_schema(true).fields(),
         )?;

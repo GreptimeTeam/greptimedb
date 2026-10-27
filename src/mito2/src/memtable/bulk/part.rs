@@ -672,7 +672,7 @@ impl BulkPartConverter {
             ensure!(
                 self.primary_key_codec.encoding() == PrimaryKeyEncoding::Sparse,
                 error::InvalidRecordBatchSnafu {
-                    reason: "metric sparse input requires the metric sparse destination layout",
+                    reason: "pre-encoded primary keys require a sparse destination layout",
                 }
             );
             // For sparse encoding, the primary key is already encoded in the KeyValue
