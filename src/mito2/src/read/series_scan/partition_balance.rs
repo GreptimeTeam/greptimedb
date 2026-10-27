@@ -169,6 +169,70 @@ mod tests {
         }
     }
 
+    /// A long tail of short series behind a few long ones, which is what a real source looks like.
+    ///
+    /// The costs are in ordinal order and the long series come first, the arrangement a count split
+    /// punishes hardest: it puts every long series on the first partition and leaves that partition
+    /// with well over half again the average while the others read short series only. Splitting by
+    /// cost keeps every partition within a few percent of the average.
+    #[test]
+    fn few_long_series_among_many_short_ones_are_balanced() {
+        const PARTITIONS: usize = 4;
+        const LONG_SERIES: usize = 8;
+        const SHORT_SERIES: usize = 2048;
+        const LONG_ROWS: usize = 1000;
+        const SHORT_ROWS: usize = 10;
+
+        let mut costs = vec![LONG_ROWS; LONG_SERIES];
+        costs.extend(std::iter::repeat_n(SHORT_ROWS, SHORT_SERIES));
+        let total = LONG_SERIES * LONG_ROWS + SHORT_SERIES * SHORT_ROWS;
+        let average = total as f64 / PARTITIONS as f64;
+
+        let per_partition = split(&costs, PARTITIONS);
+        assert_eq!(
+            total,
+            per_partition.iter().map(|(_, cost)| cost).sum::<usize>(),
+            "the split lost or duplicated cost"
+        );
+        // (a) The heaviest partition stays close to the average instead of taking every long series.
+        let heaviest = per_partition.iter().map(|(_, cost)| *cost).max().unwrap();
+        assert!(
+            heaviest as f64 / average <= 1.5,
+            "the heaviest partition carries {heaviest} against an average of {average}: {per_partition:?}"
+        );
+
+        // (b) The count split on the same input is unbalanced, which is what the weighting fixes.
+        let by_count: Vec<(Range<usize>, usize)> = (0..PARTITIONS)
+            .map(|partition| {
+                let range = count_range(costs.len(), partition, PARTITIONS);
+                let cost = costs[range.clone()].iter().sum();
+                (range, cost)
+            })
+            .collect();
+        let count_heaviest = by_count.iter().map(|(_, cost)| *cost).max().unwrap();
+        assert!(
+            count_heaviest as f64 / average > 1.5,
+            "the count split was expected to be unbalanced but carries {count_heaviest} against an \
+             average of {average}: {by_count:?}"
+        );
+        assert!(
+            heaviest < count_heaviest,
+            "the weighted split is no better than the count split: {per_partition:?} vs {by_count:?}"
+        );
+
+        // (c) The ranges still cover every ordinal exactly once, in order.
+        let mut next = 0;
+        for (range, _) in &per_partition {
+            assert_eq!(range.start, next, "gap or overlap in {per_partition:?}");
+            next = range.end;
+        }
+        assert_eq!(
+            costs.len(),
+            next,
+            "the last range ends early in {per_partition:?}"
+        );
+    }
+
     /// Balance holds even when one series dwarfs the rest.
     ///
     /// One long series cannot be divided, so whichever partition owns it carries that cost; the split

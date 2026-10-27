@@ -1673,6 +1673,7 @@ fn primary_key_at<'a>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::OpType;
@@ -1759,6 +1760,178 @@ mod tests {
             .expect("the distributor stalled on partitions the consumer was not reading");
         producer.await.unwrap();
         assert_eq!(NUM_BATCHES, received);
+    }
+
+    /// The row count of each record batch of each input [SeriesBatch].
+    ///
+    /// Three long series and seven short ones, which is the skew the greedy distributor exists for.
+    /// The first long series arrives as two record batches, which one [FlatSeriesBatch] may hold:
+    /// the divider promises only that a series is complete inside the batch, not that it fits in a
+    /// single record batch.
+    const SKEWED_BATCHES: [&[usize]; 10] = [
+        &[600, 400],
+        &[1000],
+        &[1000],
+        &[10],
+        &[10],
+        &[10],
+        &[10],
+        &[10],
+        &[10],
+        &[10],
+    ];
+
+    /// Batches of very different sizes are spread over the partitions by rows carried, not by turn.
+    ///
+    /// Round robin hands the long series to whichever partition comes next and lets the short ones
+    /// fill the partitions in turn, so the last partition can end up with little to read while the
+    /// others read long series. Sending to the least loaded partition instead lets the short ones
+    /// pile onto the partition the long ones left empty.
+    #[test]
+    fn sender_list_balances_skewed_batches_better_than_round_robin() {
+        const PARTITIONS: usize = 4;
+        const ROWS: usize = 3070;
+
+        // Capacity is the number of batches, so every `try_send` below succeeds and the test
+        // exercises the choice of partition rather than the back pressure path.
+        let (senders, receivers): (Vec<_>, Vec<_>) = (0..PARTITIONS)
+            .map(|_| {
+                let (sender, receiver) = mpsc::channel::<Result<SeriesBatch>>(SKEWED_BATCHES.len());
+                (Some(sender), receiver)
+            })
+            .unzip();
+        let mut senders = SenderList::new(senders);
+        for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
+            let batch = tagged_flat_series_batch(rows, tag as u64);
+            assert!(
+                senders
+                    .try_send_batch(SeriesBatch::Flat(batch))
+                    .unwrap()
+                    .is_none(),
+                "the distributor could not place batch {tag}"
+            );
+        }
+
+        // What each partition actually received: the tag of every batch and its inner row counts.
+        let mut received: BTreeMap<u64, (usize, Vec<usize>)> = BTreeMap::new();
+        let mut received_rows = vec![0usize; PARTITIONS];
+        let mut received_batches = vec![0usize; PARTITIONS];
+        for (partition, mut receiver) in receivers.into_iter().enumerate() {
+            while let Ok(result) = receiver.try_recv() {
+                let SeriesBatch::Flat(flat) = result.unwrap();
+                assert!(
+                    !flat.batches.is_empty(),
+                    "partition {partition} received an empty batch"
+                );
+                received_batches[partition] += 1;
+                let tags: Vec<u64> = flat.batches.iter().map(batch_tag).collect();
+                let tag = tags[0];
+                assert!(
+                    tags.iter().all(|other| *other == tag),
+                    "partition {partition} received one batch mixing tags {tags:?}"
+                );
+                let rows: Vec<usize> = flat.batches.iter().map(|batch| batch.num_rows()).collect();
+                received_rows[partition] += rows.iter().sum::<usize>();
+                assert!(
+                    received.insert(tag, (partition, rows)).is_none(),
+                    "batch {tag} was sent twice, so a series is split over partitions"
+                );
+            }
+        }
+
+        // (a) Every input batch reached exactly one partition, whole and un-split.
+        assert_eq!(
+            SKEWED_BATCHES.len(),
+            received.len(),
+            "an input batch was lost or merged: {received:?}"
+        );
+        assert_eq!(
+            SKEWED_BATCHES.len(),
+            received_batches.iter().sum::<usize>(),
+            "a batch was received twice: {received_batches:?}"
+        );
+        assert_eq!(
+            ROWS,
+            received_rows.iter().sum::<usize>(),
+            "the split lost or duplicated rows: {received_rows:?}"
+        );
+        for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
+            let (partition, received) = &received[&(tag as u64)];
+            assert_eq!(
+                *rows, received,
+                "batch {tag} arrived incomplete at partition {partition}, so a series is split"
+            );
+        }
+        assert_eq!(
+            received_rows, senders.sent_rows,
+            "the rows the distributor charged differ from the rows the partitions received"
+        );
+
+        // (c) The long series that arrived in two record batches stayed together: both parts came
+        // back inside one batch of one partition, which `received` holds only once per tag.
+        let (first_partition, first_rows) = &received[&0u64];
+        assert_eq!(
+            vec![600, 400],
+            *first_rows,
+            "the two record batches of one series did not reach partition {first_partition} together"
+        );
+
+        // (b) The same input under round robin: batch `idx` goes to partition `(idx + 1) % n`.
+        let mut round_robin_rows = vec![0usize; PARTITIONS];
+        for (idx, rows) in SKEWED_BATCHES.iter().enumerate() {
+            round_robin_rows[(idx + 1) % PARTITIONS] += rows.iter().sum::<usize>();
+        }
+        let greedy_spread = spread(&senders.sent_rows);
+        let round_robin_spread = spread(&round_robin_rows);
+        assert_eq!(
+            vec![1000, 1000, 1000, 70],
+            senders.sent_rows,
+            "each long series should take a partition and the short ones share the last"
+        );
+        assert!(
+            greedy_spread < round_robin_spread,
+            "the least loaded partition first split spread {senders_read:?} over {greedy_spread} rows, \
+             round robin spread {round_robin_rows:?} over {round_robin_spread} rows",
+            senders_read = senders.sent_rows
+        );
+    }
+
+    /// Returns the gap between the most loaded and the least loaded partition.
+    fn spread(rows: &[usize]) -> usize {
+        rows.iter().max().unwrap() - rows.iter().min().unwrap()
+    }
+
+    /// Builds a [FlatSeriesBatch] of one series, one record batch per entry in `rows`, tagged in
+    /// `field0` so the test can tell which input batch a partition received.
+    fn tagged_flat_series_batch(rows: &[usize], tag: u64) -> FlatSeriesBatch {
+        let series: &[u8] = b"series";
+        let batches: SmallVec<[RecordBatch; 4]> = rows
+            .iter()
+            .map(|rows| {
+                let primary_keys = vec![series; *rows];
+                let timestamps: Vec<i64> = (0..*rows as i64).collect();
+                let sequences: Vec<u64> = (0..*rows as u64).collect();
+                let op_types = vec![OpType::Put; *rows];
+                let fields = vec![tag; *rows];
+                new_test_record_batch(&primary_keys, &timestamps, &sequences, &op_types, &fields)
+            })
+            .collect();
+        FlatSeriesBatch { batches }
+    }
+
+    /// Returns the tag every row of a batch carries in `field0`.
+    fn batch_tag(batch: &RecordBatch) -> u64 {
+        let fields = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let tag = fields.value(0);
+        assert!(
+            fields.values().iter().all(|value| *value == tag),
+            "a received record batch mixes input batches"
+        );
+        tag as u64
     }
 
     fn new_test_record_batch(
