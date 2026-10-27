@@ -55,6 +55,7 @@ use pgwire::error::PgWireResult;
 
 use crate::postgres::copy_in::csv::CsvCodec;
 use crate::postgres::copy_in::influxdb::InfluxdbOptions;
+use crate::postgres::copy_in::otlp::OtlpOptions;
 
 /// A resolved COPY FROM STDIN format with its validated options.
 #[derive(Debug, Clone)]
@@ -67,6 +68,12 @@ pub(super) enum CopyFormat {
     /// pipeline the HTTP write endpoints use (one COPY statement is one
     /// ingestion request; streaming ingest is not supported).
     Influxdb(InfluxdbOptions),
+    /// Table-less, **binary** OTLP: one `ExportMetricsServiceRequest`,
+    /// `ExportTraceServiceRequest` or `ExportLogsServiceRequest`
+    /// protobuf message, buffered whole and completed through the
+    /// matching OTLP pipeline the OTLP/HTTP endpoints use. Advertises
+    /// wire format code 1.
+    Otlp(OtlpOptions),
 }
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY
