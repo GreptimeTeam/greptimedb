@@ -109,6 +109,18 @@ beyond it. The overflow index is `(1024 << schema) + 1` for non-negative schemas
 and `(1024 >> -schema) + 1` for negative schemas. Inputs beyond that index are
 rejected rather than clamped or merged into infinity.
 
+Ingestion and sampled Remote Read share histogram layout validation. An initial
+exponential span offset of `i32::MIN` is rejected on either side, including for
+empty spans; other negative initial offsets remain supported. For custom
+histograms with `N` bounds, bucket index `N` is the overflow bucket, and empty
+spans may end at `N + 1`. Span extents beyond that boundary are rejected.
+
+This tightens ingestion acceptance: these layouts were previously accepted on
+write but rejected by Remote Read. A validation failure rejects the entire
+Remote Write 2.0 request with HTTP 400 and all written-count headers set to zero,
+before any samples or histograms are persisted. Healthy samples in the same
+request are also rejected; senders that do not retry HTTP 400 can drop them.
+
 Exemplars and declared metric metadata are accepted on the wire but are not
 persisted by this feature.
 
@@ -136,12 +148,10 @@ their temporality labels and gauge hints; Remote Read does not accumulate them
 or reconstruct the original OTLP point.
 
 Malformed or wire-incompatible non-null stored histograms fail the entire
-`ReadRequest` with HTTP 500, including healthy queries in that request. This
-includes an initial exponential span offset of `i32::MIN` on either side,
-even for an empty span, and custom-span extents beyond `custom_values.len() + 1`.
-Empty custom spans may end at that one-past boundary. These read-specific
-restrictions do not tighten existing ingestion acceptance. Null histograms
-remain absent samples.
+`ReadRequest` with HTTP 500, including healthy queries in that request. Read
+validation remains necessary for older rows and typed inserts that bypass the
+histogram ingestion encoder. Incompatible stored rows are not repaired by the
+stricter ingestion checks. Null histograms remain absent samples.
 
 Custom-bucket interoperability is exercised against Prometheus revision
 `e471c7708c6b0b13e2050222bbd5a907b36f4113`, including `AtHistogram` and

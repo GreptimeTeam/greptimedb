@@ -313,7 +313,7 @@ pub fn decode_native_histogram_for_remote_read(
             .fail();
         }
     };
-    let positive_extent = validate_native_histogram_layout(
+    validate_native_histogram_layout(
         histogram.schema,
         histogram.zero_threshold,
         zero_count_is_zero,
@@ -333,34 +333,6 @@ pub fn decode_native_histogram_for_remote_read(
             negative_len,
         ),
     )?;
-    if histogram.schema == CUSTOM_BUCKETS_SCHEMA {
-        let max_extent = i32::try_from(histogram.custom_values.len())
-            .ok()
-            .and_then(|len| len.checked_add(1))
-            .ok_or_else(|| NativeHistogramError {
-                message: "custom native histogram extent overflows i32".to_string(),
-            })?;
-        ensure!(
-            positive_extent <= max_extent,
-            NativeHistogramSnafu {
-                message: "custom native histogram span extent exceeds custom_values plus the overflow bucket"
-            }
-        );
-    } else {
-        for (name, spans) in [
-            ("positive", &histogram.positive_spans),
-            ("negative", &histogram.negative_spans),
-        ] {
-            ensure!(
-                spans.first().is_none_or(|s| s.offset != i32::MIN),
-                NativeHistogramSnafu {
-                    message: format!(
-                        "native histogram {name} initial span offset i32::MIN is incompatible with Remote Read"
-                    )
-                }
-            );
-        }
-    }
     Ok(Some(histogram))
 }
 
@@ -411,8 +383,7 @@ fn validate_native_histogram(histogram: &Histogram, uses_float_counts: bool) -> 
                 .map(|s| (s.offset, s.length)),
             negative_buckets,
         ),
-    )?;
-    Ok(())
+    )
 }
 
 fn validate_native_histogram_layout(
@@ -422,7 +393,7 @@ fn validate_native_histogram_layout(
     custom_values: &[f64],
     positive: (impl ExactSizeIterator<Item = (i32, u32)> + Clone, usize),
     negative: (impl ExactSizeIterator<Item = (i32, u32)> + Clone, usize),
-) -> Result<i32> {
+) -> Result<()> {
     let exponential_overflow_index = validate_native_histogram_schema(schema)?;
     validate_native_histogram_custom_values(schema, custom_values)?;
     if schema == CUSTOM_BUCKETS_SCHEMA {
@@ -454,7 +425,23 @@ fn validate_native_histogram_layout(
         validate_native_histogram_spans("positive", positive.0, positive.1, bucket_index_range)?;
     validate_native_histogram_spans("negative", negative.0, negative.1, bucket_index_range)?;
 
-    Ok(positive_extent)
+    if schema == CUSTOM_BUCKETS_SCHEMA {
+        let max_extent =
+            bucket_index_range
+                .1
+                .checked_add(1)
+                .ok_or_else(|| NativeHistogramError {
+                    message: "custom native histogram extent overflows i32".to_string(),
+                })?;
+        ensure!(
+            positive_extent <= max_extent,
+            NativeHistogramSnafu {
+                message: "custom native histogram span extent exceeds custom_values plus the overflow bucket"
+            }
+        );
+    }
+
+    Ok(())
 }
 
 fn validate_native_histogram_schema(schema: i32) -> Result<Option<i32>> {
@@ -540,6 +527,14 @@ fn validate_native_histogram_spans(
                     "native histogram {name} span {} has negative offset {}",
                     span_index + 1,
                     offset
+                )
+            }
+        );
+        ensure!(
+            span_index != 0 || offset != i32::MIN,
+            NativeHistogramSnafu {
+                message: format!(
+                    "native histogram {name} initial span offset i32::MIN is incompatible with Remote Read"
                 )
             }
         );
@@ -1320,67 +1315,115 @@ mod tests {
     }
 
     #[test]
-    fn native_histogram_remote_read_wire_only_span_restrictions() {
+    fn native_histogram_remote_read_span_rules_match_ingestion() {
         for float in [false, true] {
             let custom = Histogram {
                 schema: CUSTOM_BUCKETS_SCHEMA,
                 custom_values: vec![1.0, 2.0],
                 ..empty_histogram(float)
             };
-            for (offsets, accepted) in [
-                (vec![-1], false),
-                (vec![10], false),
-                (vec![2, 2], false),
-                (vec![3], true),
-                (vec![2, 1], true),
-            ] {
-                let lengths = vec![0; offsets.len()];
-                let write = Histogram {
-                    positive_spans: offsets
-                        .iter()
-                        .map(|&offset| BucketSpan { offset, length: 0 })
-                        .collect(),
-                    ..custom.clone()
-                };
-                assert_eq!(encode_native_histogram(&write).is_ok(), offsets[0] >= 0);
-                let array = modified(
-                    &custom,
-                    &[
-                        (POSITIVE_SPAN_OFFSETS_FIELD, i32_list_value(offsets)),
-                        (POSITIVE_SPAN_LENGTHS_FIELD, i32_list_value(lengths)),
-                    ],
-                );
-                assert_eq!(
-                    decode_native_histogram_for_remote_read(&array, 0, 0).is_ok(),
-                    accepted
-                );
+            for custom_values in [vec![], custom.custom_values.clone()] {
+                let overflow_index = custom_values.len() as i32;
+                for (spans, accepted) in [
+                    (vec![(-1, 0)], false),
+                    (vec![(overflow_index + 2, 0)], false),
+                    (vec![(overflow_index, 0), (2, 0)], false),
+                    (vec![(overflow_index + 1, 0)], true),
+                    (vec![(overflow_index, 0), (1, 0)], true),
+                    (vec![(overflow_index, 1)], true),
+                    (vec![(overflow_index + 1, 1)], false),
+                ] {
+                    let bucket_count = spans.iter().map(|(_, length)| *length).sum::<u32>();
+                    let base = Histogram {
+                        custom_values: custom_values.clone(),
+                        positive_spans: vec![BucketSpan {
+                            offset: 0,
+                            length: bucket_count,
+                        }],
+                        positive_counts: if float {
+                            vec![0.0; bucket_count as usize]
+                        } else {
+                            vec![]
+                        },
+                        positive_deltas: if float {
+                            vec![]
+                        } else {
+                            vec![0; bucket_count as usize]
+                        },
+                        ..custom.clone()
+                    };
+                    let write = Histogram {
+                        positive_spans: spans
+                            .iter()
+                            .map(|&(offset, length)| BucketSpan { offset, length })
+                            .collect(),
+                        ..base.clone()
+                    };
+                    assert_eq!(encode_native_histogram(&write).is_ok(), accepted);
+                    let array = modified(
+                        &base,
+                        &[
+                            (
+                                POSITIVE_SPAN_OFFSETS_FIELD,
+                                i32_list_value(spans.iter().map(|s| s.0)),
+                            ),
+                            (
+                                POSITIVE_SPAN_LENGTHS_FIELD,
+                                i32_list_value(spans.iter().map(|s| s.1 as i32)),
+                            ),
+                        ],
+                    );
+                    assert_eq!(
+                        decode_native_histogram_for_remote_read(&array, 0, 0).is_ok(),
+                        accepted
+                    );
+                }
             }
             for negative in [false, true] {
                 for length in [0, 1] {
-                    let mut write = empty_histogram(float);
-                    let spans = vec![BucketSpan {
-                        offset: i32::MIN,
-                        length,
-                    }];
+                    let mut base = empty_histogram(float);
+                    let spans = vec![BucketSpan { offset: 0, length }];
                     if negative {
-                        write.negative_spans = spans;
+                        base.negative_spans = spans;
                     } else {
-                        write.positive_spans = spans;
+                        base.positive_spans = spans;
                     }
                     if length == 1 {
                         if float {
                             if negative {
-                                write.negative_counts = vec![0.0];
+                                base.negative_counts = vec![0.0];
                             } else {
-                                write.positive_counts = vec![0.0];
+                                base.positive_counts = vec![0.0];
                             }
                         } else if negative {
-                            write.negative_deltas = vec![0];
+                            base.negative_deltas = vec![0];
                         } else {
-                            write.positive_deltas = vec![0];
+                            base.positive_deltas = vec![0];
                         }
                     }
-                    assert_invalid(&stored(&write), "initial span offset i32::MIN");
+                    for offset in [i32::MIN, i32::MIN + 1, -2, 0] {
+                        let mut write = base.clone();
+                        let offset_field = if negative {
+                            write.negative_spans[0].offset = offset;
+                            NEGATIVE_SPAN_OFFSETS_FIELD
+                        } else {
+                            write.positive_spans[0].offset = offset;
+                            POSITIVE_SPAN_OFFSETS_FIELD
+                        };
+                        if offset == i32::MIN {
+                            assert!(encode_native_histogram(&write).is_err());
+                            assert_invalid(
+                                &modified(&base, &[(offset_field, i32_list_value([offset]))]),
+                                "initial span offset i32::MIN",
+                            );
+                        } else {
+                            assert!(
+                                decode_native_histogram_for_remote_read(&stored(&write), 0, 0)
+                                    .unwrap()
+                                    .is_some()
+                            );
+                        }
+                    }
                 }
             }
             let base = empty_histogram(float);
