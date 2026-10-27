@@ -1652,6 +1652,7 @@ impl ErrorExt for Error {
         match self {
             PartitionExprVersionMismatch { .. }
             | RegionNotFound { .. }
+            | RegionClosed { .. }
             | RejectWriteInStaging { .. }
             | RegionState {
                 state: RegionRoleState::Follower,
@@ -1788,6 +1789,21 @@ mod tests {
                 RegionNotFoundSnafu { region_id }.build(),
                 StatusCode::RegionNotFound,
                 RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionClosedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (
+                RegionDroppedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::NonRetryable,
+            ),
+            (
+                RegionTruncatedSnafu { region_id }.build(),
+                StatusCode::Cancelled,
+                RetryHint::NonRetryable,
             ),
         ] {
             assert_eq!(error.status_code(), status);
