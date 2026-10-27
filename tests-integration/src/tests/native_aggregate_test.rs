@@ -597,6 +597,7 @@ async fn native_hybrid_binary_05_06_08() {
     );
 
     check_hybrid_binary_cases(&instance, &observer).await;
+    check_hybrid_range_gaps(&instance, &observer).await;
     let subquery = format!(
         "max_over_time((rate({COUNTER_TABLE}[5m]) / on(job, instance) rate({COUNTER_RHS_TABLE}[5m]))[2m:1m])"
     );
@@ -625,6 +626,118 @@ async fn native_hybrid_binary_05_06_08() {
         &format!("subquery fallback `{subquery}`"),
     );
     check_reduced_label_matching(&instance, &observer).await;
+}
+
+async fn check_hybrid_range_gaps(instance: &Arc<Instance>, observer: &NativePlanObserver) {
+    const L: &str = "native_range_gap_left";
+    const R: &str = "native_range_gap_right";
+    for table in [L, R] {
+        execute_sql(instance, &create_table_sql(table)).await;
+    }
+    execute_sql(
+        instance,
+        &format!(
+            "INSERT INTO {L} (ts,job,instance,v) VALUES ({},'a','x',100), ({},'a','x',160), ({},'a','x',190)",
+            BASE_SECS * 1000,
+            (BASE_SECS + 30) * 1000,
+            (BASE_SECS + 60) * 1000
+        ),
+    )
+    .await;
+    execute_sql(
+        instance,
+        &format!(
+            "INSERT INTO {R} (ts,job,instance,v) VALUES ({},'a','x',100), ({},'a','x',110), ({},'a','x',140)",
+            BASE_SECS * 1000,
+            (BASE_SECS + 30) * 1000,
+            (BASE_SECS + 60) * 1000
+        ),
+    )
+    .await;
+    let promql = format!("rate({L}[2m]) / on(job,instance) rate({R}[2m])");
+    // At the second evaluation, both series' samples are outside the 2m lookback window.
+    let query = format!(
+        "TQL EVAL ({}, {}, '210s') {promql}",
+        BASE_SECS + 30,
+        BASE_SECS + 240
+    );
+    let eval = |native: bool| {
+        let query = query.clone();
+        async move {
+            let mut ctx = QueryContext::with_db_name(None);
+            ctx.set_extension(QUERY_PARALLELISM_HINT, SCAN_PARTITIONS.to_string());
+            ctx.set_extension(NATIVE_PROMQL_EXTENSION_KEY, native.to_string());
+            let out = instance
+                .do_query(&query, Arc::new(ctx))
+                .await
+                .remove(0)
+                .unwrap();
+            let batches = match out.data {
+                OutputData::Stream(s) => collect_batches(s).await.unwrap(),
+                OutputData::RecordBatches(b) => b,
+                other => panic!("unexpected: {other:?}"),
+            };
+            QueryResult::from_batches(&batches, &query)
+        }
+    };
+    let legacy = eval(false).await;
+    let mark = observer.mark();
+    let native = eval(true).await;
+    assert_rows(
+        &native.rows,
+        &legacy.rows,
+        &format!("range lookback legacy parity {query}"),
+    );
+    assert_eq!(
+        1,
+        native.rows.len(),
+        "the series is present at the first evaluation and absent beyond lookback at the second"
+    );
+    assert_eq!(
+        vec![(BASE_SECS + 30) * 1000],
+        native
+            .rows
+            .iter()
+            .map(|row| row.ts_millis)
+            .collect::<Vec<_>>(),
+        "complete timestamps",
+    );
+    assert!(
+        native.rows.iter().zip([6.0]).all(|(row, want)| row
+            .labels
+            .get("job")
+            .is_some_and(|v| v == "a")
+            && close_enough(row.value.unwrap(), want)),
+        "hand-derived ratio and expired lookback gap: {:#?}",
+        native.rows
+    );
+    let plans = observer.since(mark);
+    assert_eq!(
+        2,
+        NativeCapture::from_plans(&plans).fused.len(),
+        "hybrid rate plans"
+    );
+    let frontend = plans
+        .iter()
+        .find(|plan| find_binary_join(plan).is_some())
+        .expect("range hybrid frontend Join");
+    assert!(
+        find_binary_join(frontend)
+            .unwrap()
+            .children()
+            .iter()
+            .all(|branch| contains_execution_node(branch, "MergeScanExec")),
+        "range hybrid remote boundaries"
+    );
+    assert_eq!(
+        2,
+        observer
+            .since(mark)
+            .iter()
+            .filter(|p| contains_execution_node(p, "SeriesScanExec"))
+            .count(),
+        "native scan plans"
+    );
 }
 
 async fn check_reduced_label_matching(instance: &Arc<Instance>, observer: &NativePlanObserver) {

@@ -519,19 +519,16 @@ fn native_operand_wrapper_child(plan: &LogicalPlan) -> Option<&LogicalPlan> {
     }
 }
 
-fn native_operand_fused(plan: &LogicalPlan) -> Option<&LogicalPlan> {
+fn is_native_operand_subtree(plan: &LogicalPlan) -> bool {
     let mut node = plan;
     while let Some(child) = native_operand_wrapper_child(node) {
         node = child;
     }
-    (is_fused_series_plan(node) && matches!(node.inputs().as_slice(), [LogicalPlan::TableScan(_)]))
-        .then_some(node)
+    is_fused_series_plan(node) && matches!(node.inputs().as_slice(), [LogicalPlan::TableScan(_)])
 }
 
-fn is_native_operand_subtree(plan: &LogicalPlan) -> bool {
-    native_operand_fused(plan).is_some()
-}
-
+// The wrapper path is bounded to planner-generated native operands; FE binding has already kept
+// each unique operand subtree on its left/right side of the binary join.
 fn rewrite_hybrid_binary_operands(plan: LogicalPlan, transport: bool) -> DfResult<LogicalPlan> {
     plan.transform_up(|plan| {
         let LogicalPlan::Join(join) = &plan else {
