@@ -60,8 +60,9 @@ pub(crate) mod handler;
 pub(crate) mod task_tracker;
 
 /// Returns the epoch of this process: its start time, or one more than the epoch the metasrv has
-/// recorded for the node if that is not lower, as after a restart on a slower clock or after the
-/// clock stepped back. The metasrv fences an epoch lower than the recorded one.
+/// recorded for the node when the record is not lower than the start time, as after a restart on
+/// a slower clock or after the clock stepped back. The metasrv fences an epoch lower than the
+/// recorded one.
 async fn node_epoch_above_record(
     kv_backend: &KvBackendRef,
     node_id: u64,
@@ -508,10 +509,12 @@ mod tests {
     use super::*;
     use crate::tests::mock_region_server;
 
+    const NODE_ID: u64 = 7;
+
     async fn kv_backend_with_record(node_epoch: Option<u64>) -> KvBackendRef {
         let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::new());
         if let Some(node_epoch) = node_epoch {
-            let key = DatanodeEpochKey::new(0).to_bytes();
+            let key = DatanodeEpochKey::new(NODE_ID).to_bytes();
             let value = DatanodeEpochValue { node_epoch }
                 .try_as_raw_value()
                 .unwrap();
@@ -525,12 +528,12 @@ mod tests {
     async fn test_node_epoch_above_record() {
         for (record, expected) in [
             (None, 1000),
-            (Some(999), 1000),
+            (Some(500), 1000),
             (Some(1000), 1001),
             (Some(5000), 5001),
         ] {
             let kv_backend = kv_backend_with_record(record).await;
-            let node_epoch = node_epoch_above_record(&kv_backend, 0, 1000).await;
+            let node_epoch = node_epoch_above_record(&kv_backend, NODE_ID, 1000).await;
             assert_eq!(node_epoch.unwrap(), expected);
         }
     }
@@ -541,11 +544,11 @@ mod tests {
         let record = now + 60_000;
         let task = HeartbeatTask::try_new(
             &DatanodeOptions {
-                node_id: Some(0),
+                node_id: Some(NODE_ID),
                 ..Default::default()
             },
             mock_region_server(),
-            Arc::new(MetaClientBuilder::datanode_default_options(0).build()),
+            Arc::new(MetaClientBuilder::datanode_default_options(NODE_ID).build()),
             kv_backend_with_record(Some(record)).await,
             Arc::new(DummyCacheInvalidator),
             Plugins::default(),
