@@ -3418,6 +3418,8 @@ max_in_flight_write_bytes = "0KiB"
 write_bytes_exhausted_policy = "wait"
 init_regions_in_background = false
 init_regions_parallelism = 16
+max_concurrent_queries = 0
+concurrent_query_limiter_timeout = "100ms"
 heartbeat_env_vars = []
 
 [http]
@@ -4260,6 +4262,27 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         ],
         ..Default::default()
     });
+    let large = (1u64 << 53) + 1;
+    write_request.timeseries[1].histograms.extend([
+        Histogram {
+            count: Some(Count::CountInt(large)),
+            zero_count: Some(ZeroCount::ZeroCountInt(large)),
+            timestamp: 5000,
+            ..Default::default()
+        },
+        Histogram {
+            count: Some(Count::CountInt(0)),
+            sum: f64::from_bits(0x7ff0_0000_0000_0002),
+            timestamp: 6000,
+            ..Default::default()
+        },
+        Histogram {
+            count: Some(Count::CountFloat(0.0)),
+            sum: f64::from_bits(0x7ff8_0000_0000_0123),
+            timestamp: 7000,
+            ..Default::default()
+        },
+    ]);
     let serialized_request = write_request.encode_to_vec();
     let compressed_request =
         prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
@@ -4276,7 +4299,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let headers = res.headers();
-    assert_remote_write_v2_written_headers_with_histograms(&headers, "1", "2");
+    assert_remote_write_v2_written_headers_with_histograms(&headers, "1", "5");
     assert!(res.text().await.is_empty());
 
     validate_data(
@@ -4287,7 +4310,7 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     )
     .await;
 
-    let histogram_sql = "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;";
+    let histogram_sql = "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds where greptime_timestamp < 5000::TIMESTAMP order by greptime_timestamp;";
     let histogram_rows = "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]";
     validate_data(
         "prometheus_remote_write_v2_native_histogram_rows",
@@ -4296,6 +4319,76 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
         histogram_rows,
     )
     .await;
+
+    for flushed in [false, true] {
+        if flushed {
+            flush_table(&client, "remote_write_v2_latency_seconds").await;
+        }
+        for accepted_response_types in [vec![], vec![0], vec![1, 0]] {
+            let query = |name: &str| Query {
+                start_timestamp_ms: 0,
+                end_timestamp_ms: 10_000,
+                matchers: vec![LabelMatcher {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: name.to_string(),
+                    r#type: 0,
+                }],
+                ..Default::default()
+            };
+            let request = ReadRequest {
+                queries: vec![
+                    query("remote_write_v2_sample_seconds"),
+                    query("missing_native_histogram"),
+                    query("remote_write_v2_latency_seconds"),
+                ],
+                accepted_response_types,
+            };
+            let response = client
+                .post("/v1/prometheus/read")
+                .body(prom_store::snappy_compress(&request.encode_to_vec()).unwrap())
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["content-type"], "application/x-protobuf");
+            assert_eq!(response.headers()["content-encoding"], "snappy");
+            let body = prom_store::snappy_decompress(&response.bytes().await).unwrap();
+            let response = ReadResponse::decode(body.as_slice()).unwrap();
+            assert_eq!(response.results.len(), 3);
+            assert_eq!(
+                response.results[0].timeseries[0].samples,
+                vec![Sample {
+                    value: 5.0,
+                    timestamp: 2500
+                }]
+            );
+            assert!(response.results[1].timeseries.is_empty());
+            let series = &response.results[2].timeseries[0];
+            assert!(series.samples.is_empty());
+            assert_eq!(
+                series
+                    .histograms
+                    .iter()
+                    .map(|h| h.timestamp)
+                    .collect::<Vec<_>>(),
+                vec![3000, 4000, 5000, 6000, 7000]
+            );
+            assert_eq!(series.histograms[0].positive_deltas, vec![1, 2, -1]);
+            assert_eq!(series.histograms[0].negative_deltas, vec![1]);
+            assert_eq!(series.histograms[1].positive_counts, vec![2.0, 3.5]);
+            assert_eq!(
+                series.histograms[2].count,
+                Some(api::prom_store::remote::histogram::Count::CountInt(large))
+            );
+            assert_eq!(
+                series.histograms[2].zero_count,
+                Some(api::prom_store::remote::histogram::ZeroCount::ZeroCountInt(
+                    large
+                ))
+            );
+            assert_eq!(series.histograms[3].sum.to_bits(), 0x7ff0_0000_0000_0002);
+            assert_eq!(series.histograms[4].sum.to_bits(), 0x7ff8_0000_0000_0123);
+        }
+    }
 
     // The native histogram column is a struct of nested lists, so its SST
     // encoding differs from its memtable representation.
@@ -9131,9 +9224,17 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         )]
     };
 
-    let (app, mut guard) =
-        setup_test_http_app_with_frontend(store_type, "test_otlp_exponential_histogram").await;
-    let client = TestClient::new(app).await;
+    let standalone = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(
+        "test_otlp_exponential_histogram",
+    )
+    .with_default_store_type(store_type)
+    .build()
+    .await;
+    let server = build_test_prom_server(standalone.fe_instance().clone(), false, None)
+        .with_otlp_handler(standalone.fe_instance().clone(), true)
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    let mut guard = standalone.guard;
     let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
     assert_eq!(StatusCode::OK, res.status());
     let response = ExportMetricsServiceResponse::decode(res.bytes().await).unwrap();
@@ -9155,6 +9256,42 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         "[[1]]",
     )
     .await;
+
+    for flushed in [false, true] {
+        if flushed {
+            flush_table(&client, "otlp_exponential_latency").await;
+        }
+        let response = post_remote_read(
+            &client,
+            vec![Query {
+                start_timestamp_ms: 0,
+                end_timestamp_ms: 4000,
+                matchers: vec![LabelMatcher {
+                    name: "__name__".to_string(),
+                    value: "otlp_exponential_latency".to_string(),
+                    r#type: 0,
+                }],
+                ..Default::default()
+            }],
+        )
+        .await;
+        let histogram = &response.results[0].timeseries[0].histograms[0];
+        assert_eq!(histogram.timestamp, 3000);
+        assert_eq!(
+            histogram.count,
+            Some(api::prom_store::remote::histogram::Count::CountInt(4))
+        );
+        assert_eq!(
+            histogram.zero_count,
+            Some(api::prom_store::remote::histogram::ZeroCount::ZeroCountInt(
+                1
+            ))
+        );
+        assert_eq!(histogram.positive_deltas, vec![1, 1]);
+        assert_eq!(histogram.positive_spans[0].offset, 0);
+        assert_eq!(histogram.reset_hint, 0);
+        assert_eq!(histogram.sum, 8.0);
+    }
 
     for query in [
         "histogram_count(otlp_exponential_latency)",

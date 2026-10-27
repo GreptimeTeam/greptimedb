@@ -2838,6 +2838,32 @@ WITH(
                     .remove(0)
                     .unwrap();
             }
+            let series =
+                native_histogram_remote_read(&instance, "delta_distribution", ctx.clone()).await;
+            assert_eq!(series.len(), 1);
+            assert!(
+                series[0]
+                    .labels
+                    .iter()
+                    .any(|l| l.name == "otlp_aggregation_temporality" && l.value == "delta")
+            );
+            assert_eq!(series[0].histograms.len(), 3);
+            for (histogram, (timestamp, count)) in
+                series[0]
+                    .histograms
+                    .iter()
+                    .zip([(60_000, 10), (120_000, 20), (180_000, 15)])
+            {
+                assert_eq!(histogram.timestamp, timestamp);
+                assert_eq!(
+                    histogram.count,
+                    Some(api::prom_store::remote::histogram::Count::CountInt(count))
+                );
+                assert_eq!(histogram.positive_deltas, vec![count as i64]);
+                assert_eq!(histogram.positive_spans[0].offset, 1);
+                assert_eq!(histogram.sum, count as f64 * 1.5);
+                assert_eq!(histogram.reset_hint, 3);
+            }
             for (expression, expected) in [
                 (
                     "histogram_count(sum_over_time(delta_distribution[3m]))",
@@ -3139,6 +3165,42 @@ WITH(
         }
     }
 
+    async fn native_histogram_remote_read(
+        instance: &Arc<Instance>,
+        table: &str,
+        ctx: Arc<QueryContext>,
+    ) -> Vec<api::prom_store::remote::TimeSeries> {
+        use api::prom_store::remote::{LabelMatcher, Query, ReadRequest, ReadResponse};
+        use prost::Message;
+        use servers::query_handler::PromStoreProtocolHandler;
+
+        let response = instance
+            .read(
+                ReadRequest {
+                    queries: vec![Query {
+                        start_timestamp_ms: 0,
+                        end_timestamp_ms: 200_000,
+                        matchers: vec![LabelMatcher {
+                            name: "__name__".to_string(),
+                            value: table.to_string(),
+                            r#type: 0,
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ctx,
+            )
+            .await
+            .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        ReadResponse::decode(body.as_slice())
+            .unwrap()
+            .results
+            .remove(0)
+            .timeseries
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_otlp_delta_exponential_storage_precision_and_replacement() {
         use datatypes::arrow::datatypes::Int64Type;
@@ -3194,6 +3256,24 @@ WITH(
                             .remove(0)
                             .unwrap();
                     }
+                    let series =
+                        native_histogram_remote_read(instance, "interval", ctx.clone()).await;
+                    assert_eq!(series.len(), 1);
+                    assert!(series[0].labels.iter().any(|l| l.name == "otlp_aggregation_temporality" && l.value == "delta"));
+                    let histogram = &series[0].histograms[0];
+                    assert_eq!(histogram.timestamp, 60_000);
+                    assert_eq!(
+                        histogram.count,
+                        Some(api::prom_store::remote::histogram::Count::CountInt(count))
+                    );
+                    assert_eq!(
+                        histogram.zero_count,
+                        Some(api::prom_store::remote::histogram::ZeroCount::ZeroCountInt(
+                            count
+                        ))
+                    );
+                    assert_eq!(histogram.reset_hint, 3);
+                    assert_eq!(histogram.sum, 0.0);
                     let output = instance
                         .do_query(
                             "SELECT greptime_timestamp,greptime_native_histogram FROM interval",

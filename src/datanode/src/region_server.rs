@@ -49,7 +49,7 @@ use common_query::OutputData;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_runtime::Runtime;
+use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -250,11 +250,10 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return common_runtime::spawn_ingest(async move {
+            let task = common_runtime::spawn_ingest(async move {
                 inner.handle_request(region_id, request).await
-            })
-            .await
-            .context(RuntimeJoinSnafu { request_type })?;
+            });
+            return join_ingest_task(task, request_type).await?;
         }
 
         self.inner.handle_request(region_id, request).await
@@ -472,6 +471,23 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`.
+    pub fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_region_role_with_lease(region_id, role, deadline)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
@@ -679,14 +695,13 @@ impl RegionServer {
             "RegionServer::handle_metric_batch_puts",
             batch_size = batch_size
         ));
-        let results = common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             metric_engine
                 .put_regions_batch(put_requests)
                 .trace(span)
                 .await
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })?;
+        });
+        let results = join_ingest_task(task, request_type).await?;
         let mut response = BatchRegionResponse {
             affected_rows: 0,
             extensions: HashMap::new(),
@@ -746,7 +761,7 @@ impl RegionServer {
             .collect();
         let started = Instant::now();
         let tracing_context = TracingContext::from_current_span();
-        common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             let mut pending = engine
                 .handle_batch_put_requests(puts)
                 .into_iter()
@@ -800,10 +815,8 @@ impl RegionServer {
             }
             response.failures.sort_unstable_by_key(|(index, _)| *index);
             response
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })
-        .map(Either::Left)
+        });
+        join_ingest_task(task, request_type).await.map(Either::Left)
     }
 
     /// Returns the mito engine when there are at least two requests, every one a put into a ready
@@ -2290,6 +2303,22 @@ fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usi
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
         .with_label_values(&[engine, status_code.as_ref()])
         .inc_by(count as u64);
+}
+
+/// Awaits an ingest task without treating a join failure as an entry-level write result.
+async fn join_ingest_task<T>(task: JoinHandle<T>, request_type: &'static str) -> Result<T> {
+    task.await
+        .inspect_err(|error| {
+            let reason = if error.is_panic() {
+                "panic"
+            } else {
+                "cancelled"
+            };
+            crate::metrics::INGEST_TASK_FAILURES_TOTAL
+                .with_label_values(&[request_type, reason])
+                .inc();
+        })
+        .context(RuntimeJoinSnafu { request_type })
 }
 
 /// Records the result of `count` ingest requests answered by one response: the rows they

@@ -85,6 +85,15 @@ lazy_static! {
     )
     .unwrap();
 
+    /// Ingest-task join failures, labeled by request type and reason (`panic` or `cancelled`).
+    /// Counts tasks, not write entries: a failed task can leave entry outcomes unknown.
+    pub static ref INGEST_TASK_FAILURES_TOTAL: IntCounterVec = register_int_counter_vec!(
+        "greptime_datanode_ingest_task_failures_total",
+        "Ingest-task join failures, not failed write entries",
+        &[REGION_REQUEST_TYPE, "reason"]
+    )
+    .unwrap();
+
     /// Failed region open attempts, including individual and batch requests.
     /// Counts every request in an engine group when no individual results are available.
     /// Failed retries count separately; explicitly ignored missing regions do not count.
