@@ -23,6 +23,8 @@ use api::v1::region::{StrictWindow, compact_request};
 use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
+use common_error::ext::ErrorExt;
+use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{Expr, col, lit};
@@ -34,7 +36,7 @@ use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
     AddColumn, AlterKind, RegionAlterRequest, RegionBuildIndexRequest, RegionCloseRequest,
-    RegionCompactRequest, RegionRequest, SetIndexOption,
+    RegionCompactRequest, RegionFlushRequest, RegionRequest, RegionTruncateRequest, SetIndexOption,
 };
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, Semaphore};
@@ -2297,8 +2299,9 @@ impl SstReadCounter {
 
 #[rstest::rstest]
 #[tokio::test]
-async fn test_sync_flush_indexes_encoded_bulk_parts(
-    #[values(false, true)] disable_inverted_on_flush: bool,
+async fn test_flush_indexes_encoded_bulk_parts(
+    #[values(false, true)] async_without_flush_indexes: bool,
+    #[values(false, true)] write_cache: bool,
 ) {
     let sst_bytes_read = Arc::new(AtomicUsize::new(0));
     let counter = sst_bytes_read.clone();
@@ -2312,19 +2315,27 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         }))
         .build()
         .unwrap();
-    let mut env = TestEnv::with_prefix("test_sync_flush_indexes_encoded_bulk_parts_")
+    let mut env = TestEnv::with_prefix("test_flush_indexes_encoded_bulk_parts_")
         .await
         .with_mock_layer(layer);
-    let listener = Arc::new(IndexBuildListener::default());
     let mut config = MitoConfig {
         default_flat_format: true,
         min_compaction_interval: Duration::from_secs(3600),
         ..Default::default()
     };
     assert_eq!(config.index.build_mode, IndexBuildMode::Sync);
-    if disable_inverted_on_flush {
+    if async_without_flush_indexes {
+        config.index.build_mode = IndexBuildMode::Async;
         config.inverted_index.create_on_flush = Mode::Disable;
     }
+    if write_cache {
+        config = config.enable_write_cache(
+            env.data_home().join("write_cache").display().to_string(),
+            ReadableSize::mb(32),
+            None,
+        );
+    }
+    let listener = Arc::new(IndexBuildListener::default());
     let engine = env
         .create_engine_with(config, None, Some(listener.clone()), None)
         .await;
@@ -2345,7 +2356,7 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         .insert_option("memtable.bulk.merge_threshold", "2")
         .insert_option("memtable.bulk.encode_row_threshold", "1")
         .build_with_index();
-    if !disable_inverted_on_flush {
+    if !async_without_flush_indexes {
         // `build_with_index` only adds inverted indexes on tags; also cover a skipping index.
         let field = request
             .column_metadatas
@@ -2385,9 +2396,10 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
     flush_region(&engine, region_id, None).await;
 
     let files = current_file_metas(&engine, region_id).await;
-    if disable_inverted_on_flush {
-        // Only inverted indexes are configured and they are disabled on flush, so the builds
-        // have nothing to create. They must stop before reading the rows of the SSTs.
+    assert!(!files.is_empty());
+    if async_without_flush_indexes {
+        // Async mode builds indexes after flush. Only inverted indexes are configured and they
+        // are disabled on flush, so the builds must stop before reading the rows of the SSTs.
         let total_size: usize = files.iter().map(|f| f.file_size as usize).sum();
         // Stopping the engine waits for scheduled index builds.
         engine.stop().await.unwrap();
@@ -2398,25 +2410,169 @@ async fn test_sync_flush_indexes_encoded_bulk_parts(
         return;
     }
 
-    let version = engine.get_region(region_id).unwrap().version();
-    let indexed = async {
-        loop {
-            let files = current_file_metas(&engine, region_id).await;
-            if files.iter().all(|f| {
-                f.is_index_consistent_with_region(
-                    &version.metadata.column_metadatas,
-                    &version.options.index_options,
-                )
-            }) {
-                return files;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    };
-    let files = tokio::time::timeout(Duration::from_secs(10), indexed)
-        .await
-        .expect("flushed encoded parts have no index");
-    assert!(listener.begin_count() > 0);
+    // Sync mode builds the indexes from the encoded bytes in memory during flush.
+    assert_eq!(0, sst_bytes_read.load(Ordering::Relaxed));
+    assert_eq!(0, listener.begin_count());
     assert!(files.iter().all(|f| f.inverted_index_available()));
     assert!(files.iter().all(|f| f.bloom_filter_index_available()));
+    let access_layer = engine.get_region(region_id).unwrap().access_layer.clone();
+    for file in &files {
+        let index_path = location::index_file_path(
+            access_layer.table_dir(),
+            RegionIndexId::new(RegionFileId::new(region_id, file.file_id), 0),
+            access_layer.path_type(),
+        );
+        assert!(
+            access_layer
+                .object_store()
+                .exists(&index_path)
+                .await
+                .unwrap()
+        );
+    }
+}
+
+/// Blocks closing a puffin file whose SST is already closed, which only happens for encoded
+/// bulk parts: the SST writer closes the puffin file before the SST.
+struct BlockingPuffinWriter {
+    file_name: String,
+    inner: object_store::layers::mock::Writer,
+    closed_ssts: Arc<std::sync::Mutex<HashSet<String>>>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl object_store::layers::mock::Write for BlockingPuffinWriter {
+    async fn write(
+        &mut self,
+        bs: object_store::layers::mock::Buffer,
+    ) -> object_store::layers::mock::Result<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(
+        &mut self,
+    ) -> object_store::layers::mock::Result<object_store::layers::mock::Metadata> {
+        if let Some(file_id) = self.file_name.strip_suffix(".puffin")
+            && self.closed_ssts.lock().unwrap().contains(file_id)
+        {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        let metadata = self.inner.close().await?;
+        if let Some(file_id) = self.file_name.strip_suffix(".parquet") {
+            self.closed_ssts.lock().unwrap().insert(file_id.to_string());
+        }
+        Ok(metadata)
+    }
+
+    async fn abort(&mut self) -> object_store::layers::mock::Result<()> {
+        self.inner.abort().await
+    }
+}
+
+#[tokio::test]
+async fn test_truncate_while_indexing_encoded_bulk_part_removes_uploaded_sst() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let closed_ssts = Arc::new(std::sync::Mutex::new(HashSet::new()));
+    let (factory_entered, factory_release) = (entered.clone(), release.clone());
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _op, inner| {
+            Box::new(BlockingPuffinWriter {
+                file_name: path.rsplit('/').next().unwrap_or_default().to_string(),
+                inner,
+                closed_ssts: closed_ssts.clone(),
+                entered: factory_entered.clone(),
+                release: factory_release.clone(),
+            }) as object_store::layers::mock::Writer
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::with_prefix("test_truncate_while_indexing_encoded_bulk_part_")
+        .await
+        .with_mock_layer(layer);
+    let config = MitoConfig {
+        default_flat_format: true,
+        ..Default::default()
+    };
+    let engine = env.create_engine_with(config, None, None, None).await;
+
+    let region_id = RegionId::new(1, 1);
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+    let request = CreateRequestBuilder::new()
+        .insert_option("memtable.type", "bulk")
+        .insert_option("memtable.bulk.merge_threshold", "2")
+        .insert_option("memtable.bulk.encode_row_threshold", "1")
+        .build_with_index();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    for (start, end) in [(0, 100_000), (100_000, 200_000)] {
+        let rows = Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(start, end),
+        };
+        put_rows(&engine, region_id, rows).await;
+    }
+    let version = engine.get_region(region_id).unwrap().version();
+    for memtable in version.memtables.list_memtables() {
+        memtable.compact(false).unwrap();
+    }
+
+    let flush_engine = engine.clone();
+    let flush_task = tokio::spawn(async move {
+        flush_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Flush(RegionFlushRequest::default()),
+            )
+            .await
+    });
+    // The encoded SST is uploaded and its index is being written.
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .expect("flush did not reach index creation");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        engine.handle_request(
+            region_id,
+            RegionRequest::Truncate(RegionTruncateRequest::All),
+        ),
+    )
+    .await
+    .expect("truncate did not finish after cancelling flush")
+    .unwrap();
+    release.notify_one();
+    let flush_err = tokio::time::timeout(Duration::from_secs(5), flush_task)
+        .await
+        .expect("cancelled flush did not finish")
+        .expect("flush task panicked")
+        .unwrap_err();
+    assert_eq!(flush_err.status_code(), StatusCode::Cancelled);
+
+    let access_layer = engine.get_region(region_id).unwrap().access_layer.clone();
+    let leftovers = access_layer
+        .object_store()
+        .list_with(access_layer.table_dir())
+        .recursive(true)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.path().to_string())
+        .filter(|path| path.ends_with(".parquet") || path.ends_with(".puffin"))
+        .collect::<Vec<_>>();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
