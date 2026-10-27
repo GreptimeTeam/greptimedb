@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod tests;
 
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -32,7 +33,7 @@ use datatypes::arrow::array::{
     Array, BinaryArray, Float64Array, StructArray, TimestampMillisecondArray,
 };
 use datatypes::arrow::buffer::Buffer;
-use datatypes::arrow::compute::cast;
+use datatypes::arrow::compute::{cast, concat_batches};
 use datatypes::arrow::datatypes::ArrowNativeType;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -165,6 +166,58 @@ impl RawSeriesStream for RawStream {
     }
 }
 
+/// Rows accumulated before the residual predicates are evaluated over one record.
+///
+/// A predicate pass is dominated by per-call setup (Arc refcount traffic, `DataType` clones and
+/// the filtered `RecordBatch` allocation) rather than by per-row comparison, and one `ScanBatch`
+/// carries the rows of a single series. Buffering up to this many rows and evaluating the
+/// predicates once per group pays that setup once per group of series instead of once per series.
+///
+/// Records are never split, so a group holds fewer than this many rows plus the rows of the one
+/// record that crossed the threshold, and both the buffered and the concatenated arrays are alive
+/// while the group is built. The value is a tuning choice, not a memory bound; it also does not
+/// bound the bytes, since a record's rows are of variable width.
+const PREDICATE_BATCH_ROWS: usize = 4096;
+
+/// Returns the primary key at `row` of `record`, or `None` when the row cannot be decoded.
+///
+/// A `None` leaves reporting the malformed row to the chunk loop; it only decides how records are
+/// grouped, never whether a record is valid.
+fn primary_key_at_row(record: &RecordBatch, row: usize) -> Option<&[u8]> {
+    let primary_key = record
+        .column(primary_key_column_index(record.num_columns()))
+        .as_any()
+        .downcast_ref::<PrimaryKeyArray>()?;
+    let values = primary_key
+        .values()
+        .as_any()
+        .downcast_ref::<BinaryArray>()?;
+    if !primary_key.keys().is_valid(row) {
+        return None;
+    }
+    let index = primary_key.keys().value(row) as usize;
+    if index >= values.len() || !values.is_valid(index) {
+        return None;
+    }
+    Some(values.value(index))
+}
+
+/// Whether `next` continues the series that ends in `previous`.
+///
+/// Such a record must head its own group: concatenation merges a series' rows into one
+/// primary-key run, which would fuse the two records' runs and change the chunk boundaries.
+/// A record whose boundary key cannot be decoded is treated as a continuation, which isolates it
+/// in its own group so the records before it keep their chunks and their error order.
+fn continues_series(previous: &RecordBatch, next: &RecordBatch) -> bool {
+    match (
+        primary_key_at_row(previous, previous.num_rows() - 1),
+        primary_key_at_row(next, 0),
+    ) {
+        (Some(previous), Some(next)) => previous == next,
+        _ => true,
+    }
+}
+
 pub(crate) fn make_stream(
     inner: ScanBatchStream,
     schema: Arc<SeriesSchema>,
@@ -179,104 +232,164 @@ pub(crate) fn make_stream(
     let stream = async_stream::stream! {
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
-        while let Some(item) = input.next().await {
-            let records = match item {
-                Ok(ScanBatch::Series(SeriesBatch::Flat(flat))) => flat.batches.into_vec(),
-                Ok(ScanBatch::RecordBatch(batch)) => vec![batch],
-                Err(error) => { yield Err(BoxedError::new(error)); return; }
+        // Records waiting for one predicate pass, and the number of rows they hold.
+        let mut buffered: Vec<RecordBatch> = Vec::new();
+        let mut buffered_rows = 0;
+        // Without a predicate there is no per-call cost to amortize, so the threshold drops to one
+        // record and buffering only reproduces the per-record stream this replaced.
+        let coalesce_rows = if predicates.is_empty() { 1 } else { PREDICATE_BATCH_ROWS };
+        // Records of the last scanned batch that are not buffered yet, and a record held back
+        // because it continues the series the buffer ends with.
+        let mut incoming: VecDeque<RecordBatch> = VecDeque::new();
+        let mut held: Option<RecordBatch> = None;
+        let mut exhausted = false;
+        // An upstream error is reported only after the records buffered before it are processed,
+        // so the chunks that precede it are still yielded first.
+        let mut upstream_error: Option<Error> = None;
+        loop {
+            // Fill: pull records until one predicate pass is amortized by the group.
+            while !exhausted && upstream_error.is_none() && buffered_rows < coalesce_rows {
+                let record = match held.take() {
+                    Some(record) => record,
+                    None => match incoming.pop_front() {
+                        Some(record) => record,
+                        None => match input.next().await {
+                            Some(Ok(ScanBatch::Series(SeriesBatch::Flat(flat)))) => {
+                                incoming.extend(flat.batches.into_vec());
+                                continue;
+                            }
+                            Some(Ok(ScanBatch::RecordBatch(batch))) => batch,
+                            Some(Err(error)) => { upstream_error = Some(error); break; }
+                            None => { exhausted = true; break; }
+                        },
+                    },
+                };
+                if record.num_rows() == 0 { continue; }
+                if let Some(previous) = buffered.last()
+                    && continues_series(previous, &record)
+                {
+                    held = Some(record);
+                    break;
+                }
+                buffered_rows += record.num_rows();
+                buffered.push(record);
+            }
+            if buffered.is_empty() { break; }
+            // Take the rows out of the buffer before processing them, so an early return cannot
+            // replay them. A pending upstream error is reported only after the records buffered
+            // before it, and those are processed one record at a time: merging records of one
+            // series fuses their runs, and the run withheld as `pending` when the error arrives
+            // would then hold rows the per-record stream had already yielded.
+            let mut group: Vec<RecordBatch> = match upstream_error {
+                // Report the buffered records one at a time, keeping the boundaries the per-record
+                // stream had.
+                Some(_) if buffered.len() > 1 => {
+                    let rest = buffered.split_off(1);
+                    std::mem::replace(&mut buffered, rest)
+                }
+                _ => std::mem::take(&mut buffered),
             };
-            for record in records {
-                let mut record = record;
-                for predicate in &predicates {
-                    record = match filter::batch_filter(&record, predicate) {
-                        Ok(record) => record,
-                        Err(error) => {
-                            let source = QueryError::GeneralDataFusion {
-                                error,
-                                location: Location::new(file!(), line!(), column!()),
-                            };
-                            yield Err(BoxedError::new(ExternalSnafu {
-                                context: "raw predicate evaluation".to_string(),
-                            }.into_error(BoxedError::new(source))));
-                            return;
-                        }
-                    };
-                    if record.num_rows() == 0 {
-                        break;
+            buffered_rows = buffered.iter().map(RecordBatch::num_rows).sum();
+            // A group of one record needs no concatenation, and copying it would only add work to
+            // the case coalescing cannot help with.
+            let mut record = if group.len() == 1 {
+                group.pop().expect("group is non-empty")
+            } else {
+                match concat_batches(&group[0].schema(), &group) {
+                    Ok(record) => record,
+                    Err(error) => { yield Err(boxed(ComputeArrowSnafu.into_error(error))); return; }
+                }
+            };
+            for predicate in &predicates {
+                record = match filter::batch_filter(&record, predicate) {
+                    Ok(record) => record,
+                    Err(error) => {
+                        let source = QueryError::GeneralDataFusion {
+                            error,
+                            location: Location::new(file!(), line!(), column!()),
+                        };
+                        yield Err(BoxedError::new(ExternalSnafu {
+                            context: "raw predicate evaluation".to_string(),
+                        }.into_error(BoxedError::new(source))));
+                        return;
                     }
-                }
+                };
                 if record.num_rows() == 0 {
-                    continue;
+                    break;
                 }
-                let pk_column = record.column(primary_key_column_index(record.num_columns()));
-                let primary_key = match pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
-                    Some(primary_key) => primary_key,
-                    None => { yield Err(invalid("invalid primary-key array")); return; }
+            }
+            if record.num_rows() == 0 {
+                continue;
+            }
+            let pk_column = record.column(primary_key_column_index(record.num_columns()));
+            let primary_key = match pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+                Some(primary_key) => primary_key,
+                None => { yield Err(invalid("invalid primary-key array")); return; }
+            };
+            let values = match primary_key.values().as_any().downcast_ref::<BinaryArray>() {
+                Some(values) => values,
+                None => { yield Err(invalid("invalid primary-key dictionary")); return; }
+            };
+            let mut start = 0;
+            while start < record.num_rows() {
+                let index = if primary_key.keys().is_valid(start) {
+                    primary_key.keys().value(start).as_usize()
+                } else {
+                    yield Err(invalid("null primary key")); return;
                 };
-                let values = match primary_key.values().as_any().downcast_ref::<BinaryArray>() {
-                    Some(values) => values,
-                    None => { yield Err(invalid("invalid primary-key dictionary")); return; }
-                };
-                let mut start = 0;
-                while start < record.num_rows() {
-                    let index = if primary_key.keys().is_valid(start) {
-                        primary_key.keys().value(start).as_usize()
+                if index >= values.len() || !values.is_valid(index) {
+                    yield Err(invalid("invalid primary-key dictionary value")); return;
+                }
+                let mut end = start + 1;
+                while end < record.num_rows() {
+                    let next_index = if primary_key.keys().is_valid(end) {
+                        primary_key.keys().value(end).as_usize()
                     } else {
                         yield Err(invalid("null primary key")); return;
                     };
-                    if index >= values.len() || !values.is_valid(index) {
+                    if next_index >= values.len() || !values.is_valid(next_index) {
                         yield Err(invalid("invalid primary-key dictionary value")); return;
                     }
-                    let mut end = start + 1;
-                    while end < record.num_rows() {
-                        let next_index = if primary_key.keys().is_valid(end) {
-                            primary_key.keys().value(end).as_usize()
-                        } else {
-                            yield Err(invalid("null primary key")); return;
-                        };
-                        if next_index >= values.len() || !values.is_valid(next_index) {
-                            yield Err(invalid("invalid primary-key dictionary value")); return;
-                        }
-                        if super::primary_key_at(primary_key, values, end)
-                            == super::primary_key_at(primary_key, values, start)
-                        {
-                            end += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    let offsets = values.value_offsets();
-                    let value_start = offsets[index].as_usize();
-                    let value_len = offsets[index + 1].as_usize() - value_start;
-                    let key = values.values().slice_with_length(value_start, value_len);
-                    let begun = Instant::now();
-                    let current = match chunk(&record, start, end, key, &output_schema, &fields) {
-                        Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
-                    };
-                    metrics.inc_convert_batch_cost(begun.elapsed());
-                    if let Some(old) = pending.as_ref()
-                        && ordering == SeriesOrdering::KeyThenTime
-                        && old.primary_key.as_slice() != current.primary_key.as_slice()
-                        && current.primary_key.as_slice() <= old.primary_key.as_slice()
+                    if super::primary_key_at(primary_key, values, end)
+                        == super::primary_key_at(primary_key, values, start)
                     {
-                        yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
+                        end += 1;
+                    } else {
+                        break;
                     }
-                    if let Some(old) = pending.as_ref()
-                        && old.primary_key.as_slice() == current.primary_key.as_slice()
-                        && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
-                            .is_some_and(|(next, previous)| next <= previous)
-                    {
-                        yield Err(invalid("raw timestamps are not strictly increasing")); return;
-                    }
-                    if let Some(mut old) = pending.take() {
-                        if old.primary_key.as_slice() != current.primary_key.as_slice() { old.is_last = true; }
-                        yield Ok(old);
-                    }
-                    pending = Some(current);
-                    start = end;
                 }
+                let offsets = values.value_offsets();
+                let value_start = offsets[index].as_usize();
+                let value_len = offsets[index + 1].as_usize() - value_start;
+                let key = values.values().slice_with_length(value_start, value_len);
+                let begun = Instant::now();
+                let current = match chunk(&record, start, end, key, &output_schema, &fields) {
+                    Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
+                };
+                metrics.inc_convert_batch_cost(begun.elapsed());
+                if let Some(old) = pending.as_ref()
+                    && ordering == SeriesOrdering::KeyThenTime
+                    && old.primary_key.as_slice() != current.primary_key.as_slice()
+                    && current.primary_key.as_slice() <= old.primary_key.as_slice()
+                {
+                    yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
+                }
+                if let Some(old) = pending.as_ref()
+                    && old.primary_key.as_slice() == current.primary_key.as_slice()
+                    && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
+                        .is_some_and(|(next, previous)| next <= previous)
+                {
+                    yield Err(invalid("raw timestamps are not strictly increasing")); return;
+                }
+                if let Some(mut old) = pending.take() {
+                    if old.primary_key.as_slice() != current.primary_key.as_slice() { old.is_last = true; }
+                    yield Ok(old);
+                }
+                pending = Some(current);
+                start = end;
             }
         }
+        if let Some(error) = upstream_error { yield Err(BoxedError::new(error)); return; }
         if let Some(mut last) = pending { last.is_last = true; yield Ok(last); }
     };
     Box::pin(RawStream {

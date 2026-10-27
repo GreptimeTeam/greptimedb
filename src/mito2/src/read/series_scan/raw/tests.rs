@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,7 +29,7 @@ use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::expressions::{BinaryExpr, Column, lit as physical_lit};
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_common::ScalarValue;
-use datafusion_expr::Operator;
+use datafusion_expr::{ColumnarValue, Operator};
 use datatypes::arrow::array::{
     ArrayRef, BinaryArray, Int64Array, StructArray, TimestampMillisecondArray, UInt8Array,
     UInt64Array,
@@ -284,6 +286,22 @@ fn convert_ordered(inner: ScanBatchStream, schema: Arc<SeriesSchema>) -> Sendabl
     )
 }
 
+fn convert_with_predicate(
+    inner: ScanBatchStream,
+    schema: Arc<SeriesSchema>,
+    predicate: Arc<dyn PhysicalExpr>,
+) -> SendableRawSeriesStream {
+    make_stream(
+        inner,
+        schema,
+        primary_key_source(metadata()),
+        vec![(0, ConcreteDataType::int64_datatype())],
+        metrics(),
+        vec![predicate],
+        SeriesOrdering::Contiguous,
+    )
+}
+
 struct DropSpy {
     inner: ScanBatchStream,
     drops: Arc<AtomicUsize>,
@@ -311,6 +329,116 @@ fn values(chunk: &RawSeriesChunk) -> Vec<Option<f64>> {
             _ => unreachable!(),
         })
         .collect()
+}
+
+/// A predicate that counts its evaluations, so tests can observe predicate passes through the
+/// existing `PhysicalExpr` hook instead of a production counter.
+#[derive(Debug)]
+struct CountingPredicate {
+    inner: Arc<dyn PhysicalExpr>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl fmt::Display for CountingPredicate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Counting({})", self.inner)
+    }
+}
+
+impl PartialEq for CountingPredicate {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for CountingPredicate {}
+
+impl Hash for CountingPredicate {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.inner), state)
+    }
+}
+
+impl PhysicalExpr for CountingPredicate {
+    fn data_type(&self, input_schema: &Schema) -> datafusion::error::Result<DataType> {
+        self.inner.data_type(input_schema)
+    }
+
+    fn nullable(&self, input_schema: &Schema) -> datafusion::error::Result<bool> {
+        self.inner.nullable(input_schema)
+    }
+
+    fn evaluate(&self, batch: &RecordBatch) -> datafusion::error::Result<ColumnarValue> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.evaluate(batch)
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![&self.inner]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        Ok(Arc::new(CountingPredicate {
+            inner: children[0].clone(),
+            calls: self.calls.clone(),
+        }))
+    }
+
+    fn fmt_sql(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+/// Builds a counting `value > 0` predicate.
+fn positive_value_predicate(calls: Arc<AtomicUsize>) -> Arc<dyn PhysicalExpr> {
+    let inner: Arc<dyn PhysicalExpr> = Arc::new(BinaryExpr::new(
+        Arc::new(Column::new("value", 0)),
+        Operator::Gt,
+        physical_lit(ScalarValue::Int64(Some(0))),
+    ));
+    Arc::new(CountingPredicate { inner, calls })
+}
+
+/// Builds a record of `key` that is exactly [`super::PREDICATE_BATCH_ROWS`] rows long, so it is
+/// processed on its own instead of being coalesced with its neighbours.
+///
+/// The rows after `payload` carry the value `-1`, which the `value > 0` predicate drops.
+fn padded_batch(key: &[u8], payload: &[(i64, Option<i64>)]) -> RecordBatch {
+    let filler = super::PREDICATE_BATCH_ROWS - payload.len();
+    let keys = vec![key; payload.len() + filler];
+    let times: Vec<i64> = payload
+        .iter()
+        .map(|(time, _)| *time)
+        .chain((0..filler).map(|offset| 10_000 + offset as i64))
+        .collect();
+    let values: Vec<Option<i64>> = payload
+        .iter()
+        .map(|(_, value)| *value)
+        .chain((0..filler).map(|_| Some(-1)))
+        .collect();
+    dictionary_batch(&keys, &times, &values)
+}
+
+/// A chunk reduced to what the predicate tests compare: key, timestamps, values and `is_last`.
+type ChunkSummary = (Vec<u8>, Vec<i64>, Vec<Option<f64>>, bool);
+
+async fn collect_chunks(mut output: SendableRawSeriesStream) -> Vec<ChunkSummary> {
+    let mut chunks = Vec::new();
+    while let Some(chunk) = output.next().await {
+        let chunk = chunk.unwrap();
+        chunks.push((
+            chunk.primary_key.as_slice().to_vec(),
+            (0..chunk.time.len())
+                .map(|i| chunk.time.timestamp(i).unwrap())
+                .collect(),
+            values(&chunk),
+            chunk.is_last,
+        ));
+    }
+    chunks
 }
 
 #[tokio::test]
@@ -756,4 +884,216 @@ async fn duplicate_or_descending_cross_batch_time_is_terminal() {
         assert!(output.next().await.unwrap().is_err());
         assert!(output.next().await.is_none());
     }
+}
+
+#[tokio::test]
+async fn coalesced_groups_evaluate_predicates_once_and_keep_the_chunk_sequence() {
+    let payload: Vec<(i64, Option<i64>)> = vec![(1, Some(1)), (2, Some(2))];
+    let keys: [&[u8]; 3] = [b"a", b"b", b"c"];
+    let small: Vec<RecordBatch> = keys
+        .iter()
+        .map(|key| dictionary_batch(&[*key, *key], &[1, 2], &[Some(1), Some(2)]))
+        .collect();
+    let padded: Vec<RecordBatch> = keys.iter().map(|key| padded_batch(key, &payload)).collect();
+
+    // Every record is padded to the buffer threshold, so each one is processed alone.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let per_record = collect_chunks(convert_with_predicate(
+        input(
+            padded
+                .iter()
+                .cloned()
+                .map(|record| Ok(ScanBatch::RecordBatch(record)))
+                .collect(),
+        ),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+    let per_record_calls = calls.load(Ordering::SeqCst);
+
+    // The same rows arrive as small records, so one predicate pass covers all of them.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let coalesced = collect_chunks(convert_with_predicate(
+        input(
+            small
+                .iter()
+                .cloned()
+                .map(|record| Ok(ScanBatch::RecordBatch(record)))
+                .collect(),
+        ),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+    let coalesced_calls = calls.load(Ordering::SeqCst);
+
+    // The flat shape coalesces the same way.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut batches = smallvec::SmallVec::new();
+    batches.extend(small.iter().cloned());
+    let coalesced_flat = collect_chunks(convert_with_predicate(
+        input(vec![Ok(ScanBatch::Series(SeriesBatch::Flat(
+            FlatSeriesBatch { batches },
+        )))]),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+    let coalesced_flat_calls = calls.load(Ordering::SeqCst);
+
+    let expected: Vec<ChunkSummary> = keys
+        .iter()
+        .map(|key| (key.to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true))
+        .collect();
+    assert_eq!(per_record, expected);
+    assert_eq!(coalesced, expected);
+    assert_eq!(coalesced_flat, expected);
+    assert_eq!(per_record_calls, keys.len());
+    assert_eq!(coalesced_calls, 1);
+    assert_eq!(coalesced_flat_calls, 1);
+}
+
+#[tokio::test]
+async fn fully_filtered_group_yields_no_chunk_and_leaves_the_next_group_intact() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chunks = collect_chunks(convert_with_predicate(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(padded_batch(b"a", &[]))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"b", b"b"],
+                &[1, 2],
+                &[Some(1), Some(2)],
+            ))),
+        ]),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+
+    assert_eq!(
+        chunks,
+        vec![(b"b".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn empty_filtered_group_keeps_the_preceding_series_last_flag() {
+    // A group that filters to nothing between two series: `a` is closed by `c`, never by the
+    // empty group, and the empty group yields no chunk of its own.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chunks = collect_chunks(convert_with_predicate(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(padded_batch(
+                b"a",
+                &[(1, Some(1)), (2, Some(2))],
+            ))),
+            Ok(ScanBatch::RecordBatch(padded_batch(b"b", &[]))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"c"],
+                &[1],
+                &[Some(5)],
+            ))),
+        ]),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+
+    assert_eq!(
+        chunks,
+        vec![
+            (b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true),
+            (b"c".to_vec(), vec![1], vec![Some(5.0)], true),
+        ]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    // A group that filters to nothing right before the input ends must not consume the pending
+    // `a` chunk, drop it, or mark it `is_last` twice: the tail flush still closes `a`.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chunks = collect_chunks(convert_with_predicate(
+        input(vec![
+            Ok(ScanBatch::RecordBatch(padded_batch(
+                b"a",
+                &[(1, Some(1)), (2, Some(2))],
+            ))),
+            Ok(ScanBatch::RecordBatch(padded_batch(b"b", &[]))),
+        ]),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+
+    assert_eq!(
+        chunks,
+        vec![(b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// A predicate that drops the rows of one series can leave two runs of another series adjacent,
+/// which is how coalescing can fuse two chunks the per-record stream kept apart.
+///
+/// Data availability across an upstream error is what must not change: the records buffered before
+/// the error keep their own boundaries, so the error withholds one record's chunk, not the fused
+/// chunk that a single predicate pass would have produced.
+#[tokio::test]
+async fn filtered_boundary_fuses_chunks_on_eof_but_an_upstream_error_still_withholds_one_record() {
+    // `a(1)` then `b(1), a(2)`: the `value > 0` predicate drops `b`, so `a`'s two runs become
+    // adjacent, and their boundary keys (`a` then `b`) differ at the source record boundary.
+    let records = || {
+        vec![
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[1],
+                &[Some(1)],
+            ))),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"b", b"a"],
+                &[1, 2],
+                &[Some(-1), Some(2)],
+            ))),
+        ]
+    };
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chunks = collect_chunks(convert_with_predicate(
+        input(records()),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    ))
+    .await;
+    // Coalesced into one predicate pass, so both rows are one chunk. Fusing them is permitted:
+    // the stream contract fixes per-series ordering and finality, not record granularity.
+    assert_eq!(
+        chunks,
+        vec![(b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    let upstream_error = InvalidRecordBatchSnafu {
+        reason: "upstream injected failure".to_string(),
+    }
+    .build();
+    let mut items = records();
+    items.push(Err(upstream_error));
+    let mut output = convert_with_predicate(
+        input(items),
+        schema(),
+        positive_value_predicate(Arc::new(AtomicUsize::new(0))),
+    );
+    // `a(1)` is closed by `a(2)`, which is then withheld as `pending` when the error arrives.
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(first.time.timestamp(0), Some(1));
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(!first.is_last);
+    let error = output.next().await.unwrap().unwrap_err();
+    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
+    else {
+        panic!("unexpected upstream error: {error}");
+    };
+    assert_eq!(reason, "upstream injected failure");
+    assert!(output.next().await.is_none());
 }
