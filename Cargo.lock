@@ -11362,6 +11362,7 @@ dependencies = [
  "common-macro",
  "common-query",
  "common-recordbatch",
+ "common-runtime",
  "common-telemetry",
  "criterion 0.7.0",
  "datafusion",

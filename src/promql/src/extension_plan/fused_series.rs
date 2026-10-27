@@ -55,7 +55,7 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -71,10 +71,11 @@ use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, SendableRawSeriesStream};
+use store_api::region_engine::RawLabelSource;
 
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
+use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
@@ -1180,7 +1181,7 @@ impl ExecutionPlan for FusedSeriesExec {
             Arc::clone(&context.runtime_env().memory_pool),
         )?;
         state.register_metrics(&self.metric, partition);
-        let mut streams = VecDeque::new();
+        let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if self.inputs.len() == 1 && partition >= count {
@@ -1201,7 +1202,7 @@ impl ExecutionPlan for FusedSeriesExec {
                     unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
                 let raw = materialize_raw_labels(raw)
                     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-                streams.push_back((source, raw));
+                streams.push((source, raw));
             }
         }
         let input_ids = (0..self.series_schemas.len())
@@ -1229,9 +1230,14 @@ impl ExecutionPlan for FusedSeriesExec {
             })
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
-        if streams.is_empty() {
+        let inputs = if streams.is_empty() {
             executor.end_of_input()?;
-        }
+            None
+        } else {
+            let reservation = MemoryConsumer::new(format!("FusedSeriesGather[{partition}]"))
+                .register(&context.runtime_env().memory_pool);
+            Some(SeriesGather::new(spawn_partitions(streams), reservation))
+        };
         // A frame is encoded from the tree's own evaluated output, and only when the node answers
         // values rather than state: partial state is a third output the format does not reach.
         let frame_mode =
@@ -1257,7 +1263,7 @@ impl ExecutionPlan for FusedSeriesExec {
             })
             .transpose()?;
         Ok(Box::pin(FusedSeriesStream {
-            inputs: streams,
+            inputs,
             executor: Some(executor),
             input_ids,
             classification: Arc::clone(&self.classification),
@@ -1370,11 +1376,11 @@ fn field_column(samples: &Samples) -> DataFusionResult<ArrayRef> {
 
 /// The batches one execution of [`FusedSeriesExec`] yields.
 pub struct FusedSeriesStream {
-    /// Source-indexed partition streams, each decoded independently and consumed to EOF in order.
+    /// Every input partition, read concurrently, or `None` once they all ended.
     ///
-    /// Each decoder holds its current batch, decoded chunks and upstream source. Clearing this
-    /// queue on error releases them even if the consumer keeps the terminated stream.
-    inputs: VecDeque<(usize, SendableRawSeriesStream)>,
+    /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
+    /// error releases them even if the consumer keeps the terminated stream.
+    inputs: Option<SeriesGather>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
     /// Runtime input IDs for each source index.
@@ -1474,7 +1480,7 @@ impl FusedSeriesStream {
         self.partial_fold = None;
         self.frame_builder = None;
         self.frame_cursor = None;
-        self.inputs.clear();
+        self.inputs = None;
         // This reservation belongs only to this execution. Release it even if the consumer keeps
         // the failed stream and the plan alive.
         self._export_budget
@@ -1597,7 +1603,7 @@ impl Stream for FusedSeriesStream {
                         continue;
                     }
                     Ok(None) => {
-                        if this.inputs.is_empty() {
+                        if this.inputs.is_none() {
                             this.executor = None;
                         }
                     }
@@ -1610,7 +1616,7 @@ impl Stream for FusedSeriesStream {
             if this.done {
                 return Poll::Ready(None);
             }
-            let Some((source, input)) = this.inputs.front_mut() else {
+            let Some(inputs) = this.inputs.as_mut() else {
                 match this.pull_one() {
                     Ok(Some(chunk)) => {
                         if let Err(error) = this.convert(chunk) {
@@ -1633,8 +1639,7 @@ impl Stream for FusedSeriesStream {
                 }
                 continue;
             };
-            let (source, polled) = (*source, input.as_mut().poll_next(cx));
-            match polled {
+            match Pin::new(inputs).poll_next(cx) {
                 Poll::Pending => {
                     if let Err(error) = this.flush_frames() {
                         this.fail();
@@ -1646,10 +1651,8 @@ impl Stream for FusedSeriesStream {
                     return Poll::Pending;
                 }
                 Poll::Ready(None) => {
-                    this.inputs.pop_front();
-                    if this.inputs.is_empty()
-                        && let Err(error) = this.close_input()
-                    {
+                    this.inputs = None;
+                    if let Err(error) = this.close_input() {
                         this.fail();
                         return Poll::Ready(Some(Err(error)));
                     }
@@ -1658,7 +1661,7 @@ impl Stream for FusedSeriesStream {
                     this.fail();
                     return Poll::Ready(Some(Err(DataFusionError::External(Box::new(error)))));
                 }
-                Poll::Ready(Some(Ok(chunk))) => {
+                Poll::Ready(Some(Ok((source, chunk)))) => {
                     if let Err(error) = this.push(source, chunk) {
                         this.fail();
                         return Poll::Ready(Some(Err(error)));

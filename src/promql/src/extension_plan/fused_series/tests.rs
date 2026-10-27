@@ -48,7 +48,9 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryPool, UnboundedMemoryPool,
+};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -85,6 +87,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::extension_plan::series_gather::SeriesGather;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundScalar,
@@ -1719,9 +1722,9 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     }
 }
 
-/// Independent sources execute in source order and gather all child partitions, without zipping.
+/// Independent sources gather all child partitions, without zipping.
 #[tokio::test]
-async fn independent_sources_execute_all_partitions_sequentially() {
+async fn independent_sources_execute_all_partitions() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), other_field_schema(), 0, 1);
     let left_calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect());
     let right_calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect());
@@ -1781,6 +1784,72 @@ async fn independent_sources_execute_all_partitions_sequentially() {
             .map(|c| c.load(Ordering::SeqCst))
             .collect::<Vec<_>>()
     );
+}
+
+/// One producer feeding both inputs, as a region's two scans for one query are fed, stalls a node
+/// that drains one input before it polls the other: the producer waits on the unread input.
+#[tokio::test]
+async fn both_inputs_are_read_concurrently() {
+    const SERIES: usize = 64;
+    let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), raw_schema(), 0, 1);
+    let (left_tx, left_rx) = tokio::sync::mpsc::channel(1);
+    let (right_tx, right_rx) = tokio::sync::mpsc::channel(1);
+    let fed = |receiver: tokio::sync::mpsc::Receiver<RecordBatch>| {
+        let receiver = Mutex::new(Some(receiver));
+        staged(frame_schema(), move || {
+            let receiver = receiver.lock().unwrap().take().expect("executed once");
+            Box::pin(RecordBatchStreamAdapter::new(
+                frame_schema(),
+                futures::stream::unfold(receiver, |mut receiver| async move {
+                    receiver.recv().await.map(|batch| (Ok(batch), receiver))
+                }),
+            ))
+        })
+    };
+    let producer = tokio::spawn(async move {
+        for series in 0..SERIES {
+            let host = format!("web-{series}");
+            left_tx
+                .send(frame(&series_chunk(&host, &[(GRID_START, 10.0)], true)))
+                .await
+                .unwrap();
+            right_tx
+                .send(frame(&series_chunk(&host, &[(GRID_START, 3.0)], true)))
+                .await
+                .unwrap();
+        }
+    });
+    let node = FusedSeries::try_new(
+        Arc::from("left - right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                fed(left_rx),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                fed(right_rx),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .unwrap();
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collect(exec, SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("the node stalled on an input it did not poll")
+    .unwrap();
+    producer.await.unwrap();
+    assert_eq!(vec![7.0; SERIES], binary_values(&results));
 }
 
 /// On-label matching projects binary output tags while retaining all raw tags for frame decoding.
@@ -2518,7 +2587,13 @@ fn direct_frame_stream(
     )
     .unwrap();
     FusedSeriesStream {
-        inputs: input.into_iter().map(|input| (0, input)).collect(),
+        inputs: input.map(|input| {
+            SeriesGather::new(
+                vec![(0, input)],
+                MemoryConsumer::new("test")
+                    .register(&(Arc::new(UnboundedMemoryPool::default()) as Arc<dyn MemoryPool>)),
+            )
+        }),
         executor: None,
         input_ids: Vec::new(),
         classification: Arc::from([]),
@@ -2657,7 +2732,7 @@ async fn dropping_a_partly_emitted_frame_releases_its_input() {
         "the cursor retains its unencoded label identity"
     );
     assert!(!dropped.load(Ordering::SeqCst));
-    assert_eq!(1, stream.inputs.len());
+    assert!(stream.inputs.is_some());
     drop(stream);
     assert!(dropped.load(Ordering::SeqCst));
     assert!(

@@ -23,11 +23,9 @@
 //! The frame names each series by its complete labels rather than by its storage key. The node's
 //! schema is fixed while the frontend plans it, where the region's key layout is unknown, and the
 //! receiver compares that schema exactly; an explicit frame depends only on the field names. The
-//! stream is one partition that reads every scan partition in turn: a scan keeps each series in one
-//! partition, so reading them one after another keeps every series contiguous, which a concurrent
-//! merge of the partitions would not.
+//! stream is one partition that reads every scan partition at once and interleaves them only where
+//! a series ends: a scan keeps each series in one partition, so every series stays contiguous.
 
-use std::collections::VecDeque;
 use std::fmt::{self, Formatter};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -42,6 +40,7 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
+use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -53,14 +52,15 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream};
 
+use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
 ///
-/// Reading the scan partitions one after another keeps each series contiguous but not the series
-/// in key order, and the schema has to be known before the region's scan declares its own.
+/// Interleaving the scan partitions at series boundaries keeps each series contiguous but not the
+/// series in key order, and the schema has to be known before the region's scan declares its own.
 const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// The logical node: one table scan bound to one metric's raw series.
@@ -316,52 +316,44 @@ impl ExecutionPlan for RawSeriesSourceExec {
                 "RawSeriesSourceExec has one partition, got {partition}"
             )));
         }
-        let mut inputs = VecDeque::new();
+        let mut inputs = Vec::new();
         for child_partition in 0..self.input.properties().partitioning.partition_count() {
             let frames = self.input.execute(child_partition, Arc::clone(&context))?;
             let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
-            inputs.push_back(
+            inputs.push((
+                0,
                 materialize_raw_labels(raw)
                     .map_err(|error| DataFusionError::External(Box::new(error)))?,
-            );
+            ));
         }
-        pack_raw_series(Box::pin(ConcatenatedRawSeries {
+        let reservation = MemoryConsumer::new("RawSeriesSourceGather")
+            .register(&context.runtime_env().memory_pool);
+        pack_raw_series(Box::pin(GatheredRawSeries {
             schema: Arc::clone(&self.series_schema),
             label_source: RawLabelSource::Explicit,
-            inputs,
+            inputs: SeriesGather::new(spawn_partitions(inputs), reservation),
         }))
     }
 }
 
-/// The partitions of one scan, each read to its end before the next one is polled.
-struct ConcatenatedRawSeries {
+/// The partitions of one scan, read at once and interleaved where a series ends.
+struct GatheredRawSeries {
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
-    inputs: VecDeque<SendableRawSeriesStream>,
+    inputs: SeriesGather,
 }
 
-impl Stream for ConcatenatedRawSeries {
+impl Stream for GatheredRawSeries {
     type Item = Result<RawSeriesChunk, BoxedError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        while let Some(input) = this.inputs.front_mut() {
-            match input.as_mut().poll_next(cx) {
-                Poll::Ready(None) => {
-                    this.inputs.pop_front();
-                }
-                Poll::Ready(Some(Err(error))) => {
-                    this.inputs.clear();
-                    return Poll::Ready(Some(Err(error)));
-                }
-                polled => return polled,
-            }
-        }
-        Poll::Ready(None)
+        Pin::new(&mut self.get_mut().inputs)
+            .poll_next(cx)
+            .map(|item| item.map(|result| result.map(|(_, chunk)| chunk)))
     }
 }
 
-impl RawSeriesStream for ConcatenatedRawSeries {
+impl RawSeriesStream for GatheredRawSeries {
     fn schema(&self) -> &Arc<SeriesSchema> {
         &self.schema
     }

@@ -25,6 +25,7 @@ mod range_manipulate;
 mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
+mod series_gather;
 #[cfg(test)]
 mod test_util;
 mod union_distinct_on;
