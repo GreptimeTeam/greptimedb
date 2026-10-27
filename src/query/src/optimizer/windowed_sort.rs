@@ -222,7 +222,8 @@ fn is_time_index_expr(
     }
 
     if let Some(cast_expr) = expr.downcast_ref::<CastExpr>() {
-        return if matches!(cast_expr.cast_type(), DataType::Timestamp(_, _)) {
+        let source_type = cast_expr.expr().data_type(plan.schema().as_ref())?;
+        return if preserves_timestamp_values(cast_expr.cast_type(), &source_type) {
             is_time_index_expr(plan, cast_expr.expr())
         } else {
             Ok(false)
@@ -230,16 +231,46 @@ fn is_time_index_expr(
     }
 
     if let Some(scalar_function_expr) = expr.downcast_ref::<ScalarFunctionExpr>() {
-        return if is_supported_time_index_wrapper(scalar_function_expr)
-            && scalar_function_expr.args().len() == 1
+        if !is_supported_time_index_wrapper(scalar_function_expr)
+            || scalar_function_expr.args().len() != 1
         {
-            is_time_index_expr(plan, &scalar_function_expr.args()[0])
+            return Ok(false);
+        }
+
+        // Wrappers such as `to_timestamp_seconds` cast their argument to another time unit
+        // inside the function. That cast does not show up as a `CastExpr` in the plan, but it
+        // changes the values of the sort column exactly like a cast in the plan does, so the
+        // wrapper is only still the time index if its result keeps both the unit and the values
+        // of its argument.
+        let arg = &scalar_function_expr.args()[0];
+        let return_type = scalar_function_expr.data_type(plan.schema().as_ref())?;
+        let arg_type = arg.data_type(plan.schema().as_ref())?;
+        return if preserves_timestamp_values(&return_type, &arg_type) {
+            is_time_index_expr(plan, arg)
         } else {
             Ok(false)
         };
     }
 
     Ok(false)
+}
+
+/// Returns true if a cast, or a function wrapper, that turns `source` into `target` keeps both the
+/// time unit and the underlying values of a timestamp.
+///
+/// A cast (or a hidden cast inside a function wrapper) that changes the time unit changes the
+/// values of the sort column, so the working ranges derived from the time index, which keep the
+/// unit of the time index, no longer apply. The optimizer conservatively rejects every cast that
+/// adds a timezone to a naive timestamp, including UTC, even though UTC has a zero offset. Only a
+/// target that keeps both the unit and the values of its source can still be the time index.
+fn preserves_timestamp_values(target: &DataType, source: &DataType) -> bool {
+    matches!(
+        (target, source),
+        (
+            DataType::Timestamp(target_unit, target_tz),
+            DataType::Timestamp(source_unit, source_tz)
+        ) if target_unit == source_unit && (source_tz.is_some() || target_tz.is_none())
+    )
 }
 
 fn is_time_index_column(
@@ -344,7 +375,7 @@ mod test {
     use datafusion::config::ConfigOptions;
     use datafusion::physical_plan::filter::FilterExecBuilder;
     use datafusion_common::ScalarValue;
-    use datafusion_functions::datetime::to_timestamp_millis;
+    use datafusion_functions::datetime::{to_timestamp, to_timestamp_millis, to_timestamp_seconds};
     use datafusion_physical_expr::expressions::{CastExpr, Literal};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -416,37 +447,92 @@ mod test {
     }
 
     #[test]
-    fn test_is_time_index_expr_tracks_wrapped_aliases_through_projection() {
-        let scan = new_region_scan();
+    fn test_is_time_index_expr_tracks_value_preserving_wrapper_through_projection() {
+        let scan = new_region_scan_with_unit(TimeUnit::Millisecond);
         let config = Arc::new(ConfigOptions::default());
-        let return_field = Arc::new(Field::new(
-            "ts",
-            DataType::Timestamp(TimeUnit::Millisecond, None),
-            false,
-        ));
+        let wrapper = ScalarFunctionExpr::try_new(
+            to_timestamp_millis(config.as_ref()),
+            vec![Arc::new(PhysicalColumn::new("ts", 1))],
+            scan.schema().as_ref(),
+            config,
+        )
+        .unwrap();
+        // `to_timestamp_millis` keeps both the unit and the values of a millisecond timestamp.
+        assert_eq!(
+            wrapper.data_type(scan.schema().as_ref()).unwrap(),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
         let projection = Arc::new(
             ProjectionExec::try_new(
-                vec![(
-                    Arc::new(ScalarFunctionExpr::new(
-                        "to_timestamp_millis",
-                        to_timestamp_millis(config.as_ref()),
-                        vec![Arc::new(PhysicalColumn::new("ts", 1))],
-                        return_field,
-                        config,
-                    )) as Arc<dyn PhysicalExpr>,
-                    "ts".to_string(),
-                )],
+                vec![(Arc::new(wrapper) as Arc<dyn PhysicalExpr>, "ts".to_string())],
                 scan,
             )
             .unwrap(),
         ) as Arc<dyn ExecutionPlan>;
         let expr = Arc::new(PhysicalColumn::new("ts", 0)) as Arc<dyn PhysicalExpr>;
 
+        // So the wrapper is still the time index.
         assert!(is_time_index_expr(&projection, &expr).unwrap());
     }
 
     #[test]
-    fn test_is_time_index_expr_tracks_cast_aliases_through_projection() {
+    fn test_is_time_index_expr_rejects_unit_changing_wrapper() {
+        let config = Arc::new(ConfigOptions::default());
+
+        // `to_timestamp_millis` casts its argument to milliseconds, which truncates the values of
+        // a nanosecond time index, so the wrapper is no longer the time index.
+        let nanosecond_scan = new_region_scan();
+        let truncates_to_millis = Arc::new(
+            ScalarFunctionExpr::try_new(
+                to_timestamp_millis(config.as_ref()),
+                vec![Arc::new(PhysicalColumn::new("ts", 1))],
+                nanosecond_scan.schema().as_ref(),
+                config.clone(),
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        assert_eq!(
+            truncates_to_millis
+                .data_type(nanosecond_scan.schema().as_ref())
+                .unwrap(),
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        );
+        assert!(!is_time_index_expr(&nanosecond_scan, &truncates_to_millis).unwrap());
+
+        // Same for a millisecond time index wrapped in `to_timestamp_seconds`.
+        let millisecond_scan = new_region_scan_with_unit(TimeUnit::Millisecond);
+        let truncates_to_seconds = Arc::new(
+            ScalarFunctionExpr::try_new(
+                to_timestamp_seconds(config.as_ref()),
+                vec![Arc::new(PhysicalColumn::new("ts", 1))],
+                millisecond_scan.schema().as_ref(),
+                config.clone(),
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        assert_eq!(
+            truncates_to_seconds
+                .data_type(millisecond_scan.schema().as_ref())
+                .unwrap(),
+            DataType::Timestamp(TimeUnit::Second, None)
+        );
+        assert!(!is_time_index_expr(&millisecond_scan, &truncates_to_seconds).unwrap());
+
+        // A supported wrapper whose argument is not a timestamp is never the time index.
+        let from_integer = Arc::new(
+            ScalarFunctionExpr::try_new(
+                to_timestamp_millis(config.as_ref()),
+                vec![Arc::new(Literal::new(ScalarValue::Int64(Some(0))))],
+                nanosecond_scan.schema().as_ref(),
+                config,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&nanosecond_scan, &from_integer).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_rejects_unit_changing_cast_through_projection() {
         let scan = new_region_scan();
         let projection = Arc::new(
             ProjectionExec::try_new(
@@ -464,7 +550,116 @@ mod test {
         ) as Arc<dyn ExecutionPlan>;
         let expr = Arc::new(PhysicalColumn::new("ts_ms", 0)) as Arc<dyn PhysicalExpr>;
 
-        assert!(is_time_index_expr(&projection, &expr).unwrap());
+        // The cast changes the time unit (ns → ms), so it is no longer the time index.
+        assert!(!is_time_index_expr(&projection, &expr).unwrap());
+    }
+
+    #[test]
+    fn test_is_time_index_expr_rejects_timezone_adding_cast() {
+        let scan = new_region_scan();
+
+        // The optimizer conservatively rejects casts adding any timezone to a naive timestamp.
+        let adds_timezone = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&scan, &adds_timezone).unwrap());
+
+        // UTC has a zero offset, but naive-to-aware timestamp casts are all rejected.
+        let adds_utc_timezone = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts", 1)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("UTC"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+        assert!(!is_time_index_expr(&scan, &adds_utc_timezone).unwrap());
+
+        // `to_timestamp` returns an aware timestamp in the session time zone for a naive
+        // timestamp argument. That re-interprets the underlying values in the same way as a
+        // timezone-adding cast, so the wrapper is rejected as well.
+        let mut config = ConfigOptions::default();
+        config.execution.time_zone = Some("+08:00".to_string());
+        let config = Arc::new(config);
+        let aware_source = ScalarFunctionExpr::try_new(
+            to_timestamp(config.as_ref()),
+            vec![Arc::new(PhysicalColumn::new("ts", 1))],
+            scan.schema().as_ref(),
+            config.clone(),
+        )
+        .unwrap();
+        let projection = Arc::new(
+            ProjectionExec::try_new(
+                vec![(
+                    Arc::new(aware_source) as Arc<dyn PhysicalExpr>,
+                    "ts_aware".to_string(),
+                )],
+                scan,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>;
+        assert_eq!(
+            projection.schema().field(0).data_type(),
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+08:00")))
+        );
+        let expr = Arc::new(PhysicalColumn::new("ts_aware", 0)) as Arc<dyn PhysicalExpr>;
+
+        assert!(!is_time_index_expr(&projection, &expr).unwrap());
+
+        // A cast between two aware timestamps of the same unit keeps the underlying values, see
+        // `test_preserves_timestamp_values`, but it is still rejected here as its input is not
+        // the time index.
+        let aware_cast = Arc::new(CastExpr::new(
+            Arc::new(PhysicalColumn::new("ts_aware", 0)),
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00"))),
+            None,
+        )) as Arc<dyn PhysicalExpr>;
+
+        assert!(!is_time_index_expr(&projection, &aware_cast).unwrap());
+    }
+
+    #[test]
+    fn test_preserves_timestamp_values() {
+        let naive_nanosecond = DataType::Timestamp(TimeUnit::Nanosecond, None);
+        let naive_millisecond = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let aware_nanosecond = DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+08:00")));
+        let other_aware_nanosecond =
+            DataType::Timestamp(TimeUnit::Nanosecond, Some(Arc::from("+07:00")));
+
+        // Keeping the unit and the values of a timestamp.
+        assert!(preserves_timestamp_values(
+            &naive_nanosecond,
+            &naive_nanosecond
+        ));
+        assert!(preserves_timestamp_values(
+            &aware_nanosecond,
+            &other_aware_nanosecond
+        ));
+
+        // Changing the time unit, adding a timezone to a naive timestamp, or leaving the timestamp
+        // domain entirely all change the values of the timestamp.
+        assert!(!preserves_timestamp_values(
+            &naive_millisecond,
+            &naive_nanosecond
+        ));
+        assert!(!preserves_timestamp_values(
+            &aware_nanosecond,
+            &naive_nanosecond
+        ));
+        assert!(!preserves_timestamp_values(
+            &naive_nanosecond,
+            &DataType::Int64
+        ));
+        assert!(!preserves_timestamp_values(
+            &DataType::Int64,
+            &naive_nanosecond
+        ));
+
+        // Dropping an aware timestamp's timezone keeps the underlying values. Adding one to a
+        // naive timestamp is conservatively treated as non-preserving by the predicate.
+        assert!(preserves_timestamp_values(
+            &naive_nanosecond,
+            &aware_nanosecond
+        ));
     }
 
     #[test]
@@ -524,7 +719,8 @@ mod test {
             DataType::Timestamp(TimeUnit::Millisecond, None),
             None,
         )) as Arc<dyn PhysicalExpr>;
-        assert!(is_time_index_expr(&scan, &cast_expr).unwrap());
+        // The cast changes the time unit (ns → ms), so it is no longer the time index.
+        assert!(!is_time_index_expr(&scan, &cast_expr).unwrap());
 
         let non_timestamp_cast = Arc::new(CastExpr::new(
             Arc::new(PhysicalColumn::new("ts", 1)),
@@ -626,13 +822,14 @@ mod test {
     }
 
     fn new_region_scan() -> Arc<dyn ExecutionPlan> {
+        new_region_scan_with_unit(TimeUnit::Nanosecond)
+    }
+
+    fn new_region_scan_with_unit(unit: TimeUnit) -> Arc<dyn ExecutionPlan> {
+        let timestamp_type = ConcreteDataType::timestamp_datatype(unit.into());
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new("value", ConcreteDataType::int32_datatype(), false),
-            ColumnSchema::new(
-                "ts",
-                ConcreteDataType::timestamp_nanosecond_datatype(),
-                false,
-            ),
+            ColumnSchema::new("ts", timestamp_type.clone(), false),
         ]));
         let recordbatches = RecordBatches::try_new(schema.clone(), vec![]).unwrap();
         let stream = recordbatches.as_stream();
@@ -649,11 +846,7 @@ mod test {
                 column_id: 1,
             })
             .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_nanosecond_datatype(),
-                    false,
-                ),
+                column_schema: ColumnSchema::new("ts", timestamp_type, false),
                 semantic_type: SemanticType::Timestamp,
                 column_id: 2,
             });
