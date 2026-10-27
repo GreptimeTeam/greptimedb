@@ -59,12 +59,10 @@ use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::MetricSeriesId;
 use crate::series_index::artifact::ArtifactFormat;
-use crate::series_index::columnar::ColumnarSeriesFormat;
+
 use crate::series_index::format::{
-    self, SamplesFormat, SamplesFormatReader, SamplesReadRequest, SeriesIndexFormat,
-    SeriesReadRequest,
+    self, FormatReader, SamplesFormatReader, SamplesReadRequest, SeriesReadRequest,
 };
-use crate::series_index::samples::ColumnarSamplesFormat;
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -266,26 +264,32 @@ impl ColumnarPreparedSource {
                 "columnar series coverage changed after series preparation",
             ));
         };
+        let cache = input
+            .cache_strategy
+            .columnar_metadata(index.cache_namespace);
         let mut samples = Vec::<Arc<dyn SamplesFormatReader>>::new();
         for file_idx in files {
             let file = &input.files[file_idx];
             let handle = &index.version.samples[&file.file_id().file_id()];
-            let reader = ColumnarSamplesFormat::default()
-                .reader(index.store.clone(), handle.clone())
-                .await?;
+            let reader = crate::series_index::samples::reader::SamplesReader::open_cached(
+                index.store.clone(),
+                handle.clone(),
+                cache.clone(),
+            )
+            .await?;
             format::validate_sample_schema(&reader.schema(), metadata)?;
-            samples.push(Arc::from(reader));
+            samples.push(Arc::new(reader));
         }
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
         for id in indexes {
-            let reader = ColumnarSeriesFormat::default()
-                .reader(
-                    index.store.clone(),
-                    index.version.series_indexes[&id].clone(),
-                )
-                .await?;
+            let reader = crate::series_index::columnar::reader::ColumnarReader::open_cached(
+                index.store.clone(),
+                index.version.series_indexes[&id].clone(),
+                cache.clone(),
+            )
+            .await?;
             let schema = reader.schema();
             format::validate_series_schema(&schema, metadata)?;
             let mut tags = schema

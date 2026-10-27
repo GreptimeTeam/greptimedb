@@ -27,6 +27,7 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
+use crate::cache::columnar::{self as metadata_cache, MetadataCache};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
@@ -39,12 +40,48 @@ use crate::series_index::samples::{
 };
 use crate::sst::parquet::helper::fetch_byte_ranges;
 
-pub(super) struct SamplesReader {
+pub(crate) struct SamplesReader {
     store: ObjectStore,
     manifest: Arc<Manifest>,
+    schema: SchemaRef,
+    cache: Option<MetadataCache>,
     handle: SamplesFileHandle,
 }
 impl SamplesReader {
+    pub(crate) async fn open_cached(
+        store: ObjectStore,
+        handle: SamplesFileHandle,
+        cache: Option<MetadataCache>,
+    ) -> Result<Self> {
+        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let descriptor = metadata_cache::load(
+            cache.as_ref(),
+            identity,
+            |(manifest, schema): &(Arc<Manifest>, SchemaRef)| {
+                manifest.retained_size()
+                    + 8 * std::mem::size_of::<usize>()
+                    + std::mem::size_of::<datatypes::arrow::datatypes::Schema>()
+                    + schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.size() + std::mem::size_of::<usize>())
+                        .sum::<usize>()
+            },
+            async {
+                let reader = Self::open(store.clone(), handle.clone()).await?;
+                Ok((reader.manifest, reader.schema))
+            },
+        )
+        .await?;
+        Ok(Self {
+            store,
+            handle,
+            manifest: descriptor.0.clone(),
+            schema: descriptor.1.clone(),
+            cache,
+        })
+    }
+
     pub async fn open(store: ObjectStore, handle: SamplesFileHandle) -> Result<Self> {
         let entry = handle.entry();
         let artifact = &entry.artifact;
@@ -126,6 +163,8 @@ impl SamplesReader {
         )?;
         Ok(Self {
             store,
+            schema: manifest.schema(),
+            cache: None,
             manifest: Arc::new(manifest),
             handle,
         })
@@ -133,7 +172,7 @@ impl SamplesReader {
 }
 impl SamplesFormatReader for SamplesReader {
     fn schema(&self) -> SchemaRef {
-        self.manifest.schema()
+        self.schema.clone()
     }
     fn read(&self, request: SamplesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>> {
         let schema = self.schema();
@@ -165,6 +204,7 @@ impl SamplesFormatReader for SamplesReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("sample projection: {e}")))?,
         );
+        let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
@@ -177,24 +217,26 @@ impl SamplesFormatReader for SamplesReader {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
                 if !matches(bounds, &request) { adjacent = false; continue; }
                 let path = manifest.part_path(part.part_id);
+                let size = part.file_size;
+                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
                 let header = read_range(&store, &path, 0, metadata::HEADER_SIZE).await?;
                 metadata::validate_header(&header)?;
                 let bytes = read_range(&store, &path, part.file_size - metadata::TRAILER_SIZE, part.file_size).await?;
                 let trailer = Trailer::decode(&bytes, part.file_size)?;
+                    Ok(trailer)
+                }).await?;
                 require(trailer.root.bounds == bounds, "sample root/part bounds mismatch")?;
-                let root = load_metadata_page(&store, &path, &trailer.root, trailer.depth, trailer.payload_end, &manifest).await?;
-                let (mut active, children) = match root { Page::Leaf(blocks) => (Some(blocks), Vec::new()), Page::Internal(children) => (None, children) };
+                let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &manifest).await?;
+                let (mut active, children) = match root.as_ref() { Page::Leaf(_) => (Some(root.clone()), Vec::new()), Page::Internal(children) => (None, children.clone()) };
                 let mut children = children.into_iter(); let mut row_count = 0u64; let mut block_count = 0u64;
                 let mut payload_position = metadata::HEADER_SIZE;
                 loop {
-                    let blocks = if let Some(blocks) = active.take() { blocks } else {
+                    let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = children.next() else { break; };
                         if !matches(child.bounds, &request) { adjacent = false; continue; }
-                        match load_metadata_page(&store, &path, &child, 1, trailer.payload_end, &manifest).await? {
-                            Page::Leaf(blocks) => blocks,
-                            Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))?,
-                        }
+                        load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &manifest).await?
                     };
+                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in sample depth-two tree"))? };
                     for block in blocks {
                         row_count = row_count.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("samples row count overflow"))?;
                         block_count += 1;
@@ -205,10 +247,10 @@ impl SamplesFormatReader for SamplesReader {
                             payload_position = column.payload.end()?;
                         }
                         let batch = if matches(block.bounds(), &request) {
-                            read_block(&store, &path, &block, &manifest, &request, &projection, projected.clone()).await?
+                            read_block(&store, &path, block, &manifest, &request, &projection, projected.clone()).await?
                         } else { None };
                         if let Some(batch) = batch { yield batch; }
-                        previous = Some(block); adjacent = true;
+                        previous = Some(block.clone()); adjacent = true;
                     }
                 }
                 if complete { require(row_count == part.num_rows && block_count == part.num_blocks, "sample part totals mismatch")?; }
@@ -251,32 +293,42 @@ async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Re
     )?;
     Ok(bytes)
 }
-/// Cache integration can key this entrypoint by immutable generation, range and codecs.
+/// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
+    cache: Option<&MetadataCache>,
     store: &ObjectStore,
-    path: &str,
+    object: (&str, u64),
     reference: &PageReference,
     depth: u32,
     payload_end: u64,
     manifest: &Manifest,
-) -> Result<Page> {
-    if reference.payload.encoding != 1 {
-        return Err(unsupported("sample metadata codec"));
-    }
-    let bytes = read_range(
-        store,
-        path,
-        reference.payload.offset,
-        reference.payload.end()?,
+) -> Result<Arc<Page>> {
+    let (path, size) = object;
+    metadata_cache::load(
+        cache,
+        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}/{manifest:?}"),
+        Page::retained_size,
+        async {
+            if reference.payload.encoding != 1 {
+                return Err(unsupported("sample metadata codec"));
+            }
+            let bytes = read_range(
+                store,
+                path,
+                reference.payload.offset,
+                reference.payload.end()?,
+            )
+            .await?;
+            Page::decode(
+                &reference.payload.unpack(&bytes)?,
+                reference,
+                depth,
+                payload_end,
+                manifest,
+            )
+        },
     )
-    .await?;
-    Page::decode(
-        &reference.payload.unpack(&bytes)?,
-        reference,
-        depth,
-        payload_end,
-        manifest,
-    )
+    .await
 }
 /// Keep column loads separate from metadata for future Mito cache integration.
 async fn load_column_chunk(store: &ObjectStore, path: &str, column: &Column) -> Result<Vec<u8>> {

@@ -162,10 +162,15 @@ impl SeriesIndexVersion {
 #[derive(Debug, Default)]
 pub(crate) struct SeriesIndexVersionControl {
     current: RwLock<Arc<SeriesIndexVersion>>,
+    cache_namespace: std::sync::OnceLock<FileId>,
     pub(crate) formats: RwLock<Arc<crate::series_index::format::SeriesFormats>>,
 }
 
 impl SeriesIndexVersionControl {
+    pub(crate) fn cache_namespace(&self) -> FileId {
+        *self.cache_namespace.get_or_init(FileId::random)
+    }
+
     pub(crate) fn with_format(self, format: crate::config::SeriesIndexFormat) -> Self {
         *self.formats.write().unwrap() = Arc::new(
             crate::series_index::format::SeriesFormats::from_config(format),

@@ -2,7 +2,7 @@
 
 **Status: implemented as an opt-in internal backend.**
 This document specifies a standalone samples writer and reader. Query-consumer
-integration, caches, and enabling samples by default are separate work.
+integration and enabling samples by default are separate work.
 
 The port is stacked on [#9841](https://github.com/GreptimeTeam/greptimedb/pull/9841),
 at commit `6b44040c0ad96fb06d592c7bba5a1744e2274718`, and follows the presentation
@@ -500,9 +500,9 @@ growth as parts complete; fail rather than constructing a manifest over 64 MiB.
 Use recorded sizes for reads; do not issue object stats just to locate trailers.
 Fetch metadata and selected column ranges only. Reads are sequential in this
 initial port, without speculative adjacent-field fetches or prefetch. Keep
-fetch/validate/decode entrypoints for metadata and columns separate so a later
-cache integration can use immutable generation, part, byte range, checksum,
-codec IDs, and representation without changing the format.
+fetch/validate/decode entrypoints for metadata and columns separate. Native readers
+cache parsed descriptors and metadata through the shared decoded SST reservation;
+see the capacity, ownership, identity, and metrics contract in `mito-series.md`.
 
 Writers own all partial outputs until `finish` succeeds. Write/close errors,
 explicit abort, and cancellation clean up every created object, including an
@@ -562,7 +562,8 @@ Sequence and operation chunks are mandatory on disk but are read only if
 projected. The format reader does not silently apply visibility or delete rules.
 A future query adapter must request them when required for merging. There are
 no tag/value predicates in this initial request, no selector-result cache, and
-no cross-read page/data cache. All reads have independent traversal state and
+no cross-read data cache. Parsed metadata is shared through Mito cache infrastructure.
+All reads have independent traversal state and
 can outlive the factory. Validation is incremental over visited metadata and
 decoded chunks, not an eager whole-artifact integrity scan; unselected payload
 corruption is not guaranteed to be discovered by a selective query.
@@ -619,7 +620,7 @@ add bytes; native timestamp units and preserved duplicate rows change codec
 inputs; 64-bit checksums, Mito manifests/references, and overlapping page bounds
 change framing; bounded two-level trees replace disk-spooled arbitrary-depth
 indexes; row/byte packing replaces the benchmark's hourly default. OpenDAL and
-the absence of caches also change performance. Measure the port independently;
+metadata caching also changes performance. Measure the port independently;
 no performance equivalence is asserted.
 
 The benchmark follow-ups from [PR #9887](https://github.com/GreptimeTeam/greptimedb/pull/9887)

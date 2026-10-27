@@ -16,7 +16,7 @@
 
 pub(super) mod codec;
 mod metadata;
-mod reader;
+pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -123,6 +123,15 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
+    fn retained_size(&self) -> usize {
+        std::mem::size_of::<Self>() + self.files.capacity() * std::mem::size_of::<Part>()
+            + self.tags.capacity() * std::mem::size_of::<Tag>()
+            + self.tags.iter().map(|tag| tag.name.capacity()).sum::<usize>()
+            + self.coverage.source_file_ids.capacity() * std::mem::size_of::<FileId>()
+            // BTree nodes include allocation and partially occupied key/value slots.
+            + (self.coverage.window_sequences.len() + 1) * 128
+    }
+
     pub(crate) fn prefix(&self) -> String {
         format!("{}/series/{}/", self.region_id, self.generation)
     }

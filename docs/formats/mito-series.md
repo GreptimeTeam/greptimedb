@@ -546,14 +546,21 @@ conservative index candidates remains the future query adapter's responsibility.
    repeated dictionary values do not expand an entire block at once. This is a
    reader packing choice and does not change the wire format.
 
-Keep page traversal state to the active leaf and pending references. There is no
-cross-read cache in this implementation. Centralize fetch/validate/decode work in
-`load_metadata_page` and `load_column_chunk` entrypoints.
+Keep page traversal state to the active leaf and pending references. Native query
+readers share validated manifests, schemas, framing/trailers, and decoded metadata
+pages through Mito's decoded SST metadata reservation (half of
+`sst_meta_cache_size`). The compact SST reservation is unchanged. Disabled caches
+bypass admission; entries larger than the decoded reservation are not retained.
+Weights include collection capacities, strings, keys, schema fields, and conservative
+BTree node overhead. Cached values own neither artifact pins nor live file readers.
 
-TODO: integrate these entrypoints with Mito's existing cache system. Future keys
-need region/store identity, immutable artifact generation, part ID, byte range,
-checksum, codec IDs, and representation. Keep that information available; do not
-introduce a new cache framework, global cache, configuration, or unused parameter.
+Keys include a process-local storage namespace tied to the loaded region, generation
+paths, object lengths, representation, and page reference/checksum/codec/validation
+context. Bounded async lock striping coalesces loads; failed or canceled loads do not
+populate the cache. Current handle and schema compatibility remains checked. Maintenance
+uses uncached readers so repair checks still observe missing or corrupt objects.
+`columnar_metadata` labels expose cache bytes, hits, misses, loads, and evictions.
+Column payloads remain uncached.
 
 Ordinary series scans continue using the existing Parquet path and fall back to
 SST discovery for this format. Merely adding a format reader must not mark these
@@ -579,7 +586,7 @@ and safety limits above. Implementation acceptance includes:
   limits in tests. Reject depth 0 and unsupported depths including 3 before
   traversal, and reject an internal child where a leaf is required at depth 2.
 - Exact projection/filter results, no irrelevant payload decoding, selective
-  range reads, and independent readers/streams with caching absent.
+  range reads, and independent readers/streams with caching disabled.
 - Different block row limits, including 16,384, read by the same format reader
   without a version change. Validate references beyond 4 GiB with small mocked
   payloads, plus overflowing offsets and oversized individual payload lengths.
@@ -595,7 +602,7 @@ and safety limits above. Implementation acceptance includes:
   new source files. No SQL query behavior change is claimed by this phase.
 
 Performance must be measured again after the port: the row-count column, checksums,
-metadata framing, OpenDAL range coalescing, and the absence of decoded caches
+metadata framing, OpenDAL range coalescing, and decoded metadata caching
 change the measured workload. Future experiments also cover exact primary keys,
 dedicated job/instance locality components, and optional per-series time bounds.
 Shared-schema column references and a Protobuf footer require separate benchmarks

@@ -48,6 +48,8 @@ use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::series_scan::SeriesScan;
 use crate::region::MitoRegionRef;
 use crate::series_index::SeriesIndexReadContext;
+use crate::series_index::format::SamplesFormat;
+use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
@@ -278,6 +280,7 @@ fn scan_input(
                 .collect(),
         )
         .with_series_index(Some(SeriesIndexReadContext {
+            cache_namespace: store_api::storage::FileId::random(),
             format,
             store,
             version: region.series_index_version(),
@@ -1298,5 +1301,96 @@ async fn series_artifact_read_failure_propagates() {
         .err()
         .expect("a failed artifact read must not report a not-ready source");
     assert!(error.output_msg().contains("injected"), "{error}");
+    engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_cache_reuses_structures_and_isolates_storage() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use crate::series_index::columnar::reader::ColumnarReader;
+    use crate::series_index::samples::reader::SamplesReader;
+    use store_api::storage::FileId;
+
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ReadRecorder {
+                    inner,
+                    path: path.to_owned(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let version = region.series_index_version();
+    let series = version.series_indexes.values().next().unwrap();
+    let samples = version.samples.values().next().unwrap();
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder()
+            .sst_meta_cache_size(8 * 1024 * 1024)
+            .build(),
+    ));
+    let namespace = FileId::random();
+    let contexts = [
+        strategy.columnar_metadata(namespace),
+        strategy.columnar_metadata(namespace),
+        strategy.columnar_metadata(FileId::random()),
+        None,
+    ];
+    let mut results = Vec::new();
+    let mut counts = Vec::new();
+    for context in contexts {
+        reads.lock().unwrap().clear();
+        let reader = ColumnarReader::open_cached(store.clone(), series.clone(), context.clone())
+            .await
+            .unwrap();
+        let request = SeriesReadRequest {
+            projection: reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        };
+        let series_rows = reader
+            .read(request)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let reader = SamplesReader::open_cached(store.clone(), samples.clone(), context)
+            .await
+            .unwrap();
+        let request = SamplesReadRequest {
+            projection: reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        };
+        let sample_rows = reader
+            .read(request)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        results.push((series_rows, sample_rows));
+        counts.push(reads.lock().unwrap().len());
+    }
+    assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(
+        counts[1] < counts[0],
+        "warm metadata should avoid reads: {counts:?}"
+    );
+    assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
+    assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
     engine.stop().await.unwrap();
 }

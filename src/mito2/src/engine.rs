@@ -1062,6 +1062,7 @@ impl EngineInner {
         // in the query's older SST snapshot.
         let series_index = region.series_index_store.as_ref().map(|store| {
             crate::series_index::SeriesIndexReadContext {
+                cache_namespace: region.series_index_version_control.cache_namespace(),
                 format: if region
                     .series_index_version_control
                     .formats

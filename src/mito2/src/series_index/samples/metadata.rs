@@ -333,6 +333,22 @@ pub(super) enum Page {
     Internal(Vec<PageReference>),
 }
 impl Page {
+    pub(crate) fn retained_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Internal(children) => {
+                    children.capacity() * std::mem::size_of::<PageReference>()
+                }
+                Self::Leaf(blocks) => {
+                    blocks.capacity() * std::mem::size_of::<Block>()
+                        + blocks
+                            .iter()
+                            .map(|block| block.columns.capacity() * std::mem::size_of::<Column>())
+                            .sum::<usize>()
+                }
+            }
+    }
+
     pub fn bounds(&self) -> Result<Bounds> {
         let bounds: Vec<_> = match self {
             Self::Leaf(v) => v.iter().map(Block::bounds).collect(),
