@@ -25,8 +25,9 @@ use store_api::logstore::LogStore;
 use store_api::storage::RegionId;
 
 use crate::error::{
-    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionNotFoundSnafu, RegionStateSnafu,
-    RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
+    InvalidRequestSnafu, PartitionExprVersionMismatchSnafu, RegionLeaseExpiredSnafu,
+    RegionNotFoundSnafu, RegionStateSnafu, RejectWriteInStagingSnafu, RejectWriteSnafu, Result,
+    UnacknowledgedWriteSnafu,
 };
 use crate::metrics;
 use crate::metrics::{
@@ -34,7 +35,9 @@ use crate::metrics::{
 };
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
-use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
+use crate::request::{
+    SenderBulkRequest, SenderWriteRequest, WriteRequest, check_bulk_insert_batch,
+};
 use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
 
@@ -116,6 +119,8 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 return;
             }
         }
+        self.listener.on_write_wal_end().await;
+        self.fail_writes_after_lease_expiry(&mut region_ctxs);
 
         let (mut put_rows, mut delete_rows) = (0, 0);
         // Write to memtables.
@@ -292,8 +297,10 @@ impl<S> RegionWorkerLoop<S> {
     ) -> HashMap<RegionId, RegionWriteCtx> {
         // Initialize region write context map.
         let mut region_ctxs = HashMap::new();
-        self.process_write_requests(&mut region_ctxs, write_requests);
-        self.process_bulk_requests(&mut region_ctxs, bulk_requests);
+        // One reading serves the batch, as preparing it does not wait.
+        let lease_now = self.node_lease.is_enabled().then(|| self.node_lease.now());
+        self.process_write_requests(&mut region_ctxs, write_requests, lease_now);
+        self.process_bulk_requests(&mut region_ctxs, bulk_requests, lease_now);
         region_ctxs
     }
 
@@ -301,6 +308,7 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
         write_requests: &mut Vec<SenderWriteRequest>,
+        lease_now: Option<u64>,
     ) {
         for mut sender_req in write_requests.drain(..) {
             let region_id = sender_req.request.region_id;
@@ -332,6 +340,13 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        let leader_deadline = region.leader_deadline.get();
+                        if lease_now.is_some_and(|now| now >= leader_deadline) {
+                            sender_req
+                                .sender
+                                .send(RegionLeaseExpiredSnafu { region_id }.fail());
+                            continue;
+                        }
                         if region.reject_all_writes_in_staging() {
                             sender_req
                                 .sender
@@ -339,13 +354,14 @@ impl<S> RegionWorkerLoop<S> {
                             continue;
                         }
 
-                        let region_ctx = RegionWriteCtx::new(
+                        let mut region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
                             region.provider.clone(),
                             Some(region.region_stats.written_bytes.clone()),
                             WriteSource::Request,
                         );
+                        region_ctx.lease = lease_now.map(|_| (region, leader_deadline));
 
                         e.insert(region_ctx);
                     }
@@ -458,6 +474,7 @@ impl<S> RegionWorkerLoop<S> {
         &mut self,
         region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>,
         requests: &mut Vec<SenderBulkRequest>,
+        lease_now: Option<u64>,
     ) {
         let _timer = metrics::REGION_WORKER_HANDLE_WRITE_ELAPSED
             .with_label_values(&["prepare_bulk_request"])
@@ -480,19 +497,27 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
+                        let leader_deadline = region.leader_deadline.get();
+                        if lease_now.is_some_and(|now| now >= leader_deadline) {
+                            bulk_req
+                                .sender
+                                .send(RegionLeaseExpiredSnafu { region_id }.fail());
+                            continue;
+                        }
                         if region.reject_all_writes_in_staging() {
                             bulk_req
                                 .sender
                                 .send(RejectWriteInStagingSnafu { region_id }.fail());
                             continue;
                         }
-                        let region_ctx = RegionWriteCtx::new(
+                        let mut region_ctx = RegionWriteCtx::new(
                             region.region_id,
                             &region.version_control,
                             region.provider.clone(),
                             Some(region.region_stats.written_bytes.clone()),
                             WriteSource::Request,
                         );
+                        region_ctx.lease = lease_now.map(|_| (region, leader_deadline));
 
                         e.insert(region_ctx);
                     }
@@ -552,20 +577,46 @@ impl<S> RegionWorkerLoop<S> {
                     aligned_schema.schema_version == region_ctx.version().metadata.schema_version
                 });
 
-            // Fill missing columns if needed
-            if need_fill_missing_columns
-                && let Err(e) = bulk_req
-                    .request
-                    .fill_missing_columns(&region_ctx.version().metadata)
-            {
-                bulk_req.sender.send(Err(e));
-                continue;
+            // Fill missing columns if needed. The batch is checked again as the region
+            // schema may have changed since the request was checked.
+            if need_fill_missing_columns {
+                let metadata = &region_ctx.version().metadata;
+                if let Err(e) = check_bulk_insert_batch(metadata, &bulk_req.request.batch)
+                    .and_then(|_| bulk_req.request.fill_missing_columns(metadata))
+                {
+                    bulk_req.sender.send(Err(e));
+                    continue;
+                }
             }
 
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
                 continue;
             }
+        }
+    }
+
+    /// Fails the waiters of writes whose WAL append completed at or after their region's Leader
+    /// deadline. The writes still go to the memtables, as their entries are in the WAL.
+    fn fail_writes_after_lease_expiry(&self, region_ctxs: &mut HashMap<RegionId, RegionWriteCtx>) {
+        if !self.node_lease.is_enabled() {
+            return;
+        }
+        let now = self.node_lease.now();
+        for (region_id, region_ctx) in region_ctxs.iter_mut() {
+            // A Leader grant may have extended the deadline during the append.
+            let expired = region_ctx.lease.as_ref().is_some_and(|(region, deadline)| {
+                now >= *deadline && now >= region.leader_deadline.get()
+            });
+            if !expired || region_ctx.is_failed() {
+                continue;
+            }
+            region_ctx.fail_waiters(Arc::new(
+                UnacknowledgedWriteSnafu {
+                    region_id: *region_id,
+                }
+                .build(),
+            ));
         }
     }
 

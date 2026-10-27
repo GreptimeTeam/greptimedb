@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use api::v1::SemanticType;
 use common_query::native_histogram::is_native_histogram_value_type;
@@ -27,14 +27,18 @@ use crate::error::{AddingFieldColumnSnafu, Result};
 pub fn extract_new_columns<'a>(
     requests: &'a [(RegionId, RegionCreateRequest)],
     physical_columns: &HashMap<String, ColumnMetadata>,
-    new_column_names: &mut HashSet<&'a str>,
+    new_column_indices: &mut HashMap<&'a str, usize>,
     new_columns: &mut Vec<ColumnMetadata>,
 ) -> Result<()> {
-    for (_, request) in requests {
+    for (region_id, request) in requests {
         for col in &request.column_metadatas {
-            if !physical_columns.contains_key(&col.column_schema.name)
-                && !new_column_names.contains(&col.column_schema.name.as_str())
-            {
+            if let Some(existing) = physical_columns.get(&col.column_schema.name).or_else(|| {
+                new_column_indices
+                    .get(col.column_schema.name.as_str())
+                    .map(|&index| &new_columns[index])
+            }) {
+                crate::engine::validate_shared_column(*region_id, existing, col)?;
+            } else {
                 ensure!(
                     col.semantic_type != SemanticType::Field
                         || is_native_histogram_value_type(&col.column_schema.data_type),
@@ -42,7 +46,7 @@ pub fn extract_new_columns<'a>(
                         name: col.column_schema.name.clone(),
                     }
                 );
-                new_column_names.insert(&col.column_schema.name);
+                new_column_indices.insert(&col.column_schema.name, new_columns.len());
                 // TODO(weny): avoid clone
                 new_columns.push(col.clone());
             }
@@ -55,7 +59,7 @@ pub fn extract_new_columns<'a>(
 #[cfg(test)]
 mod tests {
     use std::assert_matches;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
 
     use api::v1::SemanticType;
     use datatypes::prelude::ConcreteDataType;
@@ -68,8 +72,50 @@ mod tests {
     use crate::error::Error;
 
     #[test]
+    fn test_conflicting_shared_definitions_rejected() {
+        let column = ColumnMetadata {
+            column_schema: ColumnSchema::new("shared", ConcreteDataType::string_datatype(), true),
+            semantic_type: SemanticType::Tag,
+            column_id: 0,
+        };
+        let mut incompatible = column.clone();
+        incompatible.semantic_type = SemanticType::Field;
+        let region = RegionId::new(1, 1);
+        assert!(crate::engine::validate_shared_column(region, &column, &incompatible).is_err());
+        incompatible.semantic_type = SemanticType::Tag;
+        incompatible.column_schema =
+            ColumnSchema::new("shared", ConcreteDataType::int64_datatype(), true);
+        assert!(crate::engine::validate_shared_column(region, &column, &incompatible).is_err());
+        assert!(crate::engine::validate_shared_column(region, &column, &column).is_ok());
+        for existing in [false, true] {
+            let physical = if existing {
+                HashMap::from([("shared".into(), column.clone())])
+            } else {
+                HashMap::new()
+            };
+            let requests = [(
+                region,
+                RegionCreateRequest {
+                    column_metadatas: vec![column.clone(), incompatible.clone()],
+                    engine: "metric".into(),
+                    primary_key: vec![0],
+                    options: HashMap::new(),
+                    table_dir: "test".into(),
+                    path_type: PathType::Bare,
+                    partition_expr_json: None,
+                    requirements: Default::default(),
+                },
+            )];
+            let error =
+                extract_new_columns(&requests, &physical, &mut HashMap::new(), &mut Vec::new())
+                    .unwrap_err();
+            assert!(matches!(error, Error::InvalidRequest { .. }));
+        }
+    }
+
+    #[test]
     fn test_extract_new_columns() {
-        let requests = vec![
+        let mut requests = vec![
             (
                 RegionId::new(1, 1),
                 RegionCreateRequest {
@@ -126,6 +172,11 @@ mod tests {
             ),
         ];
 
+        let mut another = requests[0].1.column_metadatas[1].clone();
+        another.column_schema.name = "another_column".into();
+        requests[0].1.column_metadatas.push(another.clone());
+        requests[1].1.column_metadatas.push(another);
+
         let mut physical_columns = HashMap::new();
         physical_columns.insert(
             "existing_column".to_string(),
@@ -139,20 +190,22 @@ mod tests {
                 column_id: 0,
             },
         );
-        let mut new_column_names = HashSet::new();
+        let mut new_column_indices = HashMap::new();
         let mut new_columns = Vec::new();
 
         let result = extract_new_columns(
             &requests,
             &physical_columns,
-            &mut new_column_names,
+            &mut new_column_indices,
             &mut new_columns,
         );
 
         assert!(result.is_ok());
-        assert!(new_column_names.contains("new_column"));
-        assert_eq!(new_columns.len(), 1);
+        assert_eq!(new_column_indices["new_column"], 0);
+        assert_eq!(new_column_indices["another_column"], 1);
+        assert_eq!(new_columns.len(), 2);
         assert_eq!(new_columns[0].column_schema.name, "new_column");
+        assert_eq!(new_columns[1].column_schema.name, "another_column");
     }
 
     #[test]
@@ -180,13 +233,13 @@ mod tests {
         )];
 
         let physical_columns = HashMap::new();
-        let mut new_column_names = HashSet::new();
+        let mut new_column_indices = HashMap::new();
         let mut new_columns = Vec::new();
 
         let err = extract_new_columns(
             &requests,
             &physical_columns,
-            &mut new_column_names,
+            &mut new_column_indices,
             &mut new_columns,
         )
         .unwrap_err();

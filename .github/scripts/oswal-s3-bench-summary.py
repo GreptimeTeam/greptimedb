@@ -192,6 +192,7 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
     wall, cpu = cell.get("load_wall_seconds"), cell.get("server_cpu_seconds")
     row = {
         "id": cell["id"], "group": cell.get("group", ""), "mode": cell.get("mode", "load"),
+        "image": cell.get("image", ""), "warmup": cell.get("warmup", False),
         "round": cell["round"], "concurrency": cell["concurrency"],
         "config": cell["config"], "exit_code": cell["exit_code"], "wal_device": cell.get("wal_device"),
         "missing": cell.get("missing", False), "env": cell.get("env", {}),
@@ -200,6 +201,7 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
         "rows_per_second": result.get("rows_per_second") if cell["exit_code"] == 0 else None,
         "server_cpu_cores": cpu / wall if cpu is not None and wall else None,
         "host_cpu_busy": cell.get("host_cpu_busy"), "host_cpus": cell.get("host_cpus"),
+        "host_load_start": cell.get("host_load_start"), "host_load_end": cell.get("host_load_end"),
     }
     for name, key in (("append_ack_seconds", "append_ack"), ("seal_to_durable_seconds", "seal_to_durable"),
                       ("object_bytes", "object_bytes")):
@@ -264,13 +266,14 @@ def load_cell(path: Path, spec: dict | None = None) -> dict:
 
 
 def ratios(rows: list) -> list:
-    """Each object store WAL cell over each Raft Engine control per round, and their geometric mean over the rounds, per concurrency."""
-    rows = [r for r in rows if r["mode"] == "load"]
-    speed = {(r["group"], r["round"], r["concurrency"], r["config"]): r["rows_per_second"]
+    """Each object store WAL cell over each Raft Engine control of the same image per round, and their
+    geometric mean over the rounds, per concurrency; warm-up cells are left out."""
+    rows = [r for r in rows if r["mode"] == "load" and not r["warmup"]]
+    speed = {(r["group"], r["image"], r["round"], r["concurrency"], r["config"]): r["rows_per_second"]
              for r in rows}
     result = []
-    for group in dict.fromkeys(r["group"] for r in rows):
-        members = [r for r in rows if r["group"] == group]
+    for group, image in dict.fromkeys((r["group"], r["image"]) for r in rows):
+        members = [r for r in rows if (r["group"], r["image"]) == (group, image)]
         series = sorted({r["config"] for r in members if r["config"] not in BASELINES})
         baselines = [b for b in BASELINES if any(r["config"] == b for r in members)]
         for concurrency in sorted({r["concurrency"] for r in members}):
@@ -278,13 +281,39 @@ def ratios(rows: list) -> list:
             for config, baseline in ((s, b) for s in series for b in baselines):
                 per_round = []
                 for round_number in rounds:
-                    base = speed.get((group, round_number, concurrency, baseline))
-                    measured = speed.get((group, round_number, concurrency, config))
+                    base = speed.get((group, image, round_number, concurrency, baseline))
+                    measured = speed.get((group, image, round_number, concurrency, config))
                     per_round.append(measured / base if base and measured else None)
                 complete = [ratio for ratio in per_round if ratio is not None]
-                result.append({"group": group, "concurrency": concurrency, "ratio": f"{config}/{baseline}",
-                               "per_round": per_round,
+                result.append({"group": group, "image": image, "concurrency": concurrency,
+                               "ratio": f"{config}/{baseline}", "per_round": per_round,
                                "geomean": geomean(complete) if len(complete) == len(per_round) else None})
+    return result
+
+
+def image_ratios(rows: list, images: list) -> list:
+    """Every load cell of every image per round, and each image's rows/s over the first image's in the
+    same round, with their geometric mean, minimum and maximum over the rounds; warm-up cells are left out."""
+    rows = [r for r in rows if r["mode"] == "load" and not r["warmup"]]
+    cells = {(r["group"], r["image"], r["round"], r["concurrency"], r["config"]): r for r in rows}
+    result = []
+    for group, concurrency, config in dict.fromkeys((r["group"], r["concurrency"], r["config"]) for r in rows):
+        rounds = sorted({r["round"] for r in rows if (r["group"], r["concurrency"], r["config"]) == (group, concurrency, config)})
+        for image in images:
+            measured = [cells.get((group, image, n, concurrency, config)) or {} for n in rounds]
+            reference = [cells.get((group, images[0], n, concurrency, config)) or {} for n in rounds]
+            per_round = [ratio(m.get("rows_per_second"), r.get("rows_per_second")) for m, r in zip(measured, reference)]
+            complete = image != images[0] and None not in per_round
+            result.append({
+                "group": group, "concurrency": concurrency, "config": config, "image": image,
+                "rounds": [{"round": n, "id": m.get("id"), "rows_per_second": m.get("rows_per_second"),
+                            "client_p50": m.get("client_p50"), "client_p99": m.get("client_p99"),
+                            "host_load_start": m.get("host_load_start"), "host_load_end": m.get("host_load_end")}
+                           for n, m in zip(rounds, measured)],
+                "ratio_to": None if image == images[0] else images[0],
+                "per_round": None if image == images[0] else per_round,
+                "geomean": geomean(per_round) if complete else None,
+                "min": min(per_round) if complete else None, "max": max(per_round) if complete else None})
     return result
 
 
@@ -304,18 +333,31 @@ def fmt(value, digits=0, scale=1.0) -> str:
     return "—" if value is None else f"{value * scale:,.{digits}f}"
 
 
-def render(run: dict, rows: list, pairs: list) -> str:
+def load_average(value) -> str:
+    """The 1-minute load average of a recorded [1, 5, 15] minute triple."""
+    return "—" if not value else f"{value[0]:.2f}"
+
+
+def render(run: dict, rows: list, pairs: list, compared: list = ()) -> str:
     lines = [f"## Object store WAL against S3 ({'smoke, MinIO' if run.get('smoke') else run.get('instance_type')})", ""]
-    lines += [f"GreptimeDB `{run.get('greptimedb_image')}` ({next((r['version'] for r in rows if r['version']), '—')}); "
-              f"{fmt(run.get('rows'))} rows in {run.get('batch_rows')}-row batches; bucket region {run.get('region')}.", ""]
+    images = run.get("greptimedb_images") or []
+    if len(images) > 1:
+        lines += [f"{fmt(run.get('rows'))} rows in {run.get('batch_rows')}-row batches; bucket region {run.get('region')}; "
+                  f"each image is compared with the first, `{images[0]['label']}`.", "",
+                  "| Image | Reference | Version | Commit |", "| --- | --- | --- | --- |"]
+        lines += [f"| {i['label']} | `{i['image']}` | {i['version']} | `{i['commit']}` |" for i in images] + [""]
+    else:
+        lines += [f"GreptimeDB `{run.get('greptimedb_image')}` ({next((r['version'] for r in rows if r['version']), '—')}); "
+                  f"{fmt(run.get('rows'))} rows in {run.get('batch_rows')}-row batches; bucket region {run.get('region')}.", ""]
     lines += ["| Cell | Overrides | Rows/s | Load s | Wall s | Ack p50 / p99 ms | Seal to durable p50 / p99 ms "
               "| Object p50 / p99 MiB | Creates | Creates/min | Stalled | Poisoned | Create failures | Conflicts "
-              "| Server CPUs | Host busy | WAL on |",
+              "| Server CPUs | Host busy | WAL on | Load average at start / end |",
               "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: "
-              "| ---: | ---: | --- |"]
+              "| ---: | ---: | --- | ---: |"]
     def label(r):
-        return f"{r['id']} (not run)" if r["missing"] else r["id"] if r["exit_code"] == 0 \
-            else f"{r['id']} (failed, exit {r['exit_code']})"
+        cell = f"{r['id']} (warm-up)" if r["warmup"] else r["id"]
+        return f"{cell} (not run)" if r["missing"] else cell if r["exit_code"] == 0 \
+            else f"{cell} (failed, exit {r['exit_code']})"
     loads = [r for r in rows if r["mode"] == "load"]
     for r in loads:
         cell = label(r)
@@ -327,7 +369,8 @@ def render(run: dict, rows: list, pairs: list) -> str:
             *(fmt(r[c]) for c in COUNTERS[:1]), fmt(r["creates_per_minute"], 1),
             *(fmt(r[c]) for c in COUNTERS[1:]), fmt(r["server_cpu_cores"], 2),
             "—" if r["host_cpu_busy"] is None else f"{r['host_cpu_busy']:.0%} of {r['host_cpus'] or '?'}",
-            f"`{r['wal_device'] or '—'}` |"]))
+            f"`{r['wal_device'] or '—'}`",
+            f"{load_average(r['host_load_start'])} / {load_average(r['host_load_end'])} |"]))
     lines += ["", "| Cell | WAL MB/s | Objects/s | Mean object MiB | Sealed on size | OpenDAL S3 operations during the load "
               "| OpenDAL S3 operations of the restart | Idle s | Idle creates | Idle OpenDAL S3 operations |",
               "| --- | ---: | ---: | ---: | --- | --- | --- | ---: | ---: | --- |"]
@@ -431,11 +474,22 @@ def render(run: dict, rows: list, pairs: list) -> str:
                 fmt(x["wall_seconds"], 2),
                 fmt(x["query_seconds"], 2), fmt(x["recovery_seconds"], 3), fmt(x["recovered_objects"]),
                 f"{fmt(x['rows'])} |"]))
-    lines += ["", "| Group | Concurrency | Ratio | Per round | Geometric mean |",
-              "| --- | ---: | --- | --- | ---: |"]
+    lines += ["", "| Group | Image | Concurrency | Ratio | Per round | Geometric mean |",
+              "| --- | --- | ---: | --- | --- | ---: |"]
     for p in pairs:
-        lines.append(f"| {p['group'] or '—'} | {p['concurrency']} | {p['ratio']} "
+        lines.append(f"| {p['group'] or '—'} | {p['image'] or '—'} | {p['concurrency']} | {p['ratio']} "
                      f"| {', '.join(fmt(v, 3) for v in p['per_round'])} | {fmt(p['geomean'], 3)} |")
+    if compared:
+        lines += ["", f"| Group | Concurrency | Config | Image | Rows/s per round | Client p50 / p99 ms per round "
+                  f"| Ratio to {compared[0]['image']} per round | Geometric mean | Min | Max |",
+                  "| --- | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: |"]
+        for c in compared:
+            lines.append(" | ".join([
+                f"| {c['group'] or '—'}", str(c["concurrency"]), c["config"], c["image"],
+                "; ".join(fmt(r["rows_per_second"]) for r in c["rounds"]),
+                "; ".join(pair(r["client_p50"], r["client_p99"], 1, 1000) for r in c["rounds"]),
+                "—" if c["per_round"] is None else ", ".join(fmt(v, 3) for v in c["per_round"]),
+                fmt(c["geomean"], 3), fmt(c["min"], 3), fmt(c["max"], 3)]) + " |")
     return "\n".join(lines) + "\n"
 
 
@@ -447,17 +501,20 @@ def main() -> None:
     run_path = args.root / "run.json"
     run = json.loads(run_path.read_text()) if run_path.exists() else {}
     plan_path = args.root / "plan.json"
-    planned = json.loads(plan_path.read_text())["cells"] if plan_path.exists() else []
+    plan = json.loads(plan_path.read_text()) if plan_path.exists() else {}
+    planned = plan.get("cells", [])
     # The plan, not what happened to run, defines the expected cells and rounds.
     rows = [load_cell(args.root / "cells" / spec["id"], spec) for spec in planned]
     rows += [load_cell(path) for path in sorted((args.root / "cells").glob("*"))
              if path.name not in {spec["id"] for spec in planned} and (path / "cell.json").exists()]
     pairs = ratios(rows)
+    images = plan.get("images", [""])
+    compared = image_ratios(rows, images) if len(images) > 1 else []
     missing = [r["id"] for r in rows if r["missing"]]
     (args.root / "summary.json").write_text(json.dumps(
-        {"run": run, "planned_cells": len(planned), "missing_cells": missing, "cells": rows, "ratios": pairs},
-        indent=2) + "\n")
-    print(render(run, rows, pairs) if rows else "No benchmark cell completed.\n")
+        {"run": run, "planned_cells": len(planned), "missing_cells": missing, "cells": rows, "ratios": pairs,
+         "image_ratios": compared}, indent=2) + "\n")
+    print(render(run, rows, pairs, compared) if rows else "No benchmark cell completed.\n")
 
 
 if __name__ == "__main__":

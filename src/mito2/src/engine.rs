@@ -25,6 +25,8 @@ mod batch_catchup_test;
 #[cfg(test)]
 mod batch_open_test;
 #[cfg(test)]
+mod bulk_insert_validation_test;
+#[cfg(test)]
 mod bump_committed_sequence_test;
 #[cfg(test)]
 mod catchup_test;
@@ -46,6 +48,8 @@ mod filter_deleted_test;
 mod flush_test;
 #[cfg(test)]
 mod index_build_test;
+#[cfg(test)]
+mod lease_test;
 #[cfg(any(test, feature = "test"))]
 pub mod listener;
 #[cfg(test)]
@@ -102,12 +106,15 @@ use common_base::Plugins;
 use common_error::ext::BoxedError;
 use common_meta::error::UnexpectedSnafu;
 use common_meta::key::SchemaMetadataManagerRef;
+use common_recordbatch::filter::MetadataFilter;
 use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
-use futures::future::{join_all, try_join_all};
+use datafusion_common::ScalarValue;
+use datafusion_expr::Expr;
+use futures::FutureExt;
+use futures::future::{self, join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
 use region_hook::RegionHookRef;
@@ -121,22 +128,22 @@ use store_api::metric_engine_consts::{
     MANIFEST_INFO_EXTENSION_KEY, TABLE_COLUMN_METADATA_EXTENSION_KEY,
 };
 use store_api::region_engine::{
-    BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse, RegionEngine,
-    RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic, RemapManifestsRequest,
-    RemapManifestsResponse, SetRegionRoleStateResponse, SettableRegionRoleState,
-    SyncRegionFromRequest, SyncRegionFromResponse,
+    BatchPutResponse, BatchResponses, MitoCopyRegionFromRequest, MitoCopyRegionFromResponse,
+    RegionEngine, RegionManifestInfo, RegionRole, RegionScannerRef, RegionStatistic,
+    RemapManifestsRequest, RemapManifestsResponse, SetRegionRoleStateResponse,
+    SettableRegionRoleState, SyncRegionFromRequest, SyncRegionFromResponse,
 };
 use store_api::region_info::RegionInfoEntry;
 use store_api::region_request::{
-    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    AffectedRows, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
-use store_api::sst_entry::{ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
+use store_api::sst_entry::{self, ManifestSstEntry, PuffinIndexMetaEntry, StorageSstEntry};
 use store_api::storage::{FileId, FileRefsManifest, RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
-use crate::config::MitoConfig;
+use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
@@ -242,26 +249,23 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
-        let scan_memory_tracker =
-            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .on_update(|usage| {
-                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-                })
-                .on_exhausted(|| {
-                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
-                })
-                .on_reject(|| {
-                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                })
-                .build();
+        let scan_memory_tracker = QueryMemoryTracker::builder(scan_memory_limit)
+            .on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .on_exhausted(|| {
+                SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+            })
+            .on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            })
+            .build();
 
         let inner = EngineInner {
             workers,
             config,
             wal_raw_entry_reader,
             scan_memory_tracker,
-            scan_memory_pool,
             region_hook,
             #[cfg(feature = "enterprise")]
             extension_range_provider_factory: None,
@@ -323,6 +327,22 @@ impl MitoEngine {
 
     pub fn gc_limiter(&self) -> GcLimiterRef {
         self.inner.workers.gc_limiter()
+    }
+
+    /// Makes regions acknowledge only writes whose WAL append completes within their lease.
+    pub fn require_write_lease(&self) {
+        self.inner.workers.node_lease().enable();
+    }
+
+    /// Renews the lease of this node from a heartbeat response that carries region leases.
+    pub fn renew_node_lease(&self, deadline: Instant) {
+        self.inner.workers.node_lease().renew(deadline);
+    }
+
+    /// Freezes the clock of the lease checks at `at`.
+    #[cfg(any(test, feature = "test"))]
+    pub fn freeze_lease_clock(&self, at: Instant) {
+        self.inner.workers.node_lease().freeze_clock(at);
     }
 
     pub fn object_store_manager(&self) -> &ObjectStoreManagerRef {
@@ -579,19 +599,65 @@ impl MitoEngine {
 
     /// Lists all SSTs from the manifest of all regions in the engine.
     pub async fn all_ssts_from_manifest(&self) -> Vec<ManifestSstEntry> {
-        let node_id = self.inner.workers.file_ref_manager().node_id();
-        let regions = self.inner.workers.all_regions();
+        self.scan_ssts_from_manifest(&[], 1024)
+            .flat_map(stream::iter)
+            .collect()
+            .await
+    }
 
-        let mut results = Vec::new();
-        for region in regions {
-            let mut entries = region.manifest_sst_entries().await;
-            for e in &mut entries {
-                e.node_id = node_id;
+    /// Lazily emits bounded batches of manifest entries, pruning regions before
+    /// opening their manifest snapshots and files before constructing entries.
+    /// Filters are conservative; callers must retain their residual predicates.
+    pub(crate) fn scan_ssts_from_manifest(
+        &self,
+        filters: &[Expr],
+        batch_size: usize,
+    ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
+        self.scan_ssts_from_manifest_projected(filters, batch_size, None)
+    }
+
+    /// Like [`Self::scan_ssts_from_manifest`], but avoids allocating unrequested
+    /// variable-sized fields. The projection must include residual filter columns.
+    pub fn scan_ssts_from_manifest_projected(
+        &self,
+        filters: &[Expr],
+        batch_size: usize,
+        projection: Option<&[usize]>,
+    ) -> futures::stream::BoxStream<'static, Vec<ManifestSstEntry>> {
+        let engine = self.clone();
+        let projection = crate::region::ManifestSstProjection::new(projection);
+        let filters = MetadataFilter::new(filters);
+        Box::pin(async_stream::stream! {
+            let node_id = engine.inner.workers.file_ref_manager().node_id();
+            if !filters.matches(|column| match column {
+                sst_entry::NODE_ID => Some(ScalarValue::UInt64(node_id)),
+                _ => None,
+            }) {
+                return;
             }
-            results.extend(entries);
-        }
-
-        results
+            let mut batch = Vec::with_capacity(batch_size.max(1));
+            for region in engine.inner.workers.all_regions() {
+                if !manifest_region_matches(region.region_id, node_id, &filters)
+                    || !filters.matches(|column| match column {
+                        sst_entry::TABLE_DIR => Some(ScalarValue::Utf8(Some(region.table_dir().to_string()))),
+                        _ => None,
+                    })
+                {
+                    continue;
+                }
+                let mut entries = region.manifest_sst_stream(filters.clone(), projection);
+                while let Some(mut entry) = entries.next().await {
+                    entry.node_id = node_id;
+                    batch.push(entry);
+                    if batch.len() == batch_size.max(1) {
+                        yield std::mem::replace(&mut batch, Vec::with_capacity(batch_size.max(1)));
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                yield batch;
+            }
+        })
     }
 
     /// Lists metadata about all puffin index targets stored in the engine.
@@ -747,8 +813,6 @@ struct EngineInner {
     wal_raw_entry_reader: Arc<dyn RawEntryReader>,
     /// Memory tracker for table scans.
     scan_memory_tracker: QueryMemoryTracker,
-    /// Memory pool shared by internal scan operators across all queries.
-    scan_memory_pool: Arc<dyn MemoryPool>,
     /// The region hook (if any) registered via plugins; exposed for the GC worker
     /// to fire [`RegionHook::on_region_gc`].
     region_hook: Option<RegionHookRef>,
@@ -1163,7 +1227,7 @@ impl EngineInner {
         .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
-        .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_scan_memory_tracker(self.scan_memory_tracker.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
@@ -1411,6 +1475,46 @@ impl RegionEngine for MitoEngine {
             .map_err(BoxedError::new)
     }
 
+    /// Sends the puts to regions of the same worker in one message, so that the worker writes
+    /// them in one batch and one WAL append. The messages are sent on their own task, so every
+    /// response can be awaited at once.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<BatchPutResponse> {
+        let mut writes = Vec::with_capacity(requests.len());
+        let mut responses = Vec::with_capacity(requests.len());
+        for (region_id, request) in requests {
+            let request = RegionRequest::Put(request);
+            let timer = HANDLE_REQUEST_ELAPSED
+                .with_label_values(&[request.request_type()])
+                .start_timer();
+            let region_metadata = self.inner.get_metadata(region_id).ok();
+            let response =
+                match WorkerRequest::try_from_region_request(region_id, request, region_metadata) {
+                    Ok((WorkerRequest::Write(write), receiver)) => {
+                        writes.push(write);
+                        async move {
+                            let _timer = timer;
+                            receiver
+                                .await
+                                .context(RecvSnafu)
+                                .flatten()
+                                .map(RegionResponse::new)
+                                .map_err(BoxedError::new)
+                        }
+                        .boxed()
+                    }
+                    Ok(_) => unreachable!("a put converts to a write"),
+                    Err(e) => future::ready(Err(BoxedError::new(e))).boxed(),
+                };
+            responses.push((vec![region_id], response));
+        }
+        let inner = self.inner.clone();
+        common_runtime::spawn_ingest(async move { inner.workers.submit_writes(writes).await });
+        responses
+    }
+
     #[tracing::instrument(skip_all)]
     async fn handle_request(
         &self,
@@ -1455,7 +1559,8 @@ impl RegionEngine for MitoEngine {
     }
 
     fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
-        Some(self.inner.scan_memory_tracker.clone())
+        (self.inner.config.scan_memory_mode == ScanMemoryMode::Extended)
+            .then(|| self.inner.scan_memory_tracker.clone())
     }
 
     async fn get_committed_sequence(
@@ -1492,6 +1597,21 @@ impl RegionEngine for MitoEngine {
         self.inner
             .set_region_role(region_id, role)
             .map_err(BoxedError::new)
+    }
+
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError> {
+        let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
+        // Before the role, and even if the role leaves the region's state unchanged.
+        if role.writable() {
+            region.leader_deadline.extend(deadline);
+        }
+        region.set_role(role);
+        Ok(())
     }
 
     async fn set_region_role_state_gracefully(
@@ -1620,19 +1740,17 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
-        let scan_memory_tracker =
-            QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
-                .on_update(|usage| {
-                    SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
-                })
-                .on_exhausted(|| {
-                    SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
-                })
-                .on_reject(|| {
-                    SCAN_REQUESTS_REJECTED_TOTAL.inc();
-                })
-                .build();
+        let scan_memory_tracker = QueryMemoryTracker::builder(scan_memory_limit)
+            .on_update(|usage| {
+                SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
+            })
+            .on_exhausted(|| {
+                SCAN_MEMORY_EXHAUSTED_TOTAL.inc();
+            })
+            .on_reject(|| {
+                SCAN_REQUESTS_REJECTED_TOTAL.inc();
+            })
+            .build();
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1651,7 +1769,6 @@ impl MitoEngine {
                 config,
                 wal_raw_entry_reader,
                 scan_memory_tracker,
-                scan_memory_pool,
                 region_hook: None,
                 #[cfg(feature = "enterprise")]
                 extension_range_provider_factory: None,
@@ -1665,22 +1782,55 @@ impl MitoEngine {
     }
 }
 
-fn new_scan_memory_pool(scan_memory_limit: usize) -> Arc<dyn MemoryPool> {
-    if scan_memory_limit == 0 {
-        Arc::new(UnboundedMemoryPool::default())
-    } else {
-        Arc::new(GreedyMemoryPool::new(scan_memory_limit))
-    }
+/// Evaluates region-constant predicates before visiting any of its files.
+fn manifest_region_matches(
+    region_id: RegionId,
+    node_id: Option<u64>,
+    filters: &MetadataFilter,
+) -> bool {
+    filters.matches(|column| {
+        Some(match column {
+            sst_entry::REGION_ID => ScalarValue::UInt64(Some(region_id.as_u64())),
+            sst_entry::TABLE_ID => ScalarValue::UInt32(Some(region_id.table_id())),
+            sst_entry::REGION_NUMBER => ScalarValue::UInt32(Some(region_id.region_number())),
+            sst_entry::REGION_GROUP => ScalarValue::UInt8(Some(region_id.region_group())),
+            sst_entry::REGION_SEQUENCE => ScalarValue::UInt32(Some(region_id.region_sequence())),
+            sst_entry::NODE_ID => ScalarValue::UInt64(node_id),
+            _ => return None,
+        })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use datafusion::execution::memory_pool::MemoryConsumer;
-
     use super::*;
     use crate::sst::file::FileMeta;
+
+    #[test]
+    fn test_manifest_region_predicates() {
+        use super::manifest_region_matches;
+        use common_recordbatch::filter::MetadataFilter;
+        use datafusion_expr::{col, lit};
+        let region = store_api::storage::RegionId::new(42, 3);
+        for (expr, expected) in [
+            (col("region_id").eq(lit(region.as_u64())), true),
+            (col("region_id").eq(lit(region.as_u64() + 1)), false),
+            (col("table_id").eq(lit(42u32)), true),
+            (col("node_id").is_null(), true),
+            (col("file_size").gt(lit(100u64)), true),
+            // A type mismatch is left to the residual filter, never pruned.
+            (col("region_id").eq(lit("invalid")), true),
+        ] {
+            let filter = MetadataFilter::new(std::slice::from_ref(&expr));
+            assert_eq!(
+                manifest_region_matches(region, None, &filter),
+                expected,
+                "{expr}"
+            );
+        }
+    }
 
     #[test]
     fn test_is_valid_region_edit() {
@@ -1763,18 +1913,5 @@ mod tests {
             committed_sequence: None,
         };
         assert!(!is_valid_region_edit(&edit));
-    }
-
-    #[test]
-    fn test_scan_memory_pool_is_shared_across_consumers() {
-        let pool = new_scan_memory_pool(100);
-        let cloned_pool = pool.clone();
-        let first = MemoryConsumer::new("first-scan").register(&pool);
-        let second = MemoryConsumer::new("second-scan").register(&cloned_pool);
-
-        first.try_grow(60).unwrap();
-        assert!(second.try_grow(50).is_err());
-        second.try_grow(40).unwrap();
-        assert_eq!(100, pool.reserved());
     }
 }

@@ -81,5 +81,6 @@ common-meta = { workspace = true, features = ["testing"] }
 common-query.workspace = true
 common-test-util.workspace = true
 datafusion-common.workspace = true
+log-store = { workspace = true, features = ["testing"] }
 mito2 = { workspace = true, features = ["test"] }
 session.workspace = true

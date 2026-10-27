@@ -32,7 +32,6 @@ use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_meta::procedure_executor::ProcedureExecutorRef;
-use dashmap::DashMap;
 use operator::batcher::PendingRowsBatcher;
 use operator::delete::Deleter;
 use operator::flow::FlowServiceOperator;
@@ -432,7 +431,6 @@ impl FrontendBuilder {
             event_recorder,
             slow_query_recorder,
             process_manager,
-            otlp_metrics_table_legacy_cache: Arc::new(DashMap::new()),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,

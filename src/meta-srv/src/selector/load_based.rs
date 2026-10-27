@@ -18,12 +18,11 @@ use common_meta::affinity::AffinityFallback;
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue};
 use common_meta::peer::Peer;
 use common_telemetry::debug;
-use snafu::ResultExt;
 
 use crate::cluster::MetaPeerClientRef;
-use crate::error::{self, ListActiveDatanodesSnafu, Result};
+use crate::error::{self, Result};
 use crate::metasrv::SelectorContext;
-use crate::selector::common::{choose_items, filter_out_excluded_peers};
+use crate::selector::common::{self, choose_items, filter_out_excluded_peers};
 use crate::selector::weight_compute::WeightCompute;
 use crate::selector::weighted_choose::RandomWeightedChoose;
 use crate::selector::{Selector, SelectorOptions};
@@ -52,11 +51,8 @@ where
         opts: &SelectorOptions<'_>,
     ) -> Result<Vec<Peer>> {
         // 1. get alive datanodes.
-        let alive_datanodes = ctx
-            .peer_discovery
-            .active_datanodes(opts.workload_filter)
-            .await
-            .context(ListActiveDatanodesSnafu)?
+        let alive_datanodes = common::active_schedulable_datanodes(ctx, opts.workload_filter)
+            .await?
             .into_iter()
             .filter(|node| {
                 opts.affinity

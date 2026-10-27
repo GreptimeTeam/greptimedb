@@ -247,19 +247,21 @@ pub trait RepartitionProcedureFactory: Send + Sync {
 /// The options for DDL tasks.
 ///
 /// Note: These options may not be utilized by all procedures.
-/// At present, they are specifically applied in `RepartitionProcedure`.
+/// At present, they are specifically applied in `RepartitionProcedure` and truncate tasks.
 #[derive(Debug, Clone, Copy)]
 pub struct DdlOptions {
     /// The timeout will be passed to the procedure.
     ///
     /// Note: Each procedure may implement its own timeout handling mechanism.
+    /// For truncate tasks, the timeout bounds submission and waiting rather than procedure execution.
+    /// A timeout does not cancel a submitted procedure.
     pub timeout: Duration,
     /// The flag that controls whether to wait for the procedure to complete.
     ///
     /// If wait is `true`, the procedure will wait for completion(success or failure) and the result will be returned.
     /// Otherwise, the procedure will be submitted and return the [ProcedureId](common_procedure::ProcedureId) immediately.
     ///
-    /// Note: The value of `wait` is independent of the `timeout` option. If a procedure ignores the `timeout` and `wait` is set to true, the operation returns until the procedure completes.
+    /// Note: Except for truncate tasks, the value of `wait` is independent of the `timeout` option. If a procedure ignores the `timeout` and `wait` is set to true, the operation returns until the procedure completes.
     pub wait: bool,
 }
 
@@ -454,13 +456,8 @@ impl DdlManager {
             .context(PersistRepartitionGcRequirementSnafu)?;
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
-        if wait {
-            self.execute_procedure_and_wait(procedure_with_id).await
-        } else {
-            self.submit_procedure(procedure_with_id)
-                .await
-                .map(|p| (p, None))
-        }
+        self.execute_procedure_with_options(procedure_with_id, DdlOptions { wait, timeout })
+            .await
     }
 
     /// Submits and executes an alter table task.
@@ -870,13 +867,14 @@ impl DdlManager {
         self.execute_procedure_and_wait(procedure_with_id).await
     }
 
-    /// Submits and executes a truncate table task.
+    /// Submits a truncate table task and optionally waits for completion.
     #[tracing::instrument(skip_all)]
     pub async fn submit_truncate_table_task(
         &self,
         truncate_table_task: TruncateTableTask,
         table_info_value: DeserializedValueWithBytes<TableInfoValue>,
         procedure_context: ProcedureContext,
+        ddl_options: DdlOptions,
     ) -> Result<(ProcedureId, Option<Output>)> {
         let context = self.create_context();
         let procedure = TruncateTableProcedure::new(truncate_table_task, table_info_value, context);
@@ -884,7 +882,8 @@ impl DdlManager {
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
 
-        self.execute_procedure_and_wait(procedure_with_id).await
+        self.execute_procedure_with_options(procedure_with_id, ddl_options)
+            .await
     }
 
     /// Submits and executes a comment on task.
@@ -906,6 +905,24 @@ impl DdlManager {
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
 
         self.execute_procedure_and_wait(procedure_with_id).await
+    }
+
+    /// Submits a procedure and optionally waits for completion.
+    ///
+    /// The truncate task handler bounds its whole request, including metadata reads.
+    /// The manager drives submitted procedures independently of this future.
+    async fn execute_procedure_with_options(
+        &self,
+        procedure_with_id: ProcedureWithId,
+        ddl_options: DdlOptions,
+    ) -> Result<(ProcedureId, Option<Output>)> {
+        if ddl_options.wait {
+            self.execute_procedure_and_wait(procedure_with_id).await
+        } else {
+            self.submit_procedure(procedure_with_id)
+                .await
+                .map(|id| (id, None))
+        }
     }
 
     /// Executes a procedure and waits for the result.
@@ -1001,7 +1018,13 @@ impl DdlManager {
                         .await
                 }
                 TruncateTable(truncate_table_task) => {
-                    handle_truncate_table_task(self, truncate_table_task, procedure_context).await
+                    handle_truncate_table_task(
+                        self,
+                        truncate_table_task,
+                        procedure_context,
+                        ddl_options,
+                    )
+                    .await
                 }
                 CreateLogicalTables(create_table_tasks) => {
                     handle_create_logical_table_tasks(self, create_table_tasks, procedure_context)
@@ -1084,6 +1107,33 @@ async fn handle_truncate_table_task(
     ddl_manager: &DdlManager,
     truncate_table_task: TruncateTableTask,
     procedure_context: ProcedureContext,
+    ddl_options: DdlOptions,
+) -> Result<SubmitDdlTaskResponse> {
+    // Share one timeout across metadata checks, submission and optional waiting.
+    // Dropping this future does not cancel an already submitted procedure.
+    tokio::time::timeout(
+        ddl_options.timeout,
+        handle_truncate_table_task_inner(
+            ddl_manager,
+            truncate_table_task,
+            procedure_context,
+            ddl_options,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        error::DdlTaskTimeoutSnafu {
+            timeout: ddl_options.timeout,
+        }
+        .build()
+    })?
+}
+
+async fn handle_truncate_table_task_inner(
+    ddl_manager: &DdlManager,
+    truncate_table_task: TruncateTableTask,
+    procedure_context: ProcedureContext,
+    ddl_options: DdlOptions,
 ) -> Result<SubmitDdlTaskResponse> {
     let table_id = truncate_table_task.table_id;
     let table_metadata_manager = &ddl_manager.table_metadata_manager();
@@ -1108,10 +1158,18 @@ async fn handle_truncate_table_task(
     );
 
     let (id, _) = ddl_manager
-        .submit_truncate_table_task(truncate_table_task, table_info_value, procedure_context)
+        .submit_truncate_table_task(
+            truncate_table_task,
+            table_info_value,
+            procedure_context,
+            ddl_options,
+        )
         .await?;
 
-    info!("Table: {table_id} is truncated via procedure_id {id:?}");
+    info!(
+        "Submitted truncate for table: {table_id} via procedure_id {id:?}, wait: {}",
+        ddl_options.wait
+    );
 
     Ok(SubmitDdlTaskResponse {
         key: id.to_string().into(),
@@ -1621,9 +1679,7 @@ mod tests {
     #[cfg(feature = "enterprise")]
     use common_base::protocol::Channel;
     use common_error::ext::BoxedError;
-    #[cfg(feature = "enterprise")]
     use common_error::ext::ErrorExt;
-    #[cfg(feature = "enterprise")]
     use common_error::status_code::StatusCode;
     #[cfg(feature = "enterprise")]
     use common_event_recorder::{PersistentEventContext, ProcedureEventInput, TriggerReason};
@@ -1656,6 +1712,7 @@ mod tests {
     use crate::key::TableMetadataManager;
     use crate::key::flow::FlowMetadataManager;
     use crate::kv_backend::memory::MemoryKvBackend;
+    use crate::kv_backend::test_util::MockKvBackendBuilder;
     use crate::node_manager::{DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef};
     use crate::peer::Peer;
     use crate::procedure_executor::ExecutorContext;
@@ -2219,6 +2276,60 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, crate::error::Error::Unsupported { .. }));
         }
+    }
+
+    #[tokio::test]
+    async fn test_truncate_timeout_covers_metadata_checks() {
+        let mut context = new_ddl_context(Arc::new(DummyDatanodeManager));
+        let kv_backend = MockKvBackendBuilder::default()
+            .range_async_fn(Arc::new(|_| Box::pin(std::future::pending())))
+            .build()
+            .unwrap();
+        context.table_metadata_manager = Arc::new(TableMetadataManager::new(Arc::new(kv_backend)));
+        let ddl_manager = ddl_manager_with_context(context).await;
+
+        for wait in [true, false] {
+            let timeout = Duration::from_millis(20);
+            let request = SubmitDdlTaskRequest {
+                task: DdlTask::new_truncate_table(
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "metrics".to_string(),
+                    1024,
+                    Vec::new(),
+                ),
+                wait,
+                timeout,
+            };
+            let err = tokio::time::timeout(
+                Duration::from_secs(1),
+                ddl_manager.submit_ddl_task(
+                    ExecutorContext {
+                        query_context: Some(QueryContext::default()),
+                        ..Default::default()
+                    },
+                    request,
+                ),
+            )
+            .await
+            .expect("metadata reads must be bounded by the request timeout")
+            .unwrap_err();
+            assert!(matches!(
+                err,
+                crate::error::Error::DdlTaskTimeout { timeout: actual, .. } if actual == timeout
+            ));
+            assert_eq!(err.status_code(), StatusCode::Cancelled);
+            assert!(
+                ddl_manager
+                    .procedure_manager
+                    .list_procedures()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        ddl_manager.procedure_manager.stop().await.unwrap();
     }
 
     async fn ddl_manager_with_context(ddl_context: DdlContext) -> DdlManager {

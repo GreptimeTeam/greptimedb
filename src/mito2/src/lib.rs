@@ -42,6 +42,8 @@ pub mod request;
 pub mod schedule;
 pub mod series_index;
 pub mod sst;
+#[cfg(feature = "hdfs-object-store")]
+mod temp_file_sweeper;
 mod time_provider;
 pub mod wal;
 pub mod worker;

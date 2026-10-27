@@ -287,10 +287,8 @@ impl FulltextIndexApplier {
         request: &FulltextRequest,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let blob_key = format!(
-            "{INDEX_BLOB_TYPE_TANTIVY}-{}",
-            IndexTarget::ColumnId(column_id)
-        );
+        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
         let dir = self
             .index_source
             .dir(file_id, &blob_key, file_size_hint, metrics)
@@ -407,10 +405,8 @@ impl FulltextIndexApplier {
         output: &mut [(usize, Vec<Range<usize>>)],
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
-        let blob_key = format!(
-            "{INDEX_BLOB_TYPE_BLOOM}-{}",
-            IndexTarget::ColumnId(column_id)
-        );
+        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
         let Some(reader) = self
             .index_source
             .blob(file_id, &blob_key, file_size_hint, metrics.as_deref_mut())

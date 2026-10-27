@@ -18,6 +18,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use api::greptime_proto::v1::meta::{GrantedRegion as PbGrantedRegion, RegionRole as PbRegionRole};
 use api::region::RegionResponse;
@@ -26,17 +27,19 @@ use common_error::ext::BoxedError;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::{EmptyRecordBatchStream, QueryMemoryTracker, SendableRecordBatchStream};
 use common_time::Timestamp;
+use datafusion_execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use datafusion_physical_plan::metrics::ExecutionPlanMetricsSet;
 use datafusion_physical_plan::{DisplayAs, DisplayFormatType, PhysicalExpr};
 use datatypes::schema::SchemaRef;
-use futures::future::join_all;
+use futures::FutureExt;
+use futures::future::{BoxFuture, join_all};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 
 use crate::logstore::entry;
 use crate::metadata::RegionMetadataRef;
 use crate::region_request::{
-    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionRequest,
+    BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use crate::storage::{FileId, RegionId, ScanRequest, SequenceNumber};
 
@@ -461,10 +464,23 @@ impl PrepareRequest {
 }
 
 /// Necessary context of the query for the scanner.
-#[derive(Clone, Default)]
+/// Direct callers should create one context per scan and reuse it across partitions.
+/// The default pool is unbounded; cloning the context shares its pool.
+#[derive(Clone)]
 pub struct QueryScanContext {
     /// Whether the query is EXPLAIN ANALYZE VERBOSE.
     pub explain_verbose: bool,
+    /// Executing node's query runtime pool, shared by all partitions of this scan.
+    pub memory_pool: Arc<dyn MemoryPool>,
+}
+
+impl Default for QueryScanContext {
+    fn default() -> Self {
+        Self {
+            explain_verbose: false,
+            memory_pool: Arc::new(UnboundedMemoryPool::default()),
+        }
+    }
 }
 
 /// A scanner that provides a way to scan the region concurrently.
@@ -533,6 +549,13 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
 pub type RegionScannerRef = Box<dyn RegionScanner>;
 
 pub type BatchResponses = Vec<(RegionId, Result<RegionResponse, BoxedError>)>;
+
+/// A response of [`RegionEngine::handle_batch_put_requests`] and the region of each put it
+/// answers for.
+pub type BatchPutResponse = (
+    Vec<RegionId>,
+    BoxFuture<'static, Result<RegionResponse, BoxedError>>,
+);
 
 /// Represents the statistics of a region.
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -967,6 +990,35 @@ pub trait RegionEngine: Send + Sync {
         Ok(join_all(tasks).await)
     }
 
+    /// Handles the puts of one request into regions of this engine and returns the responses
+    /// to await on their own, each with the region of every put it answers for: two puts to one
+    /// region are two entries.
+    ///
+    /// The default handles each put with [`handle_request`](Self::handle_request) and answers
+    /// each put on its own. An engine that writes several puts together may answer them with
+    /// one response whose affected rows count all of them.
+    fn handle_batch_put_requests(
+        self: Arc<Self>,
+        requests: Vec<(RegionId, RegionPutRequest)>,
+    ) -> Vec<BatchPutResponse>
+    where
+        Self: 'static,
+    {
+        requests
+            .into_iter()
+            .map(|(region_id, request)| {
+                let engine = self.clone();
+                let response = async move {
+                    engine
+                        .handle_request(region_id, RegionRequest::Put(request))
+                        .await
+                }
+                .boxed();
+                (vec![region_id], response)
+            })
+            .collect()
+    }
+
     async fn handle_batch_ddl_requests(
         &self,
         request: BatchRegionDdlRequest,
@@ -1029,6 +1081,18 @@ pub trait RegionEngine: Send + Sync {
     /// the region as readonly doesn't guarantee that write operations in progress will not
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
+
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`.
+    ///
+    /// The region must not acknowledge a write whose WAL append completes at or after the
+    /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
+    /// that deadline.
+    fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: Instant,
+    ) -> Result<(), BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(

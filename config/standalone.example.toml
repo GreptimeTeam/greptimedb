@@ -43,6 +43,14 @@ init_regions_in_background = false
 ## Parallelism of initializing regions.
 init_regions_parallelism = 16
 
+## The maximum concurrent region-read streams. Zero means unlimited.
+## A single query can consume multiple permits.
+max_concurrent_queries = 0
+
+## Timeout to acquire a permit when `max_concurrent_queries` is reached.
+## Only effective when the limiter is enabled.
+concurrent_query_limiter_timeout = "100ms"
+
 ## Enable telemetry to collect anonymous usage data. Enabled by default.
 #+ enable_telemetry = true
 
@@ -246,8 +254,8 @@ max_inflight_requests = 3000
 ## Maximum number of queued table Flow notifications.
 flow_notification_queue_capacity = 1024
 
-## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
-## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
+## Metric-engine logical-table batching for Prom remote write and OTLP metrics.
+## Requires prom_store.with_metric_engine. Logs and traces are not eligible.
 ## Enable independently with protocols and a nonzero flush interval.
 ## Omitted fields use independent defaults, not parent settings.
 ## Empty protocols or a zero interval disables logical batching without fallback.
@@ -548,11 +556,12 @@ max_running_procedures = 128
 ## Default to 0, which means the number of CPU cores.
 parallelism = 0
 
-## Memory pool size for query execution operators (aggregation, sorting, join).
+## Memory pool size for query execution operators (aggregation, sorting, join,
+## and internal series merges during table scans).
 ## Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").
 ## Setting it to 0 disables the limit. Defaults to 0 (unlimited); this example sets it to `50%`.
 ## When this limit is reached, queries will fail with ResourceExhausted error.
-## NOTE: This does NOT limit memory used by table scans.
+## Projected Parquet row groups and streamed scan batches use scan_memory_limit separately.
 ## @toml2docs:none-default="0"
 memory_pool_size = "50%"
 
@@ -728,6 +737,8 @@ skip_ssl_validation = false
 
 ## The region engine options. You can configure multiple region engines.
 ## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
+## The default configuration lists `mito` and `file`; `metric` is always registered, so naming
+## it only supplies its options rather than enabling the engine.
 [[region_engine]]
 
 ## The Mito engine options.
@@ -872,22 +883,33 @@ manifest_cache_size = "256MB"
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
-## Maximum number of SST files to scan concurrently.
+## Maximum number of SST files to scan concurrently when the memory limit is disabled
+## or a scan includes extension sources not covered by row-group accounting.
 max_concurrent_scan_files = 384
 
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
-## Memory limit for table scans across all queries.
+## Memory limit for table scans across all queries and regions.
+## Defaults to 25% of cgroup memory, or host memory when no cgroup limit is available.
 ## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 or "unlimited" disables the limit.
-scan_memory_limit = "unlimited"
-## Controls what happens when a scan cannot get memory immediately.
-## "fail" (default) fails fast and is the recommended option for most users.
-## "wait" / "wait(<duration>)" waits for memory to become available. This is mainly
-## for advanced tuning in bursty workloads where temporary contention is common and
-## higher latency is acceptable.
-## "wait" means "wait(10s)", not unlimited waiting.
+## Setting it to 0 or "unlimited" disables the limit and restores file-count checks.
+scan_memory_limit = "25%"
+
+## Memory accounting mode: "basic" (default) counts projected Parquet columns'
+## uncompressed row-group sizes while decoding, including files from older versions.
+## "extended" also counts cumulative streamed batches until stream drop.
+## Limited reservations round up to KB; unlimited accounting is byte-exact.
+## Internal series merges use query.memory_pool_size in both modes, sharing capacity
+## with other query operators on the executing node. Neither budget measures total process memory.
+scan_memory_mode = "basic"
+
+## Scan memory exhaustion always fails immediately.
+## Legacy "wait" / "wait(<duration>)" settings are deprecated. They are accepted
+## for upgrade compatibility, but startup logs a warning and treats them as "fail".
+## Change existing wait settings to "fail"; scans no longer wait for quota to free up.
+## This policy applies only to scan reservations. Series merges use the query pool
+## and fail immediately when that pool is exhausted.
 scan_memory_on_exhausted = "fail"
 
 ## Minimum time interval between two compactions.
@@ -1080,7 +1102,9 @@ enable = true
 
 ## The record type of slow queries. It can be `system_table` or `log`.
 ## If `system_table` is selected, the slow queries will be recorded in a system table `greptime_private.slow_queries`.
-## If `log` is selected, the slow queries will be logged in a log file `greptimedb-slow-queries.*`.
+## If `log` is selected, slow queries are logged to stdout when `logging.append_stdout` is enabled,
+## and to `greptimedb-slow-queries.*` when `logging.enable_file_logging` is enabled and `logging.dir` is nonempty.
+## Slow query logging is independent of `logging.level` and uses `logging.log_format` and the logging retention settings.
 record_type = "system_table"
 
 ## The threshold of slow query. It can be human readable time string, for example: `10s`, `100ms`, `1s`.
