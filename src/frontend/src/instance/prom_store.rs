@@ -851,6 +851,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_native_histogram_remote_read_response_negotiation() {
+        for accepted in [
+            vec![],
+            vec![ResponseType::Samples as i32],
+            vec![
+                ResponseType::StreamedXorChunks as i32,
+                ResponseType::Samples as i32,
+            ],
+        ] {
+            assert_eq!(
+                negotiate_response_type(&accepted).unwrap(),
+                ResponseType::Samples
+            );
+        }
+        assert!(negotiate_response_type(&[ResponseType::StreamedXorChunks as i32]).is_err());
+    }
+
+    #[test]
     fn test_remote_read_label_types() {
         use datatypes::schema::ColumnSchema;
 
@@ -864,6 +882,10 @@ mod tests {
             (ConcreteDataType::vector_datatype(3), false),
             (ConcreteDataType::int64_datatype(), false),
             (ConcreteDataType::boolean_datatype(), false),
+            (
+                common_query::native_histogram::native_histogram_value_type().clone(),
+                false,
+            ),
         ] {
             let schema = Schema::new(vec![
                 ColumnSchema::new(

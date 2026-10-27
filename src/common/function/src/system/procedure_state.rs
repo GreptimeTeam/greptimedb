@@ -20,11 +20,11 @@ use common_query::error::{
     InvalidFuncArgsSnafu, MissingProcedureServiceHandlerSnafu, Result,
     UnsupportedInputDataTypeSnafu,
 };
-use datafusion_expr::{Signature, Volatility};
+use datafusion_expr::{Signature, TypeSignature, Volatility};
 use datatypes::prelude::*;
 use serde::Serialize;
 use session::context::QueryContextRef;
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 
 use crate::handlers::ProcedureServiceHandlerRef;
 
@@ -35,8 +35,10 @@ struct ProcedureStateJson {
     error: Option<String>,
 }
 
-/// A function to query procedure state by its id.
-/// Such as `procedure_state(pid)`.
+/// Queries procedure state using an explicit procedure ID, or the latest
+/// procedure ID recorded in the Session.
+/// The zero-argument form reads the procedure ID from the Session at execution
+/// time. State lookups do not update the recorded procedure ID.
 #[admin_fn(
     name = ProcedureStateFunction,
     display_name = procedure_state,
@@ -45,25 +47,35 @@ struct ProcedureStateJson {
 )]
 pub(crate) async fn procedure_state(
     procedure_service_handler: &ProcedureServiceHandlerRef,
-    _ctx: &QueryContextRef,
+    ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
     ensure!(
-        params.len() == 1,
+        params.len() <= 1,
         InvalidFuncArgsSnafu {
             err_msg: format!(
-                "The length of the args is not correct, expect 1, have: {}",
+                "The length of the args is not correct, expect 0 or 1, have: {}",
                 params.len()
             ),
         }
     );
 
-    let ValueRef::String(pid) = params[0] else {
-        return UnsupportedInputDataTypeSnafu {
-            function: "procedure_state",
-            datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+    let last_procedure_id;
+    let pid = match params {
+        [] => {
+            last_procedure_id = ctx.last_procedure_id().context(InvalidFuncArgsSnafu {
+                err_msg: "No procedure ID has been returned in this session; pass an explicit procedure ID",
+            })?;
+            last_procedure_id.as_str()
         }
-        .fail();
+        [ValueRef::String(pid)] => *pid,
+        _ => {
+            return UnsupportedInputDataTypeSnafu {
+                function: "procedure_state",
+                datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
+            }
+            .fail();
+        }
     };
 
     let ProcedureStateResponse { status, error, .. } =
@@ -82,20 +94,29 @@ pub(crate) async fn procedure_state(
 }
 
 fn signature() -> Signature {
-    Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
+    Signature::one_of(
+        vec![
+            TypeSignature::Exact(vec![]),
+            TypeSignature::Exact(vec![ArrowDataType::Utf8]),
+        ],
+        Volatility::Volatile,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field};
     use datafusion_expr::ColumnarValue;
+    use datafusion_expr::type_coercion::functions::fields_with_udf;
 
     use super::*;
     use crate::function::FunctionContext;
     use crate::function_factory::ScalarFunctionFactory;
+    use crate::state::FunctionState;
 
     #[test]
     fn test_procedure_state_misc() {
@@ -103,12 +124,75 @@ mod tests {
         let f = factory.provide(FunctionContext::mock());
         assert_eq!("procedure_state", f.name());
         assert_eq!(DataType::Utf8, f.return_type(&[]).unwrap());
-        assert!(matches!(f.signature(),
-                         datafusion_expr::Signature {
-                             type_signature: datafusion_expr::TypeSignature::Uniform(1, valid_types),
-                             volatility: datafusion_expr::Volatility::Immutable,
-                             ..
-                         } if valid_types == &vec![ArrowDataType::Utf8]));
+        assert_eq!(
+            f.signature(),
+            &Signature::one_of(
+                vec![
+                    TypeSignature::Exact(vec![]),
+                    TypeSignature::Exact(vec![ArrowDataType::Utf8]),
+                ],
+                Volatility::Volatile,
+            )
+        );
+        let field = Arc::new(Field::new("pid", DataType::Utf8, false));
+        assert!(fields_with_udf(&[field.clone(), field], &f).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_procedure_state_args() {
+        let context = FunctionContext::mock();
+        let handler = context.state.procedure_service_handler.as_ref().unwrap();
+        let ctx = &context.query_ctx;
+        let err = procedure_state(handler, ctx, &[]).await.unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("No procedure ID has been returned")
+        );
+
+        ctx.set_last_procedure_id("session-id".to_string());
+        for (params, succeeds) in [
+            (vec![], true),
+            (vec![ValueRef::String("explicit-id")], true),
+            (vec![ValueRef::Null], false),
+            (vec![ValueRef::String("a"), ValueRef::String("b")], false),
+        ] {
+            let result = procedure_state(handler, ctx, &params).await;
+            assert_eq!(result.is_ok(), succeeds, "{params:?}: {result:?}");
+            assert_eq!(ctx.last_procedure_id().as_deref(), Some("session-id"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_procedure_state_zero_arg_rows() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let context = FunctionContext {
+            state: Arc::new(FunctionState::mock_with_procedure_state_counter(
+                calls.clone(),
+            )),
+            ..Default::default()
+        };
+        context
+            .query_ctx
+            .set_last_procedure_id("session-id".to_string());
+        let factory: ScalarFunctionFactory = ProcedureStateFunction::factory().into();
+        let function = factory.provide(context);
+        let f = function.as_async().unwrap();
+
+        for number_rows in [0, 1, 2] {
+            calls.store(0, Ordering::Relaxed);
+            let args = datafusion_expr::ScalarFunctionArgs {
+                args: vec![],
+                arg_fields: vec![],
+                return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+                number_rows,
+                config_options: Arc::new(datafusion_common::config::ConfigOptions::default()),
+            };
+            let ColumnarValue::Array(result) = f.invoke_async_with_args(args).await.unwrap() else {
+                panic!("expected array output");
+            };
+            assert_eq!(result.len(), number_rows);
+            assert_eq!(calls.load(Ordering::Relaxed), number_rows);
+        }
     }
 
     #[tokio::test]
