@@ -584,9 +584,6 @@ impl FileHandle {
             .primary_key_range()
             .or_else(|| self.raw_primary_key_range());
         let lifetime = self.inner.lifetime.clone();
-        if let Some(manager) = &lifetime.file_ref_manager {
-            manager.update_index_version(meta.file_id(), meta.index_version());
-        }
         *lifetime.meta.lock().unwrap() = meta.clone();
         Self {
             inner: Arc::new(FileHandleInner::with_lifetime(
@@ -791,6 +788,14 @@ struct FileHandleInner {
     lifetime: Arc<SstLifetime>,
 }
 
+impl Drop for FileHandleInner {
+    fn drop(&mut self) {
+        if let Some(manager) = &self.lifetime.file_ref_manager {
+            manager.remove_file(&self.meta);
+        }
+    }
+}
+
 impl FileHandleInner {
     fn new(
         meta: FileMeta,
@@ -798,9 +803,6 @@ impl FileHandleInner {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
         let file_ref_manager = file_purger.file_ref_manager();
-        if let Some(manager) = &file_ref_manager {
-            manager.register_file(&meta);
-        }
         let lifetime = Arc::new(SstLifetime {
             meta: Mutex::new(meta.clone()),
             deleted: AtomicBool::new(false),
@@ -815,6 +817,9 @@ impl FileHandleInner {
         lifetime: Arc<SstLifetime>,
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> Self {
+        if let Some(manager) = &lifetime.file_ref_manager {
+            manager.register_file(&meta);
+        }
         Self {
             meta,
             compacting: AtomicBool::new(false),
@@ -833,18 +838,15 @@ struct SstLifetime {
     meta: Mutex<FileMeta>,
     deleted: AtomicBool,
     file_purger: FilePurgerRef,
-    /// Registers one reference per lifetime, also released on normal close.
+    /// Tracks each metadata view's readers independently for object-store index GC.
     file_ref_manager: Option<FileReferenceManagerRef>,
 }
 
 impl Drop for SstLifetime {
     fn drop(&mut self) {
-        let meta = self.meta.get_mut().unwrap();
-        if let Some(manager) = &self.file_ref_manager {
-            manager.remove_file(meta.file_id());
-        }
         if self.deleted.load(Ordering::Acquire) {
-            self.file_purger.purge_file(meta.clone());
+            self.file_purger
+                .purge_file(self.meta.get_mut().unwrap().clone());
         }
     }
 }
