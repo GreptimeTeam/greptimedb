@@ -31,6 +31,7 @@ use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
 use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::InfluxdbLineProtocolHandlerRef;
+use crate::query_handler::OpenTelemetryProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
@@ -42,6 +43,7 @@ pub struct PostgresServer {
     keep_alive_secs: u64,
     batching_enabled: bool,
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
+    otlp_metrics_handler: Option<OpenTelemetryProtocolHandlerRef>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
@@ -80,6 +82,7 @@ impl PostgresServer {
             keep_alive_secs,
             batching_enabled: false,
             influxdb_handler: None,
+            otlp_metrics_handler: None,
             bind_addr: None,
             process_manager,
         }
@@ -100,6 +103,15 @@ impl PostgresServer {
         self
     }
 
+    /// Wires the OTLP metrics handler used by table-less
+    /// `COPY FROM STDIN WITH (FORMAT otlp)` — the same handler the
+    /// OTLP/HTTP endpoint uses, so the payload runs through the
+    /// identical pipeline.
+    pub fn with_otlp_metrics_handler(mut self, handler: OpenTelemetryProtocolHandlerRef) -> Self {
+        self.otlp_metrics_handler = Some(handler);
+        self
+    }
+
     fn accept(
         &self,
         io_runtime: Runtime,
@@ -115,6 +127,7 @@ impl PostgresServer {
             query_handler: make_handler.query_handler.clone(),
             copy_in_handler: make_handler.copy_in_handler.clone(),
             influxdb_handler: self.influxdb_handler.clone(),
+            otlp_metrics_handler: self.otlp_metrics_handler.clone(),
             user_provider: make_handler.user_provider.clone(),
             param_provider: make_handler.param_provider.clone(),
             force_tls: make_handler.force_tls,

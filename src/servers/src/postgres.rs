@@ -44,7 +44,9 @@ use session::context::Channel;
 use self::auth_handler::{PgUserProviderSource, ZeroPidSecretKeyGenerator};
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
-use crate::query_handler::{CopyInHandlerRef, InfluxdbLineProtocolHandlerRef};
+use crate::query_handler::{
+    CopyInHandlerRef, InfluxdbLineProtocolHandlerRef, OpenTelemetryProtocolHandlerRef,
+};
 
 pub(crate) struct GreptimeDBStartupParameters {
     version: String,
@@ -86,6 +88,10 @@ pub struct PostgresServerHandlerInner {
     /// Absent on servers not wired for it; such connections reject the
     /// influxdb format when a copy starts.
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
+    /// Executes the OTLP metrics payload flushed by a table-less
+    /// `COPY FROM STDIN WITH (FORMAT otlp)` — the same handler the
+    /// OTLP/HTTP endpoint uses.
+    otlp_metrics_handler: Option<OpenTelemetryProtocolHandlerRef>,
     force_tls: bool,
     auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
     /// SCRAM selected; failures get the uniform metric label.
@@ -106,6 +112,8 @@ pub(crate) struct MakePostgresServerHandler {
     copy_in_handler: CopyInHandlerRef,
     #[builder(default)]
     influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
+    #[builder(default)]
+    otlp_metrics_handler: Option<OpenTelemetryProtocolHandlerRef>,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -157,6 +165,7 @@ impl MakePostgresServerHandler {
                 .map(|p| Arc::new(PgUserProviderSource::new(p))),
             copy_in_handler: self.copy_in_handler.clone(),
             influxdb_handler: self.influxdb_handler.clone(),
+            otlp_metrics_handler: self.otlp_metrics_handler.clone(),
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())
                 .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),

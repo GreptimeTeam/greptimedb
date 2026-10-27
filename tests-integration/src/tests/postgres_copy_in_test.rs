@@ -818,3 +818,116 @@ async fn test_postgres_copy_in_influxdb_invalid_utf8_and_trailing_record() {
 
     server.shutdown().await.unwrap();
 }
+
+/// `COPY FROM STDIN WITH (FORMAT otlp)` ingests one binary OTLP
+/// ExportMetricsServiceRequest through the same pipeline as the OTLP/HTTP
+/// endpoint — and validates binary (format code 1) COPY support, including
+/// payloads split across CopyData chunks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_otlp_binary() {
+    use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::any_value;
+    use otel_arrow_rust::proto::opentelemetry::common::v1::{AnyValue, KeyValue};
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::number_data_point::Value;
+    use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+        Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric,
+    };
+    use prost::Message;
+
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_otlp").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let request = ExportMetricsServiceRequest {
+        resource_metrics: vec![ResourceMetrics {
+            scope_metrics: vec![ScopeMetrics {
+                metrics: vec![Metric {
+                    name: "copy_otlp_gauge".into(),
+                    data: Some(metric::Data::Gauge(Gauge {
+                        data_points: vec![
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_000_000_000_000,
+                                value: Some(Value::AsDouble(1.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("a".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                            NumberDataPoint {
+                                time_unix_nano: 1_700_000_001_000_000_000,
+                                value: Some(Value::AsDouble(2.5)),
+                                attributes: vec![KeyValue {
+                                    key: "host".into(),
+                                    value: Some(AnyValue {
+                                        value: Some(any_value::Value::StringValue("b".into())),
+                                    }),
+                                }],
+                                ..Default::default()
+                            },
+                        ],
+                    })),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let body = request.encode_to_vec();
+
+    // Feed the binary payload in small chunks: the message spans CopyData
+    // boundaries exactly like a large text payload would.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        body.chunks(9).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let messages = client
+        .simple_query("SELECT host, greptime_value FROM copy_otlp_gauge ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![("a".into(), "1.5".into()), ("b".into(), "2.5".into())]
+    );
+
+    // Garbage bytes fail the copy and the connection stays usable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT otlp)",
+        vec![Bytes::from_static(b"\xff\xff\xff\xff")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("invalid OTLP payload"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}

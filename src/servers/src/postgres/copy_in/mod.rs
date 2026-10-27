@@ -35,6 +35,7 @@ mod codec;
 mod csv;
 mod influxdb;
 mod options;
+mod otlp;
 mod parse;
 
 use std::fmt::Debug;
@@ -57,12 +58,14 @@ use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use futures::{Sink, SinkExt, stream};
 use influxdb::InfluxdbOptions;
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::results::{CopyResponse, Response, Tag};
 use pgwire::api::{ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
+use prost::Message;
 use session::context::QueryContextRef;
 use table::metadata::TableInfo;
 
@@ -84,11 +87,10 @@ use crate::postgres::utils::convert_err;
 /// the per-batch fixed costs negligible.
 pub(crate) const COPY_IN_FLUSH_ROWS: usize = 32768;
 
-/// Upper bound of an influxdb COPY FROM STDIN payload. One COPY
-/// statement is one bounded ingestion request (the whole payload is
-/// buffered like one HTTP write body); a larger import is multiple COPY
-/// statements. Streaming ingest may arrive later, with framing owned by
-/// the shared line-protocol parser rather than the COPY layer.
+/// Upper bound of a table-less COPY FROM STDIN payload (influxdb line
+/// protocol, OTLP). One COPY statement is one bounded ingestion request
+/// (the whole payload is buffered like one HTTP request body); a larger
+/// import is multiple COPY statements.
 pub(crate) const COPY_IN_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Builds a format from the format-neutral option set.
@@ -102,6 +104,8 @@ const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
     ("influxdb", influxdb::build_influxdb_codec),
     ("influxdb_line", influxdb::build_influxdb_codec),
+    ("otlp", otlp::build_otlp_codec),
+    ("otlp_metrics", otlp::build_otlp_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
@@ -268,6 +272,9 @@ enum Payload {
         data: Vec<u8>,
         precision: Option<Precision>,
     },
+    /// The whole buffered OTLP payload, decoded and completed as one
+    /// request at `CopyDone` through the OTLP metrics pipeline.
+    Otlp { data: Vec<u8> },
 }
 
 impl CopyInState {
@@ -327,6 +334,19 @@ impl CopyInState {
         }
     }
 
+    /// State for the OTLP format: the whole binary payload is buffered
+    /// and completed once at `CopyDone` through the OTLP metrics
+    /// pipeline. Binary: the advertised wire format code is 1.
+    fn new_otlp(query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            payload: Payload::Otlp { data: Vec::new() },
+            codec_name: "otlp",
+            codec_format_code: 1,
+            rows_written: 0,
+        }
+    }
+
     /// The wire format code advertised to the client.
     pub(crate) fn format_code(&self) -> i8 {
         self.codec_format_code
@@ -337,7 +357,7 @@ impl CopyInState {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
-            Payload::Influxdb { data: buffered, .. } => {
+            Payload::Influxdb { data: buffered, .. } | Payload::Otlp { data: buffered } => {
                 if buffered.len() + data.len() > COPY_IN_MAX_PAYLOAD_BYTES {
                     return Err(bad_copy_data(format!(
                         "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
@@ -356,7 +376,7 @@ impl CopyInState {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.finish()?),
             // The whole payload is one request body; nothing to finalize.
-            Payload::Influxdb { .. } => {}
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => {}
         }
         Ok(())
     }
@@ -365,7 +385,7 @@ impl CopyInState {
         match &self.payload {
             Payload::Table { rows, .. } => rows.len() >= COPY_IN_FLUSH_ROWS,
             // Completed once at CopyDone, not mid-stream.
-            Payload::Influxdb { .. } => false,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => false,
         }
     }
 
@@ -393,6 +413,17 @@ impl CopyInState {
                 rows: Some(rows),
             }],
         })
+    }
+
+    /// Takes the buffered OTLP payload, if any.
+    fn take_otlp(&mut self) -> Option<Vec<u8>> {
+        let Payload::Otlp { data } = &mut self.payload else {
+            return None;
+        };
+        if data.is_empty() {
+            return None;
+        }
+        Some(std::mem::take(data))
     }
 
     /// Takes the buffered payload as one line-protocol request body, if
@@ -558,11 +589,26 @@ impl PostgresServerHandlerInner {
                 }
                 CopyInState::new_influxdb(options, query_ctx)
             }
+            // OTLP forbids a target table too — the payload's resource
+            // metrics route to their own tables — and completes through
+            // the OTLP metrics pipeline; the server must be wired.
+            CopyFormat::Otlp => {
+                if !stmt.table.is_empty() {
+                    return Err(unsupported(format!(
+                        "format otlp routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
+                        stmt.table.join(".")
+                    )));
+                }
+                if self.otlp_metrics_handler.is_none() {
+                    return Err(unsupported("this server is not wired for the otlp format"));
+                }
+                CopyInState::new_otlp(query_ctx)
+            }
         };
         let num_columns = match &state.payload {
             Payload::Table { grpc_schema, .. } => grpc_schema.len(),
             // No fixed column set: the format routes per record.
-            Payload::Influxdb { .. } => 0,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => 0,
         };
         let format_code = state.format_code();
 
@@ -585,6 +631,19 @@ impl PostgresServerHandlerInner {
         // timestamp alignment and inserts are identical to an HTTP
         // write of the same bytes. The context stays this connection's
         // postgres context.
+        if let Some(bytes) = state.take_otlp() {
+            let Some(otlp_handler) = &self.otlp_metrics_handler else {
+                return Err(unsupported("this server is not wired for the otlp format"));
+            };
+            let request = ExportMetricsServiceRequest::decode(bytes.as_slice())
+                .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+            let outcome = otlp_handler
+                .metrics(request, query_ctx)
+                .await
+                .map_err(convert_err)?;
+            // Rows are the accepted data points.
+            return Ok(outcome.accepted_data_points.max(0) as u64);
+        }
         if let Some(request) = state.take_lines()? {
             let Some(influxdb_handler) = &self.influxdb_handler else {
                 return Err(unsupported(
