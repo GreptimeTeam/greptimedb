@@ -37,7 +37,7 @@ use table::predicate::is_string_timestamp_literal;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cache::CacheStrategy;
-use crate::cache::range_cache::{RangeCacheLookup, RangeCacheWorker};
+use crate::cache::range_cache::{RangeCacheDelivery, RangeCacheLookup, RangeCacheWorker};
 use crate::error::{ComputeArrowSnafu, Result};
 use crate::read::BoxedRecordBatchStream;
 use crate::read::read_columns::ReadColumns;
@@ -610,9 +610,14 @@ fn build_range_cache_key_inner(
 }
 
 /// Returns a stream that replays cached record batches.
-pub(crate) fn cached_flat_range_stream(value: Arc<RangeScanCacheValue>) -> BoxedRecordBatchStream {
+pub(crate) fn cached_flat_range_stream(
+    delivery: Arc<RangeCacheDelivery>,
+) -> BoxedRecordBatchStream {
     Box::pin(try_stream! {
-        for cached_batch in &value.cached_batches {
+        // Borrow through the delivery guard so it survives every yield. Batches
+        // handed to downstream operators are then owned by the query, not by
+        // this completed-result backlog.
+        for cached_batch in &delivery.value().cached_batches {
             let mut offset = 0;
             for &len in &cached_batch.slice_lengths {
                 yield cached_batch.batch.slice(offset, len);
@@ -666,7 +671,7 @@ impl CachedRangeReader<'_> {
             .await;
             match result {
                 Ok(Some(value)) => {
-                    load_metrics.inc_range_cache_size(key_size + value.estimated_size());
+                    load_metrics.inc_range_cache_size(key_size + value.value().estimated_size());
                     Some(value)
                 }
                 Ok(None) => None,
@@ -697,7 +702,7 @@ impl CachedRangeReader<'_> {
 
 /// Waiting is lazy, but the producer is independent of every consumer.
 fn shared_range_stream<F, Fut>(
-    mut receiver: tokio::sync::watch::Receiver<Option<Arc<RangeScanCacheValue>>>,
+    mut receiver: tokio::sync::watch::Receiver<Option<Arc<RangeCacheDelivery>>>,
     build: F,
 ) -> BoxedRecordBatchStream
 where
@@ -721,7 +726,7 @@ where
     })
 }
 
-/// The load budget covers retained input buffers across all flights. Acquisition
+/// The load budget covers retained input buffers and completed deliveries. Acquisition
 /// must be nonblocking: waiting with a partially accumulated result deadlocks
 /// when several loads consume all permits. Oversized ranges retain streaming
 /// query semantics by falling back to an uncached scan.
@@ -729,7 +734,7 @@ async fn collect_range_result(
     mut stream: BoxedRecordBatchStream,
     worker: &RangeCacheWorker,
     strategy: &CacheStrategy,
-) -> Result<Option<Arc<RangeScanCacheValue>>> {
+) -> Result<Option<Arc<RangeCacheDelivery>>> {
     let mut permit: Option<tokio::sync::OwnedSemaphorePermit> = None;
     let mut buffer = CacheBatchBuffer::new(strategy);
     while let Some(batch) = stream.try_next().await? {
@@ -746,7 +751,16 @@ async fn collect_range_result(
         }
         buffer.push(batch)?;
     }
-    buffer.finish().await.transpose()
+    let Some(value) = buffer.finish().await.transpose()? else {
+        return Ok(None);
+    };
+    let Some(permit) = worker
+        .load_memory
+        .try_resize(permit, value.estimated_size())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(RangeCacheDelivery::new(value, permit)))
 }
 
 enum CacheConcatCommand {
@@ -1040,9 +1054,11 @@ mod tests {
     use datafusion_expr::{Expr, col, lit};
     use smallvec::smallvec;
     use store_api::storage::{FileId, RegionId};
+    use tokio::sync::watch;
 
     use super::*;
     use crate::cache::CacheManager;
+    use crate::cache::test_util::range_cache_key;
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::range::{RangeMeta, RowGroupIndex, SourceIndex};
     use crate::read::scan_region::{PredicateGroup, ScanInput};
@@ -1196,6 +1212,187 @@ mod tests {
                 .available_permits(),
             (capacity as usize).div_ceil(1024)
         );
+    }
+
+    fn start_shared_load(
+        strategy: &CacheStrategy,
+        key: RangeScanCacheKey,
+        batches: Vec<RecordBatch>,
+    ) -> watch::Receiver<Option<Arc<RangeCacheDelivery>>> {
+        let worker = strategy.range_cache_worker().unwrap();
+        let loader_worker = worker.clone();
+        let loader_strategy = strategy.clone();
+        let lookup = worker.get_or_load(key, vec![], async move {
+            collect_range_result(
+                Box::pin(futures::stream::iter(batches.into_iter().map(Ok))),
+                &loader_worker,
+                &loader_strategy,
+            )
+            .await
+            .unwrap()
+        });
+        let RangeCacheLookup::Loading(receiver) = lookup else {
+            panic!("expected a shared load");
+        };
+        receiver
+    }
+
+    async fn wait_for_shared_load(
+        receiver: &mut watch::Receiver<Option<Arc<RangeCacheDelivery>>>,
+    ) -> Option<Arc<RangeCacheDelivery>> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            receiver
+                .wait_for(|value| value.is_some())
+                .await
+                .ok()
+                .and_then(|value| value.clone())
+        })
+        .await
+        .expect("a shared load must finish or fall back without waiting for consumers")
+    }
+
+    #[tokio::test]
+    async fn completed_load_keeps_memory_until_all_subscribers_release() {
+        let strategy = test_cache_strategy();
+        let worker = strategy.range_cache_worker().unwrap();
+        let capacity = worker.load_memory.available_permits();
+        let (key, _) = test_cache_context(&strategy);
+        let mut first = start_shared_load(&strategy, key.clone(), vec![make_batch(&[1, 2, 3])]);
+        let second = first.clone();
+        drop(wait_for_shared_load(&mut first).await.unwrap());
+
+        // A completed flight no longer counts toward the flight limit, but
+        // unpolled subscribers must still reserve its decoded result memory.
+        assert!(worker.load_memory.available_permits() < capacity);
+        drop(first);
+        assert!(worker.load_memory.available_permits() < capacity);
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.load_memory.available_permits() != capacity {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the last subscriber must release the delivery reservation");
+        assert!(
+            worker.get(&key).is_some(),
+            "the cache still owns the result"
+        );
+    }
+
+    #[rstest::rstest]
+    #[tokio::test]
+    async fn successive_loads_with_slow_consumers_exhaust_delivery_budget(
+        #[values(false, true)] invalidate: bool,
+    ) {
+        let strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .range_result_cache_size(8192)
+                .build(),
+        ));
+        let worker = strategy.range_cache_worker().unwrap();
+        let capacity = worker.load_memory.available_permits();
+        let mut held_streams = Vec::new();
+        let mut fallbacks = 0;
+
+        // Each flight finishes before the next starts, exceeding the 32-flight
+        // limit cumulatively. Only the delivery budget can bound this backlog.
+        for _ in 0..40 {
+            let file = FileId::random();
+            let key = range_cache_key(&[file]);
+            let expected = vec![make_large_binary_batch(1, 2048)];
+            let mut receiver = start_shared_load(&strategy, key, expected.clone());
+            let shared = wait_for_shared_load(&mut receiver).await.is_some();
+            if invalidate {
+                worker.invalidate_file(file);
+            }
+            let fallback_batches = expected.clone();
+            let stream = shared_range_stream(receiver, move || async move {
+                Ok((
+                    Box::pin(futures::stream::iter(fallback_batches.into_iter().map(Ok)))
+                        as BoxedRecordBatchStream,
+                    DEFAULT_READ_BATCH_SIZE,
+                ))
+            });
+            if shared {
+                held_streams.push(stream);
+            } else {
+                fallbacks += 1;
+                let actual: Vec<_> =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), stream.try_collect())
+                        .await
+                        .expect("fallback must not wait for an unpolled range")
+                        .unwrap();
+                assert_eq!(actual, expected);
+            }
+        }
+
+        assert!(!held_streams.is_empty());
+        assert!(held_streams.len() < 32);
+        assert!(
+            fallbacks > 0,
+            "completed results must not escape the budget"
+        );
+        assert!(worker.load_memory.available_permits() < capacity);
+
+        // Transfer ownership out of watch receivers into actively polled replay
+        // streams, then leave them suspended at their first yield.
+        for stream in &mut held_streams {
+            assert!(stream.try_next().await.unwrap().is_some());
+        }
+        assert!(worker.load_memory.available_permits() < capacity);
+        drop(held_streams);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.load_memory.available_permits() != capacity {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping slow readers must unblock new shared loads");
+
+        let mut retry = start_shared_load(
+            &strategy,
+            range_cache_key(&[FileId::random()]),
+            vec![make_large_binary_batch(1, 2048)],
+        );
+        assert!(wait_for_shared_load(&mut retry).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_partial_load_releases_its_reservation() {
+        let strategy = test_cache_strategy();
+        let worker = strategy.range_cache_worker().unwrap().clone();
+        let capacity = worker.load_memory.available_permits();
+        let (key, _) = test_cache_context(&strategy);
+        let loader_worker = worker.clone();
+        let lookup = worker.get_or_load(key.clone(), vec![], async move {
+            let stream = Box::pin(try_stream! {
+                yield make_batch(&[1, 2, 3]);
+                std::future::pending::<()>().await;
+            });
+            collect_range_result(stream, &loader_worker, &strategy)
+                .await
+                .unwrap()
+        });
+        let RangeCacheLookup::Loading(receiver) = lookup else {
+            panic!("expected a shared load");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.load_memory.available_permits() == capacity {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the partial result must acquire its input reservation");
+        drop(receiver);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while worker.load_memory.available_permits() != capacity {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation must release the partial result reservation");
+        assert!(worker.get(&key).is_none());
     }
 
     #[tokio::test]
@@ -1799,7 +1996,13 @@ mod tests {
             make_batch(&[1, 2, 3]).get_array_memory_size(),
         ));
 
-        let replayed = cached_flat_range_stream(value)
+        let worker = RangeCacheWorker::new(1024 * 1024);
+        let permit = worker
+            .load_memory
+            .try_acquire(value.estimated_size())
+            .unwrap();
+        let delivery = RangeCacheDelivery::new(value, permit);
+        let replayed = cached_flat_range_stream(delivery)
             .try_collect::<Vec<_>>()
             .await
             .unwrap();

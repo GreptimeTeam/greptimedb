@@ -159,6 +159,27 @@ impl RangeResultMemoryLimiter {
             .ok()
     }
 
+    /// Transfers a load's reservation to its completed result without a gap in
+    /// accounting. Compaction may shrink buffers or add metadata; growing the
+    /// reservation must remain nonblocking just like loading more input.
+    pub(crate) fn try_resize(
+        &self,
+        permit: Option<tokio::sync::OwnedSemaphorePermit>,
+        bytes: usize,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let Some(mut permit) = permit else {
+            return self.try_acquire(bytes);
+        };
+        let required = bytes.div_ceil(self.permit_bytes).max(1);
+        let reserved = permit.num_permits();
+        if required > reserved {
+            permit.merge(self.try_acquire((required - reserved).checked_mul(self.permit_bytes)?)?);
+        } else {
+            drop(permit.split(reserved - required));
+        }
+        Some(permit)
+    }
+
     pub(crate) async fn acquire(&self, bytes: usize) -> Result<tokio::sync::SemaphorePermit<'_>> {
         let permits = bytes.div_ceil(self.permit_bytes).max(1);
         if permits > self.total_permits {
@@ -2914,6 +2935,38 @@ mod tests {
         assert_eq!(limiter.available_permits(), 0);
         drop(permit);
         assert_eq!(limiter.available_permits(), 2);
+    }
+
+    #[rstest::rstest]
+    #[case::empty_result(None, 0, Some(1))]
+    #[case::new_result(None, 1025, Some(2))]
+    #[case::unchanged(Some(1024), 1024, Some(1))]
+    #[case::grow(Some(1024), 2048, Some(2))]
+    #[case::shrink(Some(3072), 1024, Some(1))]
+    #[case::exhausted(Some(1024), 4096, None)]
+    #[case::oversized(Some(1024), usize::MAX, None)]
+    #[test]
+    fn range_result_memory_reservation_resizes_without_waiting(
+        #[case] input_size: Option<usize>,
+        #[case] result_size: usize,
+        #[case] expected_permits: Option<usize>,
+    ) {
+        let limiter = RangeResultMemoryLimiter::new(4096, 1024);
+        let blocker = limiter.try_acquire(1024).unwrap();
+        let input_permit = input_size.map(|size| limiter.try_acquire(size).unwrap());
+        let result_permit = limiter.try_resize(input_permit, result_size);
+        assert_eq!(
+            result_permit.as_ref().map(|permit| permit.num_permits()),
+            expected_permits
+        );
+        assert_eq!(
+            limiter.available_permits(),
+            3 - expected_permits.unwrap_or(0)
+        );
+        drop(result_permit);
+        assert_eq!(limiter.available_permits(), 3);
+        drop(blocker);
+        assert_eq!(limiter.available_permits(), 4);
     }
 
     #[tokio::test]

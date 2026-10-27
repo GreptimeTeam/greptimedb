@@ -17,11 +17,11 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 
 use moka::sync::Cache;
 use store_api::storage::FileId;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, watch};
 
 use crate::cache::{
     RANGE_RESULT_TYPE, RangeResultMemoryLimiter, range_result_cache_weight, removal_cause_str,
@@ -33,18 +33,59 @@ use crate::sst::file::FileHandle;
 /// Admission, not a queue: excess distinct misses keep using ordinary scans.
 const MAX_IN_FLIGHT_RANGES: usize = 32;
 
-type SharedResult = Option<Arc<RangeScanCacheValue>>;
+type SharedResult = Option<Arc<RangeCacheDelivery>>;
+
+/// Keeps completed results charged while subscribers or replay streams own them.
+/// Cache entries retain only a weak reference: after the last reader leaves,
+/// the resident value is covered solely by the cache's capacity accounting.
+pub(crate) struct RangeCacheDelivery {
+    value: Arc<RangeScanCacheValue>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl RangeCacheDelivery {
+    /// Shares a decoded result together with its memory reservation.
+    pub(crate) fn new(value: Arc<RangeScanCacheValue>, permit: OwnedSemaphorePermit) -> Arc<Self> {
+        Arc::new(Self {
+            value,
+            _permit: permit,
+        })
+    }
+
+    /// Borrows the result without detaching it from the delivery reservation.
+    pub(crate) fn value(&self) -> &RangeScanCacheValue {
+        &self.value
+    }
+}
 
 pub(crate) enum RangeCacheLookup {
-    Hit(Arc<RangeScanCacheValue>),
+    Hit(Arc<RangeCacheDelivery>),
     Loading(watch::Receiver<SharedResult>),
     Bypass,
 }
 
-#[derive(Clone)]
 struct Entry {
     generation: u64,
     value: Arc<RangeScanCacheValue>,
+    delivery: Mutex<Weak<RangeCacheDelivery>>,
+}
+
+impl Entry {
+    fn deliver(&self, memory: &RangeResultMemoryLimiter) -> SharedResult {
+        // Serialize cache-hit reservations so readers of the same result share
+        // one charge, including when the last previous reader just left.
+        let mut shared_delivery = self
+            .delivery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(delivery) = shared_delivery.upgrade() {
+            return Some(delivery);
+        }
+        let permit = memory.try_acquire(self.value.estimated_size())?;
+        let delivery = RangeCacheDelivery::new(self.value.clone(), permit);
+        *shared_delivery = Arc::downgrade(&delivery);
+        Some(delivery)
+    }
 }
 
 struct Flight {
@@ -84,12 +125,13 @@ impl State {
 }
 
 pub(crate) struct RangeCacheWorker {
-    cache: Cache<RangeScanCacheKey, Entry>,
+    cache: Cache<RangeScanCacheKey, Arc<Entry>>,
     state: Mutex<State>,
     /// Moka can call listeners during a cache operation. Queue only cleanup
     /// metadata instead of reentering `state` from its eviction listener.
     evictions: Mutex<mpsc::Receiver<(Arc<RangeScanCacheKey>, u64)>>,
-    /// Held across a load, separately from the temporary concat-memory limiter.
+    /// Covers loads and completed deliveries, separately from cache residency
+    /// and the temporary concat-memory limiter. Never wait for this budget.
     pub(crate) load_memory: RangeResultMemoryLimiter,
 }
 
@@ -98,8 +140,8 @@ impl RangeCacheWorker {
         let (tx, rx) = mpsc::channel();
         let cache = Cache::builder()
             .max_capacity(capacity)
-            .weigher(|k: &RangeScanCacheKey, v: &Entry| range_result_cache_weight(k, &v.value))
-            .eviction_listener(move |key, entry: Entry, cause| {
+            .weigher(|k: &RangeScanCacheKey, v: &Arc<Entry>| range_result_cache_weight(k, &v.value))
+            .eviction_listener(move |key, entry: Arc<Entry>, cause| {
                 CACHE_BYTES
                     .with_label_values(&[RANGE_RESULT_TYPE])
                     .sub(range_result_cache_weight(&key, &entry.value).into());
@@ -123,19 +165,43 @@ impl RangeCacheWorker {
         }
     }
 
-    pub(crate) fn get(&self, key: &RangeScanCacheKey) -> SharedResult {
-        self.cache.get(key).map(|entry| entry.value)
+    #[cfg(test)]
+    pub(crate) fn get(&self, key: &RangeScanCacheKey) -> Option<Arc<RangeScanCacheValue>> {
+        self.cache.get(key).map(|entry| entry.value.clone())
+    }
+
+    fn get_for_delivery(&self, key: &RangeScanCacheKey) -> Option<RangeCacheLookup> {
+        let entry = self.cache.get(key)?;
+        // A hit without delivery budget must bypass, not start another load.
+        Some(match entry.deliver(&self.load_memory) {
+            Some(delivery) => RangeCacheLookup::Hit(delivery),
+            None => {
+                RANGE_CACHE_WORKER_EVENTS
+                    .with_label_values(&["bypass_memory"])
+                    .inc();
+                RangeCacheLookup::Bypass
+            }
+        })
     }
 
     /// For test/benchmark producers that do not hold live SST handles.
     #[cfg(any(test, feature = "test"))]
     pub(crate) fn insert(&self, key: RangeScanCacheKey, value: Arc<RangeScanCacheValue>) {
+        let Some(permit) = self.load_memory.try_acquire(value.estimated_size()) else {
+            return;
+        };
+        let delivery = RangeCacheDelivery::new(value, permit);
         let mut state = self.state.lock().unwrap();
         self.drain_evictions(&mut state);
-        self.publish(&mut state, key, value);
+        self.publish(&mut state, key, &delivery);
     }
 
-    fn publish(&self, state: &mut State, key: RangeScanCacheKey, value: Arc<RangeScanCacheValue>) {
+    fn publish(
+        &self,
+        state: &mut State,
+        key: RangeScanCacheKey,
+        delivery: &Arc<RangeCacheDelivery>,
+    ) {
         let generation = state.next_generation();
         let indexed_key = Arc::new(key.clone());
         for (file, _) in &key.row_groups {
@@ -147,8 +213,15 @@ impl RangeCacheWorker {
         }
         CACHE_BYTES
             .with_label_values(&[RANGE_RESULT_TYPE])
-            .add(range_result_cache_weight(&key, &value).into());
-        self.cache.insert(key, Entry { generation, value });
+            .add(range_result_cache_weight(&key, &delivery.value).into());
+        self.cache.insert(
+            key,
+            Arc::new(Entry {
+                generation,
+                value: delivery.value.clone(),
+                delivery: Mutex::new(Arc::downgrade(delivery)),
+            }),
+        );
         self.drain_evictions(state);
     }
 
@@ -189,8 +262,10 @@ impl RangeCacheWorker {
                 .inc();
             return RangeCacheLookup::Bypass;
         }
-        if let Some(value) = super::update_hit_miss(self.get(&key), RANGE_RESULT_TYPE) {
-            return RangeCacheLookup::Hit(value);
+        if let Some(lookup) =
+            crate::cache::update_hit_miss(self.get_for_delivery(&key), RANGE_RESULT_TYPE)
+        {
+            return lookup;
         }
         let mut state = self.state.lock().unwrap();
         self.drain_evictions(&mut state);
@@ -201,8 +276,8 @@ impl RangeCacheWorker {
                 .inc();
             return RangeCacheLookup::Bypass;
         }
-        if let Some(value) = self.get(&key) {
-            return RangeCacheLookup::Hit(value);
+        if let Some(lookup) = self.get_for_delivery(&key) {
+            return lookup;
         }
         if let Some(flight) = state.flights.get(&key) {
             RANGE_CACHE_WORKER_EVENTS
@@ -271,8 +346,7 @@ impl LoadGuard {
         let flight = state.flights.remove(&self.key).unwrap();
         let event = if let Some(value) = &value {
             if !flight.invalidated && !files.iter().any(FileHandle::is_deleted) {
-                self.worker
-                    .publish(&mut state, self.key.clone(), value.clone());
+                self.worker.publish(&mut state, self.key.clone(), value);
                 "published"
             } else {
                 "late_fill_skipped"
@@ -320,6 +394,13 @@ mod tests {
         Arc::new(RangeScanCacheValue::new(vec![], 0))
     }
 
+    fn empty_delivery() -> Arc<RangeCacheDelivery> {
+        let value = empty_result();
+        let memory = RangeResultMemoryLimiter::new(1024, 1024);
+        let permit = memory.try_acquire(value.estimated_size()).unwrap();
+        RangeCacheDelivery::new(value, permit)
+    }
+
     fn receiver(lookup: RangeCacheLookup) -> watch::Receiver<SharedResult> {
         match lookup {
             RangeCacheLookup::Loading(receiver) => receiver,
@@ -349,7 +430,7 @@ mod tests {
         let first = receiver(worker.get_or_load(key.clone(), vec![], async move {
             first_count.fetch_add(1, Ordering::Relaxed);
             gate.await.unwrap();
-            Some(empty_result())
+            Some(empty_delivery())
         }));
         let mut followers = Vec::new();
         for _ in 0..16 {
@@ -359,7 +440,7 @@ mod tests {
                 vec![],
                 async move {
                     count.fetch_add(1, Ordering::Relaxed);
-                    Some(empty_result())
+                    Some(empty_delivery())
                 },
             )));
         }
@@ -371,7 +452,7 @@ mod tests {
         }
         assert_eq!(count.load(Ordering::Relaxed), 1);
         assert!(results.iter().all(|value| Arc::ptr_eq(value, &results[0])));
-        assert!(Arc::ptr_eq(&worker.get(&key).unwrap(), &results[0]));
+        assert!(Arc::ptr_eq(&worker.get(&key).unwrap(), &results[0].value));
     }
 
     #[test]
@@ -419,7 +500,7 @@ mod tests {
         let (release, gate) = oneshot::channel();
         let pending = receiver(worker.get_or_load(key.clone(), vec![], async move {
             gate.await.unwrap();
-            Some(empty_result())
+            Some(empty_delivery())
         }));
         worker.invalidate_file(file);
         release.send(()).unwrap();
@@ -434,7 +515,7 @@ mod tests {
         file.mark_deleted();
         let key = range_cache_key(&[file.file_id().file_id()]);
         assert!(matches!(
-            worker.get_or_load(key, vec![file], async { Some(empty_result()) }),
+            worker.get_or_load(key, vec![file], async { Some(empty_delivery()) }),
             RangeCacheLookup::Bypass
         ));
     }
@@ -495,7 +576,7 @@ mod tests {
             vec![old_reader.clone()],
             async move {
                 gate.await.unwrap();
-                Some(empty_result())
+                Some(empty_delivery())
             },
         ));
         let updated = FileMeta {
@@ -511,7 +592,7 @@ mod tests {
         assert!(old_reader.is_deleted());
         assert!(worker.get(&key).is_none());
         assert!(matches!(
-            worker.get_or_load(key, vec![old_reader], async { Some(empty_result()) }),
+            worker.get_or_load(key, vec![old_reader], async { Some(empty_delivery()) }),
             RangeCacheLookup::Bypass
         ));
         release.send(()).unwrap();
@@ -523,14 +604,73 @@ mod tests {
     async fn admission_rejection_does_not_discard_the_shared_result() {
         let worker = RangeCacheWorker::new(1);
         let key = range_cache_key(&[FileId::random()]);
+        let value = empty_result();
+        let permit = worker
+            .load_memory
+            .try_acquire(value.estimated_size())
+            .unwrap();
+        let delivery = RangeCacheDelivery::new(value, permit);
         let pending =
-            receiver(worker.get_or_load(key.clone(), vec![], async { Some(empty_result()) }));
-        assert!(loaded(pending).await.is_some());
+            receiver(worker.get_or_load(key.clone(), vec![], async move { Some(delivery) }));
+        let delivery = loaded(pending).await.unwrap();
         worker.cache.run_pending_tasks();
         assert!(worker.get(&key).is_none());
-        let mut state = worker.state.lock().unwrap();
-        worker.drain_evictions(&mut state);
-        assert!(state.files.is_empty());
+        {
+            let mut state = worker.state.lock().unwrap();
+            worker.drain_evictions(&mut state);
+            assert!(state.files.is_empty());
+        }
+        assert_eq!(worker.load_memory.available_permits(), 0);
+        drop(delivery);
+        // Publishing wakes readers before the producer drops its watch sender.
+        // Its LoadGuard also needs the coordinator lock to finish cleaning up.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while worker.load_memory.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a rejected value must release its reservation after all owners leave");
+    }
+
+    #[test]
+    fn cache_hits_share_delivery_budget_until_the_last_reader_leaves() {
+        let worker = RangeCacheWorker::new(1024);
+        let file = FileId::random();
+        let key = range_cache_key(&[file]);
+        worker.insert(key.clone(), empty_result());
+        assert_eq!(worker.load_memory.available_permits(), 1);
+
+        let blocker = worker.load_memory.try_acquire(1024).unwrap();
+        assert!(matches!(
+            worker.get_or_load(key.clone(), vec![], async {
+                panic!("must not load on a hit")
+            }),
+            RangeCacheLookup::Bypass
+        ));
+        assert!(worker.get(&key).is_some());
+        drop(blocker);
+
+        let RangeCacheLookup::Hit(first) =
+            worker.get_or_load(key.clone(), vec![], async { panic!("must hit the cache") })
+        else {
+            panic!("expected an accounted cache hit");
+        };
+        let RangeCacheLookup::Hit(second) =
+            worker.get_or_load(key.clone(), vec![], async { panic!("must reuse delivery") })
+        else {
+            panic!("readers of the same value must share its reservation");
+        };
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(worker.load_memory.available_permits(), 0);
+
+        worker.invalidate_file(file);
+        worker.cache.run_pending_tasks();
+        assert!(worker.get(&key).is_none());
+        drop(first);
+        assert_eq!(worker.load_memory.available_permits(), 0);
+        drop(second);
+        assert_eq!(worker.load_memory.available_permits(), 1);
     }
 
     #[tokio::test]
@@ -539,7 +679,7 @@ mod tests {
         let key = range_cache_key(&[FileId::random()]);
         let failed = receiver(worker.get_or_load(key.clone(), vec![], async { None }));
         assert!(loaded(failed).await.is_none());
-        let retry = receiver(worker.get_or_load(key, vec![], async { Some(empty_result()) }));
+        let retry = receiver(worker.get_or_load(key, vec![], async { Some(empty_delivery()) }));
         assert!(loaded(retry).await.is_some());
     }
 
@@ -567,7 +707,7 @@ mod tests {
         .await
         .expect("cancelled loaders must release resources and the flight key");
         assert!(worker.get(&key).is_none());
-        let retry = receiver(worker.get_or_load(key, vec![], async { Some(empty_result()) }));
+        let retry = receiver(worker.get_or_load(key, vec![], async { Some(empty_delivery()) }));
         assert!(loaded(retry).await.is_some());
     }
 
@@ -584,7 +724,7 @@ mod tests {
         }
         assert!(matches!(
             worker.get_or_load(range_cache_key(&[FileId::random()]), vec![], async {
-                Some(empty_result())
+                Some(empty_delivery())
             }),
             RangeCacheLookup::Bypass
         ));
