@@ -2679,9 +2679,8 @@ const TOPK_RANGE_TIE_TO: i64 = 1_600;
 const TOPK_RANGE_HOLE_FROM: i64 = 1_000;
 const TOPK_RANGE_HOLE_TO: i64 = 1_500;
 /// A second hole, this one for every series: long enough that each series' evaluated answer breaks
-/// into a new run after it, so one series is handed over as more than one frame. That is what the
-/// sort above the selection exists for; with a single frame per series it could be dropped without
-/// any answer changing.
+/// into a new run after it. A run break is a gap in the answer, so the fixture ranks across one
+/// rather than only over contiguous steps.
 const TOPK_RANGE_BREAK_FROM: i64 = 2_000;
 const TOPK_RANGE_BREAK_TO: i64 = 2_400;
 
@@ -2966,8 +2965,10 @@ fn assert_global_selection_plan(
         1,
         "the logical metric resolves to one physical region"
     );
-    // Each series arrives as more than one frame: the selection reads more frame rows than there
-    // are series, which is what makes the order above them necessary.
+    // The selection read every series of the fixture. A single evaluated chunk now carries a
+    // series' gaps as separate spans inside one frame row, so this counts series rather than
+    // chunks; that several chunks per series are restored in order is pinned by the node's own
+    // interleaved-producer test, which can build that shape exactly.
     let mut frame_rows = 0_u64;
     for metric in select.metrics().expect("the selection's metrics").iter() {
         if metric.value().name() == "native.root.input.input_batches"
@@ -2977,8 +2978,8 @@ fn assert_global_selection_plan(
         }
     }
     assert!(
-        frame_rows >= 2 * TOPK_RANGE_SERIES as u64,
-        "the prefix must hand over several chunks per series, but only {frame_rows} frame rows \
+        frame_rows >= TOPK_RANGE_SERIES as u64,
+        "the prefix must hand over every series to the selection, but only {frame_rows} frame rows \
          arrived for {TOPK_RANGE_SERIES} series"
     );
     assert_four_native_partitions(prefix);
