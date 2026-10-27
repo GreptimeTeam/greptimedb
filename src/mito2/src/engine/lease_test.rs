@@ -70,19 +70,16 @@ async fn create_region(
 }
 
 fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
-    grant_sent_at(engine, role, Instant::now(), deadline);
+    engine
+        .set_region_role_with_lease(REGION_ID, role, Instant::now(), deadline)
+        .unwrap();
 }
 
-/// Grants `role` until `deadline` for a heartbeat sent at `sent_at`, and returns whether the
-/// role was applied.
-fn grant_sent_at(
-    engine: &MitoEngine,
-    role: RegionRole,
-    sent_at: Instant,
-    deadline: Instant,
-) -> bool {
+/// Grants Leader for a heartbeat sent at `sent_at`, and returns whether the role was applied.
+fn grant_leader_at(engine: &MitoEngine, sent_at: Instant) -> bool {
+    let deadline = Instant::now() + LEASE;
     engine
-        .set_region_role_with_lease(REGION_ID, role, sent_at, deadline)
+        .set_region_role_with_lease(REGION_ID, RegionRole::Leader, sent_at, deadline)
         .unwrap()
 }
 
@@ -313,23 +310,19 @@ async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableReg
         .await
         .unwrap();
     let demoted = engine.get_region(REGION_ID).unwrap().state();
+    // Another downgrade raises the gate again, though the role does not change.
+    let sent_between = Instant::now();
+    engine
+        .set_region_role_state_gracefully(REGION_ID, demoted_to)
+        .await
+        .unwrap();
 
-    // The grant for a heartbeat sent before the downgrade arrives late.
-    let deadline = Instant::now() + LEASE;
-    assert!(!grant_sent_at(
-        &engine,
-        RegionRole::Leader,
-        sent_before,
-        deadline
-    ));
+    // Grants for heartbeats sent before either downgrade arrive late.
+    assert!(!grant_leader_at(&engine, sent_before));
+    assert!(!grant_leader_at(&engine, sent_between));
     assert_eq!(demoted, engine.get_region(REGION_ID).unwrap().state());
 
-    assert!(grant_sent_at(
-        &engine,
-        RegionRole::Leader,
-        Instant::now(),
-        deadline
-    ));
+    assert!(grant_leader_at(&engine, Instant::now()));
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
 }
 
@@ -375,13 +368,7 @@ async fn test_grant_gate_survives_reopen() {
         &engine.get_region(REGION_ID).unwrap()
     ));
 
-    let deadline = Instant::now() + LEASE;
-    assert!(!grant_sent_at(
-        &engine,
-        RegionRole::Leader,
-        sent_before,
-        deadline
-    ));
+    assert!(!grant_leader_at(&engine, sent_before));
     assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
 
     grant(&engine, RegionRole::Leader, Instant::now() + LEASE);

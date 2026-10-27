@@ -536,11 +536,22 @@ mod test {
 
     /// Handles a heartbeat response that grants `regions` for a heartbeat sent now.
     async fn handle_lease_response(alive_keeper: &RegionAliveKeeper, regions: Vec<GrantedRegion>) {
+        let sent_at = alive_keeper.epoch().elapsed();
+        handle_lease_response_sent_at(alive_keeper, sent_at, regions).await;
+    }
+
+    /// Handles a heartbeat response that grants `regions` for a heartbeat sent at `sent_at`
+    /// after the epoch.
+    async fn handle_lease_response_sent_at(
+        alive_keeper: &RegionAliveKeeper,
+        sent_at: Duration,
+        regions: Vec<GrantedRegion>,
+    ) {
         let (tx, _rx) = mpsc::channel(1);
         let response = HeartbeatResponse {
             region_lease: Some(RegionLease {
                 regions,
-                duration_since_epoch: alive_keeper.epoch().elapsed().as_millis() as u64,
+                duration_since_epoch: sent_at.as_millis() as u64,
                 // The countdown of a granted region does not expire during the test.
                 lease_seconds: 86400,
                 closeable_region_ids: vec![],
@@ -633,8 +644,24 @@ mod test {
             role: api::v1::meta::RegionRole::Leader.into(),
             extensions: HashMap::new(),
         };
-        handle_lease_response(&alive_keeper, vec![grant]).await;
+        handle_lease_response(&alive_keeper, vec![grant.clone()]).await;
         // The countdown task has applied the grant once it answers.
+        alive_keeper.deadline(region_id).await.unwrap();
+        put(region_id).await.unwrap();
+
+        // A grant for a heartbeat sent before a downgrade does not make the region a leader again.
+        let sent_before = alive_keeper.epoch().elapsed();
+        region_server
+            .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        handle_lease_response_sent_at(&alive_keeper, sent_before, vec![grant.clone()]).await;
+        alive_keeper.deadline(region_id).await.unwrap();
+        assert_eq!(region_server.is_region_leader(region_id), Some(false));
+
+        // Send times have millisecond precision, so the next heartbeat is sent after the downgrade.
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        handle_lease_response(&alive_keeper, vec![grant]).await;
         alive_keeper.deadline(region_id).await.unwrap();
         put(region_id).await.unwrap();
     }
