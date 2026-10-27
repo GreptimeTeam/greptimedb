@@ -14,6 +14,9 @@
 
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
+mod raw_series_read;
+
+pub use self::raw_series_read::{RawSeriesRead, RawSeriesReadColumn};
 
 use std::cell::Cell;
 use std::sync::Arc;

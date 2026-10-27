@@ -346,7 +346,10 @@ fn hybrid_fused(scan: LogicalPlan, metric: &str) -> LogicalPlan {
         FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
             time_index: "ts".into(),
-            tags: vec![],
+            // The fixture table's primary key, which is what a selector over it binds. The
+            // placement check compares the table's partition columns against these, so a fixture
+            // that bound nothing would not describe any real table.
+            tags: vec!["pk1".to_string(), "pk2".to_string(), "pk3".to_string()],
             metric_name: Some(Arc::from(metric)),
         },
         vec![scan],

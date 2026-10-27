@@ -29,6 +29,8 @@ use common_function::handlers::{
     FlowServiceHandlerRef, ProcedureServiceHandlerRef, TableMutationHandlerRef,
 };
 use common_query::Output;
+use common_query::request::RawSeriesRead;
+use common_recordbatch::SendableRecordBatchStream;
 use datafusion::catalog::TableFunction;
 use datafusion::dataframe::DataFrame;
 use datafusion_expr::{AggregateUDF, LogicalPlan, WindowUDF};
@@ -76,6 +78,19 @@ pub trait QueryEngine: Send + Sync {
 
     /// Execute the given [`LogicalPlan`].
     async fn execute(&self, plan: LogicalPlan, query_ctx: QueryContextRef) -> Result<Output>;
+
+    /// Execute a FE-authorized native raw-series scan.
+    async fn execute_raw_series(
+        &self,
+        _plan: LogicalPlan,
+        _query_ctx: QueryContextRef,
+        _read: RawSeriesRead,
+    ) -> Result<SendableRecordBatchStream> {
+        Err(crate::error::UnimplementedSnafu {
+            operation: String::from("raw-series reads"),
+        }
+        .build())
+    }
 
     /// Register an aggregate function.
     ///

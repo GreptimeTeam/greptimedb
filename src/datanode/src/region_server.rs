@@ -39,7 +39,7 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
-use common_query::request::QueryRequest;
+use common_query::request::{QueryRequest, RawSeriesRead};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use common_runtime::Runtime;
@@ -1921,6 +1921,26 @@ impl RegionServerInner {
     ) -> Result<SendableRecordBatchStream> {
         // TODO(ruihang): add metrics and set trace id
 
+        let raw_read = RawSeriesRead::decode(&query_ctx.extensions())
+            .map_err(|error| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "invalid internal raw-series control: {error}"
+                ))
+            })
+            .context(DataFusionSnafu)?;
+        if let Some(raw_read) = raw_read {
+            if raw_read.region_id != request.region_id {
+                return Err(datafusion::error::DataFusionError::Plan(
+                    "raw-series control region mismatch".into(),
+                ))
+                .context(DataFusionSnafu);
+            }
+            return self
+                .query_engine
+                .execute_raw_series(request.plan, query_ctx, raw_read)
+                .await
+                .context(ExecuteLogicalPlanSnafu);
+        }
         let result = self
             .query_engine
             .execute(request.plan, query_ctx)
@@ -2060,6 +2080,7 @@ mod tests {
     use futures_util::StreamExt;
     use mito2::test_util::CreateRequestBuilder;
     use query::options::FLOW_RETURN_REGION_SEQ;
+    use session::context::QueryContextBuilder;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
     use store_api::region_request::{
@@ -2070,6 +2091,94 @@ mod tests {
 
     use super::*;
     use crate::tests::{MockRegionEngine, mock_region_server};
+
+    #[tokio::test]
+    async fn test_handle_read_inner_rejects_malformed_raw_series_control() {
+        let server = mock_region_server();
+        let context = QueryContextBuilder::default().set_extension(
+            RawSeriesRead::EXTENSION_KEY.to_string(),
+            "not-json".to_string(),
+        );
+        let request = QueryRequest {
+            header: None,
+            region_id: RegionId::new(1, 1),
+            plan: datafusion::logical_expr::LogicalPlan::EmptyRelation(
+                datafusion::logical_expr::EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(datafusion::common::DFSchema::empty()),
+                },
+            ),
+        };
+        let error = server
+            .inner
+            .handle_read_inner(request, Arc::new(context.build()))
+            .await
+            .err()
+            .expect("malformed control must be rejected");
+        // Pin the control decoder, not whichever layer happened to fail first.
+        assert!(
+            format!("{error:?}").contains("invalid internal raw-series control"),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_read_inner_rejects_raw_series_region_mismatch() {
+        let server = mock_region_server();
+        let control = RawSeriesRead {
+            version: 1,
+            region_id: RegionId::new(2, 2),
+            metric_name: "metric".into(),
+            primary_key: vec![common_query::request::RawSeriesReadColumn {
+                column_id: 2,
+                name: "host".into(),
+                data_type: datatypes::prelude::ConcreteDataType::string_datatype(),
+                nullable: false,
+            }],
+            time_index: common_query::request::RawSeriesReadColumn {
+                column_id: 1,
+                name: "ts".into(),
+                data_type: datatypes::prelude::ConcreteDataType::timestamp_millisecond_datatype(),
+                nullable: false,
+            },
+            tags: Vec::new(),
+            fields: vec![common_query::request::RawSeriesReadColumn {
+                column_id: 3,
+                name: "value".into(),
+                data_type: datatypes::prelude::ConcreteDataType::int64_datatype(),
+                nullable: false,
+            }],
+        };
+        let context = QueryContextBuilder::default().set_extension(
+            RawSeriesRead::EXTENSION_KEY.to_string(),
+            serde_json::to_string(&control).unwrap(),
+        );
+        let request = QueryRequest {
+            header: None,
+            region_id: RegionId::new(1, 1),
+            plan: datafusion::logical_expr::LogicalPlan::EmptyRelation(
+                datafusion::logical_expr::EmptyRelation {
+                    produce_one_row: false,
+                    schema: Arc::new(datafusion::common::DFSchema::empty()),
+                },
+            ),
+        };
+        let query_ctx = Arc::new(context.build());
+        let decoded = RawSeriesRead::decode(&query_ctx.extensions())
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.region_id, RegionId::new(2, 2));
+        let error = server
+            .inner
+            .handle_read_inner(request, query_ctx)
+            .await
+            .err()
+            .expect("mismatched region must be rejected");
+        assert!(
+            format!("{error:?}").contains("raw-series control region mismatch"),
+            "unexpected error: {error:?}"
+        );
+    }
 
     #[test]
     fn test_is_ingest_request() {

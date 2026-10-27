@@ -20,6 +20,7 @@ mod merge_scan;
 mod merge_sort;
 mod planner;
 mod predicate_extractor;
+pub(crate) mod raw_fan_in;
 mod region_pruner;
 mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;

@@ -28,6 +28,25 @@ side effects live in `operator`.
   it.
 - DataFusion dependency changes follow the pinned-fork rule in the repo-wide
   invariants.
+- Experimental native PromQL placement is process-local: remote admission covers
+  single-source ordinary Mito base tables, with the frontend gathering ordinarily
+  selected regions into one partition and merging raw samples by complete raw
+  identity and time before native execution. Keep remote schema/label-decode
+  validation strict; mixed-version datanodes that ignore control are rejected on
+  schema mismatch. Datanode prefix pushdown, frontend repartition/hash shuffle,
+  remote `NativeTree` serialization, metric-engine remote admission, and evaluated
+  cross-region canonical merging beyond local `Merge` are not implemented.
+  A key-and-time fan-in merge opens the selected region reads in parallel,
+  consumes every opened stream continuously, and drops each stream at its own
+  EOF so its datanode read permit is released progressively; it merges the live
+  inputs by complete raw identity and time instead of materializing them first,
+  and the chunks it does buffer are charged to the query memory pool, where
+  exhaustion is an explicit resource error. The datanode read limit counts
+  in-flight region read streams per datanode rather than per query, so a query
+  selecting more regions on one datanode than its permit count is refused at
+  admission and fails as an explicit error with every permit released and never
+  a partial result; giving one query's whole read set a shared admission scope is
+  admission-layer follow-up, not a frontend change.
 
 ## Testing
 

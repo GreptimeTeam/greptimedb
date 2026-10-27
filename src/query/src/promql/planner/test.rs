@@ -1822,10 +1822,23 @@ async fn build_native_fused_plan_with_provider(
     table_provider: DfTableSourceProvider,
 ) -> LogicalPlan {
     let eval_stmt = build_eval_stmt(query);
+    let state = QueryEngineState::try_new_with_region_transport(
+        new_memory_catalog_manager().unwrap(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        true,
+        Plugins::default(),
+        QueryOptions::default(),
+    )
+    .unwrap();
     PromPlanner::stmt_to_plan_with_annotations(
         table_provider,
         &eval_stmt,
-        &build_query_engine_state(),
+        &state,
         None,
         native_fused,
     )
@@ -1981,8 +1994,13 @@ async fn native_fused_rate_plans_to_a_fused_series_node() {
     );
 }
 
+/// A table partitioned by its time index keeps one slice of a series per region, so the fused node
+/// may not be evaluated in any of them: the analyzer reads the table's partition columns from the
+/// scan and keeps the node above the regions, where the frontend folds the raw chunks of every
+/// selected region into one series. What admits the query is therefore not a promise that a region
+/// can run it, only that the frontend can.
 #[tokio::test]
-async fn native_fused_time_partitioned_table_falls_back() {
+async fn native_fused_time_partitioned_table_is_admitted() {
     let table_provider = native_engine_provider(vec![1]).await;
     let native =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", true, table_provider).await;
@@ -1990,12 +2008,15 @@ async fn native_fused_time_partitioned_table_falls_back() {
     let without_flag =
         build_native_fused_plan_with_provider("rate(some_metric[2m])", false, fallback_provider)
             .await;
-    let display = native.display_indent().to_string();
-    assert!(!display.contains("FusedSeries"), "{display}");
-    assert_eq!(
-        display,
-        without_flag.display_indent().to_string(),
-        "a time-partitioned table must keep the existing plan, not an approximation of it"
+    assert!(
+        find_fused_series(&native).is_some(),
+        "a time-partitioned table is admitted: {}",
+        native.display_indent()
+    );
+    assert!(
+        find_fused_series(&without_flag).is_none(),
+        "the request still decides the route: {}",
+        without_flag.display_indent()
     );
 }
 

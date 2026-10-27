@@ -21,13 +21,25 @@ functions, vector matching and extension operators. Statement planning lives in
 
 ## Native execution boundary
 
-Native PromQL is an experimental, standalone evaluation route alongside the
-existing DataFusion PromQL path. It operates on one storage region, which may
-supply multiple scan partitions. It can evaluate each independent input series
-in those partitions, but does not merge one logical series split across regions
-or partitions; cross-region `SeriesMerge`/`Exchange` and global final-label
-semantics are not implemented. Do not describe partition-local work as a global
-series merge.
+Native PromQL is an experimental route alongside the existing DataFusion PromQL
+path. It evaluates each independent input series, and an admitted single-source
+scan gathers its selected storage regions on the frontend and merges their raw
+samples by complete raw identity and time before the tree runs. That raw merge is
+not a canonical evaluated merge: cross-region canonical `SeriesMerge`/`Exchange`
+and global final-label semantics are still unimplemented, so do not describe
+partition-local evaluation as a global series merge.
+
+The fan-in opens every selected region read at once, consumes each opened stream
+continuously, and drops it at its own EOF so its datanode read permit returns
+progressively; a region still opening never stops a sibling from being drained.
+Inputs reach the merge as buffered-then-live streams, so it streams instead of
+materializing every region first. Buffered chunks and the in-flight raw batch are
+charged to the query memory pool, and a refusal is an explicit resource error.
+The datanode read limit counts in-flight region read streams per datanode rather
+than per query, so a query selecting more regions on one datanode than its permit
+count is refused at admission: an explicit error, every permit released, never a
+partial result. Do not document "raise the limit" as the remedy; giving one
+query's whole read set a shared admission scope is admission-layer follow-up.
 
 Vector operations use the existing vector-matching semantics; do not describe
 them as pairing only corresponding child series. A single-input operation can
@@ -36,6 +48,13 @@ stage: `Complete` is valid only when the execution sees all contributions to
 each group. Partitioned aggregation requires `Partial` state per input partition
 followed by `Final` aggregation of that state. Do not claim that a complete
 aggregate on each scan partition is globally complete.
+
+A one-child fused node - the value-producing per-series tree and the producer
+that exports a partial fold's state alike - may be evaluated in a region only
+when every partition column of the table is one of the raw binding's tags;
+otherwise it stays on the frontend above the fan-in. The rule is a conservative
+sufficient condition read from the scan's own table metadata, and unresolvable
+metadata is refused rather than read as an unpartitioned table.
 
 The native `timestamp` operation evaluates on its input grid, and literal
 scalar constants (including foldable constant expressions) bind on the

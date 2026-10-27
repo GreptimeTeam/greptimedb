@@ -75,6 +75,7 @@ use common_base::Plugins;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::util::collect_batches;
+use common_time::timezone::Timezone;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::PhysicalExpr;
@@ -108,6 +109,10 @@ use crate::standalone::GreptimeDbStandaloneBuilder;
 const NATIVE_PROMQL_EXTENSION_KEY: &str = "query.experimental_native_promql";
 /// The physical name of the fused producer.
 const FUSED_EXEC_NAME: &str = "FusedSeriesExec";
+/// The physical name of the fan-in a producer reads when its series spans several regions.
+const FAN_IN_EXEC_NAME: &str = "NativeRawFanInExec";
+/// The physical name of the region boundary a producer sits below when it reads one region only.
+const MERGE_SCAN_EXEC_NAME: &str = "MergeScanExec";
 /// What every name of the frontend-side merge node contains (`AggregateFinalize`, `...Exec`).
 const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
 /// The metric a fused producer registers for the values its own root node produced, per partition.
@@ -1976,5 +1981,379 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     ];
     for case in &fallback_cases {
         check_fallback_case(&instance, &observer, case).await;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A table whose regions do not each hold a whole series.
+// ---------------------------------------------------------------------------------------------
+
+/// The table the series-spanning acceptance test reads: one series whose two samples sit on either
+/// side of a time partition's boundary.
+const SPAN_TABLE: &str = "native_agg_span";
+/// The only label [`SPAN_TABLE`]'s series carries.
+const SPAN_HOST: &str = "span-1";
+/// The increase between [`SPAN_TABLE`]'s two samples.
+const SPAN_INCREASE: f64 = 60.0;
+/// The later sample's value: [`COUNTER_FIRST_VALUE`] plus [`SPAN_INCREASE`].
+const SPAN_SECOND_VALUE: f64 = COUNTER_FIRST_VALUE + SPAN_INCREASE;
+/// The boundary between [`SPAN_TABLE`]'s two partitions, in seconds since the epoch.
+///
+/// It is 170s before the evaluation, which puts it between the fixture's two samples - 200s and
+/// 140s before it - so the insert routes one sample into each region.
+const SPAN_BOUNDARY_SECS: i64 = EVAL_SECS - 170;
+/// [`SPAN_BOUNDARY_SECS`] as the partition expression of [`SPAN_TABLE`]'s DDL spells it.
+///
+/// The DDL runs in a UTC session and `2023-11-14 22:14:30` UTC is epoch `1_700_000_070`, which the
+/// assertions in the test below pin against [`SPAN_BOUNDARY_SECS`].
+const SPAN_BOUNDARY_UTC: &str = "2023-11-14 22:14:30";
+/// `rate` over `[5m]` for that one series, once the chunks of both regions are merged.
+///
+/// The two samples are [`COUNTER_STEP_SECS`] apart and 200s and 140s before the evaluation, so both
+/// ends of the window are further than 1.1 average intervals (66s) away and each is extended by half
+/// an interval, 30s. The sampled increase is therefore scaled by `(60 + 30 + 30) / 60 = 2` and
+/// divided by the 300s window, the convention [`COUNTER_SERIES`] derives above: the merged answer is
+/// `60 * 2 / 300`, and the counter-zero clamp stays out of it because `interval * first / increase`
+/// is 1500s here. A region that rated the window over its own single sample would have no interval
+/// to rate at all, which is the answer this case rules out.
+const SPAN_RATE: f64 = 2.0 * SPAN_INCREASE / 300.0;
+
+/// The context every statement of this fixture runs in.
+///
+/// The fixture puts a timestamp literal in the table's DDL and reads it back through the partition
+/// expressions and the row counts, so all of them have to be read on one timeline: naming the
+/// timezone is what makes them.
+fn utc_context() -> QueryContextRef {
+    let query_ctx = QueryContext::with_db_name(None);
+    query_ctx.set_timezone(Timezone::from_tz_string("UTC").unwrap());
+    Arc::new(query_ctx)
+}
+
+/// Runs one SQL statement in [`utc_context`] and hands back the batches it answered with.
+async fn sql_batches(instance: &Arc<Instance>, sql: &str) -> RecordBatches {
+    let output = instance
+        .do_query(sql, utc_context())
+        .await
+        .remove(0)
+        .unwrap_or_else(|err| panic!("`{sql}` failed: {err}"));
+    match output.data {
+        OutputData::Stream(stream) => collect_batches(stream)
+            .await
+            .unwrap_or_else(|err| panic!("`{sql}` produced no batches: {err}")),
+        OutputData::RecordBatches(batches) => batches,
+        other => panic!("`{sql}` produced no batches: {other:?}"),
+    }
+}
+
+/// One column of `batches` by name, widened to `Int64`.
+///
+/// Every column this reads is a number - a table id, a row count, a timestamp in milliseconds - so
+/// one widening cast reads them all, and narrowing them back is not what these assertions are about.
+fn int64_column(batches: &RecordBatches, name: &str) -> Vec<Option<i64>> {
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let column = batch
+            .column_by_name(name)
+            .unwrap_or_else(|| panic!("the result has no `{name}` column"));
+        let column = cast(column, &DataType::Int64).unwrap();
+        let column = column.as_any().downcast_ref::<Int64Array>().unwrap();
+        values.extend(
+            (0..batch.num_rows()).map(|row| (!column.is_null(row)).then(|| column.value(row))),
+        );
+    }
+    values
+}
+
+/// One partition of a table, as the catalog routes it: the region it writes to and the boundary
+/// expression that selects it.
+#[derive(Debug)]
+struct TablePartition {
+    /// The region id the partition expression routes to.
+    region_id: u64,
+    /// The partition's own boundary expression, e.g. `ts < 2023-11-14 22:14:30`.
+    description: String,
+}
+
+/// The partitions `table` is split into, read from the catalog's routing metadata.
+///
+/// This is the placement the queries below depend on and cannot see from their results: a fixture
+/// whose samples happened to land in one region would answer the same numbers without any
+/// cross-region merging at all. `information_schema.partitions` reports each partition's region and
+/// the expression that routes rows into it, so this reads the routing the table really has rather
+/// than the one the DDL asked for.
+///
+/// The datanode's `information_schema.region_statistics` would report per-region row counts
+/// directly, but it is served from the meta client, which the standalone setup does not populate.
+async fn table_partitions(instance: &Arc<Instance>, table: &str) -> Vec<TablePartition> {
+    let batches = sql_batches(
+        instance,
+        &format!(
+            "SELECT greptime_partition_id, partition_description \
+             FROM information_schema.partitions \
+             WHERE table_schema = 'public' AND table_name = '{table}' \
+             ORDER BY partition_ordinal_position"
+        ),
+    )
+    .await;
+    let region_ids = int64_column(&batches, "greptime_partition_id");
+    let mut descriptions = Vec::new();
+    for batch in batches.iter() {
+        let column = batch
+            .column_by_name("partition_description")
+            .expect("the partitions table has a boundary column");
+        let column = cast(column, &DataType::Utf8).unwrap();
+        let column = column.as_any().downcast_ref::<StringArray>().unwrap();
+        descriptions.extend((0..batch.num_rows()).map(|row| column.value(row).to_string()));
+    }
+    assert_eq!(
+        region_ids.len(),
+        descriptions.len(),
+        "`{table}`: every partition reports both a region and a boundary"
+    );
+    region_ids
+        .into_iter()
+        .zip(descriptions)
+        .map(|(region_id, description)| TablePartition {
+            region_id: region_id.expect("a partition routes to a region") as u64,
+            description,
+        })
+        .collect()
+}
+
+/// The number of rows of `table` a predicate keeps.
+async fn count_rows(instance: &Arc<Instance>, table: &str, predicate: &str) -> i64 {
+    let batches = sql_batches(
+        instance,
+        &format!("SELECT count(*) AS rows FROM {table} WHERE {predicate}"),
+    )
+    .await;
+    let rows = int64_column(&batches, "rows");
+    assert_eq!(
+        1,
+        rows.len(),
+        "`count(*)` over `{table}` (`{predicate}`) must report one row, got {rows:?}"
+    );
+    rows[0].expect("`count(*)` is never null")
+}
+
+/// The DDL of [`SPAN_TABLE`]: an ordinary Mito table partitioned by its own time index.
+///
+/// The partition column is the time index, so each region holds one contiguous slice of a series'
+/// history instead of whole series - the layout the native route used to decline.
+fn span_table_sql() -> String {
+    format!(
+        "CREATE TABLE {SPAN_TABLE} (ts TIMESTAMP(3) TIME INDEX, host STRING, v DOUBLE, \
+         PRIMARY KEY(host)) PARTITION ON COLUMNS (ts) (ts < '{SPAN_BOUNDARY_UTC}', \
+         ts >= '{SPAN_BOUNDARY_UTC}')"
+    )
+}
+
+/// Executes one statement in [`utc_context`] and drops its result.
+async fn execute_sql_in_utc(instance: &Arc<Instance>, sql: &str) {
+    for result in instance.do_query(sql, utc_context()).await {
+        result.unwrap_or_else(|err| panic!("`{sql}` failed: {err}"));
+    }
+}
+
+/// One series over two time partitions: the acceptance case for a table whose regions do not each
+/// hold a whole series.
+///
+/// Each region receives one of the two samples, so a per-region `rate` would have a single sample to
+/// work with and report nothing at all. What has to answer instead is the frontend, which reads the
+/// raw chunks of every selected region through the raw fan-in and merges them into the series' real
+/// history before it folds: the merged history has a 60s interval and an increase of 60, and the
+/// answer is [`SPAN_RATE`] - worked out from the fixture above rather than read off a plan.
+///
+/// The plan assertions are what make the value evidence, and the fixture's own premise is asserted
+/// first: the catalog must route the table into two partitions in two distinct regions, split by an
+/// exhaustive `<`/`>=` pair on the time index, with one sample on each side of it - so each region
+/// holds one sample and no region holds the series whole. Only then does the plan check mean
+/// anything - the producer runs on the frontend with the fan-in below it, the fan-in names as many
+/// regions as the table is partitioned into, and the aggregate query additionally holds the frontend
+/// merge. A route that read one region - or folded one region at a time - either reports no row or
+/// reports a different value, so the exact answer and the plan together pin the shape that produced
+/// it. The legacy run is executed for both queries too: it reads both regions' rows the ordinary
+/// distributed way and has to report the same merged history, which makes the expectation the
+/// fixture's and not the native route's own output.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_aggregate_complete_over_a_series_spanning_two_time_partitions() {
+    common_telemetry::init_default_ut_logging();
+
+    // The two constants that have to agree: the boundary the DDL spells and the epoch it means.
+    assert_eq!(
+        1_700_000_070, SPAN_BOUNDARY_SECS,
+        "the DDL literal names this epoch"
+    );
+    assert!(
+        COUNTER_FIRST_SECS < SPAN_BOUNDARY_SECS
+            && SPAN_BOUNDARY_SECS < COUNTER_FIRST_SECS + COUNTER_STEP_SECS,
+        "the boundary has to fall between the fixture's two samples"
+    );
+
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_span")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(&standalone.fe_instance());
+
+    execute_sql_in_utc(&instance, &span_table_sql()).await;
+    let first = COUNTER_FIRST_SECS * 1000;
+    let second = (COUNTER_FIRST_SECS + COUNTER_STEP_SECS) * 1000;
+    execute_sql(
+        &instance,
+        &format!(
+            "INSERT INTO {SPAN_TABLE} (ts, host, v) VALUES \
+             ({first}, '{SPAN_HOST}', {COUNTER_FIRST_VALUE:?}), \
+             ({second}, '{SPAN_HOST}', {SPAN_SECOND_VALUE:?})"
+        ),
+    )
+    .await;
+
+    // The fixture's premise, checked rather than assumed: each of the two samples is in a region of
+    // its own, so no single region holds the series whole. Without this the queries below would
+    // prove nothing about merging chunks across regions - one region holding both samples would
+    // answer the same numbers by reading one region.
+    //
+    // Three facts together are that premise. The table is routed into exactly two partitions with
+    // two distinct regions, and their boundaries are `< boundary` and `>= boundary`: an exhaustive,
+    // disjoint split on the partition column. One sample lies on each side of the boundary. So each
+    // region receives exactly one of the two samples.
+    let partitions = table_partitions(&instance, SPAN_TABLE).await;
+    assert_eq!(
+        2,
+        partitions.len(),
+        "the table must be routed into the two partitions its DDL declares: {partitions:?}"
+    );
+    let mut region_ids = partitions.iter().map(|p| p.region_id).collect::<Vec<_>>();
+    region_ids.sort_unstable();
+    region_ids.dedup();
+    assert_eq!(
+        2,
+        region_ids.len(),
+        "the two partitions must live in two distinct regions: {partitions:?}"
+    );
+    let below = partitions
+        .iter()
+        .find(|p| p.description.contains(" < "))
+        .unwrap_or_else(|| panic!("one partition must select `ts < ...`: {partitions:?}"));
+    let at_or_above = partitions
+        .iter()
+        .find(|p| p.description.contains(" >= "))
+        .unwrap_or_else(|| panic!("one partition must select `ts >= ...`: {partitions:?}"));
+    assert_ne!(
+        below.region_id, at_or_above.region_id,
+        "the two boundaries must route to different regions: {partitions:?}"
+    );
+    for partition in [below, at_or_above] {
+        assert!(
+            partition.description.contains("ts"),
+            "the partition boundary must split on the time index: {partitions:?}"
+        );
+    }
+    // One sample on each side of that boundary, so one sample per region. The predicates are the
+    // partition expressions themselves, so what they select is exactly what each region routes.
+    let boundary = format!("'{SPAN_BOUNDARY_UTC}'");
+    assert_eq!(
+        1,
+        count_rows(&instance, SPAN_TABLE, &format!("ts < {boundary}")).await,
+        "the older sample must be the only row the `<` partition selects"
+    );
+    assert_eq!(
+        1,
+        count_rows(&instance, SPAN_TABLE, &format!("ts >= {boundary}")).await,
+        "the newer sample must be the only row the `>=` partition selects"
+    );
+
+    for (promql, keeps_host) in [
+        (format!("rate({SPAN_TABLE}[5m])"), true),
+        (format!("sum(rate({SPAN_TABLE}[5m]))"), false),
+    ] {
+        // A range function reports the series' own labels; the fold drops every label it does not
+        // group by, and this one groups by nothing.
+        let labels: &[(&str, &str)] = if keeps_host {
+            &[("host", SPAN_HOST)]
+        } else {
+            &[]
+        };
+        let case = case(promql.clone(), &[(labels, SPAN_RATE)], false);
+        let query = tql_eval(&promql);
+
+        let (legacy, capture) = run_query(&instance, &promql, false, &observer).await;
+        assert!(
+            capture.fused.is_empty() && capture.finalize.is_empty(),
+            "`{query}`: the legacy run must not plan a native node"
+        );
+        assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
+
+        let (native, capture) = run_query(&instance, &promql, true, &observer).await;
+        if !keeps_host {
+            // A fold reports the columns the legacy plan reports, which the aggregate cases of the
+            // neighbouring test already pin. A bare range function is left to the rows below: what
+            // it must keep is the series' own label, which the rows carry.
+            assert_same_columns(&native, &legacy, &query);
+        }
+        assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
+
+        // One producer, and it runs where every region's chunk is available: on the frontend, over
+        // the fan-in. A producer inside a region would sit below a `MergeScanExec` boundary instead.
+        assert_eq!(
+            1,
+            capture.fused.len(),
+            "`{query}`: one fused producer must run on the frontend, but the plans held {} of them",
+            capture.fused.len()
+        );
+        let fused = &capture.fused[0];
+        let plan = displayable(fused.as_ref()).indent(false).to_string();
+        assert!(
+            !plan.contains(MERGE_SCAN_EXEC_NAME),
+            "`{query}`: the producer must not read one region through a merge scan boundary:\n{plan}"
+        );
+        let children = fused.children();
+        assert_eq!(
+            1,
+            children.len(),
+            "`{query}`: the producer reads one merged raw input:\n{plan}"
+        );
+        let input = through_cooperative(children[0]);
+        assert_eq!(
+            FAN_IN_EXEC_NAME,
+            input.name(),
+            "`{query}`: the producer must read the raw fan-in of every region:\n{plan}"
+        );
+        // The count the fan-in names is the number of regions the table is stored in, which the
+        // check above read from the datanode: a route that covered one of the two would name one,
+        // and the sample in the other would never reach the producer. The whole line is compared,
+        // so a longer number cannot satisfy the shorter one.
+        let fan_in = displayable(input.as_ref()).indent(false).to_string();
+        let expected_route = format!("{FAN_IN_EXEC_NAME}: regions={}", partitions.len());
+        assert!(
+            fan_in.contains(&expected_route),
+            "`{query}`: the raw route must read every region the table is stored in, `{expected_route}`,\n\
+             otherwise one region's sample never reaches the producer:\n{fan_in}"
+        );
+
+        // The rate alone is one producer; the fold above it adds the frontend merge, which is the
+        // half that finishes the groups the producer exported state for.
+        if keeps_host {
+            assert!(
+                capture.finalize.is_empty(),
+                "`{query}`: a bare rate needs no merge above the producer, but the plans held {}",
+                capture.finalize.len()
+            );
+        } else {
+            assert_eq!(
+                1,
+                capture.finalize.len(),
+                "`{query}`: the native run must plan the frontend-side merge above the producer, \
+                 otherwise the answer came from a fall back to the legacy plan"
+            );
+        }
     }
 }

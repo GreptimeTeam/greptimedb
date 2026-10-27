@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
 use common_telemetry::debug;
+use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
@@ -26,6 +27,7 @@ use promql::extension_plan::{
 };
 use promql::native::plan::reads_across_series;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
+use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
@@ -245,6 +247,7 @@ impl Categorizer {
             }
             name if name == FusedSeries::name() => {
                 let fused = plan.as_any().downcast_ref::<FusedSeries>().unwrap();
+                let root = fused.tree().root();
                 // The raw-series reader supports one scan, or the narrow same-table two-scan
                 // one-to-one case. This classification is for region-local execution only.
                 let children = fused.children();
@@ -265,9 +268,18 @@ impl Categorizer {
                 if binding.metric_name.is_none() {
                     return Commutativity::NonCommutative;
                 }
-                let root = fused.tree().root();
                 let per_series = pointwise_operand(root) || independent_scan_pair(root);
                 if reads_across_series(root) && !per_series {
+                    return Commutativity::NonCommutative;
+                }
+                // The one-scan shapes read the raw samples themselves - the per-series tree that
+                // computes values and the producer that exports the state of a partial fold above it
+                // alike - so a region may evaluate them only when the series it holds there is the
+                // whole series. Both shapes have exactly one child, the scan checked above; the
+                // two-scan pair keeps its own, unchanged classification.
+                if children.len() == 1
+                    && !partitioning_preserves_raw_series(&children[0], &binding.tags)
+                {
                     return Commutativity::NonCommutative;
                 }
 
@@ -393,16 +405,60 @@ impl Categorizer {
     }
 }
 
+/// Whether a region's slice of a raw series is the whole series, for a [`FusedSeries`] node placed
+/// in that region.
+///
+/// The node reads raw samples and folds them, so a region may evaluate it only when the samples it
+/// holds for the series are every sample the expression is defined over: `rate(x[5m])` needs the
+/// series' history across the whole window, and a region that holds part of it answers for that
+/// part alone. For an ordinary base table that holds when every partition column of the table is one
+/// of the tags the raw binding carries: a table partitioned by tags routes every sample of a series
+/// into the one region its tag values select, so each region reads that series whole. A partition
+/// column that is not a tag - the time index, the case this is about - splits one series over the
+/// regions instead, each holding a disjoint slice of its samples.
+///
+/// This is a conservative sufficient condition, not an equivalence. A table with no partition
+/// columns has one region and is complete by construction, so the condition holds vacuously there,
+/// which is why the absence of partition columns and an unresolvable layout have to be told apart.
+/// It also claims nothing about how a partitioned table routes its rows beyond the tag case: routing
+/// is per-column expression matching, and a row no partition expression matches lands in the first
+/// region. A layout that cannot be resolved proves nothing either way and is refused. The metadata
+/// is read from the scan itself, the way [`PromPlanner::table_from_source`] reads it, rather than
+/// from the partition alias mapping the rewriter hands the categorizer: that mapping describes the
+/// node's position in the rewritten plan and is empty for the scan's own parent.
+///
+/// [`PromPlanner::table_from_source`]: crate::promql::planner::PromPlanner
+fn partitioning_preserves_raw_series(scan: &LogicalPlan, tags: &[String]) -> bool {
+    let LogicalPlan::TableScan(scan) = scan else {
+        return false;
+    };
+    let Some(source) = scan.source.downcast_ref::<DefaultTableSource>() else {
+        return false;
+    };
+    let Some(provider) = source
+        .table_provider
+        .downcast_ref::<DfTableProviderAdapter>()
+    else {
+        return false;
+    };
+    let table_info = provider.table().table_info();
+    table_info
+        .meta
+        .partition_column_names()
+        .all(|column| tags.iter().any(|tag| tag == column))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::time::{Duration, UNIX_EPOCH};
 
+    use common_error::ext::BoxedError;
+    use common_recordbatch::{EmptyRecordBatchStream, SendableRecordBatchStream};
     use datafusion::arrow::datatypes::{
         DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit,
     };
     use datafusion::common::{DFSchema, DFSchemaRef};
-    use datafusion::datasource::DefaultTableSource;
     use datafusion_common::Column;
     use datafusion_common::config::ConfigOptions;
     use datafusion_expr::LogicalPlanBuilder;
@@ -410,6 +466,8 @@ mod tests {
     use datafusion_expr::{Extension, LogicalPlan, UserDefinedLogicalNodeCore};
     use datafusion_functions::core::coalesce;
     use datafusion_optimizer::analyzer::AnalyzerRule;
+    use datatypes::data_type::ConcreteDataType;
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::series::SeriesOrdering;
     use datatypes::series::samples::{FieldSpec, SeriesSchema};
     use promql::extension_plan::{
@@ -423,8 +481,12 @@ mod tests {
         NativeExpr, NativeNode, NativeType,
     };
     use promql_parser::parser;
+    use store_api::data_source::DataSource;
     use store_api::storage::RegionId;
+    use store_api::storage::ScanRequest;
     use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+    use table::Table;
+    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
 
     use super::*;
     use crate::dist_plan::DistPlannerAnalyzer;
@@ -484,7 +546,7 @@ mod tests {
     /// The tree is the simplest shape the compiler accepts, because what these tests change is
     /// where the node may be placed, not what it computes.
     fn fused_series_plan(input: LogicalPlan) -> LogicalPlan {
-        fused_series_plan_named(input, Some("some_metric"))
+        fused_series_plan_named(input, Some("some_metric"), Vec::new())
     }
 
     fn fused_pair_plan(left: LogicalPlan, right: LogicalPlan) -> LogicalPlan {
@@ -533,8 +595,15 @@ mod tests {
         })
     }
 
-    /// The same node, with the metric name it binds chosen by the caller.
-    fn fused_series_plan_named(input: LogicalPlan, metric_name: Option<&str>) -> LogicalPlan {
+    /// The same node, with the metric name and the raw tags it binds chosen by the caller.
+    ///
+    /// The tags are the names the binding reads its raw series by, which is what the placement check
+    /// compares a table's partition columns against.
+    fn fused_series_plan_named(
+        input: LogicalPlan,
+        metric_name: Option<&str>,
+        tags: Vec<String>,
+    ) -> LogicalPlan {
         let stmt = native_statement();
         let series_schema = Arc::new(SeriesSchema {
             fields: Arc::from([FieldSpec { name: "v0".into() }]),
@@ -549,7 +618,7 @@ mod tests {
         let binding = FusedSeriesBinding {
             grid: statement_grid(&stmt).unwrap(),
             time_index: "ts".to_string(),
-            tags: Vec::new(),
+            tags,
             metric_name: metric_name.map(Arc::from),
         };
         let output_schema: DFSchemaRef = Arc::new(
@@ -587,17 +656,71 @@ mod tests {
         })
     }
 
-    /// The region's own view of the metric's table: a scan whose provider is the region provider.
-    fn table_scan_plan() -> LogicalPlan {
-        let provider = mock_table_provider(RegionId::new(1, 1));
+    /// An empty scan source: these fixtures check where a node may be placed, never what a scan
+    /// returns.
+    #[derive(Debug)]
+    struct EmptySource {
+        schema: SchemaRef,
+    }
+
+    impl DataSource for EmptySource {
+        fn get_stream(
+            &self,
+            _request: ScanRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            Ok(Box::pin(EmptyRecordBatchStream::new(self.schema.clone())))
+        }
+    }
+
+    /// The region's own view of the metric's table: a scan whose provider is the region provider,
+    /// with the table's columns - `k0` tag, `ts` time index, `v0` field - and the given partition
+    /// columns.
+    ///
+    /// The partition layout is part of the fixture because the placement check reads it: whether a
+    /// fused node may be evaluated in a region depends on which columns the table is partitioned by,
+    /// and a provider that answers with a region's metadata carries no such layout at all. Filters
+    /// are pushed down the way the region provider pushes the tag filters of these tests down.
+    fn scan_over_partitioned_table(partition_key_indices: Vec<usize>) -> LogicalPlan {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("v0", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .engine("test_engine".to_string())
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .column_ids(vec![1, 2, 3])
+            .partition_key_indices(partition_key_indices)
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let info = TableInfoBuilder::new("some_metric", meta).build().unwrap();
+        let table = Arc::new(Table::new(
+            Arc::new(info),
+            FilterPushDownType::Exact,
+            Arc::new(EmptySource { schema }),
+        ));
         LogicalPlanBuilder::scan(
             "some_metric",
-            Arc::new(DefaultTableSource::new(Arc::new(provider))),
+            Arc::new(DefaultTableSource::new(Arc::new(
+                DfTableProviderAdapter::new(table),
+            ))),
             None,
         )
         .unwrap()
         .build()
         .unwrap()
+    }
+
+    fn table_scan_plan() -> LogicalPlan {
+        scan_over_partitioned_table(vec![])
     }
 
     fn table_scan_plan_with_filter(value: &str) -> LogicalPlan {
@@ -779,11 +902,71 @@ mod tests {
         ));
     }
 
+    /// A per-series tree reads the raw samples itself, so it may be placed in a region only when
+    /// that region holds the whole series: every partition column of the table has to be one of the
+    /// tags the raw binding carries.
+    ///
+    /// These are the layouts a table can have for that purpose. A table partitioned by its time
+    /// index keeps one slice of a series per region, so a window over the raw samples there sees
+    /// part of the series' history; an unpartitioned table has one region and holds every series
+    /// whole, which the check has to admit without any tag to compare against; and a table
+    /// partitioned by a tag routes every sample of a series into the one region its tag values
+    /// select.
+    #[test]
+    fn fused_series_is_region_local_only_when_partitions_keep_series_whole() {
+        let time_partitioned = fused_series_plan(scan_over_partitioned_table(vec![1]));
+        assert!(
+            matches!(
+                Categorizer::check_plan(&time_partitioned, None).unwrap(),
+                Commutativity::NonCommutative
+            ),
+            "a time-partitioned table splits one series over several regions: {time_partitioned}"
+        );
+
+        let unpartitioned = fused_series_plan(scan_over_partitioned_table(vec![]));
+        assert!(
+            matches!(
+                Categorizer::check_plan(&unpartitioned, None).unwrap(),
+                Commutativity::Commutative
+            ),
+            "an unpartitioned table has one region, so its series are whole: {unpartitioned}"
+        );
+
+        let tag_partitioned = fused_series_plan_named(
+            scan_over_partitioned_table(vec![0]),
+            Some("some_metric"),
+            vec!["k0".to_string()],
+        );
+        assert!(
+            matches!(
+                Categorizer::check_plan(&tag_partitioned, None).unwrap(),
+                Commutativity::Commutative
+            ),
+            "partitioning by a tag keeps every series in one region: {tag_partitioned}"
+        );
+
+        // The same tag-partitioned table, read by a binding whose tags do not include the partition
+        // column: the names are compared, so this layout is refused however whole the series happens
+        // to be.
+        let other_tag = fused_series_plan_named(
+            scan_over_partitioned_table(vec![0]),
+            Some("some_metric"),
+            vec!["v0".to_string()],
+        );
+        assert!(
+            matches!(
+                Categorizer::check_plan(&other_tag, None).unwrap(),
+                Commutativity::NonCommutative
+            ),
+            "the binding has to carry the partition column itself: {other_tag}"
+        );
+    }
+
     /// The region asks the scan for one named metric's series, so a node binding no name cannot
     /// be built there.
     #[test]
     fn fused_series_that_binds_no_metric_name_is_not_commutative() {
-        let plan = fused_series_plan_named(table_scan_plan(), None);
+        let plan = fused_series_plan_named(table_scan_plan(), None, Vec::new());
 
         assert!(matches!(
             Categorizer::check_plan(&plan, None).unwrap(),
@@ -1030,6 +1213,13 @@ mod tests {
             !any_remote_input_holds(&encoded, holds_fused_series),
             "the analyzer placed the node although its plan has to encode: {encoded}"
         );
+        assert!(
+            any_remote_input_holds(&encoded, holds_table_scan),
+            "the remote MergeScan child is the bare scan, not the fused node: {encoded}"
+        );
+        let merge = first_merge_scan(&encoded).expect("the plan has a MergeScan");
+        assert!(holds_table_scan(merge.input()));
+        assert!(!holds_fused_series(merge.input()));
 
         // In process nothing is encoded, so the categorizer places the node.
         let in_process = analyze(DistPlannerAnalyzer::new(true), plan);

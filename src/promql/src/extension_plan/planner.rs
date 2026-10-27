@@ -29,8 +29,9 @@ use store_api::region_engine::RawLabelSource;
 use table::table::scan::{RegionScanExec, SeriesScanExec};
 
 use crate::extension_plan::{
-    Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
-    RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
+    Absent, AggregateFinalize, EmptyMetric, FusedInputBinding, FusedSeries, HistogramFold,
+    InstantManipulate, RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide,
+    SeriesNormalize,
     UnionDistinctOn,
 };
 
@@ -131,8 +132,13 @@ fn plan_fused_series(
     if let Some(inputs) = physical_inputs
         .iter()
         .map(|input| {
-            explicit_raw_frame_ordering(input.schema().as_ref())
-                .map(|ordering| (Arc::clone(input), RawLabelSource::Explicit, ordering))
+            explicit_raw_frame_ordering(input.schema().as_ref()).map(|ordering| {
+                (
+                    Arc::clone(input),
+                    RawLabelSource::Explicit.into(),
+                    ordering,
+                )
+            })
         })
         .collect::<Option<Vec<_>>>()
     {
@@ -173,7 +179,7 @@ fn plan_fused_series(
         )?;
         series_inputs.push((
             series_scan.clone() as Arc<dyn ExecutionPlan>,
-            series_scan.label_source().clone(),
+            FusedInputBinding::Local(series_scan.label_source().clone()),
             series_scan.raw_series_ordering(),
         ));
     }

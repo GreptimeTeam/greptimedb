@@ -366,7 +366,18 @@ impl PromPlanner {
                     },
                 };
                 let table = self.table_from_source(&scan.source)?;
-                let table_meta = &table.table_info().meta;
+                let table_info = table.table_info();
+                let table_meta = &table_info.meta;
+                // The ordinary in-process route retains its existing selector/tag/pair shapes.
+                // Across transport, admit one ordinary base-table raw source; Substrait
+                // encodability keeps the fused extension on the frontend.
+                if !native_remote_route_allowed(
+                    query_engine_state.in_process_region_transport(),
+                    selectors.len(),
+                    &table_info,
+                ) {
+                    return Ok(None);
+                }
                 // An engine without a raw-series scanner has no frame to give this node, and by the
                 // time the physical planner asks, the logical plan is already this node: the refusal
                 // there is a planning error, not a fallback. So the engine is checked here, where the
@@ -394,14 +405,6 @@ impl PromPlanner {
                         .extra_options
                         .get(store_api::mito_engine_options::APPEND_MODE_KEY)
                         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
-                {
-                    return Ok(None);
-                }
-                // Preserve the existing single-selector guard that its partition keys are tags.
-                if selectors.len() == 1
-                    && !table_meta
-                        .partition_column_names()
-                        .all(|column| tags.iter().any(|tag| tag == column))
                 {
                     return Ok(None);
                 }
@@ -586,6 +589,7 @@ impl PromPlanner {
             || (selectors.len() == 2 && independent_scan_pair(root));
         if !per_partition {
             if selectors.len() != 1
+                || !query_engine_state.in_process_region_transport()
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
                 return Ok(None);
@@ -1007,6 +1011,19 @@ fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) 
     true
 }
 
+/// Whether the captured table may use the native route. In-process routing preserves its
+/// existing tag and same-table pair shapes; remote routing admits one ordinary base source.
+fn native_remote_route_allowed(
+    in_process: bool,
+    selector_count: usize,
+    info: &table::metadata::TableInfo,
+) -> bool {
+    in_process
+        || (selector_count == 1
+            && info.table_type == table::metadata::TableType::Base
+            && matches!(info.meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
+}
+
 /// Whether `engine` can serve raw series frames to the fused-series node.
 ///
 /// A whitelist avoids probing a region from logical planning; declining only costs the native route.
@@ -1080,7 +1097,7 @@ mod tests {
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
         collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
-        native_promql_requested, scan_time_filter,
+        native_promql_requested, native_remote_route_allowed, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -1163,6 +1180,80 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[test]
+    fn remote_native_route_admits_single_selector_ordinary_base() {
+        use datatypes::data_type::ConcreteDataType;
+        use datatypes::schema::{ColumnSchema, Schema};
+        use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+        ]));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![1])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let base = TableInfoBuilder::new("cpu", meta.clone()).build().unwrap();
+        assert!(native_remote_route_allowed(false, 1, &base));
+        assert!(!native_remote_route_allowed(false, 2, &base));
+
+        // A tag-partitioned table is admitted remotely too: the frontend gathers the
+        // selected regions, so the partition layout does not decide completeness.
+        let tagged_meta = TableMetaBuilder::empty()
+            .schema(meta.schema.clone())
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![0])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let tagged = TableInfoBuilder::new("cpu", tagged_meta).build().unwrap();
+        assert!(native_remote_route_allowed(false, 1, &tagged));
+        assert!(native_remote_route_allowed(true, 1, &tagged));
+        assert!(native_remote_route_allowed(true, 2, &base));
+
+        // Unpartitioned tables have a single region and need no placement exception.
+        let unpartitioned_meta = TableMetaBuilder::empty()
+            .schema(meta.schema.clone())
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![])
+            .engine(common_catalog::consts::MITO_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let unpartitioned = TableInfoBuilder::new("cpu", unpartitioned_meta)
+            .build()
+            .unwrap();
+        assert!(native_remote_route_allowed(false, 1, &unpartitioned));
+
+        // A metric-engine or logical table keeps its existing plan on the remote route.
+        let metric_meta = TableMetaBuilder::empty()
+            .schema(meta.schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![1, 2])
+            .partition_key_indices(vec![1])
+            .engine(common_catalog::consts::METRIC_ENGINE.to_string())
+            .next_column_id(4)
+            .build()
+            .unwrap();
+        let metric = TableInfoBuilder::new("cpu", metric_meta).build().unwrap();
+        assert!(!native_remote_route_allowed(false, 1, &metric));
     }
 
     #[test]

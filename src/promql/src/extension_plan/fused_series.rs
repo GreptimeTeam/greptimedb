@@ -67,10 +67,13 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+
+use datatypes::series::frame::{LabelDecodeSpec, series_frame_label_decode};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use futures::Stream;
+use mito_codec::labels::PrimaryKeyLabelDecoder;
 use store_api::region_engine::RawLabelSource;
 
 use crate::evaluated::EvaluatedChunk;
@@ -85,6 +88,21 @@ use crate::source::materialize_raw_labels;
 
 #[cfg(test)]
 mod tests;
+
+/// Validated source binding for the raw frames consumed by `FusedSeriesExec`.
+#[derive(Clone, Debug)]
+pub enum FusedInputBinding {
+    /// A process-local source whose label binding came directly from its region scan.
+    Local(RawLabelSource),
+    /// A remote source authorized by the FE and checked against its declared frame layout.
+    Remote(LabelDecodeSpec),
+}
+
+impl From<RawLabelSource> for FusedInputBinding {
+    fn from(source: RawLabelSource) -> Self {
+        Self::Local(source)
+    }
+}
 
 /// The label a metric name is stored under, which is not a tag column of the input.
 const METRIC_NAME: &str = "__name__";
@@ -349,6 +367,21 @@ impl FusedSeries {
         &self.binding
     }
 
+    /// Raw field names required by the tree's source inputs.
+    pub fn raw_source_fields(&self) -> Vec<String> {
+        let mut fields = Vec::new();
+        if let Ok(sources) = tree_source_fields(&self.tree) {
+            for source_fields in sources {
+                for field in source_fields {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+            }
+        }
+        fields
+    }
+
     /// The physical node that runs raw frame sources as this node's inputs.
     ///
     /// Each tuple binds a frame producer to its label source and ordering. Building the node
@@ -356,7 +389,7 @@ impl FusedSeries {
     /// schema the conversion cannot classify.
     pub fn to_execution_plan(
         &self,
-        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, FusedInputBinding, SeriesOrdering)>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         if inputs.len() != self.children.len() {
@@ -888,7 +921,7 @@ pub struct FusedSeriesExec {
     /// Each source's compiled raw schema, used to decode only that source's frames.
     series_schemas: Vec<Arc<SeriesSchema>>,
     /// Physical input plans, preserving each source's frame binding and ordering.
-    inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+    inputs: Vec<(Arc<dyn ExecutionPlan>, FusedInputBinding, SeriesOrdering)>,
     /// Where each output column comes from.
     classification: Arc<[OutputColumn]>,
     /// The output column holding the grid timestamps, kept so this node can be rebuilt over a new
@@ -921,7 +954,7 @@ impl FusedSeriesExec {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         promql: Arc<str>,
-        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, FusedInputBinding, SeriesOrdering)>,
         tree: Arc<NativeTree>,
         output_schema: SchemaRef,
         time_column: String,
@@ -942,7 +975,7 @@ impl FusedSeriesExec {
     #[allow(clippy::too_many_arguments)]
     fn build(
         promql: Arc<str>,
-        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, FusedInputBinding, SeriesOrdering)>,
         tree: Arc<NativeTree>,
         output_schema: SchemaRef,
         time_column: String,
@@ -1007,7 +1040,7 @@ impl FusedSeriesExec {
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {
             input.properties().partitioning.partition_count()
         });
-        for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
+        for (index, (input, input_binding, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if count == 0 {
                 return Err(DataFusionError::Plan(format!(
@@ -1028,7 +1061,23 @@ impl FusedSeriesExec {
                     "FusedSeries producer ordering for source {index} does not satisfy every input"
                 )));
             }
-            ensure_frame_matches_label_source(input.schema().as_ref(), label_source)?;
+            let frame_schema = input.schema();
+            match input_binding {
+                FusedInputBinding::Local(source) => {
+                    ensure_frame_matches_label_source(frame_schema.as_ref(), source)?;
+                }
+                FusedInputBinding::Remote(expected) => {
+                    PrimaryKeyLabelDecoder::from_decode_spec(expected)
+                        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                    let actual = series_frame_label_decode(frame_schema.as_ref())
+                        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+                    if actual.as_ref() != Some(expected) {
+                        return Err(DataFusionError::Plan(
+                            "remote raw frame label decode description does not match authorized binding".into(),
+                        ));
+                    }
+                }
+            }
             unpack_raw_series(
                 Box::pin(RecordBatchStreamAdapter::new(
                     input.schema(),
@@ -1158,7 +1207,7 @@ impl ExecutionPlan for FusedSeriesExec {
         let children = children
             .into_iter()
             .zip(&self.inputs)
-            .map(|(child, (_, label_source, ordering))| (child, label_source.clone(), *ordering))
+            .map(|(child, (_, input_binding, ordering))| (child, input_binding.clone(), *ordering))
             .collect();
         // Rebuilt rather than patched: the new child's schema is what the frame is validated
         // against, so a child that changed shape is refused instead of decoded with a stale layout.

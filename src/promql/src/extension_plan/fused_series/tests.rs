@@ -80,8 +80,8 @@ use store_api::region_engine::RawLabelSource;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
-    series_to_record_batch,
+    FusedInputBinding, FusedOutputFormat, FusedSeries, FusedSeriesBinding,
+    OutputColumn, POLL_BUDGET, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
@@ -933,7 +933,7 @@ fn plan_of(
 ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
     node.to_execution_plan(vec![(
         input,
-        RawLabelSource::Explicit,
+        FusedInputBinding::Local(RawLabelSource::Explicit),
         SeriesOrdering::Contiguous,
     )])
 }
@@ -1675,7 +1675,7 @@ fn repeated_source_bindings_validate_fields_and_second_ordering() {
     let error = node
         .to_execution_plan(vec![(
             memory_exec(Vec::new()),
-            RawLabelSource::Explicit,
+            FusedInputBinding::Local(RawLabelSource::Explicit),
             SeriesOrdering::Contiguous,
         )])
         .expect_err("the second repeated leaf's incompatible ordering is rejected");
@@ -1704,12 +1704,12 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
         .to_execution_plan(vec![
             (
                 source(),
-                RawLabelSource::Explicit,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
                 SeriesOrdering::Contiguous,
             ),
             (
                 source(),
-                RawLabelSource::Explicit,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
                 SeriesOrdering::Contiguous,
             ),
         ])
@@ -1764,8 +1764,16 @@ async fn independent_sources_execute_all_partitions() {
     .unwrap();
     let exec = node
         .to_execution_plan(vec![
-            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
-            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (
+                left,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                right,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
         ])
         .unwrap();
     assert_eq!(1, exec.properties().output_partitioning().partition_count());
@@ -1836,12 +1844,12 @@ async fn both_inputs_are_read_concurrently() {
         .to_execution_plan(vec![
             (
                 fed(left_rx),
-                RawLabelSource::Explicit,
+                RawLabelSource::Explicit.into(),
                 SeriesOrdering::Contiguous,
             ),
             (
                 fed(right_rx),
-                RawLabelSource::Explicit,
+                RawLabelSource::Explicit.into(),
                 SeriesOrdering::Contiguous,
             ),
         ])
@@ -1887,8 +1895,16 @@ async fn binary_output_tags_are_projected_but_raw_binding_is_full() {
     ))]);
     let exec = node
         .to_execution_plan(vec![
-            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
-            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (
+                left,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                right,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
         ])
         .unwrap();
     let results = collect(exec, SessionContext::default().task_ctx())
@@ -1923,10 +1939,14 @@ async fn empty_first_source_does_not_end_gather_early() {
         .to_execution_plan(vec![
             (
                 memory_exec(Vec::new()),
-                RawLabelSource::Explicit,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
                 SeriesOrdering::Contiguous,
             ),
-            (second, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (
+                second,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
         ])
         .unwrap();
     let results = collect(exec, SessionContext::default().task_ctx())
@@ -1954,12 +1974,12 @@ fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
         .to_execution_plan(vec![
             (
                 memory_exec_partitioned(vec![vec![], vec![]]),
-                RawLabelSource::Explicit,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
                 SeriesOrdering::KeyThenTime,
             ),
             (
                 memory_exec_partitioned(vec![vec![], vec![]]),
-                RawLabelSource::Explicit,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
                 SeriesOrdering::Contiguous,
             ),
         ])
@@ -2005,8 +2025,16 @@ async fn later_source_error_drops_all_gathered_inputs() {
     });
     let exec = node
         .to_execution_plan(vec![
-            (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
-            (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+            (
+                left,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                right,
+                FusedInputBinding::Local(RawLabelSource::Explicit),
+                SeriesOrdering::Contiguous,
+            ),
         ])
         .unwrap();
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
@@ -2358,7 +2386,7 @@ fn physical_plan_requires_matching_source_count() {
     let tuple = || {
         (
             Arc::clone(&source),
-            RawLabelSource::Explicit,
+            FusedInputBinding::Local(RawLabelSource::Explicit),
             SeriesOrdering::Contiguous,
         )
     };
@@ -3559,7 +3587,7 @@ fn partial_plan(
     )?
     .to_execution_plan(vec![(
         input,
-        RawLabelSource::Explicit,
+        FusedInputBinding::Local(RawLabelSource::Explicit),
         SeriesOrdering::Contiguous,
     )])
 }

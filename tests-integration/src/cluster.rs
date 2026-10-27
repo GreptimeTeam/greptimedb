@@ -91,8 +91,9 @@ use crate::test_util::{
 /// Flight `DoGet` requests another node sent to a datanode over its network address (see
 /// [`GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`]).
 ///
-/// The frontend and datanodes inside the test process use in-process clients, so counted requests
-/// come from remote nodes querying regions owned by this datanode.
+/// By default the frontend and datanodes inside the test process use duplex in-process clients,
+/// so counted requests come from network clients. The cluster builder can opt its clients into TCP
+/// transport to include frontend traffic in these counts.
 #[derive(Debug, Default)]
 pub struct DatanodeRpcStats {
     do_get_requests: AtomicUsize,
@@ -203,12 +204,15 @@ pub struct GreptimeDbClusterBuilder {
     datanode_gc_config: GcConfig,
     metasrv_gc_config: GcSchedulerOptions,
     frontend_auto_create_table: bool,
+    frontend_query_options: query::options::QueryOptions,
+    frontend_plugins: Plugins,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
     plugins: Plugins,
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    datanode_tcp_transport: bool,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -241,12 +245,15 @@ impl GreptimeDbClusterBuilder {
             datanode_gc_config: GcConfig::default(),
             metasrv_gc_config: GcSchedulerOptions::default(),
             frontend_auto_create_table: true,
+            frontend_query_options: query::options::QueryOptions::default(),
+            frontend_plugins: Plugins::default(),
             shared_home_dir: None,
             meta_selector: None,
             plugins: Plugins::default(),
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            datanode_tcp_transport: false,
         }
     }
 
@@ -307,6 +314,18 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Sets query options and plugins for the test frontend only.
+    #[must_use]
+    pub fn with_frontend_query_options(
+        mut self,
+        options: query::options::QueryOptions,
+        plugins: Plugins,
+    ) -> Self {
+        self.frontend_query_options = options;
+        self.frontend_plugins = plugins;
+        self
+    }
+
     #[must_use]
     pub fn with_shared_home_dir(mut self, shared_home_dir: Arc<TempDir>) -> Self {
         self.shared_home_dir = Some(shared_home_dir);
@@ -347,12 +366,24 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Routes in-process datanode clients through their real TCP addresses.
+    /// Requires `with_real_datanode_grpc_addr(true)`.
+    #[must_use]
+    pub fn with_datanode_tcp_transport(mut self, enabled: bool) -> Self {
+        self.datanode_tcp_transport = enabled;
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
         start_frontend_servers: bool,
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
+        assert!(
+            !self.datanode_tcp_transport || self.real_datanode_grpc_addr,
+            "TCP datanode transport requires real datanode gRPC addresses"
+        );
         let datanodes = datanode_options.len();
 
         let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
@@ -408,6 +439,7 @@ impl GreptimeDbClusterBuilder {
             &datanode_instances,
             &datanode_options,
             &datanode_rpc_stats,
+            self.datanode_tcp_transport,
         )
         .await;
 
@@ -612,7 +644,8 @@ impl GreptimeDbClusterBuilder {
         )
         .build();
 
-        let fe_opts = self.build_frontend_options();
+        let mut fe_opts = self.build_frontend_options();
+        fe_opts.query = self.frontend_query_options.clone();
 
         let instance = FrontendBuilder::new(
             fe_opts.clone(),
@@ -623,6 +656,7 @@ impl GreptimeDbClusterBuilder {
             meta_client.clone(),
             Arc::new(ProcessManager::new(fe_opts.grpc.server_addr.clone(), None)),
         )
+        .with_plugin(self.frontend_plugins.clone())
         .with_local_file_access(self.local_file_access.clone())
         .with_local_cache_invalidator(cache_registry)
         .try_build()
@@ -710,6 +744,7 @@ async fn build_datanode_clients(
     instances: &HashMap<DatanodeId, Datanode>,
     options: &[DatanodeOptions],
     rpc_stats: &HashMap<DatanodeId, Arc<DatanodeRpcStats>>,
+    tcp_transport: bool,
 ) {
     for opts in options {
         let datanode_id = opts.node_id.unwrap();
@@ -718,6 +753,7 @@ async fn build_datanode_clients(
             instance,
             &opts.grpc.server_addr,
             rpc_stats.get(&datanode_id).cloned(),
+            tcp_transport,
         )
         .await;
         clients
@@ -771,25 +807,26 @@ fn serve_datanode_region_server<I, IO>(
 
 /// Serves the region server of `datanode` and returns the address and the client of the address.
 ///
-/// The returned client is always an in-process client: the frontend and the datanodes of the test
-/// process reach the region server through a duplex stream, no matter which address they use. This
-/// keeps the in-process traffic out of `rpc_stats`.
+/// By default, the returned in-process client reaches the region server through a duplex stream,
+/// keeping that traffic out of `rpc_stats`. With `tcp_transport`, it connects to the real TCP
+/// address instead.
 ///
-/// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address, so it cannot be served over the
-/// network at all. Any other address is a real one: the region server is additionally served on
-/// its local TCP port (`rpc_stats` counts the requests of the remote nodes that reach it, e.g. the
-/// region query that a datanode sends for the regions of another datanode).
+/// [`test_util::PEER_PLACEHOLDER_ADDR`] is not a real address and cannot be served over the
+/// network. Any other address is a real one and serves requests on its local TCP port.
 async fn create_datanode_client(
     datanode: &Datanode,
     addr: &str,
     rpc_stats: Option<Arc<DatanodeRpcStats>>,
+    tcp_transport: bool,
 ) -> (String, Client) {
     let (client, server) = tokio::io::duplex(1024);
-    serve_datanode_region_server(
-        datanode,
-        futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
-        None,
-    );
+    if !tcp_transport {
+        serve_datanode_region_server(
+            datanode,
+            futures::stream::iter(vec![Ok::<_, std::io::Error>(server)]),
+            None,
+        );
+    }
 
     if addr != test_util::PEER_PLACEHOLDER_ADDR {
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
@@ -797,29 +834,36 @@ async fn create_datanode_client(
         serve_datanode_region_server(datanode, incoming, rpc_stats);
     }
 
-    let mut client = Some(client);
-    let channel_manager = ChannelManager::new();
-    channel_manager
-        .reset_with_connector(
-            addr,
-            service_fn(move |_| {
-                let client = client.take();
+    let client = if tcp_transport {
+        let channel_manager = ChannelManager::with_config(
+            ChannelConfig::new().timeout(Some(Duration::from_secs(20))),
+            None,
+        );
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr])
+    } else {
+        let mut client = Some(client);
+        let channel_manager = ChannelManager::new();
+        channel_manager
+            .reset_with_connector(
+                addr,
+                service_fn(move |_| {
+                    let client = client.take();
 
-                async move {
-                    client
-                        .map(TokioIo::new)
-                        .ok_or_else(|| std::io::Error::other("Client already taken"))
-                }
-            }),
-        )
-        .unwrap();
+                    async move {
+                        client
+                            .map(TokioIo::new)
+                            .ok_or_else(|| std::io::Error::other("Client already taken"))
+                    }
+                }),
+            )
+            .unwrap();
 
-    (
-        addr.to_string(),
         // The mock connector pool lives on this single manager, so both lanes
         // intentionally share it (same semantics as the legacy constructor).
-        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
-    )
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr])
+    };
+
+    (addr.to_string(), client)
 }
 
 /// Counts Flight `DoGet` requests received by the wrapped server.
