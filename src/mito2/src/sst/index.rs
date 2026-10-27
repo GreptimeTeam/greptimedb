@@ -479,7 +479,7 @@ pub(crate) async fn build_index_from_parquet_bytes(
 
     // TODO(dennis): decode only the columns the enabled indexers need, including the encoded
     // primary key for tag indexes. This needs the indexer to stop locating columns by position.
-    let reader = match reader_builder.with_batch_size(batch_size).build() {
+    let mut reader = match reader_builder.with_batch_size(batch_size).build() {
         Ok(reader) => reader,
         Err(e) => {
             warn!(e; "Failed to read encoded SST {:?} for index creation", region_file_id);
@@ -487,14 +487,33 @@ pub(crate) async fn build_index_from_parquet_bytes(
             return IndexOutput::default();
         }
     };
-    for batch in reader {
-        match batch {
-            Ok(batch) => indexer.update_flat(&batch).await,
+    loop {
+        // Decoding is CPU-bound, so each batch is decoded on the blocking pool. Only one batch
+        // is in flight, and an aborted flush stops after the batch being decoded.
+        let decoded = common_runtime::spawn_blocking_global(move || {
+            let batch = reader.next();
+            (reader, batch)
+        })
+        .await;
+        let batch = match decoded {
+            Ok((next_reader, batch)) => {
+                reader = next_reader;
+                batch
+            }
             Err(e) => {
                 warn!(e; "Failed to decode encoded SST {:?} for index creation", region_file_id);
                 indexer.abort().await;
                 return IndexOutput::default();
             }
+        };
+        match batch {
+            Some(Ok(batch)) => indexer.update_flat(&batch).await,
+            Some(Err(e)) => {
+                warn!(e; "Failed to decode encoded SST {:?} for index creation", region_file_id);
+                indexer.abort().await;
+                return IndexOutput::default();
+            }
+            None => break,
         }
     }
     indexer.finish().await
