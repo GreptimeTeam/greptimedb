@@ -99,6 +99,10 @@ const METRIC_NAME: &str = "__name__";
 /// again, so nothing is lost by stopping early.
 const POLL_BUDGET: usize = 64;
 
+/// Maximum number of tags the envelope carries, shared by [`FusedSeries::serialize`] and
+/// [`FusedSeries::deserialize`] so a serialized node is always one this version can rebuild.
+const MAX_TAG_COUNT: usize = 1024;
+
 /// The statement grid and output naming that travel with a compiled tree.
 ///
 /// Source schemas belong to the tree's input nodes. This binding supplies the grid that addresses
@@ -276,6 +280,12 @@ impl FusedSeries {
             None => out.push(0),
         }
         text(&mut out, &self.binding.time_index)?;
+        if self.binding.tags.len() > MAX_TAG_COUNT {
+            return Err(DataFusionError::Plan(format!(
+                "too many FusedSeries tags: {} exceeds maximum {MAX_TAG_COUNT}",
+                self.binding.tags.len()
+            )));
+        }
         out.extend(
             u32::try_from(self.binding.tags.len())
                 .map_err(|_| DataFusionError::Plan("too many FusedSeries tags".into()))?
@@ -356,8 +366,10 @@ impl FusedSeries {
         };
         let time_index = r.text()?;
         let count = r.u32()? as usize;
-        if count > 1024 {
-            return Err(DataFusionError::Plan("too many FusedSeries tags".into()));
+        if count > MAX_TAG_COUNT {
+            return Err(DataFusionError::Plan(format!(
+                "too many FusedSeries tags: {count} exceeds maximum {MAX_TAG_COUNT}"
+            )));
         }
         let mut tags = Vec::with_capacity(count);
         for _ in 0..count {
@@ -384,6 +396,17 @@ impl FusedSeries {
             });
             collect_source_schemas(&tree)?.len()
         ];
+        // A frame output declares the layout of the tree's evaluated root, which the tree itself
+        // carries. `try_new_with_format` compares the two, so passing an empty schema here would
+        // make every serialized frame node impossible to rebuild.
+        let output_schema = if format == FusedOutputFormat::SeriesFrame {
+            let evaluated = evaluated_output(&tree)?;
+            Arc::new(datafusion::common::DFSchema::try_from(
+                series_frame_output_schema(evaluated.as_ref())?,
+            )?)
+        } else {
+            Arc::new(datafusion::common::DFSchema::empty())
+        };
         Self::try_new_with_format(
             promql,
             tree,
@@ -394,7 +417,7 @@ impl FusedSeries {
                 tags,
             },
             children,
-            Arc::new(datafusion::common::DFSchema::empty()),
+            output_schema,
             format,
         )
     }

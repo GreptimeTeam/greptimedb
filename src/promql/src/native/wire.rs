@@ -18,7 +18,7 @@
 //! 4 Map; all integers are little-endian. Input is source index (u64), ordering tag (0
 //! Interleaved, 1 Contiguous, 2 KeyThenTime), followed by a raw samples schema: field count (u32), each UTF-8 field name
 //! (u32 byte length + bytes). Instant stores lookback i64, offset i64, optional-at marker + i64,
-//! timestamp bool byte, then output grid. Window stores function tag and its arguments, range i64,
+//! value tag (0 sample, 1 timestamp, 2 info timestamp), then output grid. Window stores function tag and its arguments, range i64,
 //! offset i64, optional-anchor marker + i64, modifier tag (0 none, 1 anchored, 2 smoothed) and
 //! modifier lookback where present, input-grid marker + grid where present, output grid. Grid is
 //! start_ms i64, step_ms i64, len u64. Map stores op count u32 and math operations. Math tags and
@@ -37,14 +37,16 @@
 //! 26 ClampMin(min), 27 ClampMax(max), 28-35 Date(DayOfMonth, DayOfWeek, DayOfYear,
 //! DaysInMonth, Hour, Minute, Month, Year), in that order.
 
-//! Maximum payload is 1 MiB and maximum recursive node depth / operation count is 128.
+//! Maximum payload is 1 MiB, maximum recursive node depth is 128, maximum field count of one raw
+//! samples schema is 128, and maximum operation count of one Map is 128. The encoder refuses every
+//! payload that exceeds one of these, so a payload it produces is always decodable by this version.
 
 use crate::{
     map::MathOp,
     map_time::DateFunction,
     native::plan::{
-        BoundInput, BoundInstant, BoundMap, BoundWindow, MapOp, NativeExpr, NativeNode, NativeTree,
-        NativeType,
+        BoundInput, BoundInstant, BoundMap, BoundWindow, InstantValue, MapOp, NativeExpr,
+        NativeNode, NativeTree, NativeType,
     },
     range_eval::{RangeFunction, RangeModifier, RangeWindow},
 };
@@ -57,7 +59,12 @@ use std::{convert::TryInto, sync::Arc};
 
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 const MAX_BYTES: usize = 1_048_576;
-const MAX_COUNT: usize = 128;
+/// Maximum recursive nesting depth of a node tree, counted from the root as depth 0.
+const MAX_DEPTH: usize = 128;
+/// Maximum number of fields in one raw samples schema (an [`NativeExpr::Input`]'s output).
+const MAX_FIELD_COUNT: usize = 128;
+/// Maximum number of operations in one [`NativeExpr::Map`].
+const MAX_OPERATION_COUNT: usize = 128;
 
 struct W(Vec<u8>);
 impl W {
@@ -174,8 +181,8 @@ fn check_shape(n: &NativeNode) -> Result<(), String> {
     Ok(())
 }
 fn enc_node(n: &NativeNode, w: &mut W, d: usize) -> Result<(), String> {
-    if d > MAX_COUNT {
-        return Err("nesting maximum exceeded".into());
+    if d > MAX_DEPTH {
+        return Err(format!("nesting maximum exceeded: {d} > {MAX_DEPTH}"));
     }
     match &n.expr {
         NativeExpr::Input(i) => {
@@ -195,6 +202,12 @@ fn enc_node(n: &NativeNode, w: &mut W, d: usize) -> Result<(), String> {
             if s.eval_grid.is_some() {
                 return Err("unsupported evaluated Input".into());
             }
+            if s.fields.len() > MAX_FIELD_COUNT {
+                return Err(format!(
+                    "field count {} exceeds maximum {MAX_FIELD_COUNT}",
+                    s.fields.len()
+                ));
+            }
             w.u32(s.fields.len() as u32);
             for f in s.fields.iter() {
                 w.text(&f.name)?
@@ -206,7 +219,7 @@ fn enc_node(n: &NativeNode, w: &mut W, d: usize) -> Result<(), String> {
             w.i64(op.lookback_ms);
             w.i64(op.offset_ms);
             opt_i(w, op.at_ms);
-            w.u8(op.timestamp as u8);
+            w.u8(instant_value_tag(op.value));
             w.grid(&op.output_grid)
         }
         NativeExpr::Window { input, op } => {
@@ -239,8 +252,11 @@ fn enc_node(n: &NativeNode, w: &mut W, d: usize) -> Result<(), String> {
         NativeExpr::Map { input, op } => {
             w.u8(4);
             enc_node(input, w, d + 1)?;
-            if op.ops.is_empty() || op.ops.len() > MAX_COUNT {
-                return Err("operation count exceeds supported maximum or is zero".into());
+            if op.ops.is_empty() || op.ops.len() > MAX_OPERATION_COUNT {
+                return Err(format!(
+                    "operation count {} exceeds maximum {MAX_OPERATION_COUNT} or is zero",
+                    op.ops.len()
+                ));
             }
             w.u32(op.ops.len() as u32);
             for x in op.ops.iter() {
@@ -261,6 +277,14 @@ fn opt_i(w: &mut W, x: Option<i64>) {
         w.i64(v)
     } else {
         w.u8(0)
+    }
+}
+/// The tag of an [`InstantValue`], wire-stable and independent of the Rust discriminants.
+fn instant_value_tag(value: InstantValue) -> u8 {
+    match value {
+        InstantValue::Sample => 0,
+        InstantValue::Timestamp => 1,
+        InstantValue::InfoTimestamp => 2,
     }
 }
 fn enc_math(m: MathOp, w: &mut W) -> Result<(), String> {
@@ -375,8 +399,8 @@ pub(crate) fn decode_prefix(bytes: &[u8]) -> Result<NativeTree, String> {
     NativeTree::try_new(n).map_err(|e| e.to_string())
 }
 fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
-    if d > MAX_COUNT {
-        return Err("nesting maximum exceeded".into());
+    if d > MAX_DEPTH {
+        return Err(format!("nesting maximum exceeded: {d} > {MAX_DEPTH}"));
     }
     match r.u8()? {
         1 => {
@@ -388,8 +412,8 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
                 x => return Err(format!("unsupported Input ordering tag {x}")),
             };
             let n = r.u32()? as usize;
-            if n > MAX_COUNT {
-                return Err("operation count exceeds maximum".into());
+            if n > MAX_FIELD_COUNT {
+                return Err(format!("field count {n} exceeds maximum {MAX_FIELD_COUNT}"));
             }
             let mut fs = Vec::with_capacity(n);
             for _ in 0..n {
@@ -413,10 +437,11 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
             let lookback_ms = r.i64()?;
             let offset_ms = r.i64()?;
             let at_ms = read_opt(r)?;
-            let timestamp = match r.u8()? {
-                0 => false,
-                1 => true,
-                _ => return Err("invalid timestamp flag".into()),
+            let value = match r.u8()? {
+                0 => InstantValue::Sample,
+                1 => InstantValue::Timestamp,
+                2 => InstantValue::InfoTimestamp,
+                _ => return Err("invalid instant value tag".into()),
             };
             let output_grid = r.grid()?;
             let schema = match &input.output {
@@ -434,7 +459,7 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
                         lookback_ms,
                         offset_ms,
                         at_ms,
-                        timestamp,
+                        value,
                         output_grid,
                     },
                 },
@@ -492,8 +517,10 @@ fn dec_node(r: &mut R<'_>, d: usize) -> Result<NativeNode, String> {
         4 => {
             let input = Box::new(dec_node(r, d + 1)?);
             let n = r.u32()? as usize;
-            if n == 0 || n > MAX_COUNT {
-                return Err("operation count exceeds maximum".into());
+            if n == 0 || n > MAX_OPERATION_COUNT {
+                return Err(format!(
+                    "operation count {n} exceeds maximum {MAX_OPERATION_COUNT} or is zero"
+                ));
             }
             let mut ops = Vec::new();
             for _ in 0..n {
@@ -667,7 +694,7 @@ mod tests {
                     lookback_ms: 300_000,
                     offset_ms: 7,
                     at_ms: Some(88),
-                    timestamp: true,
+                    value: InstantValue::Timestamp,
                     output_grid: g,
                 },
             },
@@ -741,7 +768,7 @@ mod tests {
         assert_eq!(op.lookback_ms, 300_000);
         assert_eq!(op.offset_ms, 7);
         assert_eq!(op.at_ms, Some(88));
-        assert!(op.timestamp);
+        assert_eq!(op.value, InstantValue::Timestamp);
         assert_eq!(op.output_grid.spec(), grid().spec());
     }
     #[test]
@@ -910,23 +937,202 @@ mod tests {
         let b = vec![0; MAX_BYTES + 1];
         assert!(decode_prefix(&b).unwrap_err().contains("MAX_BYTES"));
     }
-    #[test]
-    fn rejects_excess_operation_count() {
+    /// A tree with `n` fields: [`instant`]'s shape over a raw input of `n` float fields.
+    ///
+    /// The input node and its binding share one output `Arc`, which is what `NativeTree`
+    /// validation compares by identity.
+    fn instant_with_fields(n: usize) -> NativeTree {
+        let g = grid();
+        let fields: Arc<[FieldSpec]> = (0..n)
+            .map(|i| FieldSpec {
+                name: Arc::from(format!("f{i}").as_str()),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let raw = NativeType::Samples(Arc::new(SeriesSchema {
+            fields: fields.clone(),
+            eval_grid: None,
+        }));
+        let output = NativeType::Samples(Arc::new(SeriesSchema {
+            fields,
+            eval_grid: Some(g.clone()),
+        }));
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(NativeNode {
+                    expr: NativeExpr::Input(BoundInput {
+                        source_index: 0,
+                        ordering: SeriesOrdering::KeyThenTime,
+                        output: raw.clone(),
+                    }),
+                    output: raw,
+                }),
+                op: BoundInstant {
+                    lookback_ms: 300_000,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value: InstantValue::Sample,
+                    output_grid: g,
+                },
+            },
+            output,
+        })
+        .unwrap()
+    }
+
+    /// A tree with `n` math operations: one [`NativeExpr::Map`] of `Abs` over [`instant`].
+    ///
+    /// `Abs` has a one-byte wire tag, so the payload ends with exactly `n` tag bytes.
+    fn mapped_with_ops(n: usize) -> NativeTree {
+        let instant = instant();
+        let input = Box::new(instant.root().clone());
+        let output = input.output.clone();
+        NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Map {
+                input,
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs); n].into(),
+                },
+            },
+            output,
+        })
+        .unwrap()
+    }
+
+    /// A payload of `depth` nested `Instant` nodes over one raw input.
+    ///
+    /// No supported shape accepts the result, but the decoder walks the nodes before it checks the
+    /// shape, so this is how the recursion limit is reached. The encoder's own depth guard is
+    /// unreachable through [`encode_prefix`], which rejects a deeper shape before encoding it.
+    fn nested_instants(depth: usize) -> Vec<u8> {
         let mut w = W(Vec::new());
         w.u32(PROTOCOL_VERSION);
-        w.u8(4);
+        for _ in 0..depth {
+            w.u8(2);
+        }
         w.u8(1);
         w.u64(0);
         w.u8(2);
         w.u32(1);
         w.text("v").unwrap();
+        for _ in 0..depth {
+            w.i64(300_000);
+            w.i64(0);
+            opt_i(&mut w, None);
+            w.u8(0);
+            w.grid(&grid());
+        }
+        w.0
+    }
+
+    /// The largest field count this version supports is transported whole.
+    #[test]
+    fn field_count_at_the_maximum_round_trips() {
+        let a = instant_with_fields(MAX_FIELD_COUNT);
+        let b = encode_prefix(&a).unwrap();
+        let d = decode_prefix(&b).unwrap();
+        assert_eq!(encode_prefix(&d).unwrap(), b);
+        let NativeType::Samples(s) = &d.root().output else {
+            panic!()
+        };
+        assert_eq!(s.fields.len(), MAX_FIELD_COUNT);
+        assert_eq!(s.fields[MAX_FIELD_COUNT - 1].name.as_ref(), "f127");
+    }
+
+    /// The encoder must refuse the field count, not write a payload its own decoder rejects.
+    #[test]
+    fn rejects_excess_field_count_on_encode() {
+        let err = encode_prefix(&instant_with_fields(MAX_FIELD_COUNT + 1)).unwrap_err();
+        assert!(err.contains("field count"), "{err}");
+        assert!(err.contains(&MAX_FIELD_COUNT.to_string()), "{err}");
+        assert!(
+            !err.contains("operation") && !err.contains("nesting"),
+            "a field-count limit must name its own limit: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_excess_field_count_on_decode() {
+        // A raw input at the root is not a supported shape, but the count is checked while the node
+        // is read, before any shape check, so the field names need not follow.
+        let mut w = W(Vec::new());
+        w.u32(PROTOCOL_VERSION);
+        w.u8(1);
+        w.u64(0);
         w.u8(2);
-        w.i64(1);
-        w.i64(0);
-        opt_i(&mut w, None);
-        w.u8(0);
-        w.grid(&grid());
-        w.u32((MAX_COUNT + 1) as u32);
-        assert!(decode_prefix(&w.0).unwrap_err().contains("operation count"));
+        w.u32((MAX_FIELD_COUNT + 1) as u32);
+        let err = decode_prefix(&w.0).unwrap_err();
+        assert!(err.contains("field count"), "{err}");
+        assert!(err.contains(&MAX_FIELD_COUNT.to_string()), "{err}");
+        assert!(!err.contains("operation"), "{err}");
+    }
+
+    /// The largest operation count this version supports is transported whole.
+    #[test]
+    fn operation_count_at_the_maximum_round_trips() {
+        let a = mapped_with_ops(MAX_OPERATION_COUNT);
+        let b = encode_prefix(&a).unwrap();
+        let d = decode_prefix(&b).unwrap();
+        assert_eq!(encode_prefix(&d).unwrap(), b);
+        let NativeExpr::Map { op, .. } = &d.root().expr else {
+            panic!()
+        };
+        assert_eq!(op.ops.len(), MAX_OPERATION_COUNT);
+    }
+
+    #[test]
+    fn rejects_excess_operation_count() {
+        // Start from a tree the codec accepts, so the bytes this test edits are the ones the
+        // encoder actually writes for `MAX_OPERATION_COUNT` operations.
+        let tree = mapped_with_ops(MAX_OPERATION_COUNT);
+        let mut bytes = encode_prefix(&tree).unwrap();
+        assert!(decode_prefix(&bytes).is_ok());
+
+        // `Map` writes its input first, then the operation count, then the operations, and nothing
+        // follows the root node. Every operation here is `Abs` (wire tag `1`), so the last
+        // `MAX_OPERATION_COUNT` bytes are those tags and the four bytes before them hold the count.
+        let at = bytes.len() - MAX_OPERATION_COUNT - 4;
+        assert!(
+            bytes[at + 4..].iter().all(|b| *b == 1),
+            "the payload does not end with one-byte Abs tags"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()),
+            MAX_OPERATION_COUNT as u32,
+            "this is not the operation count field"
+        );
+        bytes[at..at + 4].copy_from_slice(&(MAX_OPERATION_COUNT as u32 + 1).to_le_bytes());
+
+        // The operations themselves are untouched, so the only reason to refuse this payload is the
+        // count it now declares.
+        let err = decode_prefix(&bytes).unwrap_err();
+        assert!(err.contains("operation count"), "{err}");
+        assert!(err.contains(&MAX_OPERATION_COUNT.to_string()), "{err}");
+        assert!(!err.contains("field count"), "{err}");
+        assert!(!err.contains("nesting"), "{err}");
+        assert!(
+            err.contains(&(MAX_OPERATION_COUNT + 1).to_string()),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn rejects_excess_operation_count_on_encode() {
+        let err = encode_prefix(&mapped_with_ops(MAX_OPERATION_COUNT + 1)).unwrap_err();
+        assert!(err.contains("operation count"), "{err}");
+        assert!(err.contains(&MAX_OPERATION_COUNT.to_string()), "{err}");
+        assert!(!err.contains("field count"), "{err}");
+    }
+
+    /// Depth 128 is still walked; depth 129 is refused, and by the depth limit rather than the
+    /// shape check that also rejects every payload this deep.
+    #[test]
+    fn nesting_boundary_is_128() {
+        let allowed = decode_prefix(&nested_instants(MAX_DEPTH)).unwrap_err();
+        assert!(!allowed.contains("nesting"), "{allowed}");
+        let refused = decode_prefix(&nested_instants(MAX_DEPTH + 1)).unwrap_err();
+        assert!(refused.contains("nesting"), "{refused}");
+        assert!(refused.contains(&MAX_DEPTH.to_string()), "{refused}");
+        assert!(refused.contains(&(MAX_DEPTH + 1).to_string()), "{refused}");
     }
 }
