@@ -98,6 +98,8 @@ impl ObjectStoreIo {
         let path = format!("{}{}", self.probe_prefix, Uuid::new_v4());
         self.put_path_if_absent(path.clone(), Bytes::from_static(PROBE_CONTENT))
             .await?;
+        // Sent directly: only the store's own refusal shows that it honours
+        // the condition, and a read-back would find the first create's object.
         let recreated = self
             .store
             .write_with(&path, PROBE_CONTENT)

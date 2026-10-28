@@ -4038,6 +4038,25 @@ mod tests {
         }
     }
 
+    /// A writer that writes the object and then reports a failure, as a
+    /// create whose response is lost.
+    struct LosingWriter(oio::Writer);
+
+    impl oio::Write for LosingWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            self.0.write(buffer).await
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            self.0.close().await?;
+            Err(mock::Error::new(mock::ErrorKind::Unexpected, "lost response").set_temporary())
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            self.0.abort().await
+        }
+    }
+
     async fn keys(object_store: &ObjectStore) -> Vec<String> {
         let mut keys = object_store
             .list_with(&format!("{PREFIX}/"))
@@ -4096,39 +4115,17 @@ mod tests {
         assert!(keys(&object_store).await.is_empty());
     }
 
-    /// A writer that stores the object and then fails the way the retry of a
-    /// create whose response was lost does: the object exists.
-    struct RetriedWriter(oio::Writer);
-
-    impl oio::Write for RetriedWriter {
-        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
-            self.0.write(buffer).await
-        }
-
-        async fn close(&mut self) -> mock::Result<mock::Metadata> {
-            self.0.close().await?;
-            Err(mock::Error::new(
-                mock::ErrorKind::ConditionNotMatch,
-                "the object exists",
-            ))
-        }
-
-        async fn abort(&mut self) -> mock::Result<()> {
-            self.0.abort().await
-        }
-    }
-
     #[tokio::test]
     async fn test_store_open_accepts_a_retried_first_probe_create() {
         let _serialized = SERIALIZED.lock().await;
         let object_store = memory_store();
-        let retried = Arc::new(AtomicBool::new(true));
-        let first = retried.clone();
+        let lose_next = Arc::new(AtomicBool::new(true));
+        let losing = lose_next.clone();
         let retrying = object_store.clone().layer(
             MockLayerBuilder::default()
                 .writer_factory(Arc::new(move |_, _, inner| {
-                    if first.swap(false, Ordering::SeqCst) {
-                        Box::new(RetriedWriter(inner))
+                    if losing.swap(false, Ordering::SeqCst) {
+                        Box::new(LosingWriter(inner))
                     } else {
                         inner
                     }
@@ -4139,7 +4136,7 @@ mod tests {
 
         // The first write of the open is the first create of the probe.
         let store = open(retrying, &eager()).await;
-        assert!(!retried.load(Ordering::SeqCst));
+        assert!(!lose_next.load(Ordering::SeqCst));
         store.stop().await.unwrap();
         assert_eq!(
             vec![object_path(&object_store, 0)],
@@ -10551,7 +10548,7 @@ mod tests {
     /// object store access through the store, one case per fault, and checks
     /// that every row of the *Failure matrix* has one.
     mod fault_matrix {
-        use object_store::layers::mock::{self, MockLayerBuilder, oio};
+        use object_store::layers::mock::MockLayerBuilder;
         use prometheus::Histogram;
 
         use super::*;
@@ -11508,25 +11505,6 @@ mod tests {
             let armed = lose_next.clone();
             assert_identical_retry(io, move || armed.store(true, Ordering::SeqCst)).await;
             assert!(!lose_next.load(Ordering::SeqCst));
-        }
-
-        /// A writer that writes the object and then reports a failure, as a
-        /// create whose response is lost.
-        struct LosingWriter(oio::Writer);
-
-        impl oio::Write for LosingWriter {
-            async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
-                self.0.write(buffer).await
-            }
-
-            async fn close(&mut self) -> mock::Result<mock::Metadata> {
-                self.0.close().await?;
-                Err(mock::Error::new(mock::ErrorKind::Unexpected, "lost response").set_temporary())
-            }
-
-            async fn abort(&mut self) -> mock::Result<()> {
-                self.0.abort().await
-            }
         }
 
         /// Object 2 is created and object 3 in flight when object 1 fails.
