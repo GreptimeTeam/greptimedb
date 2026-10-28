@@ -2,14 +2,16 @@
 
 The PR template opts new PRs into the `merge nightly` label. The Nightly Merge
 workflow reconciles the label on PR creation, edits, and reopening. Existing PRs
-without the checkbox are not opted in. Unchecking removes the label; it does not
+without the checkbox can opt in by adding the label manually; label sync leaves
+their labels unchanged. Unchecking removes the label; it does not
 request an immediate merge or cancel an existing queue entry/auto-merge request.
 
 Every day at 02:10, 03:10, 04:10, 05:10, 06:10, 07:10, and 08:10
 Asia/Shanghai (UTC+8), the workflow enqueues up to five eligible PRs targeting
 `main` per run, oldest first. Already queued PRs do not count toward this limit.
 GitHub may delay scheduled runs.
-PRs must still have the checkbox and label, be approved and clean, and have all
+The label alone controls nightly opt-in; the enqueue job does not check the PR
+body. PRs must be approved and clean, and have all
 review threads resolved. Drafts are skipped.
 Already queued PRs and manually enabled auto-merge requests are left alone;
 Maintainers can use **Merge when ready** to proceed earlier. Unready PRs wait for a later

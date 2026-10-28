@@ -70,7 +70,7 @@ test('template opts in and checkbox edits reconcile only the nightly label', asy
   assert.ok(readFileSync(resolve(__dirname, '../../pull_request_template.md'), 'utf8').includes(checked));
   assert.deepEqual(await run({ sync: true, labels: ['bug'] }), [['add', ['merge nightly']]]);
   assert.deepEqual(await run({ sync: true }), []);
-  for (const body of [checked.replace('[x]', '[ ]'), '', null, `> ${checked}`]) {
+  for (const body of [checked.replace('[x]', '[ ]')]) {
     assert.deepEqual(await run({ sync: true, body }), [['remove', 'merge nightly']]);
   }
   assert.deepEqual(await run({ sync: true, body: checked.replace('[x]', '[X]'), labels: [] }), [['add', ['merge nightly']]]);
@@ -83,7 +83,7 @@ test('eligible PR is enqueued with its checked head; dry run performs no mutatio
 
 test('each eligibility gate independently prevents enqueueing', async () => {
   for (const options of [
-    { body: checked.replace('[x]', '[ ]') }, { labels: [] },
+    { labels: [] },
     { current: { draft: true } }, { current: { state: 'closed' } }, { current: { base: { ref: 'release/v1.3' } } },
     { detail: { reviewDecision: 'REVIEW_REQUIRED' } }, { detail: { reviewDecision: 'CHANGES_REQUESTED' } },
     { detail: { mergeStateStatus: 'BLOCKED' } }, { detail: { mergeStateStatus: 'UNKNOWN' } },
@@ -105,4 +105,15 @@ test('per-run cap and individual failures do not prevent later candidates', asyn
   const calls = await run({ count: 2, failFirst: true });
   assert.equal(calls.filter(c => c[0] === 'enqueue').length, 2);
   assert.equal(calls.filter(c => c[0] === 'failed').length, 1);
+});
+
+test('label-only opt-in survives PRs without a template and does not require a checkbox', async () => {
+  for (const body of ['', null, 'Existing PR description', `> ${checked}`]) {
+    assert.deepEqual(await run({ sync: true, body }), []);
+    assert.deepEqual(await run({ sync: true, body, labels: [] }), []);
+    assert.equal((await run({ body })).filter(call => call[0] === 'enqueue').length, 1);
+    assert.equal((await run({ body, labels: [] })).some(call => call[0] === 'enqueue'), false);
+  }
+  // The label is authoritative for admission, even before checkbox synchronization.
+  assert.equal((await run({ body: checked.replace('[x]', '[ ]') })).some(call => call[0] === 'enqueue'), true);
 });
