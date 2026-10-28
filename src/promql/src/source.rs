@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod merge;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,8 @@ use datatypes::series::samples::SeriesSchema;
 use futures::Stream;
 use mito_codec::labels::PrimaryKeyLabelDecoder;
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+
+pub use merge::merge_ordered_raw_series;
 
 /// Materializes complete metric labels from a raw-series frame stream.
 ///
