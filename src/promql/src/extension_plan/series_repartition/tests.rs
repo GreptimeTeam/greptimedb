@@ -114,6 +114,8 @@ enum Step {
     Chunk(Series, bool),
     /// The child fails here.
     Error,
+    /// The child fails here with a message of its own, for a test that has to tell two failures apart.
+    ErrorSaying(&'static str),
 }
 
 impl Step {
@@ -129,6 +131,7 @@ fn step_answer(step: Step) -> Result<(Series, bool), BoxedError> {
         Step::Error => Err(boxed(DataFusionError::Execution(
             "scripted child failure".to_string(),
         ))),
+        Step::ErrorSaying(message) => Err(boxed(DataFusionError::Execution(message.to_string()))),
     }
 }
 
@@ -1045,6 +1048,27 @@ async fn terminal_error(stream: &mut SendableRecordBatchStream) -> Option<DataFu
     }
 }
 
+/// Everything `stream` hands over until it ends: the chunks it delivered and the errors it reported.
+///
+/// Reading past the first error is what a test of the failure path needs. An error item is terminal,
+/// so a stream that reports one and then answers again is what these tests are looking for - and so
+/// is one that ends without ever reporting one, which is the clean end a failed read must not produce.
+/// It also assumes the stream does end: a failure that leaves an output waiting for a chunk that will
+/// never come is a hang, and the caller's timeout is what turns that into a failure.
+async fn until_end(
+    stream: &mut SendableEvaluatedSeriesStream,
+) -> (Vec<(Series, bool)>, Vec<String>) {
+    let mut chunks = Vec::new();
+    let mut errors = Vec::new();
+    loop {
+        match std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await {
+            None => return (chunks, errors),
+            Some(Ok(chunk)) => chunks.push(chunk),
+            Some(Err(error)) => errors.push(error.to_string()),
+        }
+    }
+}
+
 /// T-A1: the read drives each input partition on a task of its own.
 ///
 /// The child records the task that first polls each of its partitions, and what is asserted is that
@@ -1344,6 +1368,18 @@ async fn an_aborted_producer_is_not_reported_as_a_clean_end() {
     assert!(
         error.to_string().contains("producer stopped unexpectedly"),
         "the output ended with {error}"
+    );
+    // The read recorded no outcome at all, and no terminal error either: the error above is the
+    // "stopped unexpectedly" one this output builds, not a failure the read had recorded.
+    let (ending, terminal) = execution.ending();
+    assert_eq!(
+        Ending::Unrecorded,
+        ending,
+        "an aborted read records no outcome"
+    );
+    assert!(
+        terminal.is_none(),
+        "an aborted read records no terminal error for its outputs to report"
     );
 }
 
@@ -2329,5 +2365,515 @@ impl Stream for TogetherScript {
             }
             None => Poll::Ready(None),
         }
+    }
+}
+
+/// A child whose partitions hand over their `before` steps, wait until every partition got that far,
+/// and only then hand over their `after` steps.
+///
+/// The barrier sits between the two halves rather than before a partition's first chunk, which is what
+/// [`Together`] gates: what a test of the failure path needs is two partitions that fail *at once*.
+/// Every partition that gets to the gate is parked until the last one arrives, so the `after` steps of
+/// two partitions are handed over in the same wake - which is the interleaving
+/// [`two_failures_hand_every_output_one_error`] is built on. The gate itself is [`FirstChunks`], the
+/// all-arrived barrier [`Together`] already uses, since "has every partition got here" is what both
+/// need.
+struct Simultaneous {
+    partitions: Vec<GatedPartition>,
+    arrived: Arc<FirstChunks>,
+    series_schema: Arc<SeriesSchema>,
+    properties: Arc<PlanProperties>,
+}
+
+impl Simultaneous {
+    /// The child over `partitions`, and the barrier every one of them waits at.
+    fn plan(partitions: Vec<GatedPartition>) -> (Arc<dyn ExecutionPlan>, Arc<FirstChunks>) {
+        let series_schema = schema();
+        let frame = pack_evaluated_series(
+            Box::pin(futures::stream::empty()),
+            Arc::clone(&series_schema),
+        )
+        .expect("an evaluated schema declares a frame")
+        .schema();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(partitions.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        let arrived = FirstChunks::new(partitions.len());
+        let child = Arc::new(Self {
+            partitions,
+            arrived: Arc::clone(&arrived),
+            series_schema,
+            properties,
+        });
+        (child, arrived)
+    }
+}
+
+impl fmt::Debug for Simultaneous {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Simultaneous")
+            .field("partitions", &self.partitions.len())
+            .finish()
+    }
+}
+
+impl DisplayAs for Simultaneous {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Simultaneous: partitions={}", self.partitions.len())
+    }
+}
+
+impl ExecutionPlan for Simultaneous {
+    fn name(&self) -> &str {
+        "Simultaneous"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        Vec::new()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        assert!(children.is_empty(), "a simultaneous child has no children");
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let steps = self.partitions.get(partition).cloned().ok_or_else(|| {
+            DataFusionError::Execution(format!("simultaneous child has no partition {partition}"))
+        })?;
+        pack_evaluated_series(
+            Box::pin(SimultaneousScript {
+                partition,
+                before: steps.before.into_iter(),
+                after: steps.after.into_iter(),
+                arrived: Arc::clone(&self.arrived),
+                arrived_here: false,
+            }),
+            Arc::clone(&self.series_schema),
+        )
+    }
+}
+
+/// One partition of a [`Simultaneous`] child.
+struct SimultaneousScript {
+    partition: usize,
+    before: std::vec::IntoIter<Step>,
+    after: std::vec::IntoIter<Step>,
+    arrived: Arc<FirstChunks>,
+    /// Whether this partition already reached the barrier.
+    arrived_here: bool,
+}
+
+impl Stream for SimultaneousScript {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if let Some(step) = this.before.next() {
+            return Poll::Ready(Some(step_answer(step)));
+        }
+        if !this.arrived_here {
+            // Everything after the first half waits for every partition to have handed its first half
+            // over, so the second halves - and the failures among them - leave two tasks together.
+            this.arrived_here = true;
+            this.arrived.handed(this.partition);
+        }
+        this.arrived.wait(cx);
+        if !this.arrived.all() {
+            return Poll::Pending;
+        }
+        Poll::Ready(this.after.next().map(step_answer))
+    }
+}
+
+/// Every output of `plan`, read to its end at once: the chunks each delivered and the errors each
+/// reported.
+///
+/// All partitions are drained concurrently, which is what an executor does and what a failed read
+/// needs: the one broadcaster suspends on an output nobody is draining, so an output drained to its
+/// end before the next one is started would wait for a sender that is waiting for that next output.
+async fn every_output_until_end(
+    plan: &Arc<SeriesRepartitionExec>,
+    context: &Arc<TaskContext>,
+) -> Vec<(Vec<(Series, bool)>, Vec<String>)> {
+    let mut streams = Vec::new();
+    for partition in 0..plan.outputs() {
+        streams.push(
+            unpack_evaluated_series(
+                plan.execute(partition, Arc::clone(context))
+                    .expect("the output executes"),
+                None,
+            )
+            .expect("the output declares an evaluated frame"),
+        );
+    }
+    futures::future::join_all(streams.iter_mut().map(until_end)).await
+}
+
+/// T-F1: two partitions that fail at the same moment leave every output exactly one error.
+///
+/// Between them the two partitions hand over [`OUTPUT_CAPACITY`] chains per output before they fail,
+/// so both queues are exactly full and then two failures land on a read whose outputs are not being
+/// drained. The one broadcaster therefore suspends on the first full queue while the other task is
+/// itself on the failure path: the interleaving the read has to survive, since a failing task that
+/// sweeps its peers aborts the task suspended mid-broadcast, and the outputs it had not reached wake
+/// to closed queues with the read recorded as failed and no error item - which they then report as a
+/// clean end.
+///
+/// Both partitions are known to have reached the barrier before either failed, which is what makes
+/// the two failures overlap rather than merely possible: neither can hand its failing step over before
+/// the other has arrived. What is asserted is the fix from the outside - the failure is recorded with
+/// the error that belongs to it, and every output ends with exactly one error, never a clean end and
+/// never two errors (which only two broadcasts could produce), all of them the recorded one.
+#[tokio::test]
+async fn two_failures_hand_every_output_one_error() {
+    const FIRST: &str = "the first partition failed";
+    const SECOND: &str = "the second partition failed";
+    assert_eq!(
+        0,
+        OUTPUT_CAPACITY % 2,
+        "the chains of one queue are split evenly between the two partitions"
+    );
+    let half = OUTPUT_CAPACITY / 2;
+    let to_first = labels_routed_to(0, OUTPUT_CAPACITY);
+    let to_second = labels_routed_to(1, OUTPUT_CAPACITY);
+
+    /// The steps of one partition: its half of every output's queue, a place at the barrier, and then
+    /// its failure.
+    ///
+    /// The failure is what comes *after* the barrier, which is the whole point: a partition cannot hand
+    /// it over until every partition has handed over its chains, so the two failures are released into
+    /// the same wake instead of one of them landing while the other task is still reading.
+    fn failing(
+        first: &[SeriesLabels],
+        second: &[SeriesLabels],
+        message: &'static str,
+    ) -> GatedPartition {
+        GatedPartition {
+            before: first
+                .iter()
+                .chain(second)
+                .map(|labels| Step::chunk(chunk(labels.clone(), 0, 1, true)))
+                .collect::<Vec<_>>(),
+            after: vec![Step::ErrorSaying(message)],
+        }
+    }
+
+    let (child, arrived) = Simultaneous::plan(vec![
+        failing(&to_first[..half], &to_second[..half], FIRST),
+        failing(&to_first[half..], &to_second[half..], SECOND),
+    ]);
+    let plan = node(child, 2);
+    let context = SessionContext::default().task_ctx();
+    // Claimed before anything is read, so the queues that fill are the ones a reader is waiting on.
+    let mut streams = Vec::new();
+    for partition in 0..plan.outputs() {
+        streams.push(
+            unpack_evaluated_series(
+                plan.execute(partition, Arc::clone(&context))
+                    .expect("the output executes"),
+                None,
+            )
+            .expect("the output declares an evaluated frame"),
+        );
+    }
+    let execution = execution(&plan);
+
+    wait_until("both partitions reach the failure path", || arrived.all()).await;
+    wait_until("the read records its failure", || {
+        execution.ending().0 == Ending::Failed
+    })
+    .await;
+    let (ending, terminal) = execution.ending();
+    assert_eq!(Ending::Failed, ending, "the read records that it failed");
+    let recorded = terminal.expect("a recorded failure keeps the error its outputs are owed");
+    let expected = recorded.to_string();
+    let named = [FIRST, SECOND]
+        .into_iter()
+        .find(|message| expected.contains(message))
+        .unwrap_or_else(|| panic!("the recorded error names one of the two failures: {expected}"));
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::join_all(streams.iter_mut().map(until_end)),
+    )
+    .await
+    .expect("a read with two failures still ends every output");
+
+    for (partition, (chunks, errors)) in outputs.iter().enumerate() {
+        assert_eq!(
+            1,
+            errors.len(),
+            "output partition {partition} reports the failure once, not once per failing input: \
+             {errors:?}"
+        );
+        // The item and the recorded error are the same failure, but each is wrapped by the path it
+        // takes out of the read, so what they are compared on is the failure they name.
+        assert!(
+            errors[0].contains(named),
+            "output partition {partition} reports the failure the read recorded ({named}), not {}",
+            errors[0]
+        );
+        assert_chains_are_whole(chunks);
+    }
+}
+
+/// T-F2: a task attached after the failure is swept is aborted instead of waited on.
+///
+/// Partition 0 fails on its first poll, which can happen before the tasks of the partitions after it
+/// are even spawned - and a handle attached after the failure's sweep is one the sweep cannot see.
+/// Stored as live, it waits on a child that never answers while holding a sender to every output, so
+/// the queues never close and both outputs hang here. The other partitions are gated on a switch
+/// nothing opens, so the only way this test finishes is those tasks being aborted: their streams
+/// record the drop an aborted task's future goes through.
+#[tokio::test]
+async fn a_partition_failing_before_its_peers_are_attached_still_ends_every_output() {
+    const MESSAGE: &str = "the first partition failed at once";
+    let switch = Arc::new(Switch::default());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let shared = labels("web-1");
+    // Ten partitions, so the failing one's sweep runs while the later ones are still being spawned and
+    // attached: the read must stop them anyway. `read_partitions` counts them with the failing one.
+    let mut partitions = vec![GatedPartition::open(vec![Step::ErrorSaying(MESSAGE)])];
+    partitions.extend(
+        (0..10).map(|_| GatedPartition::held(vec![Step::chunk(chunk(shared.clone(), 0, 1, true))])),
+    );
+    let read_partitions = partitions.len();
+    let child = Gated::plan(partitions, switch, Arc::clone(&dropped));
+    let plan = node(child, 2);
+    let context = SessionContext::default().task_ctx();
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        every_output_until_end(&plan, &context),
+    )
+    .await
+    .expect(
+        "a read whose first partition fails before its peers were attached still ends: a task left \
+         waiting on a child holds a sender to every output, so nothing would close",
+    );
+    for (partition, (_, errors)) in outputs.iter().enumerate() {
+        assert_eq!(
+            1,
+            errors.len(),
+            "output partition {partition} reports the failure: {errors:?}"
+        );
+        assert!(
+            errors[0].contains(MESSAGE),
+            "output partition {partition} ended with {}",
+            errors[0]
+        );
+    }
+    wait_until("every child partition's stream is dropped", || {
+        dropped.load(Ordering::SeqCst) == read_partitions
+    })
+    .await;
+    // The read is over, which it could not be if a task attached after the sweep were still holding
+    // a sender to every output.
+    let execution = execution(&plan);
+    wait_until("the read stops", || producer_stopped(&execution)).await;
+}
+
+/// Sets a flag when the future holding it is dropped, which is how a test sees a task aborted.
+///
+/// Dropping the future is what aborting a task does - whether it had been polled or not - while a
+/// handle that is only stored and never aborted leaves the task running until the process ends.
+struct DroppedWhenAborted(Arc<AtomicBool>);
+
+impl Drop for DroppedWhenAborted {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// T-F2, without the runtime deciding when it happens: a handle that arrives after the failure is
+/// aborted by the attach itself.
+///
+/// The end-to-end test above can only make the race likely. This one does not race at all: the read
+/// is failed first, exactly as partition 0 does in it, and only then is a task of another partition
+/// handed over. What has to happen is the same thing, and it is stated here on its own: the task is
+/// aborted, its slot stays empty, and the read does not end up counting a task that never ran.
+#[tokio::test]
+async fn a_task_attached_after_the_failure_is_aborted_and_not_counted() {
+    let ending = Arc::new(Mutex::new(EndingRecord::default()));
+    let inputs = Inputs::new(Arc::clone(&ending), 2);
+    // Kept alive so the failure's item has somewhere to go; the queue itself is not read.
+    let (sender, _receiver) = mpsc::channel::<Queued>(1);
+    let error = Arc::new(DataFusionError::Execution(
+        "the first partition failed".to_string(),
+    ));
+    inputs
+        .failed(0, &error, std::slice::from_ref(&sender))
+        .await;
+    assert_eq!(0, inputs.live(), "a failed read is no longer running");
+
+    let aborted = Arc::new(AtomicBool::new(false));
+    // The guard is built before the future rather than inside it, so it is part of what the task
+    // holds. A task aborted before its first poll never runs its body - so a guard built there would
+    // never exist to be dropped, and the abort would look like nothing happened. Held this way, it is
+    // dropped when the runtime drops the aborted task's future, whether or not it ever ran.
+    let guard = DroppedWhenAborted(Arc::clone(&aborted));
+    // Spawned on the test's own runtime rather than the global query one: an abort is processed by the
+    // runtime the task lives on, and this test has to see it happen.
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        futures::future::pending::<()>().await;
+    });
+    inputs.attach(1, task);
+    assert!(
+        inputs
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .tasks[1]
+            .is_none(),
+        "the task of a cancelled read is aborted rather than stored as one to wait for"
+    );
+    wait_until("the task attached after the failure is aborted", || {
+        aborted.load(Ordering::SeqCst)
+    })
+    .await;
+    assert_eq!(
+        0,
+        inputs.live(),
+        "the aborted task never ran, so the read is not left waiting for it"
+    );
+}
+
+/// T-F3: a read that finished owes its outputs no error, whatever a failure elsewhere recorded.
+///
+/// The error an output reports for a failed read is now read out of the read's own state, so a read
+/// that finished must not be turned into a failure by it: what it records is `Finished` and no
+/// terminal error at all, and every output ends cleanly once. The other half of the property - a read
+/// that was stopped records nothing and is reported as an error rather than an end - is
+/// [`an_aborted_producer_is_not_reported_as_a_clean_end`].
+#[tokio::test]
+async fn a_finished_read_ends_cleanly_and_owes_no_error() {
+    let shared = labels("web-1");
+    let child = Scripted::plan(vec![
+        vec![Step::chunk(chunk(shared.clone(), 0, 2, true))],
+        vec![Step::chunk(chunk(shared.clone(), 8, 2, true))],
+    ]);
+    let plan = node(child, 2);
+    let context = SessionContext::default().task_ctx();
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        every_output_until_end(&plan, &context),
+    )
+    .await
+    .expect("both partitions end, so both outputs end");
+    // Read after the outputs are done, so the read has recorded everything it is going to.
+    let execution = execution(&plan);
+    for (partition, (chunks, errors)) in outputs.iter().enumerate() {
+        assert!(
+            errors.is_empty(),
+            "output partition {partition} reported {errors:?} for a read that finished"
+        );
+        assert_chains_are_whole(chunks);
+    }
+    assert_eq!(
+        Ending::Finished,
+        execution.ending().0,
+        "a read that finished records no failure for its outputs to report"
+    );
+    assert!(
+        execution.ending().1.is_none(),
+        "and no terminal error either"
+    );
+}
+
+/// T-F4: a failure whose broadcast never reaches an output is still reported, not ended cleanly.
+///
+/// This is the cut-short interleaving made deterministic rather than raced for. One partition hands
+/// over exactly [`OUTPUT_CAPACITY`] chains per output - both queues are then full - and fails; the
+/// task that elects itself the broadcaster is suspended on the first full queue with the failure
+/// already recorded, and the test then stops the read from outside, which aborts that task before it
+/// can hand the error to any output. Every output is therefore left with a closed queue, a failed
+/// read recorded, and no error item - the exact state the defect produced by accident.
+///
+/// What it must not do is report that as the end of the answer. Each output has to report the error
+/// the read recorded, exactly once, and never a clean end: the stored error is what makes that
+/// possible with the broadcast gone.
+#[tokio::test]
+async fn a_failure_whose_broadcast_is_cut_short_still_reaches_every_output() {
+    const MESSAGE: &str = "the partition failed mid-broadcast";
+    let mut steps = labels_routed_to(0, OUTPUT_CAPACITY)
+        .iter()
+        .chain(labels_routed_to(1, OUTPUT_CAPACITY).iter())
+        .map(|labels| Step::chunk(chunk(labels.clone(), 0, 1, true)))
+        .collect::<Vec<_>>();
+    steps.push(Step::ErrorSaying(MESSAGE));
+    let plan = node(Scripted::plan(vec![steps]), 2);
+    let context = SessionContext::default().task_ctx();
+    // Both outputs are claimed and none of them is drained, so the broadcast is parked on a full
+    // queue rather than delivered.
+    let mut streams = Vec::new();
+    for partition in 0..plan.outputs() {
+        streams.push(
+            unpack_evaluated_series(
+                plan.execute(partition, Arc::clone(&context))
+                    .expect("the output executes"),
+                None,
+            )
+            .expect("the output declares an evaluated frame"),
+        );
+    }
+    let execution = execution(&plan);
+
+    wait_until(
+        "the read records its failure while no output is drained",
+        || execution.ending().0 == Ending::Failed,
+    )
+    .await;
+    // The broadcast is cut short: the task carrying it is aborted before any output received the
+    // error, which is what a stop of the whole read does to it.
+    execution
+        .running
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .inputs
+        .stop();
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        futures::future::join_all(streams.iter_mut().map(until_end)),
+    )
+    .await
+    .expect("a read whose broadcast was cut short still ends every output");
+    for (partition, (chunks, errors)) in outputs.iter().enumerate() {
+        assert_eq!(
+            1,
+            errors.len(),
+            "output partition {partition} reports the failure the read recorded exactly once: \
+             {errors:?}"
+        );
+        assert!(
+            errors[0].contains(MESSAGE),
+            "output partition {partition} ended with {} rather than the failure",
+            errors[0]
+        );
+        assert_chains_are_whole(chunks);
     }
 }

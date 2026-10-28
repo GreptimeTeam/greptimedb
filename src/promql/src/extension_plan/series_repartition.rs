@@ -409,8 +409,8 @@ impl ExecutionPlan for SeriesRepartitionExec {
 struct SharedExecution {
     /// The queues, the tasks filling them, and how many of the execution's outputs the read still has.
     running: Mutex<Running>,
-    /// How the read ended, for an output whose queue has closed to read.
-    ending: Arc<Mutex<Ending>>,
+    /// How the read ended, and the failure it owes its outputs if it failed.
+    ending: Arc<Mutex<EndingRecord>>,
 }
 
 /// What one execution's state holds that has to be stopped together.
@@ -483,7 +483,7 @@ impl SharedExecution {
             senders.push(sender);
             receivers.push(Some(receiver));
         }
-        let ending = Arc::new(Mutex::new(Ending::Unrecorded));
+        let ending = Arc::new(Mutex::new(EndingRecord::default()));
         let inputs = Inputs::new(Arc::clone(&ending), partitions);
         // A child with no partitions has nothing to read, so the read finished before it started: the
         // count that the last input task would bring to zero is already there.
@@ -570,12 +570,16 @@ impl SharedExecution {
         }
     }
 
-    /// How the read ended, as an output whose queue has closed has to report it.
-    fn ending(&self) -> Ending {
-        *self
+    /// How the read ended, and the failure it owes its outputs if it failed.
+    ///
+    /// Both are read under the one lock that records them, so an output never sees a failure without
+    /// the error that belongs to it.
+    fn ending(&self) -> (Ending, Option<Arc<DataFusionError>>) {
+        let record = self
             .ending
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(|error| error.into_inner());
+        (record.ending, record.terminal.clone())
     }
 
     /// Stops the read and releases everything it holds.
@@ -613,35 +617,62 @@ impl Drop for SharedExecution {
 struct Inputs {
     /// The tasks themselves, and the count of those that have not stopped.
     state: Mutex<InputState>,
-    /// How the read ended, for an output whose queue has closed to read.
-    ending: Arc<Mutex<Ending>>,
+    /// How the read ended, and the failure it owes its outputs if it failed.
+    ending: Arc<Mutex<EndingRecord>>,
 }
 
 /// What [`Inputs`] guards.
 struct InputState {
     /// The task of each input partition, by partition, `None` once it stopped.
     ///
-    /// Kept rather than dropped so that the read can be stopped as a whole, and so that the first task
-    /// to fail can abort the rest: a partition whose peer already failed has nothing left to route
-    /// that an output would still take.
+    /// Kept rather than dropped so that the read can be stopped as a whole, and so that the one task
+    /// that broadcasts a failure can abort the rest: a partition whose peer already failed has
+    /// nothing left to route that an output would still take.
     tasks: Vec<Option<common_runtime::JoinHandle<()>>>,
     /// How many of those tasks have not stopped yet.
+    ///
+    /// The last task to stop brings this to zero, and reaching zero on a read nobody cancelled is
+    /// what records that the read finished. A cancellation sets it to zero itself, because a
+    /// cancelled read has no task left that will do its own bookkeeping: the failure's broadcaster
+    /// counts itself out at the end of its broadcast, and every other task is aborted, which drops
+    /// its future without it ever reaching [`Inputs::count_out`]. A task spawned and attached after
+    /// the cancellation is aborted by [`Inputs::attach`] and never runs, so it cannot raise this
+    /// back above zero and keep a finished read open.
     live: usize,
     /// Whether the read was stopped from outside - every output is gone, or the plan's state went
     /// away. It is the one thing that keeps the last task from recording that the read finished: a
     /// stopped read never finished, and the outputs that wake on the close of their queues must say
     /// so rather than report a complete answer.
     stopped: bool,
+    /// The partition whose task is broadcasting the read's failure, once one was elected.
+    ///
+    /// Exactly one task claims this, under this lock, and the claim is what makes the failure path
+    /// single-threaded: the task that finds it unclaimed is the only one that records the failure,
+    /// aborts the other tasks and hands the error to the outputs, and every other failing task finds
+    /// it taken and stops without touching a peer. That is what keeps a second failure from aborting
+    /// the broadcaster that is still handing the error over - the interleaving that used to leave an
+    /// output with a failed read recorded and no error item, which it then reported as a clean end.
+    failed_by: Option<usize>,
+    /// Whether the read has been cancelled: a failure was elected, or [`Inputs::stop`] was called.
+    ///
+    /// Recorded under the same lock that guards [`tasks`](Self::tasks), so a task attached after the
+    /// cancellation is aborted by [`Inputs::attach`] rather than stored. The sweep that cancels the
+    /// read can only abort the handles that exist when it runs, and a task spawned afterwards would
+    /// otherwise wait on a child for a read that is over while holding a sender to every output -
+    /// which keeps every queue open and every reader of it waiting.
+    cancelled: bool,
 }
 
 impl Inputs {
     /// The bookkeeping of a read over `partitions` input partitions.
-    fn new(ending: Arc<Mutex<Ending>>, partitions: usize) -> Arc<Self> {
+    fn new(ending: Arc<Mutex<EndingRecord>>, partitions: usize) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InputState {
                 tasks: (0..partitions).map(|_| None).collect(),
                 live: partitions,
                 stopped: false,
+                failed_by: None,
+                cancelled: false,
             }),
             ending,
         })
@@ -652,8 +683,20 @@ impl Inputs {
     /// Stored even if the task has already stopped - a partition that answers at once can return
     /// before its handle is stored - because the slot is only consulted to stop what is still running,
     /// and aborting a finished task is a no-op.
+    ///
+    /// A task attached to an already cancelled read is aborted here instead of stored. The
+    /// cancellation swept the tasks that existed when it ran - a partition that fails before its
+    /// peers are even spawned is exactly the case the sweep misses - so this is where those tasks
+    /// stop: storing one would leave it waiting on its child for a read that is over, holding a
+    /// sender to every output, so no queue would ever close. It is not counted either:
+    /// [`live`](InputState::live) is already zero and a task that never runs cannot add to it.
     fn attach(&self, partition: usize, task: common_runtime::JoinHandle<()>) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            state.tasks[partition] = None;
+            task.abort();
+            return;
+        }
         state.tasks[partition] = Some(task);
     }
 
@@ -678,18 +721,38 @@ impl Inputs {
 
     /// Records that `partition` failed, hands the failure to every output, and stops the rest.
     ///
-    /// The failure is recorded first: the queues close when the last task returns, and an output
-    /// woken by that has to read that the read failed rather than read nothing. Every output then
-    /// receives the error as a terminal item, so an output that was still being read cannot mistake
-    /// the failure for an end - and the other input tasks are aborted, because what they would still
-    /// route belongs to a read that has already failed.
+    /// Only one task does that, and it is the one that wins the election below. The claim, the
+    /// cancellation and the count going to zero are one step under the lock that also guards the
+    /// task handles, so two failing tasks cannot both decide they are the broadcaster, and cannot
+    /// disagree about whether the read is over either.
+    ///
+    /// The failure and its error are recorded before anything is aborted and before anything is sent:
+    /// the queues close when the last task returns, and an output woken by that has to read that the
+    /// read failed rather than read nothing. Every output then receives the error as a terminal item,
+    /// so an output that is still being read cannot mistake the failure for an end - and the other
+    /// input tasks are aborted, because what they would still route belongs to a read that has
+    /// already failed.
+    ///
+    /// A task that loses the election records nothing, aborts nobody and returns: the failure is
+    /// being broadcast by another task, and sweeping the peers from here would abort it - a task
+    /// suspended on a full output queue dies at that point, so the outputs it had not reached yet
+    /// would be left with a failed read recorded and no error item, which an output reports as a
+    /// clean end.
     async fn failed(
         &self,
         partition: usize,
         error: &Arc<DataFusionError>,
         senders: &[mpsc::Sender<Queued>],
     ) {
-        self.record(Ending::Failed);
+        if !self.claim_failure(partition) {
+            // Another partition's task is the read's one broadcaster. It is already stopping this
+            // task, so this one records nothing and stops nobody - counting itself out only keeps
+            // the bookkeeping tidy, since the read is cancelled and this cannot make it look
+            // finished.
+            self.count_out(partition);
+            return;
+        }
+        self.fail(Arc::clone(error));
         self.abort_others(partition);
         for sender in senders {
             // Ignored: an output that is gone has nobody left to tell, and one whose queue is full
@@ -697,6 +760,27 @@ impl Inputs {
             let _ = sender.send(Err(Arc::clone(error))).await;
         }
         self.count_out(partition);
+    }
+
+    /// Claims the read's one failure broadcast for `partition`, and cancels the read if it got it.
+    ///
+    /// `true` means this task is the broadcaster and the read is now cancelled; `false` means another
+    /// task claimed the broadcast first, and this one must not touch the read any more. Everything
+    /// that makes the claim atomic happens here, under the task lock: the loser's read of
+    /// [`failed_by`](InputState::failed_by) and the winner's write of it, the cancellation that
+    /// [`attach`](Self::attach) honours, and the count the read's end was read from.
+    fn claim_failure(&self, partition: usize) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.failed_by.is_some() {
+            return false;
+        }
+        state.failed_by = Some(partition);
+        state.cancelled = true;
+        // The read is over as of this step: every other task is about to be aborted and so never
+        // reaches `count_out`, and the broadcaster does not count as running for a read that has
+        // already failed its outputs.
+        state.live = 0;
+        true
     }
 
     /// Counts `partition` off the read, and says whether it was the last task still running.
@@ -707,10 +791,17 @@ impl Inputs {
         // stopped from outside may still reach this after [`stop`](Self::stop) counted it off.
         state.tasks[partition] = None;
         state.live = state.live.saturating_sub(1);
-        state.live == 0 && !state.stopped
+        // A cancelled read never records that it finished: a failure is the outcome its outputs
+        // report, and a stop is not an end.
+        state.live == 0 && !state.stopped && !state.cancelled
     }
 
     /// Aborts every input task but `partition`'s own.
+    ///
+    /// Called by the read's one failure broadcaster, which is `partition`, and by nobody else: a task
+    /// that swept the peers on its way out of a failure would abort the task handing the error to the
+    /// outputs, and the outputs it had not reached would be left with a failed read recorded and no
+    /// error item.
     fn abort_others(&self, partition: usize) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         for (index, task) in state.tasks.iter().enumerate() {
@@ -727,10 +818,14 @@ impl Inputs {
     /// Stops every input task that has not stopped yet, and counts the read as stopped.
     ///
     /// The count is set rather than left to the tasks: an aborted task does not run its own
-    /// bookkeeping, and a read whose tasks were aborted never reached an end of its own.
+    /// bookkeeping, and a read whose tasks were aborted never reached an end of its own. The read is
+    /// cancelled as well as stopped, so that a task attached after this call - one the sweep here
+    /// could not see - is aborted by [`attach`](Self::attach) instead of waiting on a child for a
+    /// read that is over.
     fn stop(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         state.stopped = true;
+        state.cancelled = true;
         state.live = 0;
         for task in state.tasks.iter_mut() {
             if let Some(task) = task.take() {
@@ -739,21 +834,39 @@ impl Inputs {
         }
     }
 
-    /// Records `outcome` as how the read ended, unless an outcome that outranks it is already there.
+    /// Records `outcome` as how the read ended, unless an ending is already recorded.
     ///
-    /// A failure outranks everything: it is the only ending whose error is handed to every output, and
-    /// nothing may replace it. Nothing outranks a recorded ending either, so the first task to record
-    /// `Abandoned` or `Finished` is the one reported - a read that lost chains to a dropped output did
-    /// not finish, whatever the other partitions went on to do.
+    /// Nothing outranks a recorded ending, so the first task to record `Abandoned` or `Finished` is
+    /// the one reported - a read that lost chains to a dropped output did not finish, whatever the
+    /// other partitions went on to do. A failure is recorded by [`fail`](Self::fail), which stores
+    /// its error in the same write: recording one here would be a failure no output could report.
     fn record(&self, outcome: Ending) {
-        let mut ending = self
+        debug_assert!(
+            !matches!(outcome, Ending::Failed),
+            "a failure is recorded by `fail`, with its error"
+        );
+        let mut record = self
             .ending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        match outcome {
-            Ending::Failed => *ending = Ending::Failed,
-            _ if matches!(*ending, Ending::Unrecorded) => *ending = outcome,
-            _ => {}
+        if matches!(record.ending, Ending::Unrecorded) {
+            record.ending = outcome;
+        }
+    }
+
+    /// Records that the read failed with `error`, keeping the error where its outputs can read it.
+    ///
+    /// A failure outranks every other ending, so it is recorded whatever is there already - and it is
+    /// recorded together with its error, in one write, so that an output reading [`Ending::Failed`]
+    /// always reads the error that goes with it. Only the broadcast's elected task calls this.
+    fn fail(&self, error: Arc<DataFusionError>) {
+        let mut record = self
+            .ending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        record.ending = Ending::Failed;
+        if record.terminal.is_none() {
+            record.terminal = Some(error);
         }
     }
 
@@ -892,9 +1005,24 @@ impl OutputLease {
     /// An end is this node's claim that every input partition finished and every chunk routed here
     /// was handed over, so only a read that ended that way may produce one. Everything else is the
     /// read stopping underneath its outputs, which is a failure of the answer and not the end of it.
+    ///
+    /// A failed read is an error here even though the broadcaster hands the error to every output as
+    /// a terminal item: the broadcast can be cut short - the read can be stopped, or the task running
+    /// it aborted - and an output it never reached would otherwise report a failed read as a complete
+    /// answer. The error is recorded beside the ending, so this reads the same one the item would
+    /// have carried.
     fn ending(&self) -> Option<Result<(Series, bool), BoxedError>> {
-        match self.shared.ending() {
-            Ending::Finished | Ending::Failed => None,
+        let (ending, terminal) = self.shared.ending();
+        match ending {
+            Ending::Finished => None,
+            Ending::Failed => Some(Err(boxed(match &terminal {
+                Some(error) => DataFusionError::from(error),
+                // A failure whose error cannot be found is still a failure, and saying so is the
+                // point: an end here would claim that every chunk routed to this output arrived.
+                None => DataFusionError::Execution(
+                    "series repartition failed and its error is no longer available".to_string(),
+                ),
+            }))),
             Ending::Abandoned => Some(Err(boxed(DataFusionError::Execution(
                 "series repartition stopped before the read finished: an output partition was dropped"
                     .to_string(),
@@ -918,17 +1046,36 @@ impl Drop for OutputLease {
 }
 
 /// How a read ended, as an output whose queue has closed has to report it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Ending {
     /// Nothing recorded an outcome - and a read that ends on its own terms records one before it
     /// drops its queues - so this is a read that was stopped, aborted or panicked, mid-flight.
+    #[default]
     Unrecorded,
     /// Every input partition finished and every chunk routed to an output was handed over.
     Finished,
     /// The read stopped because an output went away, leaving the chunks read for it undelivered.
     Abandoned,
-    /// The read failed; its error was already handed to every output as a terminal item.
+    /// The read failed. Its error is recorded beside this ending in the [`EndingRecord`] that holds
+    /// both, and every output reports it - as the terminal item the read's one broadcaster hands
+    /// over, or, for an output the broadcast never reached, as the error read from there.
     Failed,
+}
+
+/// How a read ended, and - when it failed - the error it owes every output.
+///
+/// The ending and the error are one value under one lock on purpose: a failure is recorded in one
+/// write, so an output that reads [`Ending::Failed`] always reads the error that goes with it. That
+/// is what keeps the error reachable when the broadcast meant to hand it over does not finish - a
+/// broadcaster records it before it sends anything, and an output whose queue closes without ever
+/// receiving the item reports the stored error rather than calling the read complete.
+#[derive(Default)]
+struct EndingRecord {
+    /// How the read ended.
+    ending: Ending,
+    /// The failure the read recorded, shared rather than rebuilt so every output reports the one
+    /// error the child answered with. `None` until a failure is recorded, and never cleared.
+    terminal: Option<Arc<DataFusionError>>,
 }
 
 /// One whole chain of one series: its chunks from the one that opened it to the one that closed it,
@@ -957,8 +1104,12 @@ struct RepartitionStream {
     chain: std::vec::IntoIter<(Series, bool, MemoryReservation)>,
     /// The read this stream is an output of.
     lease: OutputLease,
-    /// Whether the end of the queue was already reported, so a poll after it is the end and not the
+    /// Whether the end of the stream was already reported, so a poll after it is the end and not the
     /// same failure a second time.
+    ///
+    /// Set both by the end of the queue and by the error item that ends the stream instead: an error
+    /// is terminal, so nothing of the read is handed over after it - and the next poll is the end
+    /// rather than a second report of the same failure.
     reported: bool,
 }
 
@@ -979,8 +1130,11 @@ impl Stream for RepartitionStream {
             match this.receiver.poll_recv(cx) {
                 Poll::Ready(Some(Ok(chain))) => this.chain = chain.into_iter(),
                 // The error is shared rather than rebuilt, so every output reports the one failure the
-                // child answered with instead of M copies of its text.
+                // child answered with instead of M copies of its text. It is also terminal: the read
+                // failed, so what a task queued behind it belongs to an answer that is not coming, and
+                // the poll after this one is the end of the stream.
                 Poll::Ready(Some(Err(error))) => {
+                    this.reported = true;
                     return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
                 }
                 // The queue closing is not the end of the read on its own: aborting the read closes it
@@ -988,6 +1142,10 @@ impl Stream for RepartitionStream {
                 // that does not exist. What the read recorded says which of the two this is.
                 Poll::Ready(None) => {
                     this.reported = true;
+                    // No error item reached this output - the read never failed, or it did and the
+                    // broadcast that carries the error was cut short before it got here. The read's
+                    // own record answers both: a failure is reported as the error it is, and never
+                    // as the end of the answer.
                     return Poll::Ready(this.lease.ending());
                 }
                 Poll::Pending => return Poll::Pending,
