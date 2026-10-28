@@ -39,3 +39,40 @@ impl State for DrainDatanodeEnd {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedure::drain_datanode::test_util::{TestEnv, new_persistent_context};
+    use crate::procedure::region_migration::test_util::TestingEnv;
+
+    #[tokio::test]
+    async fn test_drain_datanode_end_transitions_to_done() {
+        let env = TestEnv::new().await;
+        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let procedure_ctx = TestingEnv::procedure_context();
+
+        let (next, status) = DrainDatanodeEnd
+            .next(&mut ctx, &procedure_ctx)
+            .await
+            .unwrap();
+
+        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
+        assert!(matches!(status, Status::Done { output: None }));
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_end_finishes() {
+        let env = TestEnv::new().await;
+        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let procedure_ctx = TestingEnv::procedure_context();
+
+        let (next, status) = DrainDatanodeEnd
+            .next(&mut ctx, &procedure_ctx)
+            .await
+            .unwrap();
+
+        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
+        assert!(matches!(status, Status::Done { .. }));
+    }
+}
