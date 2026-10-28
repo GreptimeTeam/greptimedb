@@ -52,11 +52,12 @@ use crate::info::InfoSelector;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
+use crate::native::canonicalize::insert_native_merge_inside_current_fused;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType, unifies_its_own_contributions,
+    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -10794,204 +10795,119 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     assert_eq!(pool.reserved(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// The one rule the runtime and the tree rewrite share.
-// ---------------------------------------------------------------------------
-
-/// `timestamp(inner)`, which reports a position under the metric name dropped.
-fn timestamp_of(inner: NativeNode) -> NativeNode {
-    let output = inner.output.clone();
-    NativeNode {
-        expr: NativeExpr::Timestamp {
-            input: Box::new(inner),
-        },
-        output,
+/// Runs `tree` over `inputs` and answers every chunk it produced.
+///
+/// The inputs are pushed in order and the input is ended before anything is pulled: a merge answers
+/// nothing until its input ends, so pulling earlier would only prove that.
+fn run_to_end(tree: &NativeTree, inputs: &[EvaluatedChunk]) -> Vec<EvaluatedChunk> {
+    let pool = pool();
+    let mut execution = executor(tree, Arc::clone(&pool));
+    for chunk in inputs {
+        execution
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .unwrap();
     }
+    execution.end_of_input().unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    out
 }
 
-/// The `shared` flag [`RuntimeNode::build`] answers is [`unifies_its_own_contributions`]'s answer,
-/// node for node: `shared` holds exactly when the plan-level function says the node may hand over
-/// several contributions of one canonical label set.
+/// A merge the insertion pass put above a per-series tree answers the rows the tree answered without
+/// it.
 ///
-/// That flag is what the runtime collects on - a window builds its `MergeInput` from its child's,
-/// and a `limitk` sets `vector.merge_input` from its input's - so this is the assertion that the
-/// insertion pass asks the runtime's own question when it decides where a merge goes. It is made
-/// here, on `build`'s return value, because `shared` is not reachable from the tree: `RuntimeNode`
-/// and `RuntimeOp` are private to this module.
-///
-/// The `false` the flag reports is not one fact but two, and the plan-level function is what tells
-/// them apart: a node that has unified and a leaf that claims nothing both report `false` (a
-/// `MergeInput` cannot be placed over a leaf's raw samples), while only the second is collected by
-/// the pass. The rows below cover both: `None` for the two boundary shapes and the nodes that pass
-/// that answer on, `Some(true)` for the nodes that have established one series per label set, and
-/// `Some(false)` for the nodes that report their own fragments.
+/// The tree is the one the route compiles for `abs(x)` and the merge is the pass's own output, not a
+/// node placed by the fixture, so what runs here is the shape a production tree gains. Two streams
+/// are checked: a label set arriving whole, and one arriving as two fragments, which is what one
+/// scan partition hands over when the series is split across chunks.
 #[test]
-fn the_predicate_and_the_runtime_agree() {
-    let g = grid(0, 60_000, 4);
-    let by_job = || Grouping::By(Arc::from([Arc::from("job")]));
-    // A window over the scan, evaluated on `g`.
-    let over_scan = |function| window_with(input(), function, 300_000, None, Arc::clone(&g));
-    // A window over an already-evaluated boundary, on the same grid.
-    let over_boundary = |function| {
-        window_with(
-            evaluated_input(Arc::clone(&g)),
-            function,
-            300_000,
-            Some(Arc::clone(&g)),
-            Arc::clone(&g),
-        )
-    };
-    let nodes: Vec<(&str, NativeNode)> = vec![
-        // Nothing is claimed: a raw scan and a fused evaluated boundary.
-        ("`x` - a raw scan", input()),
+fn an_inserted_merge_answers_the_rows_the_unmerged_tree_answered() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let unmerged = NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]))
+        .expect("a map over an evaluated input is a legal tree");
+    let merged =
+        insert_native_merge_inside_current_fused(&unmerged, &[NativeProperties::source_pieces()])
+            .expect("the pass keeps the tree legal");
+    // What is executed below is the pass's insertion: the pass put the merge at the root.
+    assert!(
+        matches!(merged.root().expr, NativeExpr::Merge { .. }),
+        "{merged}"
+    );
+    assert_eq!(1, merged.to_string().matches("Merge").count(), "{merged}");
+
+    let metric = named_metric("some_metric", "x");
+    let cases: [(&str, Vec<EvaluatedChunk>); 2] = [
         (
-            "an already-evaluated boundary",
-            evaluated_input(Arc::clone(&g)),
-        ),
-        // Labels rewritten or fragments reported: what the runtime collects itself.
-        (
-            "`last_over_time(x[5m])` - a window that keeps the metric name",
-            over_scan(RangeFunction::LastOverTime),
-        ),
-        (
-            "`rate(x[5m])` - a window that drops it",
-            over_scan(RangeFunction::Rate),
+            "one label set arriving whole",
+            vec![evaluated_chunk_of(
+                &schema,
+                metric.clone(),
+                0,
+                vec![Some(-1.0), Some(2.0), Some(-3.0), Some(4.0)],
+                true,
+            )],
         ),
         (
-            "`abs(last_over_time(x[5m]))` - a map",
-            map(over_scan(RangeFunction::LastOverTime), vec![MathOp::Abs]),
-        ),
-        (
-            "`timestamp(last_over_time(x[5m]))`",
-            timestamp_of(over_scan(RangeFunction::LastOverTime)),
-        ),
-        (
-            "`rate(x[5m]) * 2` - a broadcast that drops the metric name",
-            broadcast_of(
-                over_scan(RangeFunction::Rate),
-                scalar(2.0, Arc::clone(&g)),
-                binary_matching(BinaryOp::Mul),
-            ),
-        ),
-        (
-            "`rate(x[5m]) > 0` - a filtering comparison",
-            broadcast_of(
-                over_scan(RangeFunction::Rate),
-                scalar(0.0, Arc::clone(&g)),
-                binary_matching(BinaryOp::Gt),
-            ),
-        ),
-        (
-            "`topk(1, x)` - a `Vector` that keeps the series it read, over a window",
-            vector_op(
-                over_boundary(RangeFunction::Rate),
-                BoundVectorOp::TopK {
-                    k: 1.0,
-                    top: true,
-                    group: by_job(),
-                },
-            ),
-        ),
-        (
-            "`topk(1, x)` over a report of fragments",
-            vector_op(
-                map(over_boundary(RangeFunction::Rate), vec![MathOp::Abs]),
-                BoundVectorOp::TopK {
-                    k: 1.0,
-                    top: true,
-                    group: by_job(),
-                },
-            ),
-        ),
-        (
-            "`limit_ratio(0.5, x)` over a report of fragments",
-            vector_op(
-                map(over_boundary(RangeFunction::Rate), vec![MathOp::Abs]),
-                BoundVectorOp::LimitRatio { ratio: 0.5 },
-            ),
-        ),
-        (
-            "`limitk(1, x)` - it counts series, so it reads the whole vector",
-            vector_op(
-                over_boundary(RangeFunction::Rate),
-                BoundVectorOp::LimitK {
-                    k: 1.0,
-                    group: by_job(),
-                },
-            ),
-        ),
-        (
-            "`absent(x)` - it reads presence over the whole vector",
-            vector_op(
-                over_boundary(RangeFunction::Rate),
-                BoundVectorOp::Absent {
-                    labels: SeriesLabels::try_new(None, Vec::new()).unwrap(),
-                },
-            ),
-        ),
-        // What has already unified.
-        ("a merge", merge(evaluated_input(Arc::clone(&g)))),
-        ("`sum without() (rate(x[5m]))`", {
-            let inner = over_scan(RangeFunction::Rate);
-            aggregate(inner, sum_grouping(Grouping::By(Arc::from([]))))
-        }),
-        (
-            "`rate(x[5m]) + rate(x[5m])` - two vectors, matched by the kernel",
-            binary_of(
-                over_scan(RangeFunction::Rate),
-                over_boundary(RangeFunction::Rate),
-                binary_matching(BinaryOp::Add),
-            ),
-        ),
-        (
-            "`and(rate(x[5m]), rate(x[5m]))` - a set operation",
-            set_of(
-                over_scan(RangeFunction::Rate),
-                over_boundary(RangeFunction::Rate),
-                SetOp::And,
-                MatchingLabels::Ignoring(Vec::new()),
-            ),
-        ),
-        ("a constant", scalar(1.0, Arc::clone(&g))),
-        (
-            "`x` selected at each grid point",
-            instant(input(), 300_000, 0, Arc::clone(&g)),
+            "one label set arriving as two fragments",
+            vec![
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    0,
+                    vec![Some(-1.0), Some(2.0)],
+                    false,
+                ),
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    2,
+                    vec![Some(-3.0), Some(4.0)],
+                    true,
+                ),
+            ],
         ),
     ];
-    for (what, node) in nodes {
-        let mut inputs = Vec::new();
-        let (_, shared) = RuntimeNode::build(&node, &pool(), &mut inputs, "test".to_string())
-            .unwrap_or_else(|error| panic!("{what}: the runtime refuses this node: {error}"));
+    let expected = vec![
+        (0, Some(1.0)),
+        (1, Some(2.0)),
+        (2, Some(3.0)),
+        (3, Some(4.0)),
+    ];
+    for (what, inputs) in cases {
+        let without = run_to_end(&unmerged, &inputs);
+        let with = run_to_end(&merged, &inputs);
         assert_eq!(
-            shared,
-            matches!(unifies_its_own_contributions(&node), Some(false)),
-            "{what}: the runtime's `shared` flag and the plan-level answer disagree"
+            expected,
+            decided(&without),
+            "{what}: the tree without the merge"
         );
+        // The merge collects the pieces of one label set, so both streams answer the same rows: the
+        // merge changed what a consumer receives, not what the query computes.
+        assert_eq!(
+            decided(&without),
+            decided(&with),
+            "{what}: the inserted merge answered different rows"
+        );
+        // And it answers one series per label set, which is what it was inserted for. The label set
+        // is the one the unmerged tree answered: `abs` drops `__name__`, and a merge writes no label
+        // of its own, so both runs name the same series.
+        assert_eq!(1, with.len(), "{what}: {}", merged);
+        assert_eq!(
+            without.first().map(|chunk| chunk.series.metric.clone()),
+            with.first().map(|chunk| chunk.series.metric.clone()),
+            "{what}: the inserted merge answered a different series"
+        );
+        if inputs.len() > 1 {
+            assert_eq!(
+                2,
+                without.len(),
+                "{what}: the unmerged tree hands the pieces over separately"
+            );
+        }
     }
-    // The two `false`s the plan-level answer has to tell apart, stated once here so the loop above
-    // cannot pass by answering `Some(true)` everywhere: a boundary claims nothing, a merge claims
-    // what it performed, and a node that hands its input's series back unchanged passes the
-    // boundary's answer on.
-    assert_eq!(
-        None,
-        unifies_its_own_contributions(&evaluated_input(Arc::clone(&g))),
-        "a boundary claimed a proof"
-    );
-    assert_eq!(
-        Some(true),
-        unifies_its_own_contributions(&merge(evaluated_input(Arc::clone(&g)))),
-        "a merge did not claim what it performed"
-    );
-    assert_eq!(
-        None,
-        unifies_its_own_contributions(&vector_op(
-            evaluated_input(Arc::clone(&g)),
-            BoundVectorOp::TopK {
-                k: 1.0,
-                top: true,
-                group: by_job(),
-            },
-        )),
-        "a `Vector` over a boundary claimed a proof it cannot have"
-    );
 }
