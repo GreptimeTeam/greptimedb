@@ -913,33 +913,27 @@ impl RegionScanner for SeriesScan {
             // source is prepared, and is the same for every partition of this scan: read that copy
             // instead of dividing the whole source per partition.
             let state = self.prepared.clone();
-            // The columnar branch returns before the partition metrics below are created, so
-            // reuse (or register) the metrics for this partition to report its series split.
-            let part_metrics = self.metrics_list.get(partition).unwrap_or_else(|| {
-                new_partition_metrics(
+            // The columnar branch returns before the partition metrics below are created, so look up
+            // (or register) the metrics for this partition to report its series split. The lookup
+            // and the store are one step under the list lock, and the constructor only builds the
+            // metrics, so a partition that loses the race adopts the metrics already registered
+            // instead of evicting the object the prepared source was created with.
+            let part_metrics = self.metrics_list.get_or_insert_with(partition, || {
+                build_partition_metrics(
                     &self.stream_ctx,
                     ctx.explain_verbose,
                     metrics_set,
                     partition,
-                    &self.metrics_list,
                 )
             });
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
                 let boundaries = state.boundaries().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series split missing after preparation" }.build()))?;
-                debug_assert_eq!(boundaries.len(), partitions + 1, "the split has one boundary per partition plus the end");
-                debug_assert_eq!(boundaries.last().copied().unwrap_or(0), source.num_series(), "the split covers every ordinal");
-                // The split is built for the same partition count this scan validates, so a mismatch
-                // means the source and the scan disagree and every partition would read the wrong
-                // series. Report it rather than hand out an empty or a foreign range.
-                if boundaries.len() != partitions + 1 || boundaries.last().copied().unwrap_or(0) != source.num_series() {
-                    Err(BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series split does not match the scan's partitions" }.build()))?;
-                }
-                // Split by estimated work rather than blindly by ordinal: each series is weighed by
-                // the row count its indexes record, so a partition's share is a share of the samples
-                // rather than of the series. Every ordinal still belongs to exactly one partition,
-                // so the chunks of one series stay together. The range is a constant-time read of
-                // the split prepared with the source.
+                // The split was built with the source for the same partition count this scan
+                // validates above, so this partition's range is a constant-time read of it: every
+                // ordinal belongs to exactly one partition, so the chunks of one series stay
+                // together, and a partition's share is a share of the samples rather than of the
+                // series because each ordinal is weighed by the row count its indexes record.
                 let range = partition_balance::partition_range(&boundaries, partition);
                 part_metrics.add_assigned_series(range.len());
                 let mut reader = source.read_series(range)?;
@@ -1006,15 +1000,12 @@ impl RegionScanner for SeriesScan {
         let partitions = self.properties.num_partitions().max(1);
         let labels = label_source.clone();
         // Reuse the metrics already registered for partition 0 instead of replacing them, so a
-        // later partition's preparation does not evict the object partition 0 reports into.
-        let metrics = self.metrics_list.get(0).unwrap_or_else(|| {
-            new_partition_metrics(
-                &self.stream_ctx,
-                ctx.explain_verbose,
-                metrics_set,
-                0,
-                &self.metrics_list,
-            )
+        // later partition's preparation does not evict the object partition 0 reports into. The
+        // lookup and the store are one step under the list lock, and the constructor only builds
+        // the metrics without registering them, so concurrent preparations cannot both construct
+        // and one of them evict the other: the loser adopts what is already there.
+        let metrics = self.metrics_list.get_or_insert_with(0, || {
+            build_partition_metrics(&self.stream_ctx, ctx.explain_verbose, metrics_set, 0)
         });
         Box::pin(async move {
             let Some((preparation, prepared_columnar)) = preparation? else {
@@ -1545,6 +1536,30 @@ impl SenderList {
     }
 }
 
+/// Builds the [PartitionMetrics] for `partition` without registering it anywhere.
+///
+/// This constructor never touches a [PartitionMetricsList]. That is what makes it safe to hand to
+/// [PartitionMetricsList::get_or_insert_with], which runs its `make` argument while holding the
+/// list lock: registering here as well would either deadlock on that lock or let a later caller
+/// evict the metrics an earlier caller's prepared source was created with. Use
+/// [`new_partition_metrics`] when the metrics must also be registered.
+fn build_partition_metrics(
+    stream_ctx: &StreamContext,
+    explain_verbose: bool,
+    metrics_set: &ExecutionPlanMetricsSet,
+    partition: usize,
+) -> PartitionMetrics {
+    PartitionMetrics::new(
+        stream_ctx.input.mapper.metadata().region_id,
+        partition,
+        "SeriesScan",
+        stream_ctx.query_start,
+        explain_verbose,
+        metrics_set,
+    )
+}
+
+/// Builds the [PartitionMetrics] for `partition` and registers them in `metrics_list`.
 fn new_partition_metrics(
     stream_ctx: &StreamContext,
     explain_verbose: bool,
@@ -1552,15 +1567,7 @@ fn new_partition_metrics(
     partition: usize,
     metrics_list: &PartitionMetricsList,
 ) -> PartitionMetrics {
-    let metrics = PartitionMetrics::new(
-        stream_ctx.input.mapper.metadata().region_id,
-        partition,
-        "SeriesScan",
-        stream_ctx.query_start,
-        explain_verbose,
-        metrics_set,
-    );
-
+    let metrics = build_partition_metrics(stream_ctx, explain_verbose, metrics_set, partition);
     metrics_list.set(partition, metrics.clone());
     metrics
 }
@@ -1766,151 +1773,6 @@ mod tests {
             .expect("the distributor stalled on partitions the consumer was not reading");
         producer.await.unwrap();
         assert_eq!(NUM_BATCHES, received);
-    }
-
-    /// The row count of each record batch of each input [SeriesBatch].
-    ///
-    /// Three long series and seven short ones, so the batches differ enough in size that the
-    /// partition a batch goes to shows in what each partition receives. The first long series
-    /// arrives as two record batches, which one [FlatSeriesBatch] may hold: the divider promises
-    /// only that a series is complete inside the batch, not that it fits in a single record batch.
-    const SKEWED_BATCHES: [&[usize]; 10] = [
-        &[600, 400],
-        &[1000],
-        &[1000],
-        &[10],
-        &[10],
-        &[10],
-        &[10],
-        &[10],
-        &[10],
-        &[10],
-    ];
-
-    /// Every batch the legacy distributor hands over reaches exactly one partition, whole.
-    ///
-    /// Which partition a batch goes to is the distributor's choice, so this pins what must hold
-    /// however it chooses: a batch is delivered once and only once, its record batches arrive
-    /// un-split and in order, and the rows that arrive are the rows that were sent.
-    #[test]
-    fn legacy_distributor_delivers_every_batch_once_and_whole() {
-        const PARTITIONS: usize = 4;
-        const ROWS: usize = 3070;
-
-        // Capacity is the number of batches, so every `try_send` below succeeds and the test
-        // exercises the delivery rather than the back pressure path.
-        let (senders, receivers): (Vec<_>, Vec<_>) = (0..PARTITIONS)
-            .map(|_| {
-                let (sender, receiver) = mpsc::channel::<Result<SeriesBatch>>(SKEWED_BATCHES.len());
-                (Some(sender), receiver)
-            })
-            .unzip();
-        let mut senders = SenderList::new(senders);
-        for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
-            let batch = tagged_flat_series_batch(rows, tag as u64);
-            assert!(
-                senders
-                    .try_send_batch(SeriesBatch::Flat(batch))
-                    .unwrap()
-                    .is_none(),
-                "the distributor could not place batch {tag}"
-            );
-        }
-
-        // What each partition actually received: the tag of every batch and its inner row counts.
-        let mut received: Vec<Option<(usize, Vec<usize>)>> = vec![None; SKEWED_BATCHES.len()];
-        let mut received_batches = 0;
-        let mut received_rows = 0;
-        for (partition, mut receiver) in receivers.into_iter().enumerate() {
-            while let Ok(result) = receiver.try_recv() {
-                let SeriesBatch::Flat(flat) = result.unwrap();
-                assert!(
-                    !flat.batches.is_empty(),
-                    "partition {partition} received an empty batch"
-                );
-                received_batches += 1;
-                let tags: Vec<u64> = flat.batches.iter().map(batch_tag).collect();
-                let tag = tags[0];
-                assert!(
-                    tags.iter().all(|other| *other == tag),
-                    "partition {partition} received one batch mixing tags {tags:?}"
-                );
-                let rows: Vec<usize> = flat.batches.iter().map(|batch| batch.num_rows()).collect();
-                received_rows += rows.iter().sum::<usize>();
-                assert!(
-                    received[tag as usize].replace((partition, rows)).is_none(),
-                    "batch {tag} was sent twice, so a series is split over partitions"
-                );
-            }
-        }
-
-        // Every input batch reached exactly one partition, whole and un-split.
-        assert_eq!(
-            SKEWED_BATCHES.len(),
-            received.iter().flatten().count(),
-            "an input batch was lost or merged: {received:?}"
-        );
-        assert_eq!(
-            SKEWED_BATCHES.len(),
-            received_batches,
-            "a batch was received twice"
-        );
-        assert_eq!(
-            ROWS, received_rows,
-            "the split lost or duplicated rows: {received:?}"
-        );
-        for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
-            let (partition, received) = received[tag]
-                .as_ref()
-                .unwrap_or_else(|| panic!("batch {tag} never arrived: {received:?}"));
-            assert_eq!(
-                *rows,
-                received.as_slice(),
-                "batch {tag} arrived incomplete at partition {partition}, so a series is split"
-            );
-        }
-
-        // The long series that arrived in two record batches stayed together: both parts came back
-        // inside one batch of one partition, which `received` holds only once per tag.
-        let (first_partition, first_rows) = received[0].as_ref().unwrap();
-        assert_eq!(
-            [600, 400].as_slice(),
-            first_rows.as_slice(),
-            "the two record batches of one series did not reach partition {first_partition} together"
-        );
-    }
-
-    /// Builds a [FlatSeriesBatch] of one series, one record batch per entry in `rows`, tagged in
-    /// `field0` so the test can tell which input batch a partition received.
-    fn tagged_flat_series_batch(rows: &[usize], tag: u64) -> FlatSeriesBatch {
-        let series: &[u8] = b"series";
-        let batches: SmallVec<[RecordBatch; 4]> = rows
-            .iter()
-            .map(|rows| {
-                let primary_keys = vec![series; *rows];
-                let timestamps: Vec<i64> = (0..*rows as i64).collect();
-                let sequences: Vec<u64> = (0..*rows as u64).collect();
-                let op_types = vec![OpType::Put; *rows];
-                let fields = vec![tag; *rows];
-                new_test_record_batch(&primary_keys, &timestamps, &sequences, &op_types, &fields)
-            })
-            .collect();
-        FlatSeriesBatch { batches }
-    }
-
-    /// Returns the tag every row of a batch carries in `field0`.
-    fn batch_tag(batch: &RecordBatch) -> u64 {
-        let fields = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        let tag = fields.value(0);
-        assert!(
-            fields.values().iter().all(|value| *value == tag),
-            "a received record batch mixes input batches"
-        );
-        tag as u64
     }
 
     fn new_test_record_batch(

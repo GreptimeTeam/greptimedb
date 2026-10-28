@@ -597,29 +597,6 @@ pub trait PreparedSeriesSource: Send + Sync {
     /// Returns identity metadata for an ordinal without polling sample data.
     fn series_info(&self, ordinal: usize) -> Result<SeriesInfo, BoxedError>;
 
-    /// Returns a cheap estimate of the work reading the series at `ordinal` costs.
-    ///
-    /// A partition assignment weighs series by it, so that each partition carries about the same
-    /// amount of work rather than the same number of series. A long series costs far more to
-    /// evaluate than a short one, and giving both the same weight leaves the long one's partition
-    /// finishing last while the others idle.
-    ///
-    /// The figure is a sample count, so only costs of the same source are comparable: it is a work
-    /// estimate, not a duration, and it must be obtainable without reading sample data. A source
-    /// that cannot estimate its series honestly says so by not overriding this: every series then
-    /// weighs the same and the assignment stays the count split it was before, rather than reporting
-    /// a made-up figure that would make the split look balanced.
-    ///
-    /// `ordinal` is a precondition, not a checked argument: it must be below
-    /// [`num_series`](Self::num_series) of this source, as it is for [`series_info`](Self::series_info)
-    /// and [`read_series`](Self::read_series). Those two report an out-of-range ordinal as an error,
-    /// but this returns a plain number and cannot, so an ordinal past the end is a caller bug and
-    /// yields whatever fallback the source has rather than a diagnostic.
-    fn series_cost(&self, ordinal: usize) -> usize {
-        let _ = ordinal;
-        1
-    }
-
     /// Creates an independent reader for the half-open ordinal range.
     fn read_series(
         &self,

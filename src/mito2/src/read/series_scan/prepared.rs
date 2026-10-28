@@ -253,10 +253,9 @@ fn collect_inputs(
 /// a share of the rows rather than of the series count.
 ///
 /// The row count is a column of the candidate batch the index already returned, so reading it costs
-/// no extra I/O. The sum is built once while the source is prepared ([`Self::cost`] and
-/// [`Self::costed_by`] say how repeats are handled) and lives on the candidate, which every partition
-/// shares: [`PreparedSeriesSource::series_cost`] reads it straight off the ordinal, so a second copy
-/// of the per-series costs does not have to outlive preparation.
+/// no extra I/O. The sum is built once while the source is prepared and lives on the candidate, which
+/// every partition shares, so a second copy of the per-series costs does not have to outlive
+/// preparation.
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
@@ -267,13 +266,6 @@ struct Candidate {
     /// batch the candidate is built from, so it costs no extra read, and it is the one per-series
     /// size the index carries.
     cost: usize,
-    /// Which artifact contributed [`Self::cost`] last.
-    ///
-    /// One artifact covers one time bucket, so a series that spans several buckets is discovered
-    /// once per bucket and each of them reports only its own rows. The counts add up across
-    /// artifacts, but a second row for the same series from the *same* artifact would describe rows
-    /// the count already covers, so this identifies a repeat instead of adding it twice.
-    costed_by: usize,
 }
 
 struct ColumnarPreparedSource {
@@ -302,6 +294,18 @@ impl ColumnarPreparedSource {
     /// source again; see [`partition_balance::partition_range`].
     fn boundaries(&self) -> Arc<[usize]> {
         self.boundaries.clone()
+    }
+
+    /// Returns the estimated cost of the series at `ordinal`.
+    ///
+    /// A valid ordinal comes from [`PreparedSeriesSource::num_series`] of this same source, so the
+    /// candidate is there; the fallback keeps an out-of-range ordinal from panicking. Only tests read
+    /// it: the split the source publishes already holds the per-partition result of these costs.
+    #[cfg(test)]
+    pub(crate) fn series_cost(&self, ordinal: usize) -> usize {
+        self.candidates
+            .get(ordinal)
+            .map_or(1, |candidate| candidate.cost)
     }
 
     async fn prepare(
@@ -337,22 +341,10 @@ impl ColumnarPreparedSource {
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
-        // Read in bucket order, so the result does not depend on how the hash set happens to be
-        // laid out: the costs add up to the same total in any order, but a stable one keeps the
-        // preparation reproducible and the reads of adjacent buckets adjacent.
-        let mut indexes = indexes
-            .into_iter()
-            .map(|id| (index.version.series_indexes[&id].entry().bucket_start, id))
-            .collect::<Vec<_>>();
-        indexes.sort_unstable_by(|(a_start, a_id), (b_start, b_id)| {
-            a_start
-                .cmp(b_start)
-                .then_with(|| a_id.as_bytes().cmp(b_id.as_bytes()))
-        });
         // The artifacts are one per time bucket, and a series that spans several of them is seen
-        // once per bucket. The position identifies them, so a repeated row from one artifact is not
-        // counted twice while the rows of another artifact are added.
-        for (artifact, (_, id)) in indexes.into_iter().enumerate() {
+        // once per bucket: each reports only its own rows, so the costs add up to the rows the
+        // query reads for that series.
+        for id in indexes {
             let reader = ColumnarSeriesFormat::default()
                 .reader(
                     index.store.clone(),
@@ -458,7 +450,6 @@ impl ColumnarPreparedSource {
                         .map_err(|e| invalid(e.to_string()))?;
                     let is_new = merge_candidate(
                         &mut candidates,
-                        artifact,
                         id,
                         key,
                         values,
@@ -517,17 +508,16 @@ impl ColumnarPreparedSource {
 
 /// Adds one series row of one series index artifact to `candidates`.
 ///
-/// `artifact` identifies the artifact the row came from, and `cost` is the row count that artifact
-/// records for the series. An artifact covers one time bucket, so it reports only the rows of that
-/// bucket: a series that a query reads from several buckets costs the rows of all of them, and the
-/// counts therefore add up instead of the first artifact's count standing for the whole series. A
-/// row repeated for a series the same artifact already reported is not added again, because its row
-/// count already covers those rows.
+/// `cost` is the row count the artifact the row came from records for the series. An artifact covers
+/// one time bucket, so it reports only the rows of that bucket: a series that a query reads from
+/// several buckets costs the rows of all of them, and the counts therefore add up instead of the
+/// first artifact's count standing for the whole series. One artifact cannot report a series twice --
+/// the columnar reader rejects a block whose TSIDs are not strictly increasing, and unordered blocks
+/// and parts -- so every row reaching here adds its own bucket's rows.
 ///
 /// Returns whether the row added a series, which the caller sizes its reservation for.
 fn merge_candidate(
     candidates: &mut BTreeMap<MetricSeriesId, Candidate>,
-    artifact: usize,
     id: MetricSeriesId,
     key: Vec<u8>,
     tags: HashMap<u32, Option<String>>,
@@ -537,11 +527,8 @@ fn merge_candidate(
         if previous.key.as_slice() != key.as_slice() {
             return Err(invalid("conflicting labels for the same table ID and TSID"));
         }
-        if previous.costed_by != artifact {
-            // Same series, another bucket: the query reads both, so it costs both row counts.
-            previous.cost = previous.cost.saturating_add(cost);
-            previous.costed_by = artifact;
-        }
+        // Same series, another bucket: the query reads both, so it costs both row counts.
+        previous.cost = previous.cost.saturating_add(cost);
         return Ok(false);
     }
     candidates.insert(
@@ -551,7 +538,6 @@ fn merge_candidate(
             key: Buffer::from(key),
             tags,
             cost,
-            costed_by: artifact,
         },
     );
     Ok(true)
@@ -563,13 +549,6 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
     }
     fn label_source(&self) -> &RawLabelSource {
         &self.labels
-    }
-    fn series_cost(&self, ordinal: usize) -> usize {
-        // Valid ordinals come from `num_series` of this same source, so the candidate is there; the
-        // fallback keeps an out-of-range ordinal from panicking in a method that cannot report one.
-        self.candidates
-            .get(ordinal)
-            .map_or(1, |candidate| candidate.cost)
     }
     fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
         let candidate = self

@@ -961,8 +961,49 @@ impl PartitionMetricsList {
     }
 
     /// Returns the metrics already set at `partition`, if any.
+    ///
+    /// The scan path looks a slot up through [`Self::get_or_insert_with`] only, because a separate
+    /// `get` followed by an insert is the check-then-act pair that races. Reading a slot back on its
+    /// own is therefore a test-only operation.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn get(&self, partition: usize) -> Option<PartitionMetrics> {
         self.0.lock().unwrap().get(partition).cloned().flatten()
+    }
+
+    /// Returns the metrics registered at `partition`, creating and registering them if absent.
+    ///
+    /// The absence check, the growth of the list, the `make` call and the store are one critical
+    /// section, so two callers can never both observe an empty slot for the same `partition`: the
+    /// second caller only reaches the check after the first one has stored its object, so it finds
+    /// the slot occupied and adopts that object instead of constructing a replacement. Every caller
+    /// therefore returns the object that ends up registered, and no caller can evict the
+    /// [PartitionMetrics] another caller already handed to a prepared source.
+    ///
+    /// `make` runs **with this list's lock held**, so it must be a pure constructor: it may build a
+    /// [PartitionMetrics], but it must not register it anywhere — in particular not through
+    /// [`Self::set`]. A `make` that registers would break this method in one of two ways: through
+    /// [`Self::set`] it would deadlock, because that takes this already held, non-reentrant mutex;
+    /// through any other route it would reopen the very race this method closes, because a value
+    /// stored while `make` runs would be overwritten by, or adopted in place of, the object stored
+    /// below.
+    pub(crate) fn get_or_insert_with(
+        &self,
+        partition: usize,
+        make: impl FnOnce() -> PartitionMetrics,
+    ) -> PartitionMetrics {
+        let mut list = self.0.lock().unwrap();
+        if list.len() <= partition {
+            list.resize(partition + 1, None);
+        }
+        match &mut list[partition] {
+            // A concurrent caller constructed and stored the metrics while we waited for the lock.
+            Some(metrics) => metrics.clone(),
+            slot => {
+                let made = make();
+                *slot = Some(made.clone());
+                made
+            }
+        }
     }
 
     /// Format verbose metrics for each partition for explain.
