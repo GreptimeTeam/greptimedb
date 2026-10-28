@@ -459,7 +459,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                     // Account for the ID selection retained by the samples reader, including
                     // B-tree node overhead, before allocating it.
                     let selection_bytes = range.len() * (std::mem::size_of::<MetricSeriesId>() + 64);
-                    reservation.try_grow(selection_bytes).context(crate::error::MergeCandidateSeriesSnafu)?;
+                    reservation.try_grow(selection_bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                     let ids = candidates[range.clone()].iter().map(|c| c.id).collect::<BTreeSet<_>>();
                     let mut batches = reader.read(SamplesReadRequest {
                         projection: sample_projection(&reader.schema(), &context),
@@ -491,7 +491,7 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                             offset = end;
                             if flat.num_rows() == 0 { continue; }
                             let bytes = flat.get_array_memory_size();
-                            reservation.try_grow(bytes).context(crate::error::MergeCandidateSeriesSnafu)?;
+                            reservation.try_grow(bytes).context(crate::error::ScanMemoryExhaustedSnafu)?;
                             yield flat;
                             reservation.shrink(bytes);
                         }

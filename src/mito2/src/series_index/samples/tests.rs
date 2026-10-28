@@ -1165,6 +1165,93 @@ async fn batches_column_io_reuses_readers_and_releases_reservations() {
     let pool = Arc::new(GreedyMemoryPool::new(1));
     let mut request = full_request();
     request.memory_pool = Some(pool.clone());
-    assert!(reader.read(request).unwrap().try_next().await.is_err());
+    let error = reader.read(request).unwrap().try_next().await.unwrap_err();
+    assert_eq!(
+        common_error::ext::ErrorExt::status_code(&error),
+        common_error::status_code::StatusCode::RuntimeResourcesExhausted
+    );
     assert_eq!(0, pool.reserved());
+}
+
+#[tokio::test]
+async fn boundary_blocks_fetch_remaining_columns_only_for_selected_rows() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let store = store();
+    let m = metadata();
+    let format = ColumnarSamplesFormat {
+        block_rows: 3,
+        part_bytes: 1,
+        ..Default::default()
+    };
+    let input = vec![
+        (1, 1, 0, 6, 1, Some(7)),
+        (1, 1, 10, 5, 1, Some(8)),
+        (1, 1, 20, 4, 1, Some(9)),
+        (1, 1, 30, 3, 1, Some(10)),
+        (1, 1, 40, 2, 1, Some(11)),
+        (1, 1, 50, 1, 1, Some(12)),
+    ];
+    let handle = build(&format, &store, m.clone(), &[batch(&m, &input, false)]).await;
+    assert_eq!(2, manifest(&store, &handle).await.files.len());
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let creations = Arc::new(AtomicUsize::new(0));
+    let observed = reads.clone();
+    let opened = creations.clone();
+    let reader = format
+        .reader(
+            store.layer(
+                MockLayerBuilder::default()
+                    .reader_factory(Arc::new(move |path, _, inner| {
+                        if path.ends_with(".samples") {
+                            opened.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Box::new(RecordingRead {
+                            inner,
+                            path: path.into(),
+                            reads: observed.clone(),
+                        })
+                    }))
+                    .build()
+                    .unwrap(),
+            ),
+            handle,
+        )
+        .await
+        .unwrap();
+    reads.lock().unwrap().clear();
+    let mut empty = full_request();
+    empty.start = Some(1);
+    empty.end = Some(9);
+    let batches = reader
+        .read(empty)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(batches.is_empty());
+    assert_eq!(1, creations.load(Ordering::Relaxed));
+    let timestamp_read = {
+        let reads = reads.lock().unwrap();
+        // Header, trailer, root, then timestamps only. The second part is pruned.
+        assert_eq!(4, reads.len());
+        reads[3].clone()
+    };
+
+    reads.lock().unwrap().clear();
+    let mut partial = full_request();
+    partial.start = Some(5);
+    partial.end = Some(45);
+    let batches = reader
+        .read(partial)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(input[1..5], collect_rows(&batches));
+    assert_eq!(2, creations.load(Ordering::Relaxed));
+    let reads = reads.lock().unwrap();
+    // Both boundary blocks read timestamps before fetching remaining columns.
+    assert_eq!(10, reads.len());
+    assert_eq!(timestamp_read, reads[3]);
 }

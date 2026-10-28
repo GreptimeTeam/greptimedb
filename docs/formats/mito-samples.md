@@ -500,8 +500,9 @@ growth as parts complete; fail rather than constructing a manifest over 64 MiB.
 Use recorded sizes for reads; do not issue object stats just to locate trailers.
 Fetch metadata and selected column ranges only. A query lazily reuses one OpenDAL
 reader per accessed part across partition streams. Selected block columns are fetched
-in groups of at most 8 MiB with concurrency 8 and zero-gap coalescing; no unselected
-fields or neighboring blocks are prefetched. Boundary blocks read timestamps first
+with concurrency 8 and zero-gap coalescing; no unselected fields or neighboring
+blocks are prefetched. The block size limit and scan memory reservation bound
+retained buffers. Boundary blocks read timestamps first
 so empty selections avoid value I/O. Native requests reserve stored/decompressed
 buffers, selection, typed values, and output against the scan memory pool before
 payload reads, releasing the reservation when the yielded batch is consumed or

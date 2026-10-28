@@ -347,7 +347,7 @@ async fn read_block(
     if let Some(reservation) = &reservation {
         reservation
             .try_grow(bytes)
-            .context(crate::error::MergeCandidateSeriesSnafu)?;
+            .context(crate::error::ScanMemoryExhaustedSnafu)?;
     }
     let mut buffers = HashMap::new();
     if boundary {
@@ -484,44 +484,33 @@ async fn read_part_range(reader: &Reader, start: u64, end: u64) -> Result<bytes:
     Ok(bytes)
 }
 
-/// Fetch only selected ranges, in bounded groups. Zero-gap coalescing merges adjacent
-/// chunks without reading unselected fields or blocks. OpenDAL bounds concurrency to 8.
+/// Fetch selected ranges with zero-gap coalescing, without reading unselected
+/// fields or blocks. The block size and scan reservation bound retained buffers;
+/// OpenDAL bounds concurrency to 8.
 async fn fetch_columns(
     reader: &Reader,
     columns: &[&Column],
     buffers: &mut HashMap<u64, bytes::Bytes>,
 ) -> Result<()> {
-    const FETCH_BYTES: usize = 8 * 1024 * 1024;
-    let mut start = 0;
-    while start < columns.len() {
-        let mut end = start;
-        let mut bytes = 0;
-        while end < columns.len() {
-            let next = columns[end].payload.stored as usize;
-            if end > start && bytes + next > FETCH_BYTES {
-                break;
-            }
-            bytes += next;
-            end += 1;
-        }
-        let ranges = columns[start..end]
-            .iter()
-            .map(|column| Ok(column.payload.offset..column.payload.end()?))
-            .collect::<Result<Vec<_>>>()?;
-        let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let ranges = columns
+        .iter()
+        .map(|column| Ok(column.payload.offset..column.payload.end()?))
+        .collect::<Result<Vec<_>>>()?;
+    let fetched = reader.fetch(ranges).await.context(OpenDalSnafu)?;
+    require(
+        fetched.len() == columns.len(),
+        "sample fetch response count mismatch",
+    )?;
+    for (column, buffer) in columns.iter().zip(fetched) {
+        let bytes = buffer.to_bytes();
         require(
-            fetched.len() == end - start,
-            "sample fetch response count mismatch",
+            bytes.len() == column.payload.stored as usize,
+            "sample range length mismatch",
         )?;
-        for (column, buffer) in columns[start..end].iter().zip(fetched) {
-            let bytes = buffer.to_bytes();
-            require(
-                bytes.len() == column.payload.stored as usize,
-                "sample range length mismatch",
-            )?;
-            buffers.insert(column.payload.offset, bytes);
-        }
-        start = end;
+        buffers.insert(column.payload.offset, bytes);
     }
     Ok(())
 }
