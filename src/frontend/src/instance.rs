@@ -17,8 +17,6 @@ mod copy_in;
 mod dashboard;
 mod entity_graph;
 mod export_database;
-#[cfg(feature = "enterprise")]
-mod flow_write;
 mod grpc;
 mod import_packed;
 mod influxdb;
@@ -136,13 +134,6 @@ pub struct Instance {
     trace_aux_limiter: Option<RequestLimiter>,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
-    #[cfg(feature = "enterprise")]
-    flow_write_registry: Arc<
-        common_grpc::flow_write::FlowWriteRegistry<
-            flow_write::WritePayload,
-            common_grpc::flow_write::Reply,
-        >,
-    >,
 }
 
 impl Instance {
@@ -332,17 +323,6 @@ impl Instance {
                 timeout_recorder,
             );
 
-            #[cfg(feature = "enterprise")]
-            let result = if query_ctx.channel() == Channel::Internal
-                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
-            {
-                query_fut.await
-            } else {
-                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-                    .await
-                    .map_err(|_| error::CancelledSnafu.build())?
-            };
-            #[cfg(not(feature = "enterprise"))]
             let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
                 .map_err(|_| error::CancelledSnafu.build())?;
@@ -913,17 +893,6 @@ impl Instance {
 
             let query_fut = self.exec_plan_with_timeout(plan, query_ctx.clone(), timeout_recorder);
 
-            #[cfg(feature = "enterprise")]
-            let result = if query_ctx.channel() == Channel::Internal
-                && query_ctx.extension(common_grpc::flow_write::CHILD_KEY) == Some("1")
-            {
-                query_fut.await
-            } else {
-                CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
-                    .await
-                    .map_err(|_| error::CancelledSnafu.build())?
-            };
-            #[cfg(not(feature = "enterprise"))]
             let result = CancellableFuture::new(query_fut, ticket.cancellation_handle.clone())
                 .await
                 .map_err(|_| error::CancelledSnafu.build())?;

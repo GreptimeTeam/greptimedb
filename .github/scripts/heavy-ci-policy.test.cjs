@@ -6,15 +6,17 @@ const workflows = resolve(__dirname, '../workflows');
 const integration = readFileSync(resolve(workflows, 'integration.yml'), 'utf8');
 const suites = ['fuzztest', 'unstable-fuzztest', 'distributed-fuzztest', 'distributed-fuzztest-with-chaos'];
 const prerequisites = ['prepare-fuzz-targets', 'build-greptime-ci'];
-function enabled(job, { event = 'pull_request', action = 'synchronize', draft = false, attempt = 1, profile = 'none', repository = 'GreptimeTeam/greptimedb' } = {}) {
+function enabled(job, { event = 'pull_request', action = 'synchronize', draft = false, attempt = 1, profile = 'none', repository = 'GreptimeTeam/greptimedb', outputs = {}, results = {}, cancelled = false } = {}) {
   const expression = integration.match(new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}`, 'm'))[1];
   // These job guards use only operators whose semantics match JS for this fixture.
-  return new Function('github', 'inputs', `return (${expression});`)(
+  return new Function('github', 'inputs', 'needs', 'cancelled', `return (${expression});`)(
     { repository, event_name: event, event: { action, pull_request: { draft } }, run_attempt: attempt },
-    { fuzz_profile: profile, ci_command: false }
+    { fuzz_profile: profile, ci_command: false },
+    { scope: { outputs }, ...Object.fromEntries(['build', ...prerequisites].map(name => [name, { result: results[name] || 'success' }])) },
+    () => cancelled
   );
 }
-test('automatic full fuzz on ready PR admission and schedule, not every update', () => {
+test('fuzz event policy on ready PR admission and schedule, not every update', () => {
   for (const job of [...suites, ...prerequisites]) {
     for (const action of ['opened', 'ready_for_review']) assert.equal(enabled(job, { action }), true, job);
     for (const action of ['synchronize', 'reopened']) assert.equal(enabled(job, { action }), false, job);
@@ -48,4 +50,25 @@ test('Windows compilation stays in Rust CI; test coverage remains in Nightly CI'
   assert.match(nightly, /^  sqlness-windows:/m);
   assert.match(nightly, /cargo nextest run -F dashboard/);
   assert.match(nightly, /^  workflow_dispatch:/m);
+});
+
+test('scope exclusions and dependency failures compose with the event policy', () => {
+  const gates = {
+    'prepare-fuzz-targets': 'any_fuzz', 'build-greptime-ci': 'build_ci_needed',
+    fuzztest: 'fuzz_standalone', 'unstable-fuzztest': 'fuzz_unstable',
+    'distributed-fuzztest': 'fuzz_distributed', 'distributed-fuzztest-with-chaos': 'fuzz_chaos'
+  };
+  for (const [job, gate] of Object.entries(gates)) {
+    assert.equal(enabled(job, { action: 'opened', outputs: { [gate]: 'false' } }), false, job);
+    assert.equal(enabled(job, { action: 'opened', outputs: {} }), true, job);
+    assert.equal(enabled(job, { outputs: { [gate]: 'true' } }), false, job);
+    assert.equal(enabled(job, { action: 'opened', cancelled: true }), false, job);
+  }
+  for (const job of suites) {
+    for (const result of ['failure', 'skipped', 'cancelled']) {
+      assert.equal(enabled(job, { action: 'opened', results: { 'prepare-fuzz-targets': result } }), false, job);
+      const build = job === 'fuzztest' ? 'build' : 'build-greptime-ci';
+      assert.equal(enabled(job, { action: 'opened', results: { [build]: result } }), false, job);
+    }
+  }
 });

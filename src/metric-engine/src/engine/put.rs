@@ -2379,7 +2379,7 @@ mod tests {
         let at = |n| start + n * Duration::from_secs(10);
         let grant = |n| {
             engine
-                .set_region_role_with_lease(physical_region_id, RegionRole::Leader, at(n))
+                .set_region_role_with_lease(physical_region_id, RegionRole::Leader, start, at(n))
                 .unwrap()
         };
         let expire = |n| mito.freeze_lease_clock(at(n));

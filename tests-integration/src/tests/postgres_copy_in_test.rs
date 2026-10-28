@@ -316,6 +316,7 @@ async fn test_postgres_copy_in_failed_copy_then_new_copy() {
         Err(e) => e,
     };
     assert!(err.as_db_error().is_some(), "{err}");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     // The connection is usable and a NEW copy succeeds on it.
     let rows = feed_copy_in(
@@ -516,6 +517,305 @@ async fn test_postgres_copy_in_empty_field_is_null() {
     assert_eq!(rows[1], (true, None));
     // Unquoted empty field: NULL.
     assert_eq!(rows[2], (true, None));
+
+    server.shutdown().await.unwrap();
+}
+
+/// `COPY FROM STDIN WITH (FORMAT influxdb)` ingests line protocol through
+/// the same pipeline as the HTTP influxdb write endpoint: lines route to
+/// their own measurements, tables are auto-created, and a batch behaves
+/// like an HTTP write of the same bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_line_protocol() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let payload = b"monitor,host=hosta cpu=66.6,memory=1024 1663840496100023100\n\
+                    monitor,host=hostb memory=1027 1663840496400340001\n\
+                    weather,location=us-midwest temperature=82 1663840496100023102\n";
+
+    // Feed byte-by-byte-ish: lines and UTF-8 may span CopyData chunks.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        payload.chunks(7).map(Bytes::copy_from_slice).collect(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 3);
+
+    let messages = client
+        .simple_query("SELECT host, cpu, memory FROM monitor ORDER BY host")
+        .await
+        .unwrap();
+    let rows: Vec<(String, String, String)> = messages
+        .iter()
+        .filter_map(|m| {
+            let tokio_postgres::SimpleQueryMessage::Row(row) = m else {
+                return None;
+            };
+            Some((
+                row.get(0).unwrap_or("").to_string(),
+                row.get(1).unwrap_or("").to_string(),
+                row.get(2).unwrap_or("").to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("hosta".into(), "66.6".into(), "1024.0".into()),
+            ("hostb".into(), "".into(), "1027.0".into()),
+        ]
+    );
+
+    let messages = client
+        .simple_query("SELECT temperature FROM weather")
+        .await
+        .unwrap();
+    let temps: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(temps, vec!["82.0".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// The `precision` option carries the HTTP endpoint's semantics:
+/// nanosecond timestamps by default, other units on request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_precision() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_prec").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb, precision 'ms')",
+        vec![Bytes::from_static(b"prec,host=h v=1 1465839830100\n")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    let messages = client
+        .simple_query("SELECT CAST(greptime_timestamp AS BIGINT) FROM prec")
+        .await
+        .unwrap();
+    let ts: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    // 1465839830100 ms == 1465839830100000000 ns
+    assert_eq!(ts.len(), 1);
+    let ts_ns: i64 = ts[0].parse().unwrap();
+    assert_eq!(ts_ns, 1465839830100000000);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Records with newlines INSIDE quoted field values are one line-protocol
+/// record: the parser owns record boundaries, so a CopyData chunk boundary
+/// inside the quoted string — the case a naive line splitter breaks on —
+/// must not split it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_multiline_quoted_field() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_ml").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // A record whose string field value contains a physical newline, and
+    // one with a backslash right before the newline (the parser skips the
+    // escaped newline; also not a record boundary).
+    let payload: Vec<u8> = b"mlog,host=a line=\"first\nsecond\" 100\n\
+                              mlog,host=b line=\"tail\\\nmore\" 200\n"
+        .to_vec();
+
+    // Split exactly on the internal newline of the first record: chunk 1
+    // ends after `first`, chunk 2 starts with the newline.
+    let split_at = payload.windows(6).position(|w| w == b"first\n").unwrap() + b"first".len();
+    let (head, tail) = payload.split_at(split_at);
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::copy_from_slice(head), Bytes::copy_from_slice(tail)],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let messages = client
+        .simple_query("SELECT line FROM mlog ORDER BY host")
+        .await
+        .unwrap();
+    let lines: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    // The quoted values keep their physical newlines: `first`, newline,
+    // `second`; and `tail`, backslash, newline, `more` (a backslash only
+    // escapes `\` and `"` in line-protocol strings, so it stays literal
+    // before the newline).
+    assert_eq!(
+        lines,
+        vec!["first\nsecond".to_string(), "tail\\\nmore".to_string()]
+    );
+
+    server.shutdown().await.unwrap();
+}
+
+/// The payload is bounded by the HTTP write endpoints' own body limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_payload_limit() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_cap").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // The HTTP write endpoints' default body limit (64 MiB) — kept in
+    // sync with servers::http::DEFAULT_BODY_LIMIT.
+    let limit = 64 * 1024 * 1024;
+    // Several chunks over the limit, none containing a record boundary.
+    let chunk = vec![b'x'; 1024 * 1024];
+    let mut sent = 0usize;
+    let mut sink = Box::pin(
+        client
+            .copy_in("COPY FROM STDIN WITH (FORMAT influxdb)")
+            .await
+            .unwrap(),
+    );
+    while sent <= limit {
+        sink.as_mut()
+            .send(Bytes::from(chunk.clone()))
+            .await
+            .unwrap();
+        sent += chunk.len();
+    }
+    // The cap fires mid-stream; the error surfaces when the copy
+    // completes (the sink buffers sends locally).
+    let error = sink
+        .as_mut()
+        .finish()
+        .await
+        .expect_err("expected the oversized payload to fail");
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("exceeds"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+
+    // The connection stays usable.
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
+
+    server.shutdown().await.unwrap();
+}
+
+/// The regression for the retired line-splitter's failure mode: with
+/// 32,767 ordinary records plus a multiline quoted record whose first
+/// physical line lands exactly on the old 32,768-line flush threshold —
+/// and a CopyData chunk boundary at the quoted value's internal newline —
+/// the whole payload must still ingest as one request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_flush_threshold_multiline() {
+    init_default_ut_logging();
+    let (_guard, server) =
+        setup_pg_server(StorageType::File, "pg_copy_in_influxdb_threshold").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // 32,767 ordinary records, then a record whose quoted value spans
+    // three physical lines.
+    let mut head = String::new();
+    for i in 0..32_767 {
+        head.push_str(&format!(
+            "m,host=h{i} v={i} {}
+",
+            1_000 + i
+        ));
+    }
+    head.push_str("mlog,host=z line=\"first\nsecond\nthird\" 99999");
+    let tail = "
+"
+    .to_string();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![
+            Bytes::from(head.into_bytes()),
+            Bytes::from(tail.into_bytes()),
+        ],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 32_768);
+
+    let messages = client.simple_query("SELECT line FROM mlog").await.unwrap();
+    let lines: Vec<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines, vec!["first\nsecond\nthird".to_string()]);
+
+    server.shutdown().await.unwrap();
+}
+
+/// Invalid UTF-8 fails the copy with a clear error and the connection
+/// stays usable; a trailing record without a newline is still ingested.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_postgres_copy_in_influxdb_invalid_utf8_and_trailing_record() {
+    init_default_ut_logging();
+    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_utf8").await;
+    let port = server.bind_addr().unwrap().port();
+    let client = connect(port).await;
+
+    // Trailing record without a newline: accepted.
+    let rows = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::from_static(b"m2,host=a v=7 300")],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+
+    // Invalid UTF-8: the copy fails, the connection stays usable.
+    let error = feed_copy_in(
+        &client,
+        "COPY FROM STDIN WITH (FORMAT influxdb)",
+        vec![Bytes::from_static(b"m3 v=1 100\n\xff\xfe")],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .as_db_error()
+            .map(|d| d.message().contains("not valid UTF-8"))
+            .unwrap_or(false),
+        "unexpected error: {error}"
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert!(!messages.is_empty());
 
     server.shutdown().await.unwrap();
 }

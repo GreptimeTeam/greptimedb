@@ -5,9 +5,9 @@ nextest and Windows SQLness run in the existing Nightly CI workflow, which also
 supports manual dispatch. Its existing schedule is Tuesday through Friday at
 07:00 Asia/Shanghai, not every day. No new Windows test job is added.
 
-Integration CI runs all fuzz suites when a non-draft PR is opened or marked
-ready for review, and on its existing weekday schedule (23:00 Asia/Shanghai,
-Monday through Friday). Ordinary pushes and reopening do not run fuzz; core
+Integration CI admits fuzz when a non-draft PR is opened or marked ready for
+review, selecting suites with the existing diff-scope classifier. Its weekday
+schedule (23:00 Asia/Shanghai, Monday through Friday) runs all fuzz suites. Ordinary pushes and reopening do not run fuzz; core
 integration checks still run. Merge groups continue to skip fuzz.
 
 Re-running an ordinary push-triggered Integration CI run does not enable fuzz.
