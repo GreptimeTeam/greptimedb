@@ -88,8 +88,9 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeProperties, NativeTree,
-    NativeType, merges_are_placeable_in, needs_single_execution_in, reads_across_series,
+    AggregateKind, BoundAggregate, CanonicalOwner, Grouping, NativeExpr, NativeNode,
+    NativeProperties, NativeTree, NativeType, merges_are_placeable_in, needs_single_execution_in,
+    reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
