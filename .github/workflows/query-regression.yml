@@ -26,6 +26,16 @@ on:
         description: Candidate ref/sha to build; reusable release calls must provide an immutable full SHA
         required: true
         type: string
+      base_image:
+        description: Base Docker image tag/digest (empty builds base_ref from source)
+        required: false
+        type: string
+        default: ""
+      candidate_image:
+        description: Candidate Docker image tag/digest (empty builds candidate_ref from source)
+        required: false
+        type: string
+        default: ""
       cargo_profile:
         description: Cargo profile to build base and candidate binaries with
         required: false
@@ -80,6 +90,16 @@ on:
         description: Runner HTTP timeout seconds
         required: true
         default: "300"
+      base_image:
+        description: Base Docker image tag/digest (empty builds base_ref from source)
+        required: false
+        type: string
+        default: ""
+      candidate_image:
+        description: Candidate Docker image tag/digest (empty builds candidate_ref from source)
+        required: false
+        type: string
+        default: ""
       cargo_profile:
         description: Cargo profile to build base and candidate binaries with
         required: true
@@ -214,6 +234,8 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       HEAD_REPO: ${{ inputs.head_repo }}
       BASE_REPO: ${{ inputs.base_repo }}
+      BASE_IMAGE: ${{ inputs.base_image }}
+      CANDIDATE_IMAGE: ${{ inputs.candidate_image }}
       BASE_REF: ${{ inputs.base_ref }}
       CANDIDATE_REF: ${{ inputs.candidate_ref || github.ref }}
       EVENT_MERGE_SHA: ${{ inputs.pr_number != '' && inputs.candidate_ref || '' }}
@@ -224,6 +246,16 @@ jobs:
       EXPECTED_RUNNER_UID: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
       EXPECTED_RUNNER_GID: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
     steps:
+      - name: Validate image target admission
+        run: |
+          if [[ "${PR_ADMISSION}" == "true" && ( -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" ) ]]; then
+            echo "PR admission requires source targets for verified commit attribution." >&2
+            exit 1
+          fi
+          if [[ -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" ]]; then
+            docker info >/dev/null
+          fi
+
       - name: Report provisioned ECS runner
         if: ${{ needs.provision.outputs.instance_id != '' }}
         shell: bash
@@ -694,6 +726,7 @@ jobs:
           sccache --show-stats
 
       - name: Build base greptime
+        if: ${{ inputs.base_image == '' }}
         working-directory: src
         run: |
           set -euo pipefail
@@ -733,7 +766,9 @@ jobs:
         run: |
           set -euo pipefail
           SECONDS=0
-          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          if [[ -z "${CANDIDATE_IMAGE}" ]]; then
+            cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
+          fi
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
           cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
           candidate_build_elapsed="${SECONDS}"
@@ -745,8 +780,10 @@ jobs:
             target_dir="debug"
           fi
           mkdir -p "${GITHUB_WORKSPACE}/query-regression-bins/candidate"
-          cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
-            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
+          if [[ -z "${CANDIDATE_IMAGE}" ]]; then
+            cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
+              "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
+          fi
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
             "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
           cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \

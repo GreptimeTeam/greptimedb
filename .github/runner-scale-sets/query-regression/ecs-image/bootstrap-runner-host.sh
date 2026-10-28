@@ -161,6 +161,7 @@ apt-get install -y --no-install-recommends \
 step "Create runner user (${RUNNER_UID}:${RUNNER_GID}) and environment"
 getent group "${RUNNER_GID}" > /dev/null || groupadd -g "${RUNNER_GID}" runner
 id -u runner > /dev/null 2>&1 || useradd -u "${RUNNER_UID}" -g "${RUNNER_GID}" -d /home/runner -s /bin/bash runner
+usermod -aG docker runner
 chown -R "${RUNNER_UID}:${RUNNER_GID}" "${DATA_ROOT}/runner"
 echo 'PATH=/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin' > "${DATA_ROOT}/runner/.env"
 chown "${RUNNER_UID}:${RUNNER_GID}" "${DATA_ROOT}/runner/.env"

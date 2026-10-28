@@ -495,17 +495,65 @@ query_regression_runner measure --case <case.toml> --fixture-generator <fixture>
 ## GitHub Actions
 
 `.github/workflows/query-regression.yml` provides an opt-in CI entrypoint for
-query regression runs. It builds its own binaries for now:
+query regression runs. By default, it builds its own binaries:
 
 - base `greptime` from the PR base commit, or `workflow_dispatch` `base_ref`
 - candidate `greptime`, `query_perf_fixture`, and `query_regression_runner` from
   the PR merge ref/current candidate checkout
 - outer driver and summary formatter from the candidate checkout
 
-The workflow builds base and candidate `greptime` as normal release-equivalent
-binaries. Candidate `query_perf_fixture` and `query_regression_runner` are the
+For source targets, the workflow builds `greptime` as a normal release-equivalent
+binary. Candidate `query_perf_fixture` and `query_regression_runner` are the
 extra head-side helpers; `finalize-remote` uses candidate `greptime datanode
 parquetbench/scanbench` as the read-bench tool against each target's data directory.
+
+### Docker image targets
+
+`base_image` and `candidate_image` are independent optional inputs to manual
+and reusable query-regression workflows. Leave an input empty to build that
+side from source, or set it to a GreptimeDB image tag/digest to skip its server
+build. All four source/image combinations are supported. PR slash-command runs
+continue to use verified source revisions; image overrides are rejected for PR
+admission so reports cannot attribute an image to a different commit.
+
+The candidate checkout still supplies cases and builds `query_perf_fixture`
+and `query_regression_runner`, even with two image targets. `base_ref` and
+`candidate_ref` remain required for reusable calls. Remote-write read-bench
+commands use the candidate target, including its image when configured.
+
+The local driver accepts `--base-image` / `--candidate-image` (or `BASE_IMAGE` /
+`CANDIDATE_IMAGE`). An image overrides that side's `--*-bin`. For example:
+
+```bash
+python3 .github/scripts/query-regression-run.py \
+  --candidate-src . \
+  --base-image greptime/greptimedb:v1.3.0 \
+  --candidate-bin /absolute/path/to/candidate/greptime \
+  --fixture-generator /absolute/path/to/query_perf_fixture \
+  --runner /absolute/path/to/query_regression_runner \
+  --cases tests/perf/query_cases/smoke_direct_sst/case.toml \
+  --summary-script .github/scripts/query-regression-summary.py
+```
+
+Image targets require Linux and a local Docker daemon accessible to the runner
+user; the workflow checks access before building. The ECS image builder and
+manual host bootstrap add the runner to the Docker group. Existing hosts need
+an administrator to provision this access and restart the runner service, or
+a rebuilt ECS image, before selecting image targets.
+Images must expose the GreptimeDB binary at `/greptime/bin/greptime` and support
+the commands and data formats used by the selected cases. Images are pulled
+when absent locally, then pinned to their inspected image ID for the entire
+run; use a registry digest for repeatability across hosts. Reports include
+requested images, resolved IDs and repository digests alongside source commit
+identities.
+
+Containers use host networking and the runner's UID/GID. The run work directory
+is bind-mounted at the same absolute path, preserving generated configuration,
+SST materialization, logs and post-stop storage inspection. No additional CPU
+or memory limits are imposed. Keep host resources and workloads comparable;
+container execution and image build options can still affect timing. Use a
+fresh work directory for each run. Container cleanup completes before the
+lifecycle proceeds to storage inspection or a component restart.
 
 The workflow runs when an allowlisted repository admin comments
 `/query-regression` on a non-draft PR. It does not rerun on pushes,

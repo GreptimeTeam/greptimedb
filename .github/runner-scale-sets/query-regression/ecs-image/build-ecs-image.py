@@ -137,6 +137,7 @@ docker cp "${{container}}:/home/runner" /home/runner
 # Runner identity mirrors the container image (UID/GID 1001).
 groupadd --gid 1001 runner 2>/dev/null || true
 useradd --uid 1001 --gid 1001 --home-dir /home/runner --shell /bin/bash runner 2>/dev/null || true
+usermod -aG docker runner
 chown -R 1001:1001 /home/runner
 
 mkdir -p /opt/ephemeral-github-runner
