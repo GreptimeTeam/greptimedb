@@ -27,11 +27,11 @@ use datatypes::series::{SeriesLabels, SeriesOrdering};
 use crate::histogram_eval::HistogramFunction;
 use crate::map::MathOp;
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::RangeFunction;
-use crate::select::SortOrder;
+use crate::select::{MatchOp, SortOrder};
 use crate::vector_match::{BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp};
 
 /// The header line of every tree.
@@ -98,8 +98,10 @@ fn describe(node: &NativeNode) -> String {
             if let Some(at) = op.at_ms {
                 text.push_str(&format!(" @ {at}ms"));
             }
-            if op.timestamp {
-                text.push_str(" timestamp");
+            match op.value {
+                InstantValue::Sample => {}
+                InstantValue::Timestamp => text.push_str(" timestamp"),
+                InstantValue::InfoTimestamp => text.push_str(" info timestamp"),
             }
             text
         }
@@ -173,6 +175,29 @@ fn describe(node: &NativeNode) -> String {
                 SetOp::Unless => "unless",
             },
             matching_labels(&op.labels)
+        ),
+        NativeExpr::Info { selector, .. } => format!(
+            "names [{}] data [{}]{}",
+            selector
+                .name_matchers
+                .iter()
+                .map(|(op, value)| format!(
+                    "__name__{}\"{value}\"",
+                    match op {
+                        MatchOp::Equal => "=",
+                        MatchOp::NotEqual => "!=",
+                        MatchOp::Regex => "=~",
+                        MatchOp::NotRegex => "!~",
+                    }
+                ))
+                .collect::<Vec<_>>()
+                .join(", "),
+            label_list(&selector.data_labels),
+            if selector.keep_unmatched {
+                " keep unmatched"
+            } else {
+                ""
+            }
         ),
     }
 }
@@ -365,6 +390,7 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
         NativeExpr::Set { .. } => "Set",
+        NativeExpr::Info { .. } => "Info",
     }
 }
 
@@ -393,6 +419,10 @@ fn display_node(
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             display_node(f, left, depth + 1, "left")?;
             display_node(f, right, depth + 1, "right")?;
+        }
+        NativeExpr::Info { base, info, .. } => {
+            display_node(f, base, depth + 1, "base")?;
+            display_node(f, info, depth + 1, "info")?;
         }
     }
     Ok(())

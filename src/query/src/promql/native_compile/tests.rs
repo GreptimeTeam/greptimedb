@@ -28,9 +28,10 @@ use promql::map::MathOp;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundSetOp,
-    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::RangeFunction;
+use promql::select::MatchOp;
 use promql::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
 use promql_parser::parser::{
     AtModifier, BinModifier, EvalStmt, Expr as PromExpr, NumberLiteral, Offset,
@@ -1921,6 +1922,171 @@ fn a_set_operation_refuses_a_fill_value_and_several_fields() {
         let expected = format!("{} and {} fields", fields.0, fields.1);
         assert!(
             matches!(&error, DataFusionError::NotImplemented(message) if message.contains(&expected)),
+            "{query}: {error}"
+        );
+    }
+}
+
+/// `info` binds the base first and then the instant selection of its info metric, reporting the
+/// times of the samples it selects, with the selector split the way Prometheus uses it: the name
+/// picks the info metric, `target_info` when there is none, and the other matchers both filter the
+/// info series and name the labels that are copied.
+#[test]
+fn info_binds_its_info_metric_after_the_base() {
+    for (query, metric, matchers, names, keep_unmatched) in [
+        ("info(rate(x[5m]))", "target_info", vec![], vec![], true),
+        (
+            "info(rate(x[5m]), {__name__=\"build_info\", version=~\"v.+\", zone=~\".*\"})",
+            "build_info",
+            vec!["version", "zone"],
+            vec!["build_info"],
+            false,
+        ),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let [base_input, info_input] = &compiled.inputs[..] else {
+            panic!("{query}: {} inputs", compiled.inputs.len());
+        };
+        assert_eq!(
+            base_input.requirement.metric.as_deref(),
+            Some("x"),
+            "{query}"
+        );
+        let requirement = &info_input.requirement;
+        assert_eq!(requirement.metric.as_deref(), Some(metric), "{query}");
+        assert_eq!(
+            requirement
+                .matchers
+                .matchers
+                .iter()
+                .map(|matcher| matcher.name.as_str())
+                .collect::<Vec<_>>(),
+            matchers,
+            "{query}"
+        );
+        assert_eq!(
+            requirement.timing,
+            SelectorTiming::Instant { lookback_ms: 5_000 },
+            "{query}"
+        );
+        let NativeExpr::Info {
+            base,
+            info,
+            selector,
+        } = &compiled.tree.root().expr
+        else {
+            panic!(
+                "{query}: the root is not info: {:?}",
+                compiled.tree.root().expr
+            );
+        };
+        assert!(matches!(base.expr, NativeExpr::Window { .. }), "{query}");
+        let NativeExpr::Instant { input, op } = &info.expr else {
+            panic!("{query}: the info side is not a selection: {:?}", info.expr);
+        };
+        assert_eq!(op.value, InstantValue::InfoTimestamp, "{query}");
+        assert!(
+            matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 1),
+            "{query}"
+        );
+        assert_eq!(
+            selector
+                .name_matchers
+                .iter()
+                .map(|(op, value)| (*op, &**value))
+                .collect::<Vec<_>>(),
+            names
+                .into_iter()
+                .map(|name| (MatchOp::Equal, name))
+                .collect::<Vec<_>>(),
+            "{query}"
+        );
+        assert_eq!(
+            selector
+                .data_labels
+                .iter()
+                .map(|label| &**label)
+                .collect::<Vec<_>>(),
+            matchers,
+            "{query}"
+        );
+        assert_eq!(selector.keep_unmatched, keep_unmatched, "{query}");
+    }
+}
+
+/// The info series are selected at the reference time the selectors of the first argument share,
+/// as Prometheus `infoSeriesSelectTimestampAndOffset` decides it: one `@` and offset when every
+/// selector resolves to the same instant, the offsets of the subqueries a selector sits in added
+/// until one anchors it, and the evaluation time itself when the selectors disagree.
+#[test]
+fn info_selects_its_info_series_at_the_shared_reference_time() {
+    for (query, offset_ms, at_ms) in [
+        ("info(x offset 1m)", 60_000, None),
+        ("info(rate(x[1m] @ 100 offset 5s))", 5_000, Some(100_000)),
+        (
+            "info(x @ 50 offset 10s + on(job) y @ 60 offset 20s)",
+            10_000,
+            Some(50_000),
+        ),
+        ("info(x offset 1m + on(job) y)", 0, None),
+        ("info(x @ 50 + on(job) y)", 0, None),
+        ("info(rate(x[1m:10s] offset 1m))", 60_000, None),
+        (
+            "info(rate(x[1m:10s] @ 100 offset 1m))",
+            60_000,
+            Some(100_000),
+        ),
+        (
+            "info(max_over_time(rate(x[1m] @ 30 offset 2s)[1m:10s] offset 1m))",
+            2_000,
+            Some(30_000),
+        ),
+    ] {
+        let compiled = compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"));
+        let info = &compiled.inputs.last().unwrap().requirement;
+        assert_eq!(info.metric.as_deref(), Some("target_info"), "{query}");
+        assert_eq!((info.offset_ms, info.at_ms), (offset_ms, at_ms), "{query}");
+    }
+}
+
+/// What the native `info` cannot read is refused rather than read some other way: name matchers
+/// that can select several info tables, a matcher that chooses what is read instead of matching a
+/// label, and an info metric of several fields.
+#[test]
+fn info_refuses_info_metrics_it_cannot_read_as_one_table() {
+    for (query, fields, expected) in [
+        ("info(x, {__name__=~\".+_info\"})", 1, "several tables"),
+        (
+            "info(x, {__name__!=\"build_info\", version=\"v1\"})",
+            1,
+            "several tables",
+        ),
+        ("info(x, {__field__=\"v\"})", 1, "`__field__`"),
+        ("info(x)", 2, "with 2 fields"),
+    ] {
+        let error = compile_selectors(
+            &eval_stmt(query),
+            &|requirement| {
+                Ok(match requirement.metric.as_deref() {
+                    Some("x") => raw_schema(),
+                    _ => raw_schema_with_fields(fields),
+                })
+            },
+            SeriesOrdering::KeyThenTime,
+        )
+        .expect_err(&format!("`{query}` compiled"));
+        assert!(
+            matches!(&error, DataFusionError::NotImplemented(message) if message.contains(expected)),
             "{query}: {error}"
         );
     }
@@ -4883,7 +5049,13 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. } => set_input_source(input, source),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 set_input_source(left, source);
                 set_input_source(right, source);
             }
