@@ -731,12 +731,67 @@ impl Inputs {
         }
     }
 
-    /// Records that the chain this partition was routing had no output left to be delivered to.
+    /// Records that the chain this partition was routing had no output left to be delivered to, and
+    /// stops the read with it.
     ///
     /// Nothing is recorded as finished here, whatever the other partitions go on to do: the read lost
-    /// the chains that output would have carried, so it did not finish.
+    /// the chains that output would have carried, so it did not finish. Nothing is recorded as a
+    /// failure either - nothing failed, an output went away - so what the outputs report is
+    /// [`Ending::Abandoned`], which wins over [`Ending::Finished`] because the cancellation below takes
+    /// the count to zero: a peer that reads its child to its end after this finds the read cancelled
+    /// and records nothing.
+    ///
+    /// Stopping the peers is part of it, and is what an abandoned read was missing. An output that is
+    /// gone cannot come back, so the read cannot complete for anyone - and a peer parked on a child
+    /// that never answers keeps its sender to every output alive, which keeps every queue open, which
+    /// is every other output waiting for an end that can no longer be complete. Cancel them instead:
+    /// their senders drop, the queues close, and each output reads the `Abandoned` recorded here.
     fn abandoned(&self, partition: usize) {
         self.record(Ending::Abandoned);
+        self.cancel(partition);
+        self.count_out(partition);
+    }
+
+    /// Records that `partition`'s task stopped without reporting an outcome, and stops the read with
+    /// it.
+    ///
+    /// This runs where no arm of [`route_partition`]'s match can: in a `Drop`. A panic inside
+    /// [`read_chains`] unwinds the task and drops the future that was polling it, and an abort drops
+    /// that same future where it stands, so both land here - which is the point, because neither
+    /// records anything otherwise. What that costs when nothing stops it is the whole read: the peers
+    /// go on reading a child that may never answer, their sender clones stay alive, no queue closes,
+    /// and every output waits for an ending that is not coming. So a task that died is a failure of
+    /// the read, and it is recorded and acted on as one.
+    ///
+    /// A read that is already cancelled - stopped from outside, abandoned by an output, or already
+    /// broadcasting a failure - only counts this task out. The outcome that cancelled it is the one
+    /// the outputs report, and the aborts it performs are what killed this task: a task dying there is
+    /// a consequence of that outcome, not a second one for the outputs to choose between.
+    ///
+    /// Nothing is sent to the outputs, and nothing could be: a `Drop` has nowhere to await a full
+    /// queue. It is not needed either, and that is read off what an output does rather than assumed.
+    /// Delivery here is structural: a queue closes when the last of its senders is dropped, every input
+    /// task holds a clone of every sender, and the peers cancelled here drop theirs as their futures
+    /// are dropped - so the queues close with nobody sending anything. What an output whose queue has
+    /// closed reads is [`RepartitionStream::poll_next`] at `Ready(None)`, which consults
+    /// [`OutputLease::ending`] before calling the read over, and that turns the [`Ending::Failed`]
+    /// recorded here into the error built from its terminal error. Every output therefore reports this
+    /// failure out of the read's own record, exactly as it reports a failure whose broadcast was cut
+    /// short.
+    fn task_died(&self, partition: usize) {
+        if !self.claim_death(partition) {
+            // The read has an outcome already, or another task's failure is the one being handed
+            // over. Counting out only keeps the bookkeeping honest: the read is cancelled, so this
+            // cannot make it look finished.
+            self.count_out(partition);
+            return;
+        }
+        // Recorded with its error in one write, and before this task's sender clones are dropped: an
+        // output woken by its queue closing reads the failure and the error that belongs to it.
+        self.fail(Arc::new(DataFusionError::Execution(format!(
+            "series repartition input partition {partition} stopped without reporting an outcome"
+        ))));
+        self.abort_others(partition);
         self.count_out(partition);
     }
 
@@ -796,12 +851,56 @@ impl Inputs {
             return false;
         }
         state.failed_by = Some(partition);
-        state.cancelled = true;
-        // The read is over as of this step: every other task is about to be aborted and so never
-        // reaches `count_out`, and the broadcaster does not count as running for a read that has
-        // already failed its outputs.
-        state.live = 0;
+        Self::cancel_locked(&mut state);
         true
+    }
+
+    /// Claims the read's one failure broadcast for a task that has already stopped, if there is
+    /// anything left to claim.
+    ///
+    /// The same claim [`claim_failure`](Self::claim_failure) makes, refused when the read is already
+    /// cancelled, and that difference is what keeps a dying task from rewriting an outcome that
+    /// exists. A stopped read records nothing and is reported as a stop; an abandoned one records
+    /// [`Ending::Abandoned`]; a failed one is broadcasting its own error. The aborts those paths
+    /// perform are what stopped this task in the first place, so its death is the consequence of the
+    /// outcome already recorded rather than a second one the outputs would have to choose between. A
+    /// task that fails on its own is not that case: a failure outranks every other ending, so the
+    /// failure path claims whatever else was recorded.
+    fn claim_death(&self, partition: usize) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cancelled || state.failed_by.is_some() {
+            return false;
+        }
+        state.failed_by = Some(partition);
+        Self::cancel_locked(&mut state);
+        true
+    }
+
+    /// Cancels the read and aborts every input task but `partition`'s own.
+    ///
+    /// The one primitive for ending a read its remaining tasks cannot serve: a failure is on its way
+    /// to the outputs, a task died, or an output the read would have delivered into is gone. What it
+    /// does is what each of those needs from the others - see [`cancel_locked`](Self::cancel_locked)
+    /// for the cancellation itself, and [`abort_others`](Self::abort_others) for the sweep.
+    fn cancel(&self, partition: usize) {
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            Self::cancel_locked(&mut state);
+        }
+        self.abort_others(partition);
+    }
+
+    /// Cancels the read, under the task lock the caller already holds.
+    ///
+    /// Cancelled is what keeps a peer from recording that the read finished: a task that reaches
+    /// [`count_out`](Self::count_out) after this records nothing, so [`Ending::Finished`] - which an
+    /// output reports as a complete answer - cannot be recorded for a read that stopped under its
+    /// outputs. The count is taken to zero in the same step for the same reason from the count's side:
+    /// the read is over as of here, every other task is about to be aborted and so never counts itself
+    /// out, and the task doing the cancelling has no more of the read to run either.
+    fn cancel_locked(state: &mut InputState) {
+        state.cancelled = true;
+        state.live = 0;
     }
 
     /// Counts `partition` off the read, and says whether it was the last task still running.
@@ -819,10 +918,13 @@ impl Inputs {
 
     /// Aborts every input task but `partition`'s own.
     ///
-    /// Called by the read's one failure broadcaster, which is `partition`, and by nobody else: a task
-    /// that swept the peers on its way out of a failure would abort the task handing the error to the
-    /// outputs, and the outputs it had not reached would be left with a failed read recorded and no
-    /// error item.
+    /// Called by whatever ended the read: the one failure broadcaster, a task that died without
+    /// reporting (through [`cancel`](Self::cancel)), and a partition that lost a chain to a dropped
+    /// output. `partition`'s own task is spared because it still has bookkeeping to do - it is the one
+    /// handing the error over, or the one already gone - and aborting it from here would cut that
+    /// short: a broadcaster aborted while suspended on a full output queue leaves the outputs it had
+    /// not reached with a failed read recorded and no error item, which an output reports as a clean
+    /// end.
     fn abort_others(&self, partition: usize) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         for (index, task) in state.tasks.iter().enumerate() {
@@ -899,6 +1001,18 @@ impl Inputs {
             .unwrap_or_else(|error| error.into_inner())
             .live
     }
+
+    /// Aborts the task of one input partition, for a test that has to make exactly one producer stop.
+    ///
+    /// [`stop`](Self::stop) cannot state that: it stops every task and records the read as stopped,
+    /// so what an output reports afterwards is the stop rather than one producer dying.
+    #[cfg(test)]
+    fn abort(&self, partition: usize) {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(task) = &state.tasks[partition] {
+            task.abort();
+        }
+    }
 }
 
 /// One input partition's task: reads its own child, one whole chain at a time, and hands each chain
@@ -921,11 +1035,53 @@ async fn route_partition(
     read_ahead: MemoryReservation,
     inputs: Arc<Inputs>,
 ) {
+    // Held across the whole read, and built before it starts, so that every way of leaving this
+    // function reports what happened - including the two that never reach the match below.
+    let mut report = ReportIfUnreported {
+        inputs: Arc::clone(&inputs),
+        partition,
+        reported: false,
+    };
     let stop = read_chains(&mut stream, &routing, &senders, &read_ahead).await;
     match &stop {
         Stop::Ended => inputs.ended(partition),
         Stop::Abandoned => inputs.abandoned(partition),
         Stop::Failed(error) => inputs.failed(partition, error, &senders).await,
+    }
+    // This task said what became of its partition, so the guard has nothing left to report.
+    report.reported = true;
+}
+
+/// Reports an input task that stopped without recording an outcome, on the paths that would
+/// otherwise report nothing.
+///
+/// The match in [`route_partition`] covers the ways a read ends on its own terms: the partition ended,
+/// a chain had no output to go to, the child failed. What it does not cover is a task that never
+/// returns at all. A panic unwinds the task and takes the future polling it with it, and the task
+/// being aborted drops that future where it stands; neither reaches an arm of that match, so nothing
+/// is recorded, the count is untouched and the peers go on reading. A peer parked on a child that
+/// never answers then holds a sender to every output for good, no queue ever closes, and every output
+/// waits for an ending that is not coming - the `Unrecorded` fallback is no help there, since it is
+/// only read once a queue has closed.
+///
+/// A guard is what covers both without [`std::panic::catch_unwind`], which covers neither an abort nor
+/// a panic the runtime catches elsewhere: unwinding and cancellation both drop this, so both report.
+struct ReportIfUnreported {
+    /// The bookkeeping of the read this task belongs to.
+    inputs: Arc<Inputs>,
+    /// The input partition whose task holds this guard.
+    partition: usize,
+    /// Whether that task recorded its own outcome, which is what makes this a no-op.
+    reported: bool,
+}
+
+impl Drop for ReportIfUnreported {
+    fn drop(&mut self) {
+        // Also runs on the way out of a normal return, which is what the flag is for: a task that
+        // reached its own ending reported it there and has nothing to add here.
+        if !self.reported {
+            self.inputs.task_died(self.partition);
+        }
     }
 }
 

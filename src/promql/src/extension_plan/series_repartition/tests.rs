@@ -292,6 +292,24 @@ fn output(
     .expect("the output declares an evaluated frame")
 }
 
+/// The output partition of `plan` at `partition`, for a test that keeps the node itself.
+///
+/// [`execution`] reaches the read through the node rather than through the plan a consumer would hold,
+/// so a test that has to look at the tasks behind an output claims it here instead of coercing the
+/// node to the plan it is: the two are the same call, one on a reference the test already has.
+fn output_of(
+    plan: &Arc<SeriesRepartitionExec>,
+    partition: usize,
+    context: &Arc<TaskContext>,
+) -> SendableEvaluatedSeriesStream {
+    unpack_evaluated_series(
+        plan.execute(partition, Arc::clone(context))
+            .expect("the output executes"),
+        None,
+    )
+    .expect("the output declares an evaluated frame")
+}
+
 /// The labels of a chunk in the form a failure message can show.
 fn named(metric: &SeriesLabels) -> String {
     render_label_set(&label_set(metric))
@@ -2909,4 +2927,555 @@ async fn a_failure_whose_broadcast_is_cut_short_still_reaches_every_output() {
         );
         assert_chains_are_whole(chunks);
     }
+}
+
+/// What one partition of a [`Fragile`] child does when it is polled.
+#[derive(Clone)]
+enum Behaviour {
+    /// Hands `steps` over only once the switch is opened, then ends.
+    Held(Vec<Step>),
+    /// Panics on the first poll, which is a task dying where no arm of the read's ending match is
+    /// reached: the unwind takes the whole future with it.
+    Panics,
+    /// Never answers, so the task reading it stays parked on it until it is aborted.
+    Parked,
+    /// Hands one step over per poll, staying pending in between, so each of them becomes a frame
+    /// batch of its own.
+    ///
+    /// The frame boundary coalesces what a producer hands over in one poll into one batch - the
+    /// builder only flushes when the source is pending or done - so a child that hands several chunks
+    /// over back to back reaches a consumer as ONE chunk. A chunk per poll is what keeps them apart,
+    /// and a test about how a chain accumulates is about chunks rather than about batches.
+    OneAtATime(Vec<Step>),
+}
+
+/// A child whose partitions stop in ways of their own: one dies or is parked, another stays parked.
+///
+/// A test of what a read does with a producer that dies has to be able to make exactly one producer
+/// die, and to see that the others really were reading and really were stopped. [`Behaviour::Panics`]
+/// is the death nothing in the read reaches, [`Behaviour::Parked`] is the peer that would wait for a
+/// child that never answers, and the counters answer the two questions a timeout cannot: `polled`
+/// says a partition was being read rather than skipped, and `dropped` says the read let the stream of
+/// a parked partition go - which is what an aborted task does.
+struct Fragile {
+    behaviours: Vec<Behaviour>,
+    switch: Arc<Switch>,
+    /// Whether each partition has been polled once, which every partition waits for before it does
+    /// what its behaviour says.
+    ///
+    /// [`Behaviour::Panics`] needs it, and needs it for the peer rather than for itself: a producer
+    /// that dies on its very first poll can die before the task reading the other partition has been
+    /// polled at all, and then the peer is aborted without ever having read anything - which is a read
+    /// that never had a parked input to hang on. Waiting here is what makes the shape the test is
+    /// about exist before the death happens.
+    reading: Arc<FirstChunks>,
+    polled: Vec<Arc<AtomicUsize>>,
+    dropped: Vec<Arc<AtomicUsize>>,
+    series_schema: Arc<SeriesSchema>,
+    properties: Arc<PlanProperties>,
+}
+
+/// A [`Fragile`] child, and the two counters of every one of its partitions.
+struct FragileChild {
+    plan: Arc<dyn ExecutionPlan>,
+    /// How many times each partition was polled.
+    polled: Vec<Arc<AtomicUsize>>,
+    /// How many of each partition's streams were dropped.
+    dropped: Vec<Arc<AtomicUsize>>,
+}
+
+impl Fragile {
+    /// The child over `behaviours`, one partition per behaviour, gated on `switch`.
+    fn plan(behaviours: Vec<Behaviour>, switch: Arc<Switch>) -> FragileChild {
+        let series_schema = schema();
+        let frame = pack_evaluated_series(
+            Box::pin(futures::stream::empty()),
+            Arc::clone(&series_schema),
+        )
+        .expect("an evaluated schema declares a frame")
+        .schema();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(behaviours.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        let polled = (0..behaviours.len())
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        let dropped = (0..behaviours.len())
+            .map(|_| Arc::new(AtomicUsize::new(0)))
+            .collect::<Vec<_>>();
+        FragileChild {
+            plan: Arc::new(Self {
+                behaviours: behaviours.clone(),
+                switch,
+                reading: FirstChunks::new(behaviours.len()),
+                polled: polled.clone(),
+                dropped: dropped.clone(),
+                series_schema,
+                properties,
+            }),
+            polled,
+            dropped,
+        }
+    }
+}
+
+impl fmt::Debug for Fragile {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Fragile")
+            .field("partitions", &self.behaviours.len())
+            .finish()
+    }
+}
+
+impl DisplayAs for Fragile {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Fragile: partitions={}", self.behaviours.len())
+    }
+}
+
+impl ExecutionPlan for Fragile {
+    fn name(&self) -> &str {
+        "Fragile"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        Vec::new()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        assert!(children.is_empty(), "a fragile child has no children");
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let behaviour = self.behaviours.get(partition).cloned().ok_or_else(|| {
+            DataFusionError::Execution(format!("fragile child has no partition {partition}"))
+        })?;
+        let steps = match &behaviour {
+            Behaviour::Held(steps) | Behaviour::OneAtATime(steps) => steps.clone(),
+            Behaviour::Panics | Behaviour::Parked => Vec::new(),
+        };
+        pack_evaluated_series(
+            Box::pin(FragileScript {
+                partition,
+                behaviour,
+                steps: steps.into_iter(),
+                switch: Arc::clone(&self.switch),
+                reading: Arc::clone(&self.reading),
+                polled: Arc::clone(&self.polled[partition]),
+                dropped: Arc::clone(&self.dropped[partition]),
+                stayed_pending: false,
+            }),
+            Arc::clone(&self.series_schema),
+        )
+    }
+}
+
+/// One partition of a [`Fragile`] child.
+struct FragileScript {
+    partition: usize,
+    behaviour: Behaviour,
+    steps: std::vec::IntoIter<Step>,
+    switch: Arc<Switch>,
+    reading: Arc<FirstChunks>,
+    polled: Arc<AtomicUsize>,
+    dropped: Arc<AtomicUsize>,
+    /// Whether a [`Behaviour::OneAtATime`] partition has already stayed pending since its last chunk.
+    stayed_pending: bool,
+}
+
+impl Stream for FragileScript {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        this.polled.fetch_add(1, Ordering::SeqCst);
+        // Every partition is read once before any of them does what it is here for, so a partition
+        // that dies cannot do so before its peer was read.
+        this.reading.handed(this.partition);
+        this.reading.wait(cx);
+        if !this.reading.all() {
+            return Poll::Pending;
+        }
+        match &this.behaviour {
+            Behaviour::Held(_) => {
+                this.switch.wait(cx);
+                if !this.switch.is_open() {
+                    return Poll::Pending;
+                }
+                Poll::Ready(this.steps.next().map(step_answer))
+            }
+            // The child's own poll, which runs inside the task reading it: what a producer that dies
+            // under a read does is exactly this, and nothing of the read is told about it.
+            Behaviour::Panics => panic!("the fragile child partition panicked while being read"),
+            // Parked on a source that never answers. No waker is registered because nothing can make
+            // this partition answer: the only way it stops is the read aborting it.
+            Behaviour::Parked => Poll::Pending,
+            Behaviour::OneAtATime(_) => {
+                if !this.stayed_pending {
+                    // One pending poll between two chunks is what makes the frame boundary flush,
+                    // and the wake is this stream's own: nothing outside it has to poll again for the
+                    // next chunk to arrive.
+                    this.stayed_pending = true;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                this.stayed_pending = false;
+                Poll::Ready(this.steps.next().map(step_answer))
+            }
+        }
+    }
+}
+
+impl Drop for FragileScript {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// T-S1: a partition whose task panics ends every output with the read's error, and stops its peers.
+///
+/// Two inputs and one output. Partition 0's child panics inside its `poll_next`, which unwinds the
+/// task reading it: no arm of [`route_partition`]'s ending match runs, so nothing is recorded and
+/// nothing stops the peer. Partition 1's child never answers, so its task stays parked on it holding
+/// a copy of the senders - the queue never closes, and the output waits for an ending that cannot
+/// come. That is the hang, and the timeout below is what turns it into a failure instead of a stall.
+///
+/// The panic happens on a task of the read, never on this test's, so the unwind is the runtime's to
+/// catch and what the test sees is its effect: the output ends with the read's error instead of
+/// waiting, the parked peer's child is dropped because its task was aborted, and nothing the read
+/// reserved outlives it.
+#[tokio::test]
+async fn a_panicking_input_ends_every_output_and_stops_its_peers() {
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let child = Fragile::plan(
+        vec![Behaviour::Panics, Behaviour::Parked],
+        Arc::new(Switch::default()),
+    );
+    let plan = node(child.plan, 1);
+    let mut stream = output_of(&plan, 0, &context);
+    let execution = execution(&plan);
+    wait_until("the parked peer is reading its child", || {
+        child.polled[1].load(Ordering::SeqCst) > 0
+    })
+    .await;
+
+    let (chunks, errors) = tokio::time::timeout(Duration::from_secs(10), until_end(&mut stream))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the output never ended although one of its two inputs had died: the death recorded \
+                 nothing, so the parked peer kept the queue open"
+            )
+        });
+    assert!(
+        chunks.is_empty(),
+        "no chunk was routed before the read stopped, so the output owes none"
+    );
+    assert_eq!(
+        1,
+        errors.len(),
+        "the output reports the death of partition 0 once: {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .contains("series repartition input partition 0 stopped without reporting an outcome"),
+        "the output ended with {} rather than the death of its producer",
+        errors[0]
+    );
+    // The peer did not go on waiting for a child that never answers: its task was aborted, which is
+    // what the drop of the stream it was reading says.
+    wait_until("the parked peer's child is dropped", || {
+        child.dropped[1].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the read's tasks are gone", || producer_stopped(&execution)).await;
+    wait_until("what the read reserved is released", || {
+        pool.reserved() == 0
+    })
+    .await;
+}
+
+/// T-S2: a partition whose task is aborted on its own ends every output, and stops its peers.
+///
+/// The same shape as [`a_panicking_input_ends_every_output_and_stops_its_peers`] with the other way a
+/// task disappears: nothing panics, one task is aborted where it stands - as a cancelled query's task
+/// is - and the future it was running is dropped with it. Both partitions stay parked on children that
+/// never answer, so the only thing that can end this read is one of them dying and the read noticing:
+/// the output would otherwise wait for two sources that never speak.
+///
+/// The abort reaches the handle of one partition only. [`Inputs::stop`] cannot state this: it stops
+/// every task and records the read as stopped, so what its outputs report is the stop rather than one
+/// producer that died while its peers were still running.
+#[tokio::test]
+async fn an_aborted_input_task_ends_every_output_and_stops_its_peers() {
+    let child = Fragile::plan(
+        vec![Behaviour::Parked, Behaviour::Parked],
+        Arc::new(Switch::default()),
+    );
+    let plan = node(child.plan, 1);
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output_of(&plan, 0, &context);
+    let execution = execution(&plan);
+    wait_until("both partitions are reading their children", || {
+        child.polled[0].load(Ordering::SeqCst) > 0 && child.polled[1].load(Ordering::SeqCst) > 0
+    })
+    .await;
+
+    let inputs = Arc::clone(
+        &execution
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .inputs,
+    );
+    inputs.abort(0);
+
+    let (chunks, errors) = tokio::time::timeout(Duration::from_secs(10), until_end(&mut stream))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "the output never ended although one of its two inputs had been aborted: the abort \
+                 recorded nothing, so the parked peer kept the queue open"
+            )
+        });
+    assert!(
+        chunks.is_empty(),
+        "both partitions are parked, so nothing was routed before the read stopped"
+    );
+    assert_eq!(
+        1,
+        errors.len(),
+        "the output reports the death of partition 0 once: {errors:?}"
+    );
+    assert!(
+        errors[0]
+            .contains("series repartition input partition 0 stopped without reporting an outcome"),
+        "the output ended with {} rather than the death of its producer",
+        errors[0]
+    );
+    wait_until("the other parked partition's child is dropped", || {
+        child.dropped[1].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the read's tasks are gone", || producer_stopped(&execution)).await;
+}
+
+/// T-S3: an output that is dropped stops the inputs, so the outputs still read end rather than wait.
+///
+/// Partition 0 holds one chain for output 0 across the switch and partition 1 never answers. Output 0
+/// is claimed and then dropped - nothing it would have been given is wanted any more - so the chain
+/// partition 0 is holding has nowhere to go, which is `Stop::Abandoned`. That used to be recorded and
+/// nothing more: partition 1 stayed parked on its child holding a copy of the senders, the queue output
+/// 1 reads never closed, and output 1 waited for an input that cannot finish. Once an output is gone
+/// the read cannot complete for anyone, so what it must do is end every output it still has - with the
+/// `Abandoned` ending rather than a clean one, since the chains the dropped output would have carried
+/// were lost, and not as a failure either, since nothing failed.
+#[tokio::test]
+async fn dropping_an_output_ends_the_outputs_that_are_still_read() {
+    let switch = Arc::new(Switch::default());
+    let doomed = labels_routed_to(0, 1).remove(0);
+    let child = Fragile::plan(
+        vec![
+            Behaviour::Held(vec![Step::chunk(chunk(doomed.clone(), 0, 1, true))]),
+            Behaviour::Parked,
+        ],
+        Arc::clone(&switch),
+    );
+    let plan = node(child.plan, 2);
+    let context = SessionContext::default().task_ctx();
+    // Both outputs are claimed, so the one that goes away releases a claim on a read that still has
+    // another output to serve instead of stopping it.
+    let dropped_output = output_of(&plan, 0, &context);
+    let mut kept_output = output_of(&plan, 1, &context);
+    let execution = execution(&plan);
+
+    // Dropped while its queue is still empty and its producer parked on the switch, so the chain held
+    // for it is what finds it gone.
+    drop(dropped_output);
+    switch.open();
+
+    let (chunks, errors) = tokio::time::timeout(
+        Duration::from_secs(10),
+        until_end(&mut kept_output),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the output that is still read never ended: the abandoned chain was recorded but the \
+                 partition parked on a child that never answers was left running"
+        )
+    });
+    assert!(
+        chunks.is_empty(),
+        "the only chain of this read belonged to the dropped output"
+    );
+    assert_eq!(
+        1,
+        errors.len(),
+        "the output reports that the read was abandoned once: {errors:?}"
+    );
+    assert!(
+        errors[0].contains("an output partition was dropped"),
+        "the output ended with {} rather than the abandoned read",
+        errors[0]
+    );
+    wait_until("the parked partition's child is dropped", || {
+        child.dropped[1].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    wait_until("the read's tasks are gone", || producer_stopped(&execution)).await;
+    let (ending, terminal) = execution.ending();
+    assert_eq!(
+        Ending::Abandoned,
+        ending,
+        "an output going away is an abandoned read, not a failure and not an end"
+    );
+    assert!(
+        terminal.is_none(),
+        "nothing failed, so the read owes its outputs no terminal error"
+    );
+}
+
+/// T-S4: a chain that outgrows the pool ends every output, cancels its peers and releases the memory.
+///
+/// This is what the whole-chain handover costs unless it is charged: a chain is buffered whole before
+/// it is routed, so a child that keeps one series open and never closes it would grow the buffer
+/// without bound. Here the chain is charged to the pool as it grows, and the pool is sized from the
+/// chunks rather than from a number picked by hand.
+///
+/// The arithmetic is measured rather than assumed, and both sides of it matter. `per_chunk` is what
+/// one chunk costs the read: a probe reads two chunks of the same shape through the same pack/unpack
+/// path the read's child goes through, and the larger of the two [`series_bytes`] reductions is taken.
+/// The chain is `CHUNKS` of those, the pool holds `CHUNKS / 2` of them, so one chunk fits with room
+/// to spare and the chain as a whole does not: the growth that is refused is the one that would have
+/// made the buffer exceed the pool, at the `CHUNKS / 2 + 1`-th chunk. A change to what a chunk costs
+/// moves the pool with it instead of silently making the refusal happen at the first chunk or not at
+/// all - which is what a hard-coded byte count did here.
+///
+/// The child hands one chunk over per poll ([`Behaviour::OneAtATime`]) for a reason that is not
+/// cosmetic: what a producer hands over in one poll reaches the read as one chunk, so back-to-back
+/// chunks would coalesce into a single one and there would be no growing chain to refuse.
+///
+/// What is asserted is the whole of it: every output ends with the refusal rather than a clean end,
+/// the partition parked on a child that never answers is cancelled, and the pool is back to nothing
+/// once the read is over - the chain it refused to grow is not left charged for.
+#[tokio::test]
+async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
+    const CHUNKS: usize = 8;
+    let shared = labels("web-1");
+    // One open chain: every chunk continues the series and none of them closes it, so the read goes on
+    // reading until the pool refuses to hold more of it.
+    let steps = (0..CHUNKS)
+        .map(|index| Step::chunk(chunk(shared.clone(), index, 1, false)))
+        .collect::<Vec<_>>();
+    // What one chunk of this chain costs, measured through the read's own path on an unbounded pool.
+    // The probe closes its chain, so what it measures is a whole stream's worth of chunks rather than
+    // the error a producer that never closes one leaves behind.
+    let per_chunk = {
+        let probe = Fragile::plan(
+            vec![Behaviour::OneAtATime(vec![
+                Step::chunk(chunk(shared.clone(), 0, 1, false)),
+                Step::chunk(chunk(shared.clone(), 1, 1, true)),
+            ])],
+            Arc::new(Switch::default()),
+        );
+        let probe_context = unbounded_context();
+        let mut probe_chunks = unpack_evaluated_series(
+            probe
+                .plan
+                .execute(0, Arc::clone(&probe_context))
+                .expect("the probe partition executes"),
+            None,
+        )
+        .expect("the probe declares an evaluated frame");
+        let (chunks, errors) =
+            tokio::time::timeout(Duration::from_secs(10), until_end(&mut probe_chunks))
+                .await
+                .expect("the probe chain ends, so its stream ends");
+        assert!(
+            errors.is_empty(),
+            "the probe chain is a whole one, so nothing about it fails: {errors:?}"
+        );
+        assert_eq!(
+            2,
+            chunks.len(),
+            "one chunk per poll is what keeps the frame boundary from coalescing two chunks into one"
+        );
+        chunks
+            .iter()
+            .map(|(series, _)| series_bytes(series))
+            .max()
+            .expect("the probe chain has chunks of its own")
+    };
+    let pool_size = per_chunk * (CHUNKS / 2);
+    assert!(
+        per_chunk >= 1 && pool_size < per_chunk * CHUNKS,
+        "the pool has to hold at least one chunk and fewer than all of them, or this test refuses \
+         nothing: {pool_size} bytes against {per_chunk} per chunk"
+    );
+    let pool = Arc::new(GreedyMemoryPool::new(pool_size));
+    let context = task_context(&pool);
+    let child = Fragile::plan(
+        vec![Behaviour::OneAtATime(steps), Behaviour::Parked],
+        Arc::new(Switch::default()),
+    );
+    let plan = node(child.plan, 2);
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        every_output_until_end(&plan, &context),
+    )
+    .await
+    .expect("a reservation that is refused ends the read instead of growing past the pool");
+    for (partition, (chunks, errors)) in outputs.iter().enumerate() {
+        assert!(
+            chunks.is_empty(),
+            "output partition {partition} was given the first {n} chunks of a chain that was never \
+             routed",
+            n = chunks.len()
+        );
+        assert_eq!(
+            1,
+            errors.len(),
+            "output partition {partition} reports the refusal once: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("Failed to allocate additional"),
+            "output partition {partition} ended with {} rather than the refusal",
+            errors[0]
+        );
+    }
+    wait_until("the parked partition's child is dropped", || {
+        child.dropped[1].load(Ordering::SeqCst) == 1
+    })
+    .await;
+    let execution = execution(&plan);
+    wait_until("the read's tasks are gone", || producer_stopped(&execution)).await;
+    wait_until("what the refused chain reserved is released", || {
+        pool.reserved() == 0
+    })
+    .await;
 }
