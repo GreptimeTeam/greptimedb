@@ -43,7 +43,7 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
     NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
-    map_chunk, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -3075,9 +3075,10 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
 /// The fragments are admitted one by one as they arrive, so their charge is not what fails here:
 /// what fails is the workspace the merge needs, taken in `finish` before the helper runs. The first
 /// run measures what the collected input holds where the pool admits it; the second is given that
-/// much and a little over -- enough for every fragment, not for the workspace, which charges at
-/// least one `(position, member, row)` triple and one position per row. The failure releases the
-/// fragments, the evaluators and the queues while the executor is still alive.
+/// much, the map's transient charge for one chunk and a little over -- enough for every fragment,
+/// not for the workspace, which charges at least one `(position, member, row)` triple and one
+/// position per row. The failure releases the fragments, the evaluators and the queues while the
+/// executor is still alive.
 #[test]
 fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     let inner_grid = grid(0, 60_000, 2);
@@ -3117,8 +3118,19 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     assert!(measured > 0, "the collected input is not charged for");
     drop(reference);
 
-    // Room for exactly what the collected input holds, and not for the merge's workspace.
-    let pool = bounded_pool(measured + 64);
+    // Room for what the collected input holds and for the map to hold one chunk with the workspace
+    // its kernel writes in, which it gives back before the next chunk; not for the merge's
+    // workspace.
+    let one_chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(-1.0), None],
+        true,
+    );
+    let mapping = evaluated_bytes(&one_chunk)
+        + map_workspace_bytes(&[MapOp::Math(MathOp::Abs)], &one_chunk.series).unwrap();
+    let pool = bounded_pool(measured + mapping + 64);
     let mut execution = executor(&tree(), Arc::clone(&pool));
     push_both(&mut execution);
     assert!(
@@ -11067,4 +11079,80 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// A point-wise node reserves the series its kernel builds before the kernel runs.
+///
+/// Every case reads one dense series over a grid of `1 << 20` points, or -- for the window -- one
+/// raw sample whose window reaches every point, so the kernel writes a row per point. The first
+/// budget admits what the node is handed (the vector, the varying scalar, the grid's timestamps)
+/// and not the series it writes, which only the reservation taken before the kernel can refuse:
+/// nothing after it rejects a dense result of one run. The second admits both.
+#[test]
+fn point_wise_nodes_reserve_the_series_their_kernel_builds() {
+    const MIB: usize = 1 << 20;
+    let grid = grid(1_000, 1_000, 1 << 20);
+    let one = || vector_of(scalar(1.0, Arc::clone(&grid)));
+    let time = || eval_time(None, Arc::clone(&grid));
+    let timestamp = NativeNode {
+        output: one().output,
+        expr: NativeExpr::Timestamp {
+            input: Box::new(one()),
+        },
+    };
+    let window = window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1 << 31,
+        None,
+        Arc::clone(&grid),
+    );
+    let cases = [
+        ("map", map(one(), vec![MathOp::Abs]), 9 * MIB),
+        (
+            "constant broadcast",
+            broadcast_right(one(), 1.0, BinaryOp::Add, false),
+            9 * MIB,
+        ),
+        ("timestamp", timestamp, 17 * MIB),
+        ("window", window, MIB),
+        (
+            "parameterized map",
+            parameterized(one(), ParameterizedOp::Round, vec![time()]),
+            17 * MIB,
+        ),
+        (
+            "dynamic broadcast",
+            scalar_binary(one(), time(), binary_matching(BinaryOp::Add)),
+            17 * MIB,
+        ),
+    ];
+    for (node, root, inputs) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        for (budget, fits) in [(inputs, false), (128 * MIB, true)] {
+            let pool = bounded_pool(budget);
+            let mut execution = executor(&tree, Arc::clone(&pool));
+            let source = execution.state().input_ids(0).next();
+            if let Some(input) = source {
+                execution
+                    .push_raw(input, raw_chunk(&raw_schema(), &[1_000], &[1.0], true))
+                    .unwrap();
+            }
+            match execution.finish() {
+                Ok(chunks) => {
+                    assert!(fits, "{node}: the kernel ran without its series reserved");
+                    let rows: usize = chunks.iter().map(|chunk| chunk.series.time.len()).sum();
+                    assert_eq!(rows, 1 << 20, "{node}");
+                }
+                Err(error) => {
+                    assert!(!fits, "{node}: {error}");
+                    assert!(
+                        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                        "{node}: {error}"
+                    );
+                }
+            }
+            assert_eq!(pool.reserved(), 0, "{node}");
+        }
+    }
 }

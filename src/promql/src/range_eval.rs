@@ -699,6 +699,61 @@ impl RangeEvaluator {
             + self.pending.bytes()
     }
 
+    /// An upper bound of the rows the next push hands out, for input whose last sample is at
+    /// `last_ts` (`None` when it holds none) and which closes its series when `last`.
+    ///
+    /// A push writes at most one row per point it decides, from the series' cursor -- the first
+    /// point for a series not started yet. Unless the series closes, it decides no point past the
+    /// time the input has reached; and a point holds a row only while its window still reaches the
+    /// latest sample, so the points after that one's window are decided empty. A replayed `@`
+    /// result fills every grid point from the one window it evaluates first.
+    pub(crate) fn output_rows_bound(&self, last_ts: Option<i64>, last: bool) -> usize {
+        let spec = self.grid.spec();
+        let len = usize::try_from(spec.len).unwrap_or(usize::MAX);
+        let state = self.series.as_ref();
+        let Some(latest) = last_ts.or_else(|| state.and_then(|state| state.last_ts)) else {
+            return 0;
+        };
+        let cursor = state.map_or(0, |state| state.cursor);
+        if !matches!(self.replay, Replay::PerPoint) {
+            return if cursor == 0 { len } else { 0 };
+        }
+        // The grid points whose evaluation time is before `bound`.
+        let (start, step) = (i128::from(spec.start_ms), i128::from(spec.step_ms));
+        let points_before = |bound: i128| {
+            let offset = bound - start;
+            if offset <= 0 {
+                return 0;
+            }
+            usize::try_from((offset + step - 1) / step).map_or(len, |points| points.min(len))
+        };
+        let shifted = i128::from(latest) + i128::from(self.window.offset_ms);
+        let before = self
+            .window
+            .modifier
+            .map_or(0, |modifier| i128::from(modifier.before_ms()));
+        let mut end = points_before(shifted + i128::from(self.window.range_ms) + before);
+        if !last && last_ts.is_some() {
+            end = end.min(points_before(shifted + 1));
+        }
+        end.saturating_sub(cursor)
+    }
+
+    /// Whether this evaluator can answer with a native histogram.
+    pub(crate) fn yields_histograms(&self) -> bool {
+        self.function.is_some_and(RangeFunction::yields_histograms)
+    }
+
+    /// The heap bytes of the widest native histogram this evaluator retains, `None` when it
+    /// retains none.
+    pub(crate) fn widest_retained_histogram(&self) -> Option<usize> {
+        self.fields
+            .iter()
+            .flat_map(|field| &field.histograms)
+            .map(|(_, histogram)| histogram.heap_bytes())
+            .max()
+    }
+
     /// Schema of the evaluated series: the input fields on the evaluation grid.
     pub fn output_schema(&self) -> &Arc<SeriesSchema> {
         &self.output_schema

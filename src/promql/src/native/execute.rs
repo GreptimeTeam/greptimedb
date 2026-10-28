@@ -40,6 +40,7 @@ use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, fields_bytes, label_set, merge_same_labelset, owned,
     series_bytes, table_bytes,
 };
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
 use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
@@ -48,8 +49,8 @@ use crate::instant_eval::{
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
-    drop_metric_name, map_arithmetic, map_arithmetic_series, map_compare, map_compare_series,
-    map_math, map_math_with_parameters,
+    drop_metric_name, is_float_series, map_arithmetic, map_arithmetic_series, map_compare,
+    map_compare_series, map_math, map_math_with_parameters,
 };
 use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::AggregateRuntime;
@@ -2165,11 +2166,6 @@ fn histogram_row_bytes(field: &Samples) -> Option<usize> {
 /// because a histogram handed on unchanged keeps its layout through
 /// [`crate::histogram_eval::float_histogram::FloatHistogram::push_to`].
 fn histogram_bytes(view: &HistogramView<'_>) -> usize {
-    // Schema, zero threshold, sum, count, zero count, reset hint and start timestamp, the narrow
-    // columns counted at the width of the widest.
-    let scalars = 7 * std::mem::size_of::<i64>();
-    // One offset per list column: custom bounds, two span columns and one bucket column per side.
-    let list_offsets = 7 * std::mem::size_of::<u32>();
     let custom = view
         .custom_values
         .len()
@@ -2188,11 +2184,17 @@ fn histogram_bytes(view: &HistogramView<'_>) -> usize {
                 )
         })
         .fold(0usize, usize::saturating_add);
-    scalars
-        .saturating_add(list_offsets)
+    HISTOGRAM_ROW_HEADER_BYTES
         .saturating_add(custom)
         .saturating_add(sides)
 }
+
+/// The bytes a histogram table row takes before its bucket lists: the schema, zero threshold, sum,
+/// count, zero count, reset hint and start timestamp, the narrow columns counted at the width of
+/// the widest, and one offset per list column -- custom bounds, two span columns and one bucket
+/// column per side.
+const HISTOGRAM_ROW_HEADER_BYTES: usize =
+    7 * std::mem::size_of::<i64>() + 7 * std::mem::size_of::<u32>();
 
 /// The last timestamp of `spec`, which is inclusive: its `len` points step from its start.
 ///
@@ -2244,6 +2246,213 @@ fn grid_chunk_bytes(grid: &EvalGrid) -> Result<usize> {
                 .and_then(|values| bytes.checked_add(values))
         })
         .ok_or_else(|| DataFusionError::Execution("scalar allocation size overflow".into()))
+}
+
+/// An upper bound of what the operations of a map allocate for the series they write over
+/// `series`.
+///
+/// Each operation that writes values reads the series the one before it wrote, which stays alive
+/// until the next one is written, so the bound is the largest of the first one's workspace and of
+/// two consecutive ones'. Math over a series of floats maps its segments; math over native
+/// histograms and histogram functions build a subset of its rows. Every such operation writes
+/// floats only, at no more rows than it read, so a later math operation maps no more than the
+/// input's segments hold; a later histogram function is bounded without assuming the runs of what
+/// it reads.
+fn map_workspace_bytes(ops: &[MapOp], series: &Series) -> Result<usize> {
+    let (mut previous, mut bound) = (0usize, 0usize);
+    let mut first = true;
+    for op in ops {
+        let workspace = match op {
+            MapOp::Label(_) => continue,
+            MapOp::Math(_) if !first || is_float_series(series) => mapped_workspace_bytes(series)?,
+            _ if first => built_series_workspace_bytes(series)?,
+            _ => built_workspace_bytes(series.time.len(), series.time.len(), series.fields.len())?,
+        };
+        let live = previous
+            .checked_add(workspace)
+            .ok_or_else(|| workspace_overflow(series.time.len(), series.fields.len()))?;
+        bound = bound.max(live);
+        previous = workspace;
+        first = false;
+    }
+    Ok(bound)
+}
+
+/// An upper bound of what a kernel that maps each dense segment of `series` into a float array of
+/// its length allocates: float math over a series of floats and arithmetic against a constant.
+///
+/// A mapped segment holds its values, rounded up to Arrow's 64-byte alignment, behind the header
+/// of the allocation they share, and keeps the input's validity and axis; the result is assembled
+/// as [`assembly_bytes`] counts it.
+fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
+    let segments = series
+        .fields
+        .iter()
+        .map(|field| field.segments().len())
+        .fold(0usize, usize::saturating_add);
+    let bound = || {
+        let mut bytes = assembly_bytes(series.fields.len(), segments, &series.metric)?;
+        for segment in series.fields.iter().flat_map(|field| field.segments()) {
+            bytes = segment
+                .len()
+                .checked_mul(std::mem::size_of::<f64>())?
+                .checked_add(64 + BUFFER_HEADER_BYTES)?
+                .checked_add(bytes)?;
+        }
+        Some(bytes)
+    };
+    bound().ok_or_else(|| workspace_overflow(series.time.len(), series.fields.len()))
+}
+
+/// An upper bound of what a kernel that pushes a subset of the rows of `series` into a
+/// [`GridSeriesBuilder`] allocates: [`built_workspace_bytes`] over the series' rows and runs, and
+/// the result's assembly ([`assembly_bytes`]), one segment per field.
+fn built_series_workspace_bytes(series: &Series) -> Result<usize> {
+    let fields = series.fields.len();
+    let rows = built_workspace_bytes(series.time.len(), series.time.runs().count(), fields)?;
+    assembly_bytes(fields, fields, &series.metric)
+        .and_then(|assembly| assembly.checked_add(rows))
+        .ok_or_else(|| workspace_overflow(series.time.len(), fields))
+}
+
+/// The bytes a result of `fields` fields over `segments` segments is assembled from, beside its
+/// values: the descriptor lists and the label set rebuilt from `metric`.
+///
+/// A list collected or pushed without knowing its length starts at four entries and doubles, so a
+/// list of `n` descriptors holds at most `2 * n + 4`. Each field goes through up to three segment
+/// lists -- the mapped segments, the flattened ones and the copy a chunked field keeps -- and the
+/// series through two field lists. The label set keeps the input's labels or fewer.
+fn assembly_bytes(fields: usize, segments: usize, metric: &SeriesLabels) -> Option<usize> {
+    let descriptors = segments
+        .checked_mul(6)?
+        .checked_add(fields.checked_mul(16)?)?
+        .checked_add(8)?
+        .checked_mul(std::mem::size_of::<Samples>())?;
+    descriptors
+        .checked_add(std::mem::size_of_val(metric.tags()))?
+        .checked_add(BUFFER_HEADER_BYTES + std::mem::size_of::<Series>())
+}
+
+/// An allowance for the shared header an Arrow buffer or a label list is allocated behind.
+const BUFFER_HEADER_BYTES: usize = 64;
+
+/// An upper bound of the bytes a [`GridSeriesBuilder`] allocates for a result of `fields` float
+/// fields whose positions are a subset of `rows` positions making up `runs` runs.
+///
+/// The kernels that build their result this way are math over native histograms, histogram
+/// functions (one float per histogram), filters, math with scalar parameters, arithmetic and
+/// comparison against a varying scalar, `timestamp` and range windows. A label rewrite writes no
+/// row; the map admits the labels it writes itself.
+///
+/// For a result of `kept` rows in `split` runs, the builder's row indices and each field's values
+/// grow by doubling, so each holds at most `2 * kept + 4` entries, and a field's validity at most
+/// twice its bits plus one 64-byte block. Finishing turns each run into a span, which the axis
+/// copies once, beside the first row of each span. Dropping one position from a set of positions
+/// splits at most one run in two, so `split <= min(kept, runs + rows - kept)`. The cost is linear
+/// in `kept` and `split`, so over that region it is largest at `kept = rows, split = runs` or at
+/// `kept = split = (rows + runs) / 2`, and the bound is the larger of the two. A caller that cannot
+/// say the result's positions are the input's passes `runs = rows`, which assumes nothing.
+///
+/// The builder is not told the row count up front: its values become the result's arrays without a
+/// copy, so a capacity reserved for every input row would stay with the result of a filter that
+/// kept few of them, and every consumer charging that result by its capacity would pay for it.
+///
+/// The transient second copy a reallocation makes is not counted.
+fn built_workspace_bytes(rows: usize, runs: usize, fields: usize) -> Result<usize> {
+    let cost = |kept: usize, split: usize| {
+        let capacity = kept.checked_mul(2)?.checked_add(4)?;
+        let indices = capacity.checked_mul(std::mem::size_of::<usize>())?;
+        let validity = kept.div_ceil(8).checked_mul(2)?.checked_add(64)?;
+        let field = capacity
+            .checked_mul(std::mem::size_of::<f64>())?
+            .checked_add(validity)?;
+        let spans = split
+            .checked_mul(2 * std::mem::size_of::<GridSpan>() + 2 * std::mem::size_of::<usize>())?;
+        fields
+            .checked_mul(field)?
+            .checked_add(indices)?
+            .checked_add(spans)
+    };
+    let runs = runs.min(rows);
+    let fragmented = rows.checked_add(runs).map(|total| total.div_ceil(2));
+    fragmented
+        .and_then(|fragmented| Some(cost(rows, runs)?.max(cost(fragmented, fragmented)?)))
+        .ok_or_else(|| workspace_overflow(rows, fields))
+}
+
+fn workspace_overflow(rows: usize, fields: usize) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the workspace for {rows} rows of {fields} fields does not fit one address space"
+    ))
+}
+
+/// An upper bound of what `window`'s next push allocates for the rows it hands out, for input
+/// whose last sample is at `last_ts`, closing its series when `last`, with `fields`, of the series
+/// `metric` names.
+///
+/// The rows are bounded by [`RangeEvaluator::output_rows_bound`] and written as
+/// [`built_workspace_bytes`] counts them; the points they sit on are the output grid's, not a
+/// subset of the input's, so each may be a run of its own. A function that can answer with a
+/// native histogram also writes, per field and row, a histogram index -- buffered as an
+/// `Option<u32>` and copied into an index array -- and a table row grown by doubling, with one
+/// boxed result per field in flight. A table row is bounded by the widest histogram the evaluator retains or `fields`
+/// carries: `first_over_time` and `last_over_time` copy one, and the others combine the window's
+/// histograms, whose layouts nest while a counter only grows. A combination of disjoint layouts --
+/// across a counter reset, or a `sum_over_time` of gauge histograms -- can exceed that row; it is
+/// not bounded here.
+fn window_workspace_bytes(
+    window: &RangeEvaluator,
+    last_ts: Option<i64>,
+    last: bool,
+    fields: &SeriesFields,
+    metric: &SeriesLabels,
+) -> Result<usize> {
+    let rows = window.output_rows_bound(last_ts, last);
+    let width = window.output_schema().fields.len();
+    let floats = assembly_bytes(width, width, metric)
+        .ok_or_else(|| workspace_overflow(rows, width))?
+        .checked_add(built_workspace_bytes(rows, rows, width)?)
+        .ok_or_else(|| workspace_overflow(rows, width))?;
+    if !window.yields_histograms() {
+        return Ok(floats);
+    }
+    let retained = window
+        .widest_retained_histogram()
+        .map(|heap| heap.saturating_add(HISTOGRAM_ROW_HEADER_BYTES));
+    let incoming = fields.iter().filter_map(histogram_row_bytes).max();
+    let Some(widest) = retained.max(incoming) else {
+        return Ok(floats);
+    };
+    let histograms = || {
+        let row = widest
+            .checked_mul(2)?
+            .checked_add(2 * std::mem::size_of::<Option<u32>>() + std::mem::size_of::<u32>() + 1)?;
+        let in_flight = widest.checked_add(std::mem::size_of::<FloatHistogram>())?;
+        rows.checked_mul(row)?
+            .checked_add(in_flight)?
+            .checked_mul(width)?
+            .checked_add(floats)
+    };
+    histograms().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "the histogram workspace for {rows} rows of {width} fields does not fit one address \
+             space"
+        ))
+    })
+}
+
+/// The time of the last sample a chunk carries, on its own timeline.
+fn last_sample_ms(chunk: &NativeChunk) -> Option<i64> {
+    match chunk {
+        NativeChunk::Raw(chunk) => chunk.time.as_buffer().last().copied(),
+        NativeChunk::Evaluated(chunk) => last_series_ms(&chunk.series),
+    }
+}
+
+/// The time of the last row `series` carries.
+fn last_series_ms(series: &Series) -> Option<i64> {
+    let row = series.time.len().checked_sub(1)?;
+    series.time.timestamp(row)
 }
 
 /// One unlabelled constant value per statement grid point, closed on its only chunk.
@@ -3998,8 +4207,11 @@ impl NodeState {
     /// there is nothing to hand on, and the input may still decide more.
     fn map(&mut self, map: &MapRuntime, chunk: EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
-        // The chunk is held for as long as this node works on it.
+        // The chunk is held for as long as this node works on it, beside the series its
+        // operations write.
+        let workspace = map_workspace_bytes(&map.ops, &chunk.series)?;
         self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -4013,8 +4225,15 @@ impl NodeState {
         if closing {
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // The chunk and the workspace are this call's, not the node's, so a failed map gives them
+        // back here rather than holding the pool's budget until the stopped executor is dropped.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer.resize(self.emitted_bytes())?;
+                return Err(error);
+            }
+        };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
@@ -4040,7 +4259,9 @@ impl NodeState {
         chunk: EvaluatedChunk,
     ) -> Result<Option<EvaluatedChunk>> {
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
+        let workspace = built_series_workspace_bytes(&chunk.series)?;
         self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             let _timer = metrics.timer();
@@ -4050,7 +4271,16 @@ impl NodeState {
         if closing {
             metrics.record_completed_series(1);
         }
-        let output = match outcome? {
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.buffer
+                    .resize(self.emitted_bytes().saturating_add(map.parameter_bytes))?;
+                return Err(error);
+            }
+        };
+        let output = match outcome {
             Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
             // A closing chunk is handed over even when no point kept a value, because a consumer
             // tells "nothing more here" from "no more input" by that chunk alone.
@@ -4080,25 +4310,21 @@ impl NodeState {
     ) -> Result<Option<EvaluatedChunk>> {
         let positions = chunk.series.time.len();
         let closing = chunk.is_last;
+        // The kernel reads the grid's timestamps, which it materializes when they are deferred.
         let grid_points = schema.eval_grid.as_ref().map_or(0, |grid| {
             usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
         });
+        let workspace = built_series_workspace_bytes(&chunk.series)?;
         let scratch = grid_points
-            .saturating_mul(std::mem::size_of::<i64>())
-            .saturating_add(
-                positions
-                    .saturating_mul(
-                        std::mem::size_of::<usize>().saturating_add(
-                            schema
-                                .fields
-                                .len()
-                                .saturating_mul(std::mem::size_of::<f64>() + 1),
-                        ),
-                    )
-                    .saturating_mul(2),
-            );
-        self.buffer
-            .grow(evaluated_bytes(&chunk).saturating_add(scratch))?;
+            .checked_mul(std::mem::size_of::<i64>())
+            .and_then(|timestamps| timestamps.checked_add(workspace))
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "the workspace of timestamp does not fit one address space".to_string(),
+                )
+            })?;
+        self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(scratch)?;
         let labels = drop_metric_name(&chunk.series.metric)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let result = {
@@ -4109,7 +4335,15 @@ impl NodeState {
         if closing {
             metrics.record_completed_series(1);
         }
-        let output = match result? {
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.buffer.resize(self.emitted_bytes())?;
+                return Err(error);
+            }
+        };
+        let output = match result {
             Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
             None if closing => Some(no_row_chunk(schema, labels)?),
             None => None,
@@ -4140,8 +4374,17 @@ impl NodeState {
             ));
         };
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
-        // The chunk is held for as long as this node works on it.
+        // The chunk is held for as long as this node works on it, beside the series the kernel
+        // writes: arithmetic against a constant maps the vector's segments, and every other
+        // operation builds a subset of its rows.
+        let workspace = match (&broadcast.scalar, broadcast.op) {
+            (BroadcastScalar::Literal(_), BroadcastOp::Arithmetic(_)) => {
+                mapped_workspace_bytes(&chunk.series)?
+            }
+            _ => built_series_workspace_bytes(&chunk.series)?,
+        };
         self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -4155,8 +4398,15 @@ impl NodeState {
             // on every chunk it handed up, so the series it read is closed here.
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer
+                    .resize(self.emitted_bytes().saturating_add(broadcast.scalar_bytes))?;
+                return Err(error);
+            }
+        };
         let output = match output {
             Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
             None => None,
@@ -4254,8 +4504,22 @@ impl NodeState {
             return self.collect(merge, window, chunk);
         }
         let (positions, closing) = (chunk.positions(), chunk.is_last());
-        // The chunk is held for as long as the evaluator consumes it.
+        // The chunk is held for as long as the evaluator consumes it, beside the rows the push
+        // hands out, which are counted on the output grid: a sparse input can decide far more
+        // points than it carries, and a dense one far fewer.
+        let (fields, metric) = match &chunk {
+            NativeChunk::Raw(chunk) => (&chunk.fields, chunk.metric.as_ref()),
+            NativeChunk::Evaluated(chunk) => (&chunk.series.fields, Some(&chunk.series.metric)),
+        };
+        let workspace = match metric {
+            Some(metric) => {
+                window_workspace_bytes(window, last_sample_ms(&chunk), closing, fields, metric)?
+            }
+            // The evaluator refuses a raw chunk without labels before it writes a row.
+            None => 0,
+        };
         self.buffer.grow(chunk.bytes())?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             let _timer = metrics.timer();
@@ -4276,8 +4540,15 @@ impl NodeState {
             // nothing for it still closed it, so it is counted here rather than on its output.
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // As in `Self::map`, a failed push gives back the chunk and the workspace here.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer
+                    .resize(window.retained_bytes().saturating_add(self.emitted_bytes()))?;
+                return Err(error);
+            }
+        };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
@@ -4712,12 +4983,21 @@ impl NodeState {
         // the flush is over.
         let merged = merge_same_labelset(&schema, merge.fragments)?;
         for series in merged {
+            let workspace = window_workspace_bytes(
+                window,
+                last_series_ms(&series),
+                true,
+                &series.fields,
+                &series.metric,
+            )?;
+            self.buffer.grow(workspace)?;
             let output = {
                 let metrics = Arc::clone(&self.buffer.metrics);
                 let _timer = metrics.timer();
                 window.push_series(&series, true)?
             };
             let Some(output) = output else {
+                self.buffer.shrink(workspace)?;
                 continue;
             };
             self.buffer
