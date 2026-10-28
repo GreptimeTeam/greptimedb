@@ -1399,6 +1399,7 @@ async fn metadata_cache_reuses_structures_and_isolates_storage() {
 /// results depend on the machine, build profile, and filesystem page cache.
 #[tokio::test]
 #[ignore = "manual native preparation cold/warm measurement"]
+#[allow(clippy::print_stdout)] // This manual benchmark reports measurements to its caller.
 async fn native_preparation_metadata_benchmark() {
     use crate::cache::{CacheManager, CacheStrategy};
     use std::time::Instant;
