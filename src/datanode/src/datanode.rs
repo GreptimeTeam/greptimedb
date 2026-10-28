@@ -462,10 +462,10 @@ impl DatanodeBuilder {
         .await
     }
 
-    /// Builds [ObjectStoreManager] from [StorageConfig] and self-tests every remote
-    /// object store it contains, unless `self_test_on_startup` is disabled.
+    /// Builds [ObjectStoreManager] from [StorageConfig] and probes every remote
+    /// object store it contains, unless `probe_on_startup` is disabled.
     ///
-    /// The self-test fails the build when a store rejects any of the operations the
+    /// The probe fails the build when a store rejects any of the operations the
     /// engines and the WAL rely on, so a misconfigured storage surfaces here instead
     /// of failing on the first write.
     pub async fn build_object_store_manager(
@@ -488,38 +488,45 @@ impl DatanodeBuilder {
             object_store_manager.add(name, object_store);
         }
 
-        if cfg.self_test_on_startup && !checks.is_empty() {
-            let prefix = store::self_test_key_prefix(node_id);
-            Self::run_self_tests(&checks, &prefix).await?;
+        if cfg.probe_on_startup && !checks.is_empty() {
+            let prefix = store::probe_key_prefix(node_id);
+            Self::run_probes(&checks, &prefix).await?;
         }
 
         Ok(Arc::new(object_store_manager))
     }
 
-    /// Self-tests every store in `checks` under its own key prefix.
+    /// Probes every store in `checks` under its own key prefix.
     ///
-    /// Each check is bounded by [`store::SELF_TEST_TIMEOUT`], so a store that accepts
+    /// Providers often share one object storage, so when there is more than one
+    /// store each probe starts after a random delay rather than all at once.
+    ///
+    /// Each check is bounded by [`store::PROBE_TIMEOUT`], so a store that accepts
     /// connections but never answers fails startup instead of blocking it, after a
     /// best-effort removal of its probe.
-    async fn run_self_tests(checks: &[(String, ObjectStore)], prefix: &str) -> Result<()> {
+    async fn run_probes(checks: &[(String, ObjectStore)], prefix: &str) -> Result<()> {
+        let stagger = checks.len() > 1;
         let checks = checks
             .iter()
             .enumerate()
             .map(|(index, (name, object_store))| {
                 let prefix = format!("{prefix}/{index}");
                 async move {
+                    if stagger {
+                        tokio::time::sleep(store::probe_start_delay()).await;
+                    }
                     match tokio::time::timeout(
-                        store::SELF_TEST_TIMEOUT,
-                        store::self_test_object_store(object_store, name, &prefix),
+                        store::PROBE_TIMEOUT,
+                        store::probe_object_store(object_store, name, &prefix),
                     )
                     .await
                     {
                         Ok(result) => result,
                         Err(_) => {
-                            store::remove_self_test_probe(object_store, &prefix).await;
-                            error::ObjectStoreSelfTestTimeoutSnafu {
+                            store::remove_probe_object(object_store, &prefix).await;
+                            error::ObjectStoreProbeTimeoutSnafu {
                                 name,
-                                timeout: store::SELF_TEST_TIMEOUT,
+                                timeout: store::PROBE_TIMEOUT,
                             }
                             .fail()
                         }
@@ -1519,9 +1526,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_object_store_self_test_can_be_disabled() {
+    async fn test_object_store_probe_can_be_disabled() {
         // The endpoint does not accept connections, so this only succeeds when the
-        // self-test does not run.
+        // probe does not run.
         let storage = StorageConfig {
             store: ObjectStoreConfig::S3(S3Config {
                 connection: S3Connection {
@@ -1534,7 +1541,7 @@ mod tests {
                 },
                 ..Default::default()
             }),
-            self_test_on_startup: false,
+            probe_on_startup: false,
             ..Default::default()
         };
 
@@ -1544,9 +1551,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_store_is_not_self_tested() {
-        // The self-test is enabled by default, but a File store must skip it.
-        let data_home = create_temp_dir("object-store-self-test-file");
+    async fn test_file_store_is_not_probed() {
+        // The probe is enabled by default, but a File store must skip it.
+        let data_home = create_temp_dir("object-store-probe-file");
         let storage = StorageConfig {
             data_home: data_home.path().to_str().unwrap().to_string(),
             ..Default::default()
@@ -1556,12 +1563,12 @@ mod tests {
             .await
             .unwrap();
 
-        // The self-test would leave this directory behind if it ran.
-        assert!(!data_home.path().join(".greptime_self_test").exists());
+        // The probe would leave this directory behind if it ran.
+        assert!(!data_home.path().join(".greptime_probe").exists());
     }
 
     #[tokio::test]
-    async fn test_object_store_self_test_failure_aborts_build() {
+    async fn test_object_store_probe_failure_aborts_build() {
         // The endpoint does not accept connections, so the probe write fails and the
         // build must fail with it.
         let storage = StorageConfig {
@@ -1584,7 +1591,7 @@ mod tests {
             .unwrap_err();
         assert_matches!(
             err,
-            Error::ObjectStoreSelfTest {
+            Error::ObjectStoreProbe {
                 name,
                 step: "write",
                 ..
