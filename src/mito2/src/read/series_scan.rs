@@ -14,6 +14,7 @@
 
 //! Per-series scan implementation.
 
+mod partition_balance;
 mod prepared;
 mod raw;
 
@@ -644,6 +645,7 @@ impl SeriesScan {
                 metrics.scan_cost += fetch_start.elapsed();
 
                 let build_start = Instant::now();
+                part_metrics.add_assigned_series(input.assigned_series.series().len());
                 let reader = SeriesReader::try_new(
                     stream_ctx.clone(),
                     partition_ranges.clone(),
@@ -907,12 +909,34 @@ impl RegionScanner for SeriesScan {
             let future = self.prepare_series(ctx, metrics_set, label_source);
             let schema = preparation.schema;
             let labels = label_source.clone();
+            // The split of the source's ordinals over the partitions is decided once, while the
+            // source is prepared, and is the same for every partition of this scan: read that copy
+            // instead of dividing the whole source per partition.
+            let state = self.prepared.clone();
+            // The columnar branch returns before the partition metrics below are created, so look up
+            // (or register) the metrics for this partition to report its series split. The lookup
+            // and the store are one step under the list lock, and the constructor only builds the
+            // metrics, so a partition that loses the race adopts the metrics already registered
+            // instead of evicting the object the prepared source was created with.
+            let part_metrics = self.metrics_list.get_or_insert_with(partition, || {
+                build_partition_metrics(
+                    &self.stream_ctx,
+                    ctx.explain_verbose,
+                    metrics_set,
+                    partition,
+                )
+            });
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
-                let n = source.num_series() as u128;
-                let start = (n * partition as u128 / partitions as u128) as usize;
-                let end = (n * (partition + 1) as u128 / partitions as u128) as usize;
-                let mut reader = source.read_series(start..end)?;
+                let boundaries = state.boundaries().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series split missing after preparation" }.build()))?;
+                // The split was built with the source for the same partition count this scan
+                // validates above, so this partition's range is a constant-time read of it: every
+                // ordinal belongs to exactly one partition, so the chunks of one series stay
+                // together, and a partition's share is a share of the samples rather than of the
+                // series because each ordinal is weighed by the row count its indexes record.
+                let range = partition_balance::partition_range(&boundaries, partition);
+                part_metrics.add_assigned_series(range.len());
+                let mut reader = source.read_series(range)?;
                 while let Some(chunk) = reader.try_next().await? { yield chunk; }
             };
             return Ok(Some(raw::from_stream(
@@ -971,14 +995,18 @@ impl RegionScanner for SeriesScan {
             .flatten()
             .copied()
             .collect();
+        // The split the source prepares is the one its partitions read, so it is decided for the
+        // same partition count `scan_series_partition` validates against.
+        let partitions = self.properties.num_partitions().max(1);
         let labels = label_source.clone();
-        let metrics = new_partition_metrics(
-            &self.stream_ctx,
-            ctx.explain_verbose,
-            metrics_set,
-            0,
-            &self.metrics_list,
-        );
+        // Reuse the metrics already registered for partition 0 instead of replacing them, so a
+        // later partition's preparation does not evict the object partition 0 reports into. The
+        // lookup and the store are one step under the list lock, and the constructor only builds
+        // the metrics without registering them, so concurrent preparations cannot both construct
+        // and one of them evict the other: the loser adopts what is already there.
+        let metrics = self.metrics_list.get_or_insert_with(0, || {
+            build_partition_metrics(&self.stream_ctx, ctx.explain_verbose, metrics_set, 0)
+        });
         Box::pin(async move {
             let Some((preparation, prepared_columnar)) = preparation? else {
                 return Ok(None);
@@ -988,7 +1016,7 @@ impl RegionScanner for SeriesScan {
                 return Ok(None);
             }
             state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .prepare(stream_ctx, ranges, partitions, labels, preparation, metrics)
                 .await
                 .map(Some)
         })
@@ -1508,6 +1536,30 @@ impl SenderList {
     }
 }
 
+/// Builds the [PartitionMetrics] for `partition` without registering it anywhere.
+///
+/// This constructor never touches a [PartitionMetricsList]. That is what makes it safe to hand to
+/// [PartitionMetricsList::get_or_insert_with], which runs its `make` argument while holding the
+/// list lock: registering here as well would either deadlock on that lock or let a later caller
+/// evict the metrics an earlier caller's prepared source was created with. Use
+/// [`new_partition_metrics`] when the metrics must also be registered.
+fn build_partition_metrics(
+    stream_ctx: &StreamContext,
+    explain_verbose: bool,
+    metrics_set: &ExecutionPlanMetricsSet,
+    partition: usize,
+) -> PartitionMetrics {
+    PartitionMetrics::new(
+        stream_ctx.input.mapper.metadata().region_id,
+        partition,
+        "SeriesScan",
+        stream_ctx.query_start,
+        explain_verbose,
+        metrics_set,
+    )
+}
+
+/// Builds the [PartitionMetrics] for `partition` and registers them in `metrics_list`.
 fn new_partition_metrics(
     stream_ctx: &StreamContext,
     explain_verbose: bool,
@@ -1515,15 +1567,7 @@ fn new_partition_metrics(
     partition: usize,
     metrics_list: &PartitionMetricsList,
 ) -> PartitionMetrics {
-    let metrics = PartitionMetrics::new(
-        stream_ctx.input.mapper.metadata().region_id,
-        partition,
-        "SeriesScan",
-        stream_ctx.query_start,
-        explain_verbose,
-        metrics_set,
-    );
-
+    let metrics = build_partition_metrics(stream_ctx, explain_verbose, metrics_set, partition);
     metrics_list.set(partition, metrics.clone());
     metrics
 }
