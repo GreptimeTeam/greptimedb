@@ -26,8 +26,8 @@ use crate::native::plan::tests::{
     window_on, window_with,
 };
 use crate::native::plan::{
-    BoundSetOp, CanonicalGrouping, CanonicalOwner, NativeExpr, NativeNode, NativeProperties,
-    NativeTree,
+    BoundSetOp, CanonicalGrouping, CanonicalOwner, InstantValue, NativeExpr, NativeNode,
+    NativeProperties, NativeTree,
 };
 use crate::range_eval::RangeFunction;
 use crate::vector_match::{MatchingLabels, SetOp};
@@ -417,7 +417,11 @@ fn the_timestamp_shapes_gain_a_merge_and_a_value_selection_does_not() {
 
     // `timestamp(x)` over a selection is the same rewrite on the selected sample.
     let selected = rewrite(
-        instant_over(raw_input_at(0), true, Arc::clone(&shared)),
+        instant_over(
+            raw_input_at(0),
+            InstantValue::Timestamp,
+            Arc::clone(&shared),
+        ),
         &[canonical_source()],
     );
     assert!(
@@ -427,7 +431,7 @@ fn the_timestamp_shapes_gain_a_merge_and_a_value_selection_does_not() {
 
     // A selection that reports the value keeps the label set it read.
     let values = rewrite(
-        instant_over(raw_input_at(0), false, Arc::clone(&shared)),
+        instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared)),
         &[canonical_source()],
     );
     assert_eq!(merges(&values), 0, "{values}");

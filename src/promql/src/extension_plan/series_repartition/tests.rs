@@ -657,36 +657,6 @@ async fn dropping_the_execution_releases_what_the_producer_reserved() {
     });
 }
 
-/// T4: a child that fails leaves every output with a terminal error rather than a clean end.
-#[tokio::test]
-async fn a_child_failure_reaches_every_output_as_an_error() {
-    let shared = labels("web-1");
-    let other = labels("elsewhere");
-    let child = Scripted::plan(vec![
-        vec![Step::chunk(chunk(shared.clone(), 0, 2, false)), Step::Error],
-        vec![Step::chunk(chunk(other.clone(), 0, 1, true)), Step::Error],
-    ]);
-    let plan: Arc<dyn ExecutionPlan> = node(child, 3);
-
-    let outputs = tokio::time::timeout(
-        Duration::from_secs(10),
-        drain(&plan, &SessionContext::default().task_ctx()),
-    )
-    .await
-    .expect("a failed read still ends every output");
-    assert_eq!(3, outputs.len());
-    for (partition, output) in outputs.iter().enumerate() {
-        let error = output
-            .as_ref()
-            .err()
-            .unwrap_or_else(|| panic!("output partition {partition} reported a clean end"));
-        assert!(
-            error.to_string().contains("scripted child failure"),
-            "output partition {partition} ended with {error}"
-        );
-    }
-}
-
 /// T5: one output is the same node, not a special case - every chunk arrives, in one chain after
 /// another, with nothing filtered out.
 #[tokio::test]

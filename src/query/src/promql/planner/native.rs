@@ -982,16 +982,16 @@ impl NativePlacement {
     /// layout the aggregate split is offered its cut against.
     ///
     /// Per-series work is decided first: a tree that answers each series from its own rows is
-    /// correct one partition at a time, and a two-occurrence pair reads each of its sides the same
-    /// way. Of what is left, the aggregate split carries one cut over one raw scan child, and a
-    /// one-selector tree the split refuses that nonetheless reads the whole vector at a point is a
-    /// single execution.
+    /// correct one partition at a time, and a match over independent scans reads each of its sides
+    /// the same way, however many occurrences the statement has. Of what is left, the aggregate
+    /// split carries one cut over one raw scan child, and a one-selector tree the split refuses that
+    /// nonetheless reads the whole vector at a point is a single execution.
     ///
-    /// `None` is the route having no placement for the tree, and it is the same set the route
-    /// declined before this decision was named: a two-occurrence statement outside the admitted pair
-    /// is left to the existing planner, because no partition holds the whole of what it folds, and a
-    /// one-selector tree that reads across series without needing a single execution is not a shape
-    /// the compiler builds. Naming the placement does not widen what the route plans.
+    /// `None` is the route having no placement for the tree: a statement of more than one occurrence
+    /// that is not per-series work is left to the existing planner, because no partition holds the
+    /// whole of what it folds, and a one-selector tree that reads across series without needing a
+    /// single execution is not a shape the compiler builds. Naming the placement does not widen what
+    /// the route plans.
     fn of(
         tree: &NativeTree,
         selectors: usize,
@@ -999,10 +999,7 @@ impl NativePlacement {
         time_index: &str,
     ) -> Option<Self> {
         let root = tree.root();
-        if !reads_across_series(root)
-            || pointwise_operand(root)
-            || (selectors == 2 && independent_scan_pair(root))
-        {
+        if !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root) {
             return Some(Self::PerPartition);
         }
         if selectors != 1 {
@@ -1862,6 +1859,11 @@ mod tests {
             sources.push(vec!["host".to_string(), "kind".to_string()]);
             sources
         };
+        let three = || {
+            let mut sources = two();
+            sources.push(vec!["host".to_string(), "az".to_string()]);
+            sources
+        };
         for (query, selectors, placement, sources) in [
             ("x", 1, NativePlacement::PerPartition, one.clone()),
             ("rate(x[5m])", 1, NativePlacement::PerPartition, one.clone()),
@@ -1881,6 +1883,15 @@ mod tests {
                 one.clone(),
             ),
             ("x + on(job) y", 2, NativePlacement::PerPartition, two()),
+            // A tree of matches over independent scans is per-series work whatever its occurrence
+            // count: each side reads the series the partition holding it has, so three of them bind
+            // as three, not as the two occurrences a pair would.
+            (
+                "x + on(job) y + on(job) z",
+                3,
+                NativePlacement::PerPartition,
+                three(),
+            ),
         ] {
             let compiled = compiled_test_tree(query);
             assert_eq!(

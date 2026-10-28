@@ -581,10 +581,13 @@ impl NativeNode {
             // rewrite's.
             NativeExpr::Instant { input, op } => {
                 let input = input.properties(boundary);
-                if op.timestamp {
-                    input.label_sets_of_its_own()
-                } else {
+                // `Sample` answers the label set the selection read. `Timestamp` and
+                // `InfoTimestamp` both report a time instead of the value and rewrite the labels on
+                // the way, so the facts are a rewrite's.
+                if matches!(op.value, InstantValue::Sample) {
                     input
+                } else {
+                    input.label_sets_of_its_own()
                 }
             }
             // A window folds a range of one series' samples and hands the answer over as that
@@ -622,6 +625,13 @@ impl NativeNode {
             }
             // A merge is the canonicalizer: it answers one series per label set whatever pieces it
             // read.
+            // `info` enriches each base series with the info series that share its identifying
+            // labels, which is a read across both sides' whole vectors: what it answers under is
+            // decided per series against the other side, so neither side's grouping is the output's.
+            NativeExpr::Info { base, info, .. } => base
+                .properties(boundary)
+                .united(info.properties(boundary))
+                .label_sets_of_its_own(),
             NativeExpr::Merge { input } => input.properties(boundary).merged(),
             // An aggregate folds a group and a vector operation decides whole series against each
             // other, so the input's label sets are not what their output holds.
@@ -793,6 +803,15 @@ pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => needs_single_execution_in(input, boundary),
+        // `info` pairs each base series with the info series that share its identifying labels,
+        // which is a match by a label set of the caller's choosing rather than by a canonical key -
+        // the same reason a two-vector `Binary` needs one execution unless both sides are proven to
+        // sit in it.
+        NativeExpr::Info { base, info, .. } => {
+            needs_single_execution_in(base, boundary)
+                || needs_single_execution_in(info, boundary)
+                || !(matching_co_located(base, boundary) && matching_co_located(info, boundary))
+        }
         NativeExpr::Aggregate { input, op } => {
             op.stage == AggregateStage::Complete || needs_single_execution_in(input, boundary)
         }

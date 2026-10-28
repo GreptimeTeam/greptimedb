@@ -106,6 +106,18 @@ fn rewrite(node: &NativeNode, boundary: &[NativeProperties]) -> DfResult<NativeN
             input: Box::new(rewrite(input, boundary)?),
             op: op.clone(),
         },
+        // `info` pairs each base series with the info series that share its identifying labels, so
+        // it reads both sides whole: the pieces of one label set have to be one series before they
+        // are matched.
+        NativeExpr::Info {
+            base,
+            info,
+            selector,
+        } => NativeExpr::Info {
+            base: Box::new(canonical(rewrite(base, boundary)?, boundary)),
+            info: Box::new(canonical(rewrite(info, boundary)?, boundary)),
+            selector: selector.clone(),
+        },
         // A merge is the canonicalizer itself, so it asks nothing of its input: fragments are what it
         // was written to receive.
         NativeExpr::Merge { input } => NativeExpr::Merge {

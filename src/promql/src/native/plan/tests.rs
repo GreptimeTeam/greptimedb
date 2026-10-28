@@ -21,12 +21,14 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp,
-    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType, needs_single_execution,
-    needs_single_execution_in, no_label_sets, preserves_canonical_identity, reads_across_series,
+    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping,
+    InstantValue, MapOp, NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
+    needs_single_execution, needs_single_execution_in, no_label_sets, preserves_canonical_identity,
+    reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::histogram_eval::NativeHistogramFunction;
+use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
@@ -273,9 +275,13 @@ pub(crate) fn window_of_range(
     }
 }
 
-/// An instant selection over raw samples. With `timestamp` it reports the selected sample's time
-/// instead of its value, which is the selection that rewrites the labels.
-pub(crate) fn instant_over(inner: NativeNode, timestamp: bool, out: Arc<EvalGrid>) -> NativeNode {
+/// An instant selection over raw samples. With `value` other than [`InstantValue::Sample`] it
+/// reports a time instead of the sample's value, which is the selection that rewrites the labels.
+pub(crate) fn instant_over(
+    inner: NativeNode,
+    value: InstantValue,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Instant {
             input: Box::new(inner),
@@ -283,7 +289,7 @@ pub(crate) fn instant_over(inner: NativeNode, timestamp: bool, out: Arc<EvalGrid
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp,
+                value,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -932,14 +938,18 @@ fn the_two_timestamp_shapes_downgrade_and_a_value_selection_inherits() {
     );
 
     // A selection that reports the sample's time is the same rewrite, applied to a selected sample.
-    let selected = instant_over(raw_input_at(0), true, Arc::clone(&shared));
+    let selected = instant_over(
+        raw_input_at(0),
+        InstantValue::Timestamp,
+        Arc::clone(&shared),
+    );
     assert_eq!(
         selected.properties(&boundary),
         boundary[0].label_sets_of_its_own()
     );
 
     // A selection that reports the sample's value keeps the label set it read, so it inherits.
-    let values = instant_over(raw_input_at(0), false, Arc::clone(&shared));
+    let values = instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared));
     assert_eq!(values.properties(&boundary), boundary[0]);
 }
 
