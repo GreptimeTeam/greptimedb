@@ -188,7 +188,10 @@ mod tests {
             let region_id = RegionId::new(1024, 1);
             env.create_table(vec![leader_region(region_id, leader_id)])
                 .await;
-            let ctx = env.context(new_persistent_context(Some(2)));
+            let ctx = env.context(new_persistent_context(
+                Some(2),
+                DrainDatanodeStrategy::FailFast,
+            ));
             let procedure_ctx =
                 crate::procedure::region_migration::test_util::TestingEnv::procedure_context();
             let child = ctx
@@ -219,7 +222,10 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
             region_id,
@@ -245,7 +251,10 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
             region_id,
@@ -276,7 +285,10 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
             region_id,
@@ -306,7 +318,10 @@ mod tests {
         // raced with the migration leaves behind.
         env.create_table(vec![leader_region(region_id, 2)]).await;
 
-        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
             region_id,
@@ -334,7 +349,10 @@ mod tests {
         let region_id = RegionId::new(1024, 1);
         env.create_table(vec![leader_region(region_id, 1)]).await;
 
-        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let mut ctx = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
             region_id,
@@ -367,7 +385,10 @@ mod tests {
                 leader_region(succeeded_region, 1),
             ])
             .await;
-            let mut ctx = env.context(new_persistent_context(Some(2)));
+            let mut ctx = env.context(new_persistent_context(
+                Some(2),
+                DrainDatanodeStrategy::FailFast,
+            ));
             seed_plan(&mut ctx, vec![failed_region, succeeded_region]);
             let failed_id = ProcedureId::random();
             let pending_id = ProcedureId::random();
@@ -427,7 +448,10 @@ mod tests {
                 leader_region(succeeded_region, 1),
             ])
             .await;
-            let mut ctx = env.context(new_persistent_context(Some(2)));
+            let mut ctx = env.context(new_persistent_context(
+                Some(2),
+                DrainDatanodeStrategy::FailFast,
+            ));
             seed_plan(&mut ctx, vec![failed_region, succeeded_region]);
             let failed_id = ProcedureId::random();
             let succeeded_id = ProcedureId::random();

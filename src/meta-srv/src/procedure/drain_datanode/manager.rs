@@ -20,14 +20,15 @@ use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::{ProcedureContext, ProcedureId, ProcedureManagerRef, ProcedureWithId};
 use common_telemetry::info;
+use common_time::util::current_time_millis;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
 use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::{
-    Context as DrainDatanodeContext, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
-    PersistentContext,
+    Context as DrainDatanodeContext, DEFAULT_DRAIN_TIMEOUT, DrainDatanodeProcedure,
+    DrainDatanodeProcedureTask, MAX_PARALLELISM, PersistentContext,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 
@@ -80,15 +81,16 @@ impl Drop for DrainDatanodeProcedureGuard {
 
 /// Manages the [`DrainDatanodeProcedure`]s.
 ///
-/// It registers the procedure loader and submits drain tasks. A datanode is drained by at
-/// most one procedure at a time: [`DrainDatanodeManager::submit_procedure`] rejects a second
-/// drain through the [`DrainDatanodeProcedureTracker`].
+/// It registers the procedure loader and submits drain tasks. Procedures of the same
+/// datanode are serialized by the procedure lock declared in
+/// [`DrainDatanodeProcedure::lock_key`].
 pub struct DrainDatanodeManager {
     procedure_manager: ProcedureManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     node_scheduling_manager: NodeSchedulingManagerRef,
     region_migration_manager: RegionMigrationManagerRef,
     selector_ctx: SelectorContext,
+
     tracker: DrainDatanodeProcedureTracker,
 }
 
@@ -107,6 +109,7 @@ impl DrainDatanodeManager {
             node_scheduling_manager,
             region_migration_manager,
             selector_ctx,
+
             tracker: DrainDatanodeProcedureTracker::default(),
         }
     }
@@ -140,6 +143,19 @@ impl DrainDatanodeManager {
             }
             .fail();
         }
+        if task.parallelism == 0 || task.parallelism > MAX_PARALLELISM {
+            return error::InvalidArgumentsSnafu {
+                err_msg: format!("the parallelism must be in 1..={}", MAX_PARALLELISM),
+            }
+            .fail();
+        }
+        let timeout = task.timeout.unwrap_or(DEFAULT_DRAIN_TIMEOUT);
+        if timeout.is_zero() {
+            return error::InvalidArgumentsSnafu {
+                err_msg: "the timeout must be greater than zero",
+            }
+            .fail();
+        }
 
         let Some(guard) = self.tracker.insert_running_procedure(&task) else {
             return error::DrainDatanodeRunningSnafu {
@@ -151,14 +167,19 @@ impl DrainDatanodeManager {
         let persistent_ctx = PersistentContext {
             node_id: task.node_id,
             target_node_id: task.target_node_id,
+            parallelism: task.parallelism,
+            strategy: task.strategy,
+            // The budget starts when the task is submitted, so neither a slow start nor a
+            // restart extends it.
+            deadline_ms: current_time_millis() + timeout.as_millis() as i64,
         };
         let procedure = DrainDatanodeProcedure::new(self.context(persistent_ctx), vec![guard]);
         let procedure_with_id =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
         let procedure_id = procedure_with_id.id;
         info!(
-            "Starting drain datanode procedure {procedure_id} for datanode {}",
-            task.node_id
+            "Starting drain datanode procedure {procedure_id} for datanode {}, timeout: {:?}",
+            task.node_id, timeout
         );
         self.procedure_manager
             .submit(procedure_with_id)
@@ -204,26 +225,71 @@ impl DrainDatanodeManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::procedure::drain_datanode::test_util::{TestEnv, new_persistent_context};
+    use std::time::Duration;
+
     use common_procedure::Procedure;
 
+    use crate::error;
+    use crate::procedure::drain_datanode::manager::DrainDatanodeProcedureTracker;
+    use crate::procedure::drain_datanode::test_util::{TestEnv, new_persistent_context};
+    use crate::procedure::drain_datanode::{
+        DEFAULT_PARALLELISM, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
+        DrainDatanodeStrategy,
+    };
+
     #[tokio::test]
-    async fn test_submit_procedure_rejects_same_target() {
+    async fn test_submit_procedure_rejects_invalid_task() {
         let env = TestEnv::new().await;
         let manager = env.drain_manager();
 
+        // The pinned target must differ from the drained datanode.
         let error = manager
             .submit_procedure(
                 common_procedure::ProcedureContext::default(),
                 DrainDatanodeProcedureTask {
                     node_id: 1,
                     target_node_id: Some(1),
+                    parallelism: DEFAULT_PARALLELISM,
+                    strategy: DrainDatanodeStrategy::FailFast,
+                    timeout: None,
                 },
             )
             .await
             .unwrap_err();
+        assert!(matches!(error, error::Error::InvalidArguments { .. }));
 
+        // The parallelism must be in range.
+        for parallelism in [0, crate::procedure::drain_datanode::MAX_PARALLELISM + 1] {
+            let error = manager
+                .submit_procedure(
+                    common_procedure::ProcedureContext::default(),
+                    DrainDatanodeProcedureTask {
+                        node_id: 1,
+                        target_node_id: Some(2),
+                        parallelism,
+                        strategy: DrainDatanodeStrategy::FailFast,
+                        timeout: None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, error::Error::InvalidArguments { .. }));
+        }
+
+        // The timeout must be greater than zero.
+        let error = manager
+            .submit_procedure(
+                common_procedure::ProcedureContext::default(),
+                DrainDatanodeProcedureTask {
+                    node_id: 1,
+                    target_node_id: Some(2),
+                    parallelism: DEFAULT_PARALLELISM,
+                    strategy: DrainDatanodeStrategy::FailFast,
+                    timeout: Some(Duration::ZERO),
+                },
+            )
+            .await
+            .unwrap_err();
         assert!(matches!(error, error::Error::InvalidArguments { .. }));
     }
 
@@ -234,6 +300,9 @@ mod tests {
         let task = DrainDatanodeProcedureTask {
             node_id: 1,
             target_node_id: Some(2),
+            parallelism: DEFAULT_PARALLELISM,
+            strategy: DrainDatanodeStrategy::FailFast,
+            timeout: None,
         };
 
         // A drain of datanode 1 is running, for example one recovered after a restart.
@@ -249,10 +318,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_datanode_tracker_takes_the_place_back_on_reload() {
+    async fn test_drain_datanode_takes_the_place_back_on_reload() {
         let env = TestEnv::new().await;
-        let procedure =
-            DrainDatanodeProcedure::new(env.context(new_persistent_context(Some(2))), vec![]);
+        let context = env.context(new_persistent_context(
+            Some(2),
+            DrainDatanodeStrategy::FailFast,
+        ));
+        let procedure = DrainDatanodeProcedure::new(context, vec![]);
         let json = procedure.dump().unwrap();
         let tracker = DrainDatanodeProcedureTracker::default();
 
@@ -264,6 +336,9 @@ mod tests {
         let task = DrainDatanodeProcedureTask {
             node_id: 1,
             target_node_id: Some(2),
+            parallelism: DEFAULT_PARALLELISM,
+            strategy: DrainDatanodeStrategy::FailFast,
+            timeout: None,
         };
         assert!(tracker.insert_running_procedure(&task).is_none());
 

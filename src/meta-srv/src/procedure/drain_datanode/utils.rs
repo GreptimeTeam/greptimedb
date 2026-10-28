@@ -19,6 +19,7 @@ use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::region_distribution;
+use common_time::util::current_time_millis;
 use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -116,6 +117,26 @@ pub(crate) async fn leads_region(
     Ok(region_route.leader_peer.as_ref().map(|peer| peer.id) == Some(node_id))
 }
 
+/// Returns an error if the drain exceeded its deadline.
+pub(crate) fn ensure_drain_deadline(ctx: &Context) -> Result<()> {
+    if current_time_millis() < ctx.persistent_ctx.deadline_ms {
+        return Ok(());
+    }
+
+    let remaining_leader_regions = ctx
+        .volatile_ctx
+        .plan
+        .as_ref()
+        .map_or(0, |plan| plan.leader_regions.len());
+    error::ExceededDeadlineSnafu {
+        operation: format!(
+            "Drain datanode {}, migrated: {}, remaining leader regions: {}",
+            ctx.persistent_ctx.node_id, ctx.volatile_ctx.migrated, remaining_leader_regions
+        ),
+    }
+    .fail()
+}
+
 /// Selects the migration destination of `region_id` off the drained datanode.
 ///
 /// Returns the pinned target when the procedure has one, otherwise the schedulable
@@ -150,13 +171,15 @@ pub(crate) async fn select_migration_target(
 
 #[cfg(test)]
 mod tests {
-    use crate::error;
-    use crate::key::NodeSchedulingRole;
-    use crate::procedure::drain_datanode::test_util::new_persistent_context;
-    use crate::procedure::drain_datanode::test_util::{TestEnv, follower_region, leader_region};
-    use crate::procedure::drain_datanode::utils;
     use common_meta::peer::Peer;
     use store_api::storage::RegionId;
+
+    use crate::error;
+    use crate::key::NodeSchedulingRole;
+    use crate::procedure::drain_datanode::test_util::{
+        TestEnv, follower_region, leader_region, new_persistent_context,
+    };
+    use crate::procedure::drain_datanode::{DrainDatanodeStrategy, utils};
 
     #[tokio::test]
     async fn test_build_datanode_plan() {
@@ -190,8 +213,8 @@ mod tests {
     async fn test_build_datanode_plan_reads_the_table_route() {
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
-        // The datanode is a follower of the region, so it is not a leader even though the
-        // datanode table index of the datanode contains the table.
+        // The datanode is listed as a follower of the region, so it is not a leader even
+        // though the table index of the datanode contains the table.
         env.create_table(vec![follower_region(region_id, 2, 1)])
             .await;
 
@@ -202,12 +225,16 @@ mod tests {
         assert!(plan.leader_regions.is_empty());
         assert_eq!(vec![region_id], plan.follower_regions);
     }
+
     #[tokio::test]
     async fn test_select_migration_target() {
         let env = TestEnv::new().await;
         let region_id = RegionId::new(1024, 1);
 
-        let mut ctx = env.context(new_persistent_context(None));
+        let mut ctx = env.context(new_persistent_context(
+            None,
+            DrainDatanodeStrategy::FailFast,
+        ));
         let peer = utils::select_migration_target(&ctx, region_id, &[])
             .await
             .unwrap();

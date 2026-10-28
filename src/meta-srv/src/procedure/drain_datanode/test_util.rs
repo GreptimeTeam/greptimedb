@@ -12,34 +12,53 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::metasrv::SelectorContext;
-use crate::procedure::drain_datanode::DrainDatanodePlan;
-use crate::procedure::drain_datanode::manager::DrainDatanodeManager;
-use crate::procedure::region_migration::manager::{
-    RegionMigrationManager, RegionMigrationManagerRef,
-};
-use common_meta::affinity::NoopAffinity;
-use common_procedure::ProcedureManagerRef;
 use std::sync::Arc;
+use std::time::Duration;
 
+use api::v1::meta::MailboxMessage;
+use api::v1::meta::mailbox_message::Payload;
 use common_meta::DatanodeId;
+use common_meta::affinity::NoopAffinity;
+use common_meta::instruction::{
+    DowngradeRegionReply, DowngradeRegionsReply, FlushRegionReply, Instruction, InstructionReply,
+    SimpleReply, UpgradeRegionReply, UpgradeRegionsReply,
+};
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::test_utils::new_test_table_info;
 use common_meta::peer::Peer;
 use common_meta::rpc::router::{Region, RegionRoute};
-use common_procedure::{Context as ProcedureContext, Status};
+use common_procedure::{
+    Context as ExecContext, ProcedureId, ProcedureManagerRef, ProcedureState, Status,
+};
+use common_time::util::current_time_millis;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
-use crate::procedure::drain_datanode::{Context, PersistentContext, State};
+use crate::procedure::drain_datanode::manager::DrainDatanodeManager;
+use crate::procedure::drain_datanode::{
+    Context, DEFAULT_PARALLELISM, DrainDatanodePlan, DrainDatanodeStrategy, PersistentContext,
+    State,
+};
+use crate::procedure::region_migration::manager::{
+    RegionMigrationManager, RegionMigrationManagerRef,
+};
 use crate::procedure::region_migration::test_util::TestingEnv;
+use crate::procedure::test_util::{MockHeartbeatReceiver, new_open_region_reply};
+use crate::service::mailbox::{Channel, MailboxRef};
 use crate::test_util::{create_meta_peer_client, new_node_scheduling_discovery, put_datanodes};
 
-pub(super) fn new_persistent_context(target_node_id: Option<DatanodeId>) -> PersistentContext {
+pub(super) fn new_persistent_context(
+    target_node_id: Option<DatanodeId>,
+    strategy: DrainDatanodeStrategy,
+) -> PersistentContext {
     PersistentContext {
         node_id: 1,
         target_node_id,
+        parallelism: DEFAULT_PARALLELISM,
+        strategy,
+        deadline_ms: current_time_millis() + 60 * 1000,
     }
 }
 
@@ -152,14 +171,127 @@ impl TestEnv {
             self.selector_ctx.clone(),
         )
     }
+
+    pub(super) async fn mock_datanodes(&mut self) {
+        let mailbox_ctx = self.env.mailbox_context();
+        for node_id in [1, 2] {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            mailbox_ctx
+                .insert_heartbeat_response_receiver(Channel::Datanode(node_id), tx)
+                .await;
+            spawn_mock_datanode(mailbox_ctx.mailbox().clone(), rx);
+        }
+    }
+}
+
+/// Spawns a mock datanode that answers every mailbox message of a migration.
+pub(super) fn spawn_mock_datanode(mailbox: MailboxRef, mut rx: MockHeartbeatReceiver) {
+    common_runtime::spawn_global(async move {
+        while let Some(Ok(response)) = rx.recv().await {
+            let message = response.mailbox_message.unwrap();
+            if let Some(reply) = mock_instruction_reply(&message) {
+                mailbox.on_recv(message.id, Ok(reply)).await.unwrap();
+            }
+        }
+    });
+}
+
+/// Returns the reply of `message`, or `None` if the instruction needs no reply.
+fn mock_instruction_reply(message: &MailboxMessage) -> Option<MailboxMessage> {
+    let Some(Payload::Json(payload)) = message.payload.as_ref() else {
+        panic!("unexpected mailbox payload of message {}", message.id);
+    };
+    let instruction: Instruction = serde_json::from_str(payload).unwrap();
+    let reply = match instruction {
+        Instruction::OpenRegions(_) => {
+            return Some(new_open_region_reply(message.id, true, None));
+        }
+        Instruction::CloseRegions(_) => InstructionReply::CloseRegions(SimpleReply {
+            result: true,
+            error: None,
+        }),
+        Instruction::FlushRegions(flush) => {
+            InstructionReply::FlushRegions(FlushRegionReply::from_results(
+                flush
+                    .region_ids
+                    .into_iter()
+                    .map(|region_id| (region_id, Ok(())))
+                    .collect(),
+            ))
+        }
+        Instruction::DowngradeRegions(regions) => {
+            InstructionReply::DowngradeRegions(DowngradeRegionsReply::new(
+                regions
+                    .into_iter()
+                    .map(|region| DowngradeRegionReply {
+                        region_id: region.region_id,
+                        last_entry_id: Some(1),
+                        metadata_last_entry_id: Some(1),
+                        exists: true,
+                        error: None,
+                    })
+                    .collect(),
+            ))
+        }
+        Instruction::UpgradeRegions(regions) => {
+            InstructionReply::UpgradeRegions(UpgradeRegionsReply::new(
+                regions
+                    .into_iter()
+                    .map(|region| UpgradeRegionReply {
+                        region_id: region.region_id,
+                        ready: true,
+                        exists: true,
+                        error: None,
+                    })
+                    .collect(),
+            ))
+        }
+        // One-way instruction: the meta server does not await a reply.
+        Instruction::InvalidateCaches(_) => return None,
+        other => panic!("unexpected instruction: {other:?}"),
+    };
+
+    Some(MailboxMessage {
+        id: message.id,
+        subject: "mock".to_string(),
+        from: "datanode".to_string(),
+        to: "meta".to_string(),
+        timestamp_millis: current_time_millis(),
+        payload: Some(Payload::Json(serde_json::to_string(&reply).unwrap())),
+        header: None,
+    })
+}
+
+pub(super) async fn wait_for_terminal_state(
+    procedure_manager: &ProcedureManagerRef,
+    procedure_id: ProcedureId,
+) -> ProcedureState {
+    for _ in 0..500 {
+        if let Some(state) = procedure_manager
+            .procedure_state(procedure_id)
+            .await
+            .unwrap()
+            && matches!(
+                state,
+                ProcedureState::Done { .. }
+                    | ProcedureState::Failed { .. }
+                    | ProcedureState::Poisoned { .. }
+            )
+        {
+            return state;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    panic!("the drain procedure did not reach a terminal state in 10 seconds");
 }
 
 pub(super) async fn run_until_done(
     state: &mut Box<dyn State>,
     ctx: &mut Context,
-    procedure_ctx: &ProcedureContext,
+    procedure_ctx: &ExecContext,
 ) -> Result<Status> {
-    for _ in 0..10 {
+    for _ in 0..50 {
         let (next, status) = state.next(ctx, procedure_ctx).await?;
         *state = next;
         if !matches!(status, Status::Executing { .. }) {
@@ -167,10 +299,10 @@ pub(super) async fn run_until_done(
         }
     }
 
-    panic!("the drain procedure did not finish in 10 steps");
+    panic!("the drain procedure did not finish in 50 steps");
 }
 
-/// Seeds the volatile plan for migration batch tests.
+/// Seeds the volatile plan, as if `CheckDrained` had built it.
 pub(super) fn seed_plan(ctx: &mut Context, leader_regions: Vec<RegionId>) {
     ctx.volatile_ctx.plan = Some(DrainDatanodePlan {
         leader_regions,
