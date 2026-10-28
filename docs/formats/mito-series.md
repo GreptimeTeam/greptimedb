@@ -1,16 +1,8 @@
 # Mito columnar series format
 
-**Status: implemented as an opt-in internal backend.** The byte assignments
-below are the version 1 compatibility contract. This document describes series-index artifacts only;
-sample files and query-consumer integration are separate work.
-
-The presentation follows the field tables and diagrams in the
-[Prometheus chunks format documentation](https://github.com/prometheus/prometheus/blob/main/tsdb/docs/format/chunks.md).
-This is an independent format, not a Prometheus-compatible file.
-
-The format sections follow storage order: artifact manifest, then each part's
-header, column payloads, metadata pages, and trailer. Writer/reader behavior and
-validation follow the layout specification.
+This document specifies the version 1 on-disk layout, encodings, ordering rules,
+and validation limits for series-index artifacts. For samples, see
+[Mito columnar samples format](mito-samples.md).
 
 ## Artifact manifest
 
@@ -44,24 +36,18 @@ in file order. The object name is derived as `part-<part_id>.series`, using the
 decimal ID without leading zeros, under the artifact's generation prefix. No
 path is stored in a file entry. `first` and `last` are inclusive identifiers,
 represented as objects with `table_id` and `tsid`. Ranges are strictly ordered
-and disjoint. Coverage is captured from
-the build request; source SST IDs remain diagnostic information, not a reuse
-criterion. Validate coverage and generation against the catalog handle on open.
+and disjoint. Coverage and generation must match the catalog entry.
 
 The tag list records the schema at build time, including tags currently absent
 from some logical tables. The logical Arrow schema is `__table_id`, `__tsid`,
 `__series_row_count`, followed by stored tags in manifest order. It has no
 timestamp columns and is separate from the existing Parquet index schema.
 
-The manifest is written only after every part is closed successfully. The
-existing catalog publication commits the artifact. `ArtifactMetadata.objects`
-lists the manifest and every part as `{ path, file_size }` objects, and the
-artifact-level `file_size` is their total stored size. Object sizes are recorded
-by the writer; the manifest does not store its own size.
-These lifecycle object paths are derived from the generation and part IDs;
-artifact ownership and deferred purge behavior remain unchanged.
-The reader obtains part order from the manifest, not object-list ordering.
-An empty build has a manifest with an empty file list and creates no part files.
+`ArtifactMetadata.objects` lists the manifest and every part as `{ path, file_size }`
+objects. The artifact-level `file_size` is their total stored size; the manifest
+does not store its own size. Object paths derive from the generation and part IDs.
+Part order comes from the manifest. An empty artifact has an empty file list and
+no part files.
 
 ## Part file
 
@@ -118,33 +104,16 @@ checksums are recorded in the later [metadata pages](#metadata-pages).
 `(__table_id, __tsid)` is the complete identifier **under the current uniqueness
 assumption**. Equal TSIDs in different tables are distinct. Records are ordered
 lexicographically by this pair and identifiers do not repeat after aggregation.
-There is no stored `__primary_key` column. The writer extracts identifiers and
-labels from input sparse primary keys without retaining their bytes on disk.
+There is no stored `__primary_key` column. Different label sets may hash to the
+same TSID within a table; version 1 stores no collision discriminator.
 
-Repeated input rows for a series, including rows split across input batches,
-contribute to its row count. Tags are constant for that identifier under the
-uniqueness assumption. Aggregation keeps
-the current index writer's input visibility semantics; this format does not add
-sample deduplication or make the row count an exact query-visible count for
-update-mode data.
+The row count records input rows aggregated for each identifier. Tags are constant
+for that identifier under the uniqueness assumption. The count is not necessarily
+the query-visible row count after deduplication or snapshot filtering.
 
-No per-series or per-block timestamps are stored, and the series schema has no
-timestamp unit. The catalog's bucket coverage allows coarse time pruning. A series selected
-from an overlapping bucket is only a candidate for a time-constrained query;
-SST/sample reads must apply the exact time filter. The format reader cannot prune
-individual series by time or accept filters on timestamp columns.
-
-TODO: evaluate support for optional per-series minimum/maximum timestamps and
-benchmark their storage size, build cost, and time-pruning benefit before adding
-them to the format. Keep this version free of per-series and per-block time bounds.
-
-TODO: benchmark storing exact input primary-key bytes and reconsider collision
-handling. Different label sets can hash to the same TSID within one table. This
-version neither preserves a collision discriminator nor promises collision-safe
-identity. Add the corresponding TODO at the implementation's identity boundary.
-
-Dedicated `job_id` and `instance_id` identifier/locality components are deferred.
-Ordinary tags named `job` or `instance` remain ordinary tag columns.
+No per-series or per-block timestamps or timestamp unit are stored. Time coverage
+is recorded only in the catalog bucket. Tags named `job` and `instance` are
+ordinary tag columns, not dedicated identifier components.
 
 #### Integer encoding 1
 
@@ -177,17 +146,7 @@ Entry zero is null; remaining entries are distinct non-null strings in
 first-occurrence order. Null cannot occur at another entry. The empty string is
 a non-null entry with zero bytes. Dictionary length includes its count and entry
 framing. Codes must be in range; the dictionary and code streams must each be
-consumed exactly. Keep dictionary/code buffers during filtering rather than
-expanding one owned string per row.
-
-TODO: implement and benchmark a plain UTF-8 encoding alternative for string
-chunks, particularly high-cardinality labels. Compare dictionary encoding with
-null bitmap + offsets + UTF-8 bytes, including Zstd-compressed size, build cost,
-and filtering/decoding cost. Evaluate per-chunk selection using estimated encoded
-size rather than cardinality alone. A plain encoding gets its own encoding ID;
-it can use the existing compression IDs and coexist with dictionary chunks.
-This port implements dictionary strings only; the alternative and automatic
-selection remain future work.
+consumed exactly.
 
 ### Metadata pages
 
@@ -199,9 +158,7 @@ The metadata is a tree that maps identifier ranges to column locations:
 - The **root page** is the tree's entrypoint, referenced by the trailer. It is
   either a leaf or an internal page; there is no separate root page encoding.
 
-This implementation supports only depths 1 and 2. It does not build or traverse
-internal pages below the root. The existing depth field and page references
-leave room for deeper trees as future work.
+Version 1 supports depths 1 and 2 only; internal pages cannot occur below the root.
 
 Each page is encoded and compressed independently. The diagrams below show its
 **decoded bytes**. The stored bytes are the compressed form of that entire page;
@@ -261,8 +218,7 @@ pages. Each entry is a fixed-size 56-byte page reference:
 └───────────────────────────────────────────────────────┘
 ```
 
-An internal page's decoded size is `12 + N × 56` bytes. In this implementation,
-it is always the root and all its children are leaves. An internal page has no
+An internal page's decoded size is `12 + N × 56` bytes. It is always the root and all its children are leaves. An internal page has no
 block descriptors or column data. At the 65,536-byte page limit, the root holds
 at most `floor((65536 - 12) / 56) = 1170` leaf references.
 
@@ -270,8 +226,7 @@ at most `floor((65536 - 12) / 56) = 1170` leaf references.
 
 If all block descriptors fit in one leaf, that leaf is also the root and the
 trailer records depth 1. Otherwise the root is an internal page and the trailer
-records depth 2: root → leaves. Depth 3 would mean root → internal pages → leaves,
-but is not implemented in this port.
+records depth 2: root → leaves. Other depths are invalid in version 1.
 
 For example, four data blocks can be indexed by two leaves and an internal root.
 The ranges below are inclusive `(table_id, tsid)` bounds; they do not imply that
@@ -303,15 +258,6 @@ are not needed.
 The root's own bounds and storage reference live in the trailer; its page bytes
 have exactly the leaf or internal layout above. At depth 2 the writer emits all
 leaves and then the internal root. At depth 1 it emits only the single leaf.
-
-TODO: evaluate depth 3+ if larger parts or metadata volumes justify it. The
-current page-reference representation can point to another internal page, so
-the extension need not change the byte layout. It would require new writer and
-reader traversal support, benchmarks, and a rollout policy for older readers.
-Current readers reject depths other than 1 or 2 explicitly before traversal;
-they must never interpret unsupported trees as empty indexes. Future writers
-must not assume that an unchanged file version implies old-reader support for
-new depths. Older files remain readable by a future deeper-tree implementation.
 
 #### Page ordering and size limits
 
@@ -386,13 +332,6 @@ and its inferred null count equals the number of series. A present tag chunk
 has string bounds if it contains any non-null values. Null and the empty string
 are distinct. Names must be unique and belong to the manifest schema.
 
-TODO: benchmark replacing repeated column names with numeric references to a
-shared schema, including metadata size, decode cost, and selective-read latency.
-The manifest already stores the tag schema; leaf descriptors currently repeat
-names to identify their chunks. Keep the current descriptors for this port.
-Names can be deduplicated later, but payload locations, codecs, null counts, and
-statistics remain specific to each block's column chunk.
-
 ### Trailer
 
 | Field | Bytes | Meaning |
@@ -409,12 +348,6 @@ The root ends immediately before the trailer. Supported depths are 1 and 2. Page
 lie in the metadata area; column ranges lie between the header and `payload_end`.
 Checksums detect accidental corruption; they do not authenticate data.
 
-TODO: evaluate and benchmark a variable-length Protobuf footer located by a
-small fixed trailer, so optional file metadata can evolve without enlarging the
-fixed trailer. Measure footer size, open/read cost, and compatibility behavior
-before adopting it. This port retains the 96-byte trailer above; no Protobuf
-footer or schema-reference changes are included.
-
 ## Codec selection and evolution
 
 Encoding IDs have separate column and metadata namespaces. IDs are explicitly
@@ -426,11 +359,10 @@ assigned and never reused. Version 1 supports:
 | Column encoding | 2 | Nullable UTF-8 dictionary and unsigned varint codes |
 | Metadata encoding | 1 | Block descriptors / page references defined above |
 | Compression | 0 | None; stored length equals decoded length |
-| Compression | 1 | Zstd frame; writer default is level 3 |
+| Compression | 1 | Zstd frame |
 
-The default writer uses compression 1 for columns and metadata. Compression 0
-provides an explicit uncompressed representation and a second dispatch path to
-test. Codec selection is internal; this change adds no public codec configuration.
+Compression 0 stores encoded bytes without compression. Compression 1 stores
+a Zstd frame; its level does not affect the decoding contract.
 
 Changing the writer's block row limit (for example, from 8,192 to 16,384) requires
 no codec ID, trailer extension, or file-version change: the block descriptor
@@ -441,8 +373,7 @@ are distinct from changing the serialized structure of a descriptor or trailer.
 A new encoding gets a new ID and its own documented payload interpretation;
 it can coexist with older encodings in the same file. A codec can define its
 own payload prefix for parameters. A new compression method likewise receives
-a new ID. Neither change requires rewriting the outer layout or changing the
-format API. Changing the outer structures or the meaning of an existing field
+a new ID. Neither change requires rewriting the outer layout. Changing the outer structures or the meaning of an existing field
 requires a new file version. Reserved fields must remain zero in version 1.
 
 Unknown versions, reserved bits, or metadata codecs fail open/read explicitly.
@@ -450,163 +381,14 @@ An unknown column codec may be skipped when its column is neither projected nor
 needed for filtering; attempting to read it returns an unsupported-codec error.
 It must never be interpreted as null or silently decoded with a default codec.
 
-## Writer and resource bounds
+## Format limits
 
-The implementation lives behind `SeriesIndexFormat::writer` and `FormatWriter`.
-Its input remains sorted flat `RecordBatch` data. Reuse the existing writer's
-sparse-primary-key and string-tag validation, but do not depend on its timestamp
-aggregation or timestamp-bearing output schema. This writer consumes primary
-keys and counts input rows without decoding timestamp values. Preserve
-aggregation across `write` calls; reject decreasing identifiers and checked-count
-overflow.
+Version 1 permits metadata depths 1 and 2 only. At most 1,170 leaf references
+fit in the root; an artifact may use additional parts when that limit is reached.
+Part size and block packing choices do not alter the wire layout.
 
-Write column payloads as blocks complete, retaining only the current series,
-current block, and bounded per-part descriptors. Finish a part at block boundaries
-when the stored position reaches 512 MiB or cumulative serialized descriptors
-reach 8 MiB. These are soft limits: the completing block may overshoot them.
-The root's leaf-reference capacity is a separate hard packing limit: account for
-the next block descriptor's leaf-page placement before writing that block. If
-it would require more than 1,170 leaves, finish the current part and write the
-block to a new part. Never create a third metadata level. Emit leaf pages, the
-internal root only when needed, and then the trailer.
-
-For bounded decoding, an individual column chunk is capped at 64 MiB decoded and
-64 MiB plus 1 MiB stored. Oversized chunks fail the build; no partial artifact is
-published. A block contains at most 8,388,608 series, bounding each decoded u64
-column and row-selection buffer to 64 MiB. Bound the manifest to 64 MiB before parsing. These safety limits are
-part of version 1, not new server configuration. Check offsets, lengths, counts,
-and arithmetic before allocation; row counts and lengths alone must not authorize
-allocations larger than the enclosing decoded data permits.
-
-## OpenDAL I/O and lifecycle
-
-Use `object_store::ObjectStore` (the OpenDAL operator) and its `Reader`/`Writer`
-types, as other Mito index implementations do. Do not add a parallel storage trait
-or a native filesystem adapter. Memory and filesystem OpenDAL services and the
-existing mock layers provide test backends.
-
-- Use the artifact metadata's recorded object sizes to read the manifest and
-  locate part trailers without stat requests. Validate part sizes against the
-  manifest and reject duplicate object paths or inconsistent totals. Fetch headers,
-  trailers, metadata pages, and selected column ranges through asynchronous range reads.
-  Reuse `fetch_byte_ranges` where applicable. Its range coalescing can fetch gaps
-  between selected chunks; those bytes do not cause unselected columns to decode.
-- Open outputs through `writer_with`, using `DEFAULT_WRITE_BUFFER_SIZE` and
-  `DEFAULT_WRITE_CONCURRENCY`. Stream bytes without buffering an entire part.
-  Call `close` before reporting success; count all committed object bytes.
-- Use existing `OpenDalSnafu` error conversion. Keep codec work separate from I/O
-  and run codecs inline, matching the format benchmark. TODO: compare inline
-  and offloaded codecs for latency, concurrent throughput, and async-worker
-  responsiveness before choosing an offloading policy. No comparative benchmark
-  currently establishes a performance advantage for either policy.
-- Until successful finish, the writer owns every output in its generation.
-  Failure or explicit abort aborts live OpenDAL writers, removes completed
-  unpublished objects, and aborts each live OpenDAL writer to clean its own atomic-write temporary
-  file. Cleanup never scans temporary files by generic part basenames. A cancellation/drop guard schedules the same cleanup
-  on the shared runtime. Cleanup errors are reported without hiding the original
-  operation error. Process-crash orphan recovery remains the existing lifecycle's
-  responsibility; an incomplete generation is never published as valid.
-- After successful finish, ownership transfers to the build/catalog lifecycle.
-  Reuse existing publication-failure cleanup and deferred retirement. A reader
-  and each returned stream retain a `SeriesIndexFileHandle` until dropped.
-
-## Reader API and execution
-
-Add a reader factory to `SeriesIndexFormat`, accepting the store and pinned
-artifact handle, and returning a format reader. The reader exposes its stored
-Arrow schema and a `read` method returning a stream of projected record batches.
-Reads have independent traversal state and may outlive the reader factory.
-
-The initial read request contains an ordered projection of column names, an
-optional table ID, an optional set of `MetricSeriesId` values, and a conjunction
-of `SimpleFilterEvaluator` filters. No ID restriction means all IDs; an explicitly
-empty set means no rows. Reject unknown projection/filter columns instead of
-guessing their meaning. An empty projection still preserves selected row counts.
-Returned rows preserve identifier order, even when IDs are not projected.
-
-The reader accepts filters only on its stored logical columns; it has no time
-filter. Bucket-level time selection belongs to the caller, and exact time
-filtering belongs to subsequent SST/sample reads. This API evaluates supplied
-filters exactly; conversion of arbitrary query expressions or schema-evolution predicates into
-conservative index candidates remains the future query adapter's responsibility.
-
-1. Open and validate the manifest and selected parts' framing. Use file bounds
-   to skip irrelevant parts and page bounds to traverse only relevant metadata.
-2. Apply conservative block pruning using identifier and label bounds.
-   Missing statistics never exclude possible matches. Label filters do not prune
-   internal pages. Full scans need not load the entire metadata tree at once.
-3. Decode IDs when needed for selection and predicate columns before output
-   columns. Apply existing Mito filter/null semantics, including evaluation on
-   tag dictionaries where possible. Null is not converted to the empty string.
-4. Fetch and decode remaining projected columns only for blocks with surviving
-   rows; each selected chunk is still decompressed as a whole. Materialize output
-   only for selected rows. Synthesize table IDs from the block constant and
-   omitted tags as null arrays. Reuse already decoded filter columns. Output
-   batches target 8 MiB of materialized values (one larger row is allowed), so
-   repeated dictionary values do not expand an entire block at once. This is a
-   reader packing choice and does not change the wire format.
-
-Keep page traversal state to the active leaf and pending references. Native query
-readers share validated manifests, schemas, framing/trailers, and decoded metadata
-pages through Mito's decoded SST metadata reservation (half of
-`sst_meta_cache_size`). The compact SST reservation is unchanged. Disabled caches
-bypass admission; entries larger than the decoded reservation are not retained.
-Weights include collection capacities, strings, keys, schema fields, and conservative
-BTree node overhead. Cached values own neither artifact pins nor live file readers.
-
-Keys include a process-local storage namespace tied to the engine's series store
-(stable across region reopen), generation paths, object lengths, representation,
-and page reference/checksum/codec/validation context. Generation paths already identify the manifest/schema, so page keys do
-not repeat their field names or part descriptors. Bounded async lock striping
-coalesces loads; failed or canceled loads do not populate the cache. Current handle and schema compatibility remains checked. Maintenance
-uses uncached readers so repair checks still observe missing or corrupt objects.
-`columnar_metadata` labels expose cache bytes, hits, misses, loads, and evictions.
-Column payloads remain uncached.
-
-Ordinary series scans continue using the existing Parquet path and fall back to
-SST discovery for this format. Merely adding a format reader must not mark these
-artifacts as supported query coverage. Samples remain disabled by default.
-
-## Compatibility and validation
-
-Existing Parquet files and catalogs remain readable. The new backend is opt-in
-through the internal format selection; defaults do not write this format. An
-older binary need not decode new codec bytes. These rebuildable artifacts must
-not become necessary for reading authoritative SST data. There is no promise
-that old binaries understand the new catalog identifier.
-
-Validation covers the layouts, identifier assumption, codec IDs, schema handling,
-and safety limits above. Implementation acceptance includes:
-
-- Codec unit tests and writer/reader round trips. Dedicated compatibility tests
-  and frozen format fixtures are outside this PR's scope.
-- Empty input, repeated series across batches, mixed tables/schemas, equal TSIDs
-  across tables, nullable/empty tags, forced rollover, depths 1 and 2, and
-  oversized payloads/descriptors.
-- Root-capacity rollover before a third level is needed, using reduced packing
-  limits in tests. Reject depth 0 and unsupported depths including 3 before
-  traversal, and reject an internal child where a leaf is required at depth 2.
-- Exact projection/filter results, no irrelevant payload decoding, selective
-  range reads, and independent readers/streams with caching disabled.
-- Different block row limits, including 16,384, read by the same format reader
-  without a version change. Validate references beyond 4 GiB with small mocked
-  payloads, plus overflowing offsets and oversized individual payload lengths.
-- Part-ID-to-path derivation, invalid/misordered part IDs, absence of timestamp
-  columns, and rejection of timestamp filters. Varying input timestamps must not
-  change encoded series records when identifiers, labels, and row counts match.
-- Truncation, bad checksums, invalid offsets/counts/order, dictionary corruption,
-  unsupported codec/version IDs, and bounded decompression/decoding failures.
-- Real-format reconciliation, reopen, publication failures, OpenDAL write/close
-  failures, abort/cancellation cleanup, accounting, and retirement with pinned
-  streams. Failed builds must not replace a valid catalog entry.
-- `cargo nextest run -p mito2`, crate Clippy, formatting, and license checks for
-  new source files. No SQL query behavior change is claimed by this phase.
-
-Performance must be measured again after the port: the row-count column, checksums,
-metadata framing, OpenDAL range coalescing, and decoded metadata caching
-change the measured workload. Future experiments also cover exact primary keys,
-dedicated job/instance locality components, and optional per-series time bounds.
-Shared-schema column references and a Protobuf footer require separate benchmarks
-and remain outside this port.
-Depth 3+ metadata is also deferred until larger parts justify the added traversal.
-No performance equivalence is asserted by this document.
+An individual column chunk is capped at 64 MiB decoded and 64 MiB plus 1 MiB
+stored. A block contains at most 8,388,608 series. The manifest is at most 64 MiB.
+Offsets, lengths, and counts must fit their enclosing areas without arithmetic
+overflow. Counts must not imply allocations larger than the enclosing decoded
+payload permits.
