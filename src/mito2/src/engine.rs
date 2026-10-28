@@ -1614,7 +1614,7 @@ impl RegionEngine for MitoEngine {
         if role == RegionRole::Leader {
             return Ok(region
                 .manifest_ctx
-                .promote_unless_demoted_after(sent_at, region_id));
+                .promote_unless_downgrade_started_after(sent_at, region_id));
         }
         region.set_role(role);
         Ok(true)

@@ -898,15 +898,15 @@ mod test {
         let (engine, mito) = (env.metric(), env.mito());
         let physical_region_id = env.default_physical_region_id();
         let lease = std::time::Duration::from_secs(10);
-        // The data region is demoted before the heartbeat is sent, the metadata region after it.
-        let demote = |region_id| {
+        // The data region is downgraded before the heartbeat is sent, the metadata region after it.
+        let downgrade = |region_id| {
             mito.set_region_role_state_gracefully(region_id, SettableRegionRoleState::Follower)
         };
-        demote(utils::to_data_region_id(physical_region_id))
+        downgrade(utils::to_data_region_id(physical_region_id))
             .await
             .unwrap();
         let sent_at = Instant::now();
-        demote(utils::to_metadata_region_id(physical_region_id))
+        downgrade(utils::to_metadata_region_id(physical_region_id))
             .await
             .unwrap();
 

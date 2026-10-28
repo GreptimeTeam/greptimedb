@@ -1519,7 +1519,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                 // Downgrading, and earlier ones have finished. This only
                 // changes a writable or staging leader, but always fences
                 // promotions issued before.
-                region.manifest_ctx.demote(region_id);
+                region.manifest_ctx.begin_downgrade(region_id);
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;

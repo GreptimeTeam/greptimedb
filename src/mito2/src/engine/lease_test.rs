@@ -301,27 +301,27 @@ async fn test_upgraded_region_writes_before_leader_grant() {
 #[case::downgrading(SettableRegionRoleState::DowngradingLeader)]
 #[case::follower(SettableRegionRoleState::Follower)]
 #[tokio::test]
-async fn test_stale_leader_grant_after_downgrade(#[case] demoted_to: SettableRegionRoleState) {
+async fn test_stale_leader_grant_after_downgrade(#[case] downgraded_to: SettableRegionRoleState) {
     common_telemetry::init_default_ut_logging();
     let mut env = TestEnv::with_prefix("stale-leader-grant").await;
     let (_listener, engine, _schema) = create_region(&mut env, None).await;
     let sent_before = Instant::now() - Duration::from_millis(1);
     engine
-        .set_region_role_state_gracefully(REGION_ID, demoted_to)
+        .set_region_role_state_gracefully(REGION_ID, downgraded_to)
         .await
         .unwrap();
-    let demoted = engine.get_region(REGION_ID).unwrap().state();
+    let downgraded = engine.get_region(REGION_ID).unwrap().state();
     // Another downgrade raises the gate again, though the role does not change.
     let sent_between = Instant::now();
     engine
-        .set_region_role_state_gracefully(REGION_ID, demoted_to)
+        .set_region_role_state_gracefully(REGION_ID, downgraded_to)
         .await
         .unwrap();
 
     // Grants for heartbeats sent before either downgrade arrive late.
     assert!(!grant_leader_at(&engine, sent_before));
     assert!(!grant_leader_at(&engine, sent_between));
-    assert_eq!(demoted, engine.get_region(REGION_ID).unwrap().state());
+    assert_eq!(downgraded, engine.get_region(REGION_ID).unwrap().state());
 
     assert!(grant_leader_at(&engine, Instant::now()));
     assert!(engine.get_region(REGION_ID).unwrap().is_writable());
