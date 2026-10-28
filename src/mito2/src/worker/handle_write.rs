@@ -340,7 +340,7 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
-                        let leader_deadline = region.leader_deadline.get();
+                        let leader_deadline = region.manifest_ctx.leader_deadline.get();
                         if lease_now.is_some_and(|now| now >= leader_deadline) {
                             sender_req
                                 .sender
@@ -497,7 +497,7 @@ impl<S> RegionWorkerLoop<S> {
                 match region.state() {
                     RegionRoleState::Leader(RegionLeaderState::Writable)
                     | RegionRoleState::Leader(RegionLeaderState::Staging) => {
-                        let leader_deadline = region.leader_deadline.get();
+                        let leader_deadline = region.manifest_ctx.leader_deadline.get();
                         if lease_now.is_some_and(|now| now >= leader_deadline) {
                             bulk_req
                                 .sender
@@ -606,7 +606,7 @@ impl<S> RegionWorkerLoop<S> {
         for (region_id, region_ctx) in region_ctxs.iter_mut() {
             // A Leader grant may have extended the deadline during the append.
             let expired = region_ctx.lease.as_ref().is_some_and(|(region, deadline)| {
-                now >= *deadline && now >= region.leader_deadline.get()
+                now >= *deadline && now >= region.manifest_ctx.leader_deadline.get()
             });
             if !expired || region_ctx.is_failed() {
                 continue;

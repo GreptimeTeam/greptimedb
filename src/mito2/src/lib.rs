@@ -31,6 +31,7 @@ pub mod error;
 pub mod extension;
 pub mod flush;
 pub mod gc;
+mod lease;
 pub mod manifest;
 pub mod memtable;
 mod metrics;
