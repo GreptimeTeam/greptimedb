@@ -600,8 +600,10 @@ impl PromPlanner {
         if ranked && selectors.len() != 1 {
             return Ok(None);
         }
-        let per_partition =
-            !ranked && (!reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root));
+        let per_partition = !ranked
+            && (!reads_across_series(root)
+                || pointwise_operand(root)
+                || independent_scan_pair(root));
         if ranked {
             let output_schema = fused_output_schema(&ranked_fields, &tags, &time)?;
             let Some(raw_input) = children.into_iter().next() else {
