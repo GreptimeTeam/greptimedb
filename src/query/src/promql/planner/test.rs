@@ -2220,10 +2220,33 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// More than one selector over metric-engine logical tables is not one multi-input node, though
-/// one selector over the same tables is native.
+/// Every selector `plan`'s fused node reads answers with a raw source naming its own metric.
+fn fused_input_metrics(plan: &LogicalPlan) -> Vec<String> {
+    let fused = find_fused_series(plan).unwrap_or_else(|| panic!("no fused node in {plan}"));
+    fused
+        .inputs()
+        .iter()
+        .map(|input| {
+            let LogicalPlan::Extension(Extension { node }) = input else {
+                panic!("expected a raw source, got {input}");
+            };
+            node.as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .unwrap_or_else(|| panic!("expected a raw source, got {input}"))
+                .metric_name()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Two metric logical tables over one physical table are two metrics, one input each, though one
+/// selector over either of them is one input and one binding.
+///
+/// Both logical tables are rewritten to scans of the same physical table, so their scans name the
+/// same table and only the id the rewrite restricts to tells them apart: a plan that read the first
+/// binding for both inputs would report the first metric's answer twice.
 #[tokio::test]
-async fn native_fused_multiple_metric_engine_selectors_fall_back() {
+async fn native_fused_metric_engine_selectors_keep_their_own_logical_table() {
     let tables = [
         (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
         (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
@@ -2231,14 +2254,72 @@ async fn native_fused_multiple_metric_engine_selectors_fall_back() {
     let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
     let single =
         build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
-    assert!(find_fused_series(&single).is_some(), "{single}");
+    let fused = find_fused_series(&single).unwrap_or_else(|| panic!("{single}"));
+    assert_eq!(Some("other_metric"), fused.binding().metric_name.as_deref());
     for query in [
         "some_metric / other_metric",
-        "some_metric + some_metric",
         "some_metric + other_metric + some_metric",
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
-        assert!(!has_pair_node(&native), "{query}: {native}");
+        assert!(has_pair_node(&native), "{query}: {native}");
+        let fused = find_fused_series(&native).unwrap_or_else(|| panic!("{query}: {native}"));
+        assert_eq!(None, fused.binding().metric_name, "{query}");
+        assert!(
+            fused_input_metrics(&native)
+                .iter()
+                .any(|metric| metric == "other_metric"),
+            "{query}: {native}"
+        );
+    }
+    let pair =
+        build_native_fused_plan_with_provider("some_metric / other_metric", true, provider().await)
+            .await;
+    assert_eq!(
+        vec!["some_metric".to_string(), "other_metric".to_string()],
+        fused_input_metrics(&pair),
+        "{pair}"
+    );
+    // Two selectors of one logical table are one metric read twice, so they keep the one binding
+    // and the direct scans that name it.
+    let repeated =
+        build_native_fused_plan_with_provider("some_metric + some_metric", true, provider().await)
+            .await;
+    let fused = find_fused_series(&repeated).unwrap_or_else(|| panic!("{repeated}"));
+    assert_eq!(2, fused.inputs().len(), "{repeated}");
+    assert_eq!(
+        Some("some_metric"),
+        fused.binding().metric_name.as_deref(),
+        "{repeated}"
+    );
+}
+
+/// Two aggregates over two metric logical tables of one physical table are one multi-input
+/// evaluation, not an aggregate split: the node folds every input partition in one execution.
+#[tokio::test]
+async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    for query in [
+        "sum(some_metric) / sum(other_metric)",
+        "sum(sum(some_metric)) / sum(other_metric)",
+        "sum by (tag_0) (some_metric) / sum by (tag_0) (other_metric)",
+    ] {
+        let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
+        let fused = find_fused_series(&native)
+            .unwrap_or_else(|| panic!("{query}: no fused node: {native}"));
+        assert_eq!(2, fused.inputs().len(), "{query}: {native}");
+        assert!(
+            fused.partial_fold().is_none(),
+            "{query}: a multi-input aggregate is not a split: {native}"
+        );
+        assert_eq!(
+            vec!["some_metric".to_string(), "other_metric".to_string()],
+            fused_input_metrics(&native),
+            "{query}: {native}"
+        );
     }
 }
 

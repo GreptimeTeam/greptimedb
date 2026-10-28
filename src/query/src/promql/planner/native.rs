@@ -284,6 +284,10 @@ impl PromPlanner {
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
             let mut single_input_context = None;
+            // The first metric logical-table id a selector's rewrite carried, and whether a later one
+            // carried a different id. See the `cross_table` use below.
+            let mut logical_scan_id: Option<u32> = None;
+            let mut logical_ids_differ = false;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -338,8 +342,20 @@ impl PromPlanner {
                 let mut input = self.create_table_scan_plan(table_ref).await?;
                 let logical_scan = metric_scan_and_table_id(&input);
                 let has_verified_metric_rewrite = logical_scan.is_some();
+                // A metric logical table's id is part of the identity its own scan reads: two
+                // logical tables served through one physical table prepare two scans of that one
+                // table, and the ids are what says they are two metrics. A selector whose scan is not
+                // a logical rewrite contributes no id, and a missing id on either side is not a
+                // difference.
+                if let Some((_, _, table_id)) = &logical_scan {
+                    match logical_scan_id {
+                        None => logical_scan_id = Some(*table_id),
+                        Some(first) if first != *table_id => logical_ids_differ = true,
+                        Some(_) => {}
+                    }
+                }
                 let scan = match logical_scan {
-                    Some((mut scan, predicate)) => {
+                    Some((mut scan, predicate, _)) => {
                         // Preserve logical field order and the table restriction on the direct
                         // physical scan.
                         let source_schema = scan.source.schema();
@@ -382,11 +398,11 @@ impl PromPlanner {
                 // there is a planning error, not a fallback. So the engine is checked here, where the
                 // existing plan is still the answer. A file-engine table is the concrete case: its
                 // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
-                // default `None`. A metric-engine table is served only through the logical rewrite
-                // recognised above, which is what makes its series the table's own.
+                // default `None`. A metric-engine selector is admitted through its verified logical
+                // rewrite, with no separate multi-selector exclusion: what is admitted is exactly a
+                // metric logical table served through that rewrite, one input per logical table, and
+                // the ids those rewrites carry are what tells two of them apart below.
                 if !supports_native_raw_series(&table_meta.engine)
-                    || (selectors.len() > 1
-                        && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
                     return Ok(None);
@@ -452,17 +468,20 @@ impl PromPlanner {
                 }
                 prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
             }
-            Ok(Some((prepared, single_input_context)))
+            Ok(Some((prepared, single_input_context, logical_ids_differ)))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, single_input_context)) = preparation? else {
+        let Some((mut prepared, single_input_context, logical_ids_differ)) = preparation? else {
             return Ok(None);
         };
         // Selectors over one table share one region, so the node runs there over every scan. When
         // they read more than one table, each scan answers from its own region and the node runs
-        // above them; see `RawSeriesSource`.
-        let cross_table = !same_table_scans(prepared.iter().map(|(scan, ..)| scan));
+        // above them; see `RawSeriesSource`. A metric logical table's id is part of the identity it
+        // reads: two ids are two metrics even when one physical table holds both, so two selectors
+        // that differ only by that id still read different series and are bound as two inputs.
+        let cross_table =
+            !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
@@ -589,12 +608,28 @@ impl PromPlanner {
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
         // Ordinary pointwise trees and trees of one-to-one matches, on one table or across
-        // several, are answered per partition. Aggregate splits are restricted to one raw scan
-        // child.
+        // several, are answered per partition. A tree that folds across series - an aggregate - is
+        // not, and one selector's fold is carried by the aggregate split below.
         let root = compiled.tree.root();
         let per_partition =
             !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
-        if !per_partition {
+        // The split is only ever a one-child plan: it exports each partition's leaf state and merges
+        // them above the region. A tree over two metric logical tables of ONE physical table is not
+        // split, because that node already runs one execution over every input partition: a
+        // `FusedSeries` with more than one input declares one partition, and its `execute` reads all
+        // of every input's partitions (`if self.inputs.len() > 1 { 0..count }` in `fused_series.rs`),
+        // so every group is folded in one place. Both of those inputs are `RawSeriesSource` children
+        // (the two ids made `cross_table` true), each answering from its own region with frames that
+        // carry their own labels, so the node is plannable above both. That plan needs no split to be
+        // correct, so it falls through to the node below.
+        //
+        // A multi-selector tree whose inputs stay direct scans of one table is not admitted here: its
+        // scans are not raw sources, so the categorizer refuses to place the node region-locally
+        // (`Categorizer::check_extension_plan` is `NonCommutative` for a cross-series node over more
+        // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
+        // such a tree keeps its one-selector-or-decline behaviour, unchanged.
+        let multi_input = selectors.len() > 1 && logical_ids_differ;
+        if !per_partition && !multi_input {
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
@@ -679,7 +714,12 @@ impl PromPlanner {
             return Ok(None);
         }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
-        // Across tables the region scans are bound by their `RawSeriesSource` children.
+        // Across tables the region scans are bound by their `RawSeriesSource` children, and this is
+        // also the binding a node over more than one input needs: such a node reads frames that
+        // already carry their own labels, so it binds neither tags nor one metric name of its own -
+        // each child names the metric it reads. A multi-input plan whose children stay direct
+        // scans reads one table through the one metric and tag set they share, and keeps this
+        // binding, which is the same identity those scans carry.
         let (tags, metric) = if cross_table {
             (Vec::new(), None)
         } else {
@@ -1172,10 +1212,12 @@ fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
 
-/// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`.
+/// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`, and reports
+/// the logical table's id together with the scan: the rewrite's `__table_id = <id>` restriction is
+/// the logical table the rewrite stands for, so it is the identity a selector over it reads.
 fn metric_scan_and_table_id(
     plan: &LogicalPlan,
-) -> Option<(datafusion::logical_expr::TableScan, Expr)> {
+) -> Option<(datafusion::logical_expr::TableScan, Expr, u32)> {
     let plan = match plan {
         LogicalPlan::Projection(projection) => projection.input.as_ref(),
         plan => plan,
@@ -1195,16 +1237,15 @@ fn metric_scan_and_table_id(
     {
         return None;
     }
-    if !matches!(
-        binary.right.as_ref(),
-        Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(_)), _)
-    ) {
+    let Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(table_id)), _) =
+        binary.right.as_ref()
+    else {
         return None;
-    }
+    };
     let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
         return None;
     };
-    Some((scan.clone(), filter.predicate.clone()))
+    Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
 /// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.

@@ -1770,17 +1770,30 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
     }
 }
 
-/// The fused node of the last wrapped plan that held one, and every region-side raw source.
+/// The fused node of the last wrapped plan that held one, every region-side raw source, and the
+/// root of the last wrapped plan.
 #[derive(Default)]
 struct NativePlanObserver(
     Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
     Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
 );
 
 impl NativePlanObserver {
     fn clear(&self) {
         *self.0.lock().unwrap() = None;
         self.1.lock().unwrap().clear();
+        *self.2.lock().unwrap() = None;
+    }
+
+    /// The root of the first plan wrapped after the last `clear`, which is the frontend's own tree
+    /// for the statement: the region-side sub-plans are wrapped later, while it executes.
+    fn root_plan(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.2
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a wrapped plan was captured")
     }
 
     fn take_raw_sources(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
@@ -1807,6 +1820,12 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
         _ctx: session::context::QueryContextRef,
     ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        {
+            let mut root = self.2.lock().unwrap();
+            if root.is_none() {
+                *root = Some(origin.clone());
+            }
+        }
         let mut stack = vec![origin.clone()];
         while let Some(node) = stack.pop() {
             if node.name() == "FusedSeriesExec" {
@@ -4565,6 +4584,167 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
         assert_eq!(native_rows, legacy_rows);
+    }
+}
+
+/// What every name of the frontend-side merge a split aggregate runs in front of contains.
+const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
+
+/// Whether any node of `plan` is the merge a split aggregate runs in front of.
+fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> bool {
+    let mut stack = vec![plan.clone()];
+    while let Some(node) = stack.pop() {
+        if node.name().contains(FINALIZE_EXEC_NAME) {
+            return true;
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    false
+}
+
+/// Two aggregates, one per metric logical table of one physical table, answered by one multi-input
+/// native node and by the existing plan alike.
+///
+/// The two logical tables are two metrics over one physical table, so both rewrites prepare a scan
+/// of that same table and only the id each one restricts to tells them apart: one binding read for
+/// both inputs would report one metric's sum where the query asks for a ratio. The pair is not a
+/// split either - the node has more than one input, so it declares one partition and folds every
+/// input's partitions in that one execution - and the plans the engines ran say so.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_pair_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_pair_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_pair_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_pair_phy');
+        CREATE TABLE native_pair_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_pair_phy');
+        INSERT INTO native_pair_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_pair_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // `sum` drops the labels, so both sides are one label-less series and the division matches:
+    // (2 + 4) / (8 + 8) = 0.375. Grouped by host each source keeps its own host's ratio, so the
+    // two groups differ and a swapped input would not answer the same: a = 2 / 8, b = 4 / 8.
+    let grouped = |host: &str, value: f64| {
+        (
+            0,
+            std::collections::BTreeMap::from([("host".to_string(), host.to_string())]),
+            value,
+        )
+    };
+    for (query, expected) in [
+        (
+            "sum(native_pair_demo) / sum(native_pair_other)",
+            vec![(0, std::collections::BTreeMap::new(), 0.375)],
+        ),
+        (
+            "sum by (host) (native_pair_demo) / sum by (host) (native_pair_other)",
+            vec![grouped("a", 0.25), grouped("b", 0.5)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+
+        // The existing plan: the route is off, so no native node ran and the answer is the one the
+        // legacy planner derives from the fixture by hand.
+        observer.clear();
+        let (legacy_columns, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the existing plan must not hold a native node"
+        );
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the comparison cannot pass vacuously"
+        );
+        assert_eq!(legacy_rows, expected, "legacy: {query}");
+
+        // The native plan: one two-input node over both logical tables' scans, and no split.
+        observer.clear();
+        let (native_columns, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(
+            observer.take_raw_sources().len(),
+            2,
+            "{query}: each logical table answers through its own raw source"
+        );
+        assert!(
+            !holds_split_merge(&observer.root_plan()),
+            "{query}: a multi-input aggregate is one execution, not a split"
+        );
+
+        assert_eq!(native_rows, legacy_rows, "{query}: rows");
+        assert_eq!(native_rows, expected, "{query}");
+
+        // The columns both routes report: the time index, one value column, and one column per
+        // label. The labels themselves are compared row by row above, and the time index is `ts` on
+        // both. The value column's *name* is not equal, and that is this route's existing naming for
+        // a computed value column rather than anything this shape introduces: the node names its
+        // fields after the tree's own root schema, while the existing planner names a computed column
+        // after its expression (see the comment above `legacy_output_columns` in
+        // `src/query/src/promql/planner/native.rs`; the same difference is pinned for a cross-table
+        // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
+        // shape is asserted, and the value column's name is pinned as the raw field it comes from.
+        assert_eq!(
+            native_columns.len(),
+            legacy_columns.len(),
+            "{query}: columns"
+        );
+        assert!(
+            legacy_columns.iter().any(|column| column == "ts"),
+            "{query}"
+        );
+        assert!(
+            native_columns.iter().any(|column| column == "ts"),
+            "{query}"
+        );
+        assert!(
+            native_columns.iter().any(|column| column == "val"),
+            "{query}: {native_columns:?}"
+        );
+        let labels = native_rows
+            .first()
+            .map(|(_, labels, _)| labels.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for label in labels {
+            assert!(
+                native_columns.contains(&label) && legacy_columns.contains(&label),
+                "{query}: label {label} is a column on both routes"
+            );
+        }
+        println!("{query}: native columns {native_columns:?}");
+        println!("{query}: legacy columns {legacy_columns:?}");
+        println!("{query}: rows {native_rows:?}");
+        println!(
+            "{query}: native plan\n{}",
+            datafusion::physical_plan::displayable(observer.root_plan().as_ref())
+                .indent(true)
+                .to_string()
+        );
     }
 }
 
