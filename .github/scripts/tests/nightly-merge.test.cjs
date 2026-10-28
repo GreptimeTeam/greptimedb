@@ -61,7 +61,7 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
   const summary = { addHeading() { return this; }, addTable(rows) { calls.push(['summary', rows]); return this; }, async write() {} };
   await scripts[sync ? 0 : 1](github,
     { repo: { owner: 'GreptimeTeam', repo: 'greptimedb' }, payload: { pull_request: { number: 1 } } },
-    { summary, warning() {}, setFailed: message => calls.push(['failed', message]) },
+    { summary, info() {}, warning() {}, setFailed: message => calls.push(['failed', message]) },
     { env: { DRY_RUN: String(dryRun) } });
   return calls;
 }
