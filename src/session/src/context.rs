@@ -918,6 +918,192 @@ mod test {
 
     use crate::Session;
     use crate::context::{Channel, *};
+    use crate::query_options::{
+        MAX_PUBLIC_PARALLELISM, canonical_query_option_name, parse_query_option,
+    };
+
+    #[test]
+    fn query_options_snapshot_validates_and_overlays_request_options() {
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query_parallelism", "8")
+            .unwrap();
+        ctx.set_extension("query_parallelism", "4");
+        ctx.set_extension("flow.return_region_seq", "true");
+        let mut expected_extensions = ctx.extensions();
+        expected_extensions.insert("query.parallelism".to_string(), "4".to_string());
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
+        assert_eq!(snapshot.extension("query_parallelism"), Some("4"));
+        assert_eq!(snapshot.extension("flow.return_region_seq"), Some("true"));
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "16")
+            .unwrap();
+        assert_eq!(snapshot.extension("query.parallelism"), Some("4"));
+        assert_eq!(
+            snapshot.configuration_parameter().query_options(),
+            HashMap::from([("query.parallelism".to_string(), "16".to_string())])
+        );
+        assert_eq!(
+            snapshot.effective_query_options().unwrap(),
+            HashMap::from([("query.parallelism".to_string(), "4".to_string()),])
+        );
+        // Session configuration is shared; request overrides stay frozen in the snapshot.
+        ctx.configuration_parameter()
+            .set_query_option("datafusion.optimizer.prefer_hash_join", "false")
+            .unwrap();
+        assert!(
+            !snapshot
+                .query_option_snapshot()
+                .unwrap()
+                .effective_query_options()
+                .unwrap()
+                .contains_key("datafusion.optimizer.prefer_hash_join")
+        );
+        assert_eq!(
+            ctx.query_option_snapshot()
+                .unwrap()
+                .effective_query_options()
+                .unwrap()
+                .get("datafusion.optimizer.prefer_hash_join")
+                .map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(snapshot.extensions(), expected_extensions);
+
+        let mut aliases = QueryContextBuilder::default().build();
+        aliases.set_extension("query_fallback", "TRUE");
+        aliases.set_extension("query.allow_query_fallback", "true");
+        assert_eq!(
+            aliases
+                .effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("true")
+        );
+        aliases.set_extension("allow_query_fallback", "false");
+        assert!(aliases.query_option_snapshot().is_err());
+
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query_fallback", "true")
+            .unwrap();
+        assert_eq!(
+            ctx.effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("true")
+        );
+        ctx.set_extension("query_fallback", "false");
+        assert_eq!(
+            ctx.effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("false")
+        );
+        ctx.set_extension("query_fallback", "true");
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "1")
+            .unwrap();
+        let before = ctx.configuration_parameter().query_options();
+        assert!(
+            ctx.configuration_parameter()
+                .set_query_option("query.parallelism", "1025")
+                .is_err()
+        );
+        assert_eq!(ctx.configuration_parameter().query_options(), before);
+        assert!(
+            ctx.configuration_parameter()
+                .set_query_option("query.parallelism", "")
+                .is_err()
+        );
+        assert_eq!(ctx.configuration_parameter().query_options(), before);
+
+        let absent = QueryContextBuilder::default().build();
+        let mut explicit_false = QueryContextBuilder::default().build();
+        explicit_false.set_extension("query.allow_query_fallback", "false");
+        assert_eq!(
+            absent
+                .effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback"),
+            None
+        );
+        assert_eq!(
+            explicit_false
+                .effective_query_options()
+                .unwrap()
+                .get("query.allow_query_fallback")
+                .map(String::as_str),
+            Some("false")
+        );
+    }
+
+    #[test]
+    fn query_option_snapshot_roundtrips_options_and_shares_only_mutable_session_data() {
+        let mut context = QueryContextBuilder::default()
+            .current_catalog(DEFAULT_CATALOG_NAME.to_string())
+            .current_schema("public".to_string())
+            .build();
+        context
+            .configuration_parameter()
+            .set_query_option(
+                "datafusion.optimizer.enable_dynamic_filter_pushdown",
+                "TRUE",
+            )
+            .unwrap();
+        context.set_extension("query_parallelism", "8");
+        context.set_extension("flow.return_region_seq", "true");
+        context.set_extension(REMOTE_QUERY_ID_EXTENSION_KEY, "query-id");
+        context.enable_live_analyze_metrics();
+
+        let snapshot = context.query_option_snapshot().unwrap();
+        let expected_options = snapshot.effective_query_options().unwrap();
+        let expected_extensions = snapshot.extensions();
+        assert_eq!(
+            expected_options
+                .get("datafusion.optimizer.enable_dynamic_filter_pushdown")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            expected_options
+                .get("query.parallelism")
+                .map(String::as_str),
+            Some("8")
+        );
+        assert_eq!(
+            expected_extensions
+                .get("flow.return_region_seq")
+                .map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            expected_extensions
+                .get(REMOTE_QUERY_ID_EXTENSION_KEY)
+                .map(String::as_str),
+            Some("query-id")
+        );
+        assert!(snapshot.live_analyze_metrics_enabled());
+
+        context.set_current_schema("changed");
+        assert_eq!(snapshot.current_schema(), "changed");
+        let other = QueryContextBuilder::default().build();
+        assert!(!other.extensions().contains_key("query.parallelism"));
+
+        let api_context: api::v1::QueryContext = (&snapshot).into();
+        let restored = QueryContext::try_from(api_context).unwrap();
+        let restored_snapshot = restored.query_option_snapshot().unwrap();
+        assert_eq!(
+            restored_snapshot.effective_query_options().unwrap(),
+            expected_options
+        );
+        assert_eq!(restored_snapshot.extensions(), expected_extensions);
+        assert!(restored_snapshot.live_analyze_metrics_enabled());
+    }
 
     #[test]
     fn test_query_parallelism_wire_accepts_legacy_value() {
@@ -1247,5 +1433,176 @@ mod test {
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();
         assert!(!ctx.batching_enabled());
+    }
+
+    #[test]
+    fn canonicalizes_and_validates_query_options() {
+        assert_eq!(
+            parse_query_option("QUERY_PARALLELISM", "1024", MAX_PUBLIC_PARALLELISM).unwrap(),
+            Some(("query.parallelism".into(), "1024".into()))
+        );
+        assert_eq!(
+            parse_query_option("query.parallelism", "1", MAX_PUBLIC_PARALLELISM).unwrap(),
+            Some(("query.parallelism".into(), "1".into()))
+        );
+        for value in ["", "-1", "0", "1025", "65536", "18446744073709551615"] {
+            assert!(
+                parse_query_option("query.parallelism", value, MAX_PUBLIC_PARALLELISM).is_err()
+            );
+        }
+        for (max, invalid) in [(1024, "1025"), (u16::MAX, "65536")] {
+            let message = parse_query_option("query.parallelism", invalid, max)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(&format!("1 and {max}")),
+                "unexpected diagnostic for max={max}: {message}"
+            );
+            assert!(parse_query_option("query.parallelism", "0", max).is_err());
+        }
+        assert_eq!(
+            parse_query_option("query.parallelism", "65535", u16::MAX).unwrap(),
+            Some(("query.parallelism".into(), "65535".into()))
+        );
+        assert!(parse_query_option("query.unknown", "true", MAX_PUBLIC_PARALLELISM).is_err());
+        assert_eq!(
+            parse_query_option("query_fallback", "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
+            Some(("query.allow_query_fallback".into(), "true".into()))
+        );
+        assert!(
+            parse_query_option("query.allow_query_fallback", "yes", MAX_PUBLIC_PARALLELISM)
+                .is_err()
+        );
+        assert_eq!(
+            canonical_query_option_name("datafusion.optimizer.prefer_hash_join"),
+            Some("datafusion.optimizer.prefer_hash_join".to_string())
+        );
+        for key in [
+            "datafusion.optimizer.repartition_joins",
+            "datafusion.optimizer.repartition_aggregations",
+            "datafusion.optimizer.repartition_sorts",
+            "datafusion.optimizer.repartition_windows",
+            "datafusion.optimizer.enable_round_robin_repartition",
+            "datafusion.optimizer.prefer_existing_sort",
+            "datafusion.optimizer.prefer_hash_join",
+            "datafusion.optimizer.join_reordering",
+            "datafusion.optimizer.enable_topk_aggregation",
+            "datafusion.optimizer.enable_dynamic_filter_pushdown",
+            "datafusion.optimizer.skip_failed_rules",
+            "datafusion.optimizer.filter_null_join_keys",
+            "datafusion.optimizer.enable_join_dynamic_filter_pushdown",
+            "datafusion.optimizer.enable_aggregate_dynamic_filter_pushdown",
+            "datafusion.optimizer.enable_topk_dynamic_filter_pushdown",
+        ] {
+            assert_eq!(
+                parse_query_option(key, "TRUE", MAX_PUBLIC_PARALLELISM).unwrap(),
+                Some((key.to_string(), "true".to_string())),
+                "{key} should accept uppercase true"
+            );
+            assert_eq!(
+                parse_query_option(key, "FALSE", MAX_PUBLIC_PARALLELISM).unwrap(),
+                Some((key.to_string(), "false".to_string())),
+                "{key} should accept uppercase false"
+            );
+            assert!(
+                parse_query_option(key, "yes", MAX_PUBLIC_PARALLELISM).is_err(),
+                "{key}"
+            );
+        }
+        for (key, input, expected) in [
+            ("datafusion.optimizer.max_passes", "05", "5"),
+            (
+                "datafusion.optimizer.default_filter_selectivity",
+                "25",
+                "25",
+            ),
+            (
+                "datafusion.optimizer.hash_join_single_partition_threshold",
+                "4096",
+                "4096",
+            ),
+        ] {
+            assert_eq!(
+                parse_query_option(key, input, MAX_PUBLIC_PARALLELISM).unwrap(),
+                Some((key.to_string(), expected.to_string()))
+            );
+        }
+        for (key, value) in [
+            ("datafusion.optimizer.max_passes", "invalid"),
+            ("datafusion.optimizer.default_filter_selectivity", "256"),
+            ("datafusion.optimizer.unknown", "true"),
+            ("datafusion.optimizer.max_passes.extra", "5"),
+        ] {
+            assert!(
+                parse_query_option(key, value, MAX_PUBLIC_PARALLELISM).is_err(),
+                "{key}={value}"
+            );
+        }
+        assert!(
+            parse_query_option(
+                "datafusion.execution.batch_size",
+                "12",
+                MAX_PUBLIC_PARALLELISM
+            )
+            .is_err()
+        );
+        assert_eq!(
+            parse_query_option("custom.extension", "value", MAX_PUBLIC_PARALLELISM).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_query_option("flow.return_region_seq", "true", MAX_PUBLIC_PARALLELISM).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_query_option_snapshot_mirrors_legacy_parallelism_key() {
+        // New frontends speak the canonical key, but older Datanodes only read
+        // the legacy `query_parallelism` hint; the wire snapshot carries both.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.parallelism", "1")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        let extensions = snapshot.extensions();
+        assert_eq!(
+            extensions.get("query.parallelism").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            extensions.get("query_parallelism").map(String::as_str),
+            Some("1")
+        );
+
+        // Without a parallelism override nothing is mirrored.
+        let ctx = QueryContextBuilder::default().build();
+        ctx.configuration_parameter()
+            .set_query_option("query.allow_query_fallback", "true")
+            .unwrap();
+        let snapshot = ctx.query_option_snapshot().unwrap();
+        assert!(!snapshot.extensions().contains_key("query_parallelism"));
+    }
+
+    #[test]
+    fn test_legacy_zero_parallelism_survives_wire_round_trip() {
+        // An old Frontend forwards `query_parallelism=0` untouched inside the
+        // wire query context; a new Datanode must restore it and treat the
+        // option as unset instead of rejecting the whole region query.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query_parallelism", "0");
+        let wire: api::v1::QueryContext = (&ctx).into();
+        let restored = QueryContext::try_from(wire).unwrap();
+
+        let snapshot = restored.query_option_snapshot().unwrap();
+        assert!(
+            !snapshot.extensions().contains_key("query.parallelism"),
+            "legacy zero parallelism is treated as unset"
+        );
+
+        // The canonical key keeps strict validation.
+        let mut ctx = QueryContextBuilder::default().build();
+        ctx.set_extension("query.parallelism", "0");
+        assert!(ctx.query_option_snapshot().is_err());
     }
 }
