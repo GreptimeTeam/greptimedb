@@ -84,6 +84,7 @@ use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
 use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
+use crate::sst::index::inverted_index::applier::index_target_data_type;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
 use crate::worker::WorkerListener;
@@ -1120,7 +1121,7 @@ impl IndexBuildTask {
             self.reason,
             IndexBuildType::Manual | IndexBuildType::SchemaChange
         );
-        let json_targets = if is_rebuild {
+        let mut json_targets = if is_rebuild {
             let indexes: Vec<_> = self
                 .source
                 .file_meta
@@ -1164,13 +1165,20 @@ impl IndexBuildTask {
                 .with_context(|| PreserveJsonIndexSnafu {
                     reason: "SST with existing JSON indexes has no readable rows".to_string(),
                 })?;
-            metadata = rebuild_json_metadata(&metadata, reader.metadata(), &json_targets)?;
-            parquet_reader = self
-                .access_layer
-                .read_sst(self.file.clone())
-                .expected_metadata(Some(metadata.clone()))
-                .build()
-                .await?;
+            json_targets.retain(|target| {
+                let current_type = index_target_data_type(&metadata, target);
+                current_type.is_some()
+                    && current_type == index_target_data_type(reader.metadata(), target)
+            });
+            if !json_targets.is_empty() {
+                metadata = rebuild_json_metadata(&metadata, reader.metadata(), &json_targets)?;
+                parquet_reader = self
+                    .access_layer
+                    .read_sst(self.file.clone())
+                    .expected_metadata(Some(metadata.clone()))
+                    .build()
+                    .await?;
+            }
         }
 
         let row_group_size = parquet_reader.as_ref().and_then(|reader| {
@@ -1413,8 +1421,7 @@ impl IndexBuildTask {
     }
 }
 
-/// Keeps current ordinary-column options but reads indexed JSON columns using the
-/// SST's layout. Current hints may omit or change the type of an existing target.
+/// Keeps current ordinary-column options but reads indexed JSON columns using the SST's layout.
 fn rebuild_json_metadata(
     current: &RegionMetadataRef,
     sst: &RegionMetadata,

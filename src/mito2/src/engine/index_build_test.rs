@@ -81,8 +81,14 @@ fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
 }
 
 #[tokio::test]
-async fn test_rebuild_preserves_existing_json_path_indexes() {
-    for (had_path_index, schema_change) in [(false, false), (true, false), (true, true)] {
+async fn test_rebuild_filters_json_path_indexes() {
+    for (had_path_index, schema_change, current_paths, old_type_changed, preserve_old) in [
+        (false, false, &["new"][..], false, false),
+        (true, false, &["old", "new"][..], false, true),
+        (true, false, &["new"][..], false, false),
+        (true, false, &["old", "new"][..], true, false),
+        (true, true, &["old", "new"][..], false, true),
+    ] {
         let mut env = TestEnv::new().await;
         let mut config = MitoConfig::default();
         // Leave an ordinary column index missing so BUILD_INDEX must replace the file.
@@ -99,13 +105,17 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
                 env.get_kv_backend(),
             )
             .await;
-        let settings = |paths: &[&str]| {
+        let settings = |paths: &[&str], old_type_changed: bool| {
             JsonSettings::try_new(
                 paths
                     .iter()
                     .map(|path| JsonTypeHint {
                         path: vec![(*path).to_string()],
-                        data_type: ConcreteDataType::int64_datatype(),
+                        data_type: if *path == "old" && old_type_changed {
+                            ConcreteDataType::float64_datatype()
+                        } else {
+                            ConcreteDataType::int64_datatype()
+                        },
                         inverted_index: true,
                     })
                     .collect(),
@@ -130,7 +140,7 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         request.column_metadatas[1]
             .column_schema
             .with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
-                settings(if had_path_index { &["old"] } else { &[] }),
+                settings(if had_path_index { &["old"] } else { &[] }, false),
             ))));
         let table_dir = request.table_dir.clone();
         let schema = rows_schema(&request);
@@ -170,22 +180,23 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         let new_target = IndexTarget::new_json_path(1, vec!["new".into()])
             .unwrap()
             .encode();
-        let entries = engine.all_index_metas().await;
-        assert_eq!(
-            entries.iter().any(|entry| entry.target_key == old_target),
-            had_path_index
-        );
         let before = current_file_metas(&engine, region_id).await;
-        assert_eq!(
-            before[0]
-                .indexes
+        let json_paths = |file: &FileMeta| {
+            file.indexes
                 .iter()
-                .filter(|index| index.path.is_some())
-                .count(),
-            usize::from(had_path_index)
+                .filter_map(|index| index.path.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            json_paths(&before[0]),
+            if had_path_index {
+                vec![vec!["old".to_string()]]
+            } else {
+                vec![]
+            }
         );
 
-        if had_path_index && !schema_change {
+        if preserve_old && !schema_change {
             // Targets come from FileMeta even if the old Puffin becomes
             // unreadable. Rebuild from the SST and publish a good version.
             let region = engine.get_region(region_id).unwrap();
@@ -197,17 +208,21 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
             );
             let store = access.object_store();
             store.write(&path, b"corrupt index".to_vec()).await.unwrap();
+            engine
+                .cache_manager()
+                .puffin_metadata_cache()
+                .unwrap()
+                .remove(&before[0].index_id().to_string());
         }
 
-        // Current hints differ from the SST's hints. Neither add the new target nor
-        // discard the old target when rebuilding an ordinary column index.
+        // Only targets indexed in this SST and still usable under the current hints survive.
         engine
             .handle_request(
                 region_id,
                 RegionRequest::Alter(RegionAlterRequest {
                     kind: AlterKind::SetJsonSettings {
                         column_name: "field_0".into(),
-                        settings: settings(&["new"]),
+                        settings: settings(current_paths, old_type_changed),
                     },
                 }),
             )
@@ -239,12 +254,12 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         let after = current_file_metas(&engine, region_id).await;
         assert_eq!(after.len(), 1);
         assert_eq!(
-            after[0]
-                .indexes
-                .iter()
-                .filter(|index| index.path.is_some())
-                .count(),
-            usize::from(had_path_index)
+            json_paths(&after[0]),
+            if preserve_old {
+                vec![vec!["old".to_string()]]
+            } else {
+                vec![]
+            }
         );
         assert_eq!(after[0].file_id, before[0].file_id);
         assert!(after[0].index_file_size > 0);
@@ -259,10 +274,10 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         );
         assert_eq!(
             entries.iter().any(|entry| entry.target_key == old_target),
-            had_path_index
+            preserve_old
         );
         assert!(!entries.iter().any(|entry| entry.target_key == new_target));
-        if had_path_index {
+        if preserve_old {
             // Exercise the same applier used by queries, not only the inspection table.
             let target = IndexTarget::decode(&old_target).unwrap();
             let region = engine.get_region(region_id).unwrap();

@@ -426,9 +426,9 @@ impl Drop for InvertedIndexApplier {
     }
 }
 
-/// Resolves the value type used to encode an index predicate.
+/// Returns the data type of an indexed target.
 /// JSON paths must have an enabled inverted-index type hint.
-fn index_target_data_type(
+pub(crate) fn index_target_data_type(
     metadata: &RegionMetadata,
     target: &IndexTarget,
 ) -> Option<ConcreteDataType> {
