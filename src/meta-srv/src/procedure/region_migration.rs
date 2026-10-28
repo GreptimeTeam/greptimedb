@@ -650,8 +650,9 @@ impl Context {
         );
     }
 
-    /// Notifies the RegionSupervisor to reset failure detectors of the given candidate regions.
-    pub async fn reset_failure_detectors_for_candidate_regions(&self, region_ids: &[RegionId]) {
+    /// Notifies the RegionSupervisor to reset failure detectors of the given regions on the target
+    /// peer.
+    pub async fn reset_failure_detectors(&self, region_ids: &[RegionId]) {
         let datanode_id = self.persistent_ctx.to_peer.id;
         let detecting_regions = region_ids
             .iter()
@@ -661,7 +662,7 @@ impl Context {
             .reset_failure_detectors(detecting_regions)
             .await;
         info!(
-            "Reset failure detectors of candidate regions for datanode {}, regions {:?}",
+            "Reset failure detectors of regions for datanode {}, regions {:?}",
             datanode_id, region_ids
         );
     }
@@ -943,7 +944,7 @@ impl RegionMigrationProcedure {
         // the target stopped before sending one.
         if !switched_regions.is_empty() {
             self.context
-                .reset_failure_detectors_for_candidate_regions(&switched_regions)
+                .reset_failure_detectors(&switched_regions)
                 .await;
         }
 
