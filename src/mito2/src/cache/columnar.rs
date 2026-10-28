@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use store_api::storage::FileId;
 
-use super::{
+use crate::cache::{
     CacheStrategy, CachedSstMeta, SST_META_DECODED_TYPE, SstDecodedMetaCache, SstMetaKey,
     decoded_meta_cache_weight,
 };
