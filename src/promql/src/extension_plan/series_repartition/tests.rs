@@ -16,12 +16,15 @@
 //! a stalled output does to the read, what an output learns when the child fails, and that one output
 //! is the degenerate case rather than a special one.
 //!
-//! Two properties need an input that behaves in time rather than only in sequence, so they are tested
-//! with children that hold: a partition that will not answer until another one has been polled, and
-//! partitions that stay silent until the test opens a [`Switch`]. The first is how the read's
-//! partition parallelism is checked - a read that drives every partition from one task cannot make
-//! progress past it - and the second is how the streams' ownership of the read is checked, by making
-//! the input produce nothing before the plan is dropped.
+//! Some properties need an input that behaves in time rather than only in sequence, so they are tested
+//! with children that hold: partitions that stay silent until the test opens a [`Switch`], which is
+//! how the streams' ownership of the read is checked, by making the input produce nothing before the
+//! plan is dropped.
+//!
+//! That a partition is read on a task of its own is not one of those properties, and is deliberately
+//! not tested as one: it is a structural fact about the read, so it is observed structurally, by
+//! recording the task that polls each partition (see [`Recording`]), rather than by requiring two
+//! tasks to run on two threads at the same instant - which the test cannot require of the runtime.
 //!
 //! The child here is scripted rather than planned: each of its partitions answers a list of steps,
 //! so a test says which series a chunk belongs to, where on the grid it sits and whether it closes
@@ -32,7 +35,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use datafusion::arrow::array::Float64Array;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
@@ -859,54 +862,26 @@ impl Drop for GatedScript {
     }
 }
 
-/// Where a [`Blocking`] child's partitions were polled, and what that showed about the read.
-#[derive(Clone)]
-struct BlockingProbe {
-    /// How many times each partition's stream was polled.
-    polls: Arc<Vec<AtomicUsize>>,
-    /// How many partitions are inside `poll_next` right now; more than one is two tasks reading at
-    /// once, since one task polls one partition at a time.
-    inside: Arc<AtomicUsize>,
-    /// Whether two partitions were ever in flight at the same time.
-    overlapped: Arc<AtomicBool>,
-    /// Whether partition 0 waited for another partition and never saw one polled.
-    timed_out: Arc<AtomicBool>,
-}
+/// The tokio task that first polled each partition of a [`Recording`] child.
+type ReadTasks = Arc<Mutex<Vec<Option<tokio::task::Id>>>>;
 
-impl BlockingProbe {
-    fn new(partitions: usize) -> Self {
-        Self {
-            polls: Arc::new((0..partitions).map(|_| AtomicUsize::new(0)).collect()),
-            inside: Arc::new(AtomicUsize::new(0)),
-            overlapped: Arc::new(AtomicBool::new(false)),
-            timed_out: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn polls(&self, partition: usize) -> usize {
-        self.polls[partition].load(Ordering::SeqCst)
-    }
-}
-
-/// How long partition 0 of a [`Blocking`] child waits before giving up on being read in parallel.
-const GATE: Duration = Duration::from_secs(5);
-
-/// A child whose partition 0 will not answer until another partition has been polled.
+/// A child whose partitions answer scripted steps, recording the task that first polls each one.
 ///
-/// A poll in flight is invisible to a task that never gets to run, so the gate is a real one:
-/// partition 0 stays inside `poll_next` - holding its thread - until another partition's `poll_next`
-/// has run, which a read that drives every partition from one task can never arrange.
-struct Blocking {
+/// A partition count says how many parts a plan declares, not how many tasks compute them: one task
+/// polling every partition in turn declares the same number. What is recorded here is the task
+/// itself, read from [`tokio::task::try_id`] inside the poll - which is where a child partition is
+/// really read, and hence what the partition count actually bought.
+struct Recording {
     steps: Vec<Vec<Step>>,
-    probe: BlockingProbe,
+    polled: ReadTasks,
     series_schema: Arc<SeriesSchema>,
     properties: Arc<PlanProperties>,
 }
 
-impl Blocking {
-    /// The child over `steps`, one partition per list, and the record of how it was polled.
-    fn plan(steps: Vec<Vec<Step>>) -> (Arc<dyn ExecutionPlan>, BlockingProbe) {
-        let probe = BlockingProbe::new(steps.len());
+impl Recording {
+    /// The child over `steps`, one partition per list, and the record of which task polled each.
+    fn plan(steps: Vec<Vec<Step>>) -> (Arc<dyn ExecutionPlan>, ReadTasks) {
+        let polled: ReadTasks = Arc::new(Mutex::new(vec![None; steps.len()]));
         let series_schema = schema();
         let frame = pack_evaluated_series(
             Box::pin(futures::stream::empty()),
@@ -922,31 +897,31 @@ impl Blocking {
         ));
         let child = Arc::new(Self {
             steps,
-            probe: probe.clone(),
+            polled: Arc::clone(&polled),
             series_schema,
             properties,
         });
-        (child, probe)
+        (child, polled)
     }
 }
 
-impl fmt::Debug for Blocking {
+impl fmt::Debug for Recording {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Blocking")
+        f.debug_struct("Recording")
             .field("partitions", &self.steps.len())
             .finish()
     }
 }
 
-impl DisplayAs for Blocking {
+impl DisplayAs for Recording {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Blocking: partitions={}", self.steps.len())
+        write!(f, "Recording: partitions={}", self.steps.len())
     }
 }
 
-impl ExecutionPlan for Blocking {
+impl ExecutionPlan for Recording {
     fn name(&self) -> &str {
-        "Blocking"
+        "Recording"
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -968,7 +943,7 @@ impl ExecutionPlan for Blocking {
         self: Arc<Self>,
         children: Vec<Arc<dyn ExecutionPlan>>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
-        assert!(children.is_empty(), "a blocking child has no children");
+        assert!(children.is_empty(), "a recording child has no children");
         Ok(self)
     }
 
@@ -978,53 +953,44 @@ impl ExecutionPlan for Blocking {
         _context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
         let steps = self.steps.get(partition).cloned().ok_or_else(|| {
-            DataFusionError::Execution(format!("blocking child has no partition {partition}"))
+            DataFusionError::Execution(format!("recording child has no partition {partition}"))
         })?;
         pack_evaluated_series(
-            Box::pin(BlockingScript {
+            Box::pin(RecordingScript {
                 partition,
                 steps: steps.into_iter(),
-                probe: self.probe.clone(),
-                waited: false,
+                polled: Arc::clone(&self.polled),
+                recorded: false,
             }),
             Arc::clone(&self.series_schema),
         )
     }
 }
 
-/// One partition of a [`Blocking`] child.
-struct BlockingScript {
+/// One partition of a [`Recording`] child.
+struct RecordingScript {
     partition: usize,
     steps: std::vec::IntoIter<Step>,
-    probe: BlockingProbe,
-    /// Whether this partition already waited at the gate.
-    waited: bool,
+    polled: ReadTasks,
+    /// Whether this partition's first poll has been recorded.
+    recorded: bool,
 }
 
-impl Stream for BlockingScript {
+impl Stream for RecordingScript {
     type Item = Result<(Series, bool), BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
-        // Counted before the gate, so a partition that is inside its poll is visible as such to any
-        // other partition polling at the same time on another task.
-        let inside = this.probe.inside.fetch_add(1, Ordering::SeqCst) + 1;
-        if this.partition > 0 && inside > 1 {
-            this.probe.overlapped.store(true, Ordering::SeqCst);
+        // Recorded on the first poll rather than in `execute`: `execute` may run on the consumer's
+        // task while the reading is what another task does.
+        if !this.recorded {
+            this.recorded = true;
+            let mut polled = this
+                .polled
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            polled[this.partition] = tokio::task::try_id();
         }
-        if this.partition == 0 && !this.waited {
-            this.waited = true;
-            let deadline = Instant::now() + GATE;
-            while !(1..this.probe.polls.len()).any(|partition| this.probe.polls(partition) > 0) {
-                if Instant::now() >= deadline {
-                    this.probe.timed_out.store(true, Ordering::SeqCst);
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        }
-        this.probe.polls[this.partition].fetch_add(1, Ordering::SeqCst);
-        this.probe.inside.fetch_sub(1, Ordering::SeqCst);
         Poll::Ready(this.steps.next().map(step_answer))
     }
 }
@@ -1064,41 +1030,57 @@ async fn terminal_error(stream: &mut SendableRecordBatchStream) -> Option<DataFu
 
 /// T-A1: the read drives each input partition on a task of its own.
 ///
-/// What is asserted, and why it is the property rather than a hint of it: partition 0 of the child
-/// does not answer until another partition has been polled, and it waits by holding its thread
-/// inside `poll_next`, not by returning `Poll::Pending`. A single task polls one future at a time, so
-/// no arrangement of awaits inside one task can get past that gate - it only opens if partition 1's
-/// `poll_next` really ran while partition 0 was still inside its own, which is two tasks on two
-/// threads. `overlapped` records that the child saw exactly that, and `timed_out` records a gate that
-/// was never opened, so a read that went back to polling everything from one task fails here instead
-/// of merely being slow.
+/// The child records the task that first polls each of its partitions, and what is asserted is that
+/// the two partitions were polled by two distinct tasks, neither of them the consumer's. That is the
+/// property `Forwarders::start` provides - one task per child partition - and it is what a partition
+/// count on its own cannot say: one task polling every partition in turn declares the same count.
+///
+/// Two distinct tasks is deliberately not a claim about simultaneous wall-clock execution: the two
+/// tasks may share a worker thread and be polled one after the other, and the read is correct either
+/// way. Nor does the assertion need two threads to be free at the same instant, which is what ties it
+/// to the scheduling of the runtime the read runs on rather than to the read. What a read that drove
+/// the partitions from one task would record instead is one id for both, or the consumer's own.
 #[tokio::test]
 async fn every_input_partition_is_read_on_a_task_of_its_own() {
     let shared = labels("web-1");
-    let (child, probe) = Blocking::plan(vec![
+    let (child, polled) = Recording::plan(vec![
         vec![Step::chunk(chunk(shared.clone(), 0, 1, true))],
         vec![Step::chunk(chunk(shared.clone(), 4, 1, true))],
     ]);
     let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    // Taken before anything is read: the task that asks for an output is the one a partition must
+    // not be read on.
+    let consumer = tokio::task::try_id();
     let outputs = tokio::time::timeout(
         Duration::from_secs(10),
         drain(&plan, &SessionContext::default().task_ctx()),
     )
     .await
-    .expect("a read that drives each partition separately gets past the gate");
+    .expect("both partitions of the child answer, so the output ends");
 
-    assert!(
-        !probe.timed_out.load(Ordering::SeqCst),
-        "partition 0 waited for another partition to be polled and none was: the read drove the \
-         partitions one after another on one task"
+    let recorded = polled
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(
+        2,
+        recorded.len(),
+        "the child holds one partition per scripted list"
+    );
+    let tasks = recorded
+        .iter()
+        .map(|task| task.unwrap_or_else(|| panic!("a child partition was never polled")))
+        .collect::<Vec<_>>();
+    assert_ne!(
+        tasks[0], tasks[1],
+        "the two partitions were polled by two different tasks, so neither was read on the task \
+         that read the other: {tasks:?}"
     );
     assert!(
-        probe.overlapped.load(Ordering::SeqCst),
-        "two partitions were never polled at the same time"
+        tasks.iter().all(|task| Some(*task) != consumer),
+        "neither partition ran on the consumer's task, so the read stayed on the tasks the node \
+         started for the child: {tasks:?} against {consumer:?}"
     );
-    // At least once each: the frame codec in front of the child polls one more time to see the end.
-    assert!(probe.polls(0) >= 1, "partition 0 was never polled");
-    assert!(probe.polls(1) >= 1, "partition 1 was never polled");
 
     let mut chunks = outputs
         .into_iter()
@@ -1112,7 +1094,7 @@ async fn every_input_partition_is_read_on_a_task_of_its_own() {
             (named(&shared), Some(4), 1, true),
         ],
         summaries(&chunks),
-        "both partitions' chunks arrive, so the gate opened on real concurrency"
+        "both partitions' chunks arrive, each from the task that read it"
     );
 }
 
