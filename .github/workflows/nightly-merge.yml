@@ -23,7 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pull-requests: read
+      # PR label mutations require pull-request write permission.
+      pull-requests: write
       issues: write
     concurrency:
       group: nightly-merge-label-${{ github.event.pull_request.number }}

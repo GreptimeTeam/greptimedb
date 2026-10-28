@@ -66,6 +66,12 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
   return calls;
 }
 
+test('label sync grants PR label write permission without checking out PR code', () => {
+  const syncJob = workflow.split('  sync-label:\n')[1].split('  enqueue:\n')[0];
+  assert.match(syncJob, /^      pull-requests: write$/m);
+  assert.doesNotMatch(syncJob, /uses: actions\/checkout/);
+});
+
 test('template opts in and checkbox edits reconcile only the nightly label', async () => {
   assert.ok(readFileSync(resolve(__dirname, '../../pull_request_template.md'), 'utf8').includes(checked));
   assert.deepEqual(await run({ sync: true, labels: ['bug'] }), [['add', ['merge nightly']]]);
