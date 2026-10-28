@@ -15,9 +15,11 @@
 use criterion::criterion_main;
 
 mod bench_range_fn;
+mod bench_series_repartition;
 mod bench_vector_match;
 
 criterion_main! {
     bench_range_fn::benches,
+    bench_series_repartition::benches,
     bench_vector_match::benches_group
 }
