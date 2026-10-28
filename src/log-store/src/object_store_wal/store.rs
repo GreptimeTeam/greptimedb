@@ -4096,6 +4096,57 @@ mod tests {
         assert!(keys(&object_store).await.is_empty());
     }
 
+    /// A writer that stores the object and then fails the way the retry of a
+    /// create whose response was lost does: the object exists.
+    struct RetriedWriter(oio::Writer);
+
+    impl oio::Write for RetriedWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            self.0.write(buffer).await
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            self.0.close().await?;
+            Err(mock::Error::new(
+                mock::ErrorKind::ConditionNotMatch,
+                "the object exists",
+            ))
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            self.0.abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_open_accepts_a_retried_first_probe_create() {
+        let _serialized = SERIALIZED.lock().await;
+        let object_store = memory_store();
+        let retried = Arc::new(AtomicBool::new(true));
+        let first = retried.clone();
+        let retrying = object_store.clone().layer(
+            MockLayerBuilder::default()
+                .writer_factory(Arc::new(move |_, _, inner| {
+                    if first.swap(false, Ordering::SeqCst) {
+                        Box::new(RetriedWriter(inner))
+                    } else {
+                        inner
+                    }
+                }))
+                .build()
+                .unwrap(),
+        );
+
+        // The first write of the open is the first create of the probe.
+        let store = open(retrying, &eager()).await;
+        assert!(!retried.load(Ordering::SeqCst));
+        store.stop().await.unwrap();
+        assert_eq!(
+            vec![object_path(&object_store, 0)],
+            keys(&object_store).await
+        );
+    }
+
     #[tokio::test]
     async fn test_store_recovery_ignores_a_probe_left_behind() {
         let _serialized = SERIALIZED.lock().await;
