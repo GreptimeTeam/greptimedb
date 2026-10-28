@@ -1405,7 +1405,8 @@ async fn native_preparation_metadata_benchmark() {
     use store_api::metadata::RegionMetadataBuilder;
     use store_api::storage::FileId;
 
-    for (series_count, field_count) in [(4096, 1), (512, 1024)] {
+    // Keep wide-artifact setup small: this measures preparation, not sample writing.
+    for (series_count, field_count) in [(4096, 1), (64, 1024)] {
         let tag_count = 78;
         let mut env = TestEnv::with_prefix("native-metadata-bench").await;
         let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
