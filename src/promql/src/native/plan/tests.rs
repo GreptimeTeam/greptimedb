@@ -21,8 +21,9 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, reads_across_series,
+    BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType, merges_are_placeable_in,
+    needs_single_execution_in, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::info::InfoSelector;
@@ -1475,4 +1476,212 @@ fn info_reads_the_sample_times_of_one_field() {
         let error = info_of(value, fields).validate().unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
     }
+}
+
+/// What a raw scan proves about the pieces of a label set: nothing.
+fn source_pieces() -> NativeProperties {
+    NativeProperties::source_pieces()
+}
+
+/// What a child that routes its chunks by canonical label set proves: this execution holds every
+/// piece of the label sets it names, and no other output holds a fragment of one of them.
+fn routed_by_canonical_key() -> NativeProperties {
+    NativeProperties {
+        owner: CanonicalOwner::ByCanonicalKey,
+        grouping: CanonicalGrouping::SourcePiecesOnly,
+    }
+}
+
+/// A merge over `inner`, laid out as `inner` is: a merge writes no field and no grid of its own.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
+/// A `topk` over `inner`, which reads the whole vector at each grid point.
+fn topk_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output,
+    }
+}
+
+/// A merge inherits what its input needs from an execution and demands nothing of its own.
+///
+/// This is what the old answer got wrong: a merge whose pieces no boundary proves co-located used
+/// to answer `true`, which the fused node turned into one execution over every input partition. The
+/// merge does not need that - given the pieces it answers one series per label set - and what it
+/// cannot do in a per-partition execution is a fact about the placement, not a reason to take the
+/// caller's parallelism away. The two boundaries below are the two ways a boundary proves nothing:
+/// an empty one, where the caller said nothing, and [`source_pieces`], which is a scan's own facts.
+#[test]
+fn a_merge_inherits_and_never_demands_a_single_execution() {
+    let merge = merge_over(input_on(grid(0, 60_000, 4)));
+    for boundary in [Vec::new(), vec![source_pieces()]] {
+        assert!(
+            !needs_single_execution_in(&merge, &boundary),
+            "a merge demanded a single execution of a boundary that proves nothing"
+        );
+        // ... and it is nevertheless not placeable per partition: that is the other answer, and it
+        // is the one the scan's boundary gives.
+        assert!(
+            !merges_are_placeable_in(&merge, &boundary, false),
+            "a merge over an unproven boundary was placed in a single partition"
+        );
+    }
+    // One execution reads every input partition, so every piece is present and the merge is
+    // placeable there whatever the boundary proves.
+    assert!(merges_are_placeable_in(&merge, &[], true));
+
+    // What the merge does inherit is its input's need: a `topk` below it still reads the whole
+    // vector, so the tree needs one execution for the `topk` and not for the merge.
+    let ranked = merge_over(topk_over(input_on(grid(0, 60_000, 4))));
+    assert!(
+        needs_single_execution_in(&ranked, &[]),
+        "the `topk` below the merge no longer needs one execution"
+    );
+    assert!(merges_are_placeable_in(&ranked, &[], true));
+}
+
+/// A merge over a child that routes pieces by canonical key keeps the partitions it was given.
+///
+/// The proof arrives in the boundary and not in a single execution: such a child hands every piece
+/// of each label set it names to one partition and no other partition a fragment of them, so the
+/// merge reads each label set whole inside the partition it runs in. This is the legal parallel path,
+/// where the node is neither collapsed to one execution nor refused, and it is why a merge no longer
+/// answers the "needs one execution" question with its own placement.
+#[test]
+fn a_merge_over_a_repartitioning_child_keeps_its_partitions() {
+    let merge = merge_over(input_on(grid(0, 60_000, 4)));
+    let boundary = [routed_by_canonical_key()];
+    assert!(
+        !needs_single_execution_in(&merge, &boundary),
+        "the merge demanded a single execution of a boundary that already proves co-location"
+    );
+    assert!(
+        merges_are_placeable_in(&merge, &boundary, false),
+        "the merge was not placeable where the pieces are co-located"
+    );
+    // The proof is about the label sets the child names, so it survives an operator that leaves the
+    // identity alone and stops at one that does not (the next test).
+    assert!(merges_are_placeable_in(&merge, &boundary, false));
+}
+
+/// A proof about the label sets a child names does not survive a rewrite of those label sets.
+///
+/// `rate` drops the metric name, so `rate(a)` and `rate(b)` coincide on the labels they have left
+/// where `a` and `b` did not: the window invents label sets the boundary's keys do not name, and a
+/// merge over what it answers reads the pieces of a label set the proof never covered. The merge is
+/// then not placeable per partition - and, again, it is not a reason to run the tree in one
+/// execution either: the shape is declined instead.
+#[test]
+fn a_label_rewrite_under_a_repartition_invalidates_the_merge_proof() {
+    let boundary = [routed_by_canonical_key()];
+    let rewritten = merge_over(window_over(input(), None));
+    assert!(
+        !needs_single_execution_in(&rewritten, &boundary),
+        "a merge demanded a single execution because its proof was lost"
+    );
+    assert!(
+        !merges_are_placeable_in(&rewritten, &boundary, false),
+        "the proof survived a window that drops the metric name"
+    );
+    // A map that drops the name loses it the same way, so losing the proof is not about windows.
+    let mapped = merge_over(map_over(input_on(grid(0, 60_000, 4))));
+    assert!(!merges_are_placeable_in(&mapped, &boundary, false));
+    // A merge of a merge is checked at every level, so the recursion does not stop at the outer
+    // merge: the rewrite takes the proof away and neither level has it.
+    let nested = merge_over(merge_over(window_over(input(), None)));
+    assert!(!merges_are_placeable_in(&nested, &boundary, false));
+}
+
+/// A canonical merge above the instant selection preserves the sample times it was handed, so the
+/// check looks through it; an operation that computes values is not looked through, because a
+/// sample's value is not a sample's time and reading one as the other would compare values.
+///
+/// The merge is what the insertion pass puts over the info side of a legal `info` tree, so a check
+/// that did not look through it rejected the tree the pass had just built.
+#[test]
+fn info_reads_the_sample_times_of_a_merged_selection_and_nothing_else() {
+    let out = grid(0, 60_000, 4);
+    let selection = |value: InstantValue| NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input_with_fields(1)),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+    let info_of = |info: NativeNode| NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(window_fields(input_with_fields(1), Arc::clone(&out), 1)),
+            info: Box::new(info),
+            selector: InfoSelector {
+                name_matchers: Vec::new(),
+                data_labels: Vec::new(),
+                keep_unmatched: true,
+            },
+        },
+        output: evaluated(fields(1), Arc::clone(&out)),
+    };
+
+    // The merged selection reports sample times, and the merge hands them on unchanged.
+    let merged = merge_over(selection(InstantValue::InfoTimestamp));
+    assert!(
+        info_of(merged.clone()).validate().is_ok(),
+        "a canonical merge over the info side rejected the tree the pass builds: {}",
+        info_of(merged).validate().unwrap_err()
+    );
+    // Merges nest, and the check looks through every one of them.
+    assert!(
+        info_of(merge_over(merged.clone())).validate().is_ok(),
+        "a merge of a merge over the info side was not looked through"
+    );
+
+    // A merge over values is not a set of sample times, so what the merge wraps is what decides:
+    // the selection is still read there, but a node that computes values is not an instant
+    // selection and is refused.
+    let selected = selection(InstantValue::InfoTimestamp);
+    let value_source = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(selected.clone()),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
+            },
+        },
+        output: selected.output.clone(),
+    };
+    let error = info_of(merge_over(value_source)).validate().unwrap_err();
+    assert!(
+        error.to_string().contains("instant selection"),
+        "values were read as sample times: {error}"
+    );
+
+    // A merge over the samples themselves is refused for the same reason, whether or not it is
+    // merged: the check unwraps and then requires the sample times.
+    let error = info_of(merge_over(selection(InstantValue::Sample)))
+        .validate()
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("not their values"),
+        "a selection of samples was read as sample times: {error}"
+    );
 }

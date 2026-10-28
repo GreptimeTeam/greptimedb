@@ -30,6 +30,9 @@ use crate::native::plan::{
     CanonicalGrouping, NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
 };
 
+#[cfg(test)]
+pub(crate) mod tests;
+
 /// Rewrites `tree` so that every consumer of a whole canonical series is handed one.
 ///
 /// `inputs` holds what the caller knows about the fused inputs the tree was compiled over, indexed
