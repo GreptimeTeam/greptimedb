@@ -35,10 +35,15 @@ use crate::native::plan::{
 ///
 /// `inputs` holds what the caller knows about the fused inputs the tree was compiled over, indexed
 /// by the `source_index` of the [`BoundInput`](crate::native::plan::BoundInput) each leaf was bound
-/// to; a boundary the caller says nothing about proves nothing. What this adds is only a
-/// [`NativeExpr::Merge`] over a node whose fragments may hold one label set: every operation binding
-/// and every `source_index` stays where it was, so the rewrite changes which series a consumer reads
-/// and not what the query computes.
+/// to; a boundary the caller says nothing about proves nothing. The index is what a leaf reads, so a
+/// tree with several sources is judged source by source: one scan's proof is never another's. What
+/// this adds is only a [`NativeExpr::Merge`] over a node whose fragments may hold one label set:
+/// every operation binding and every `source_index` stays where it was, so the rewrite changes which
+/// series a consumer reads and not what the query computes.
+///
+/// Where the merge goes is decided by what each node does to a label set, not by what its input
+/// proved: a window that drops the metric name, a timestamp and a label-rewriting map invent label
+/// sets of their own, so the merge their aliases need sits above them and not below.
 ///
 /// Running the pass over its own output changes nothing: a merge proves one series per label set, so
 /// the consumer that gained one is not handed a mergeable child the second time.
@@ -50,146 +55,93 @@ pub fn insert_native_merge_inside_current_fused(
     inputs: &[NativeProperties],
 ) -> DfResult<NativeTree> {
     // The root is a consumer too: whatever reads this tree reads one series per label set.
-    let root = rewrite(tree.root(), inputs)?.canonical();
-    NativeTree::try_new(root.node)
+    let root = canonical(rewrite(tree.root(), inputs)?, inputs);
+    NativeTree::try_new(root)
 }
 
-/// A rewritten node and the facts it reports to whatever reads it.
-struct Rewritten {
-    /// The rewritten node.
-    node: NativeNode,
-    /// What it proves to its consumer.
-    properties: NativeProperties,
-}
-
-impl Rewritten {
-    /// Splits this into the node and its facts.
-    fn into_parts(self) -> (NativeNode, NativeProperties) {
-        (self.node, self.properties)
-    }
-
-    /// Wraps this node in a [`NativeExpr::Merge`] unless it already answers one series per canonical
-    /// label set.
-    ///
-    /// A consumer that folds a label set's series into one answer needs the whole series and not the
-    /// pieces one partition holds: given pieces it answers pieces. [`CanonicalGrouping`] and
-    /// [`OverlapStatus`] are the two facts that say whether it has the whole one, so a node that
-    /// cannot prove both is wrapped.
-    ///
-    /// A node whose output is not an evaluated vector keeps its place: a merge binds samples
-    /// evaluated on a grid, so a scalar, raw samples and aggregate state have nothing a merge could
-    /// take, and no consumer asks for one over those.
-    fn canonical(self) -> Self {
-        if self.properties.grouping == CanonicalGrouping::CanonicalComplete
-            && self.properties.overlaps == OverlapStatus::Checked
-        {
-            return self;
-        }
-        if !matches!(&self.node.output, NativeType::Samples(schema) if schema.eval_grid.is_some()) {
-            return self;
-        }
-        // A merge reports its input's layout: the same fields on the same grid.
-        let output = self.node.output.clone();
-        let input = self.properties;
-        let node = NativeNode {
-            expr: NativeExpr::Merge {
-                input: Box::new(self.node),
-            },
-            output,
-        };
-        let properties = node.properties(&[input]);
-        Self { node, properties }
-    }
-}
-
-/// Rewrites `node` bottom-up: its children first, then the merge a consumer of them needs, then the
-/// node's own facts.
+/// Wraps `node` in a [`NativeExpr::Merge`] unless it already answers one series per canonical label
+/// set.
 ///
-/// `boundary` is what the caller knows about the fused inputs this tree was compiled over. It is
-/// read at a leaf only, because that is the one node whose facts are not its children's.
-fn rewrite(node: &NativeNode, boundary: &[NativeProperties]) -> DfResult<Rewritten> {
-    let (expr, children) = match &node.expr {
-        // A source is the boundary it was bound to, so its facts are the boundary's and there is
-        // nothing below it to rewrite. A constant reads nothing.
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => (node.expr.clone(), Vec::new()),
-        NativeExpr::Instant { input, op } => {
-            let (input, properties) = rewrite(input, boundary)?.into_parts();
-            (
-                NativeExpr::Instant {
-                    input: Box::new(input),
-                    op: op.clone(),
-                },
-                vec![properties],
-            )
-        }
+/// A consumer that folds a label set's series into one answer needs the whole series and not the
+/// pieces one partition holds: given pieces it answers pieces. [`CanonicalGrouping`] and
+/// [`OverlapStatus`] are the two facts that say whether it has the whole one, so a node that cannot
+/// prove both is wrapped.
+///
+/// A node whose output is not an evaluated vector keeps its place: a merge binds samples evaluated on
+/// a grid, so a scalar, raw samples and aggregate state have nothing a merge could take, and no
+/// consumer asks for one over those.
+///
+/// The facts are read through [`NativeNode::properties`], which derives them from the rewritten node
+/// and the boundary every time. A merge proves one series per label set from the pieces it was
+/// handed, and it cannot claim that a fragment which never arrived was collected: that is why the
+/// ownership it reports stays its input's, unchanged.
+fn canonical(node: NativeNode, boundary: &[NativeProperties]) -> NativeNode {
+    let properties = node.properties(boundary);
+    if properties.grouping == CanonicalGrouping::CanonicalComplete
+        && properties.overlaps == OverlapStatus::Checked
+    {
+        return node;
+    }
+    if !matches!(&node.output, NativeType::Samples(schema) if schema.eval_grid.is_some()) {
+        return node;
+    }
+    // A merge reports its input's layout: the same fields on the same grid.
+    let output = node.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(node),
+        },
+        output,
+    }
+}
+
+/// Rewrites `node` bottom-up: its children first, then the merge a consumer of them needs.
+///
+/// `boundary` is what the caller knows about the fused inputs this tree was compiled over, indexed by
+/// `source_index`. It is the one thing every node's facts are derived from, leaves included, so the
+/// rewrite never has to say which of its own lists a node should read: [`NativeNode::properties`]
+/// asks a leaf for its own entry and every other node for its children's.
+fn rewrite(node: &NativeNode, boundary: &[NativeProperties]) -> DfResult<NativeNode> {
+    let expr = match &node.expr {
+        // A source is the boundary it was bound to and there is nothing below it to rewrite. A
+        // constant reads nothing.
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => node.expr.clone(),
+        NativeExpr::Instant { input, op } => NativeExpr::Instant {
+            input: Box::new(rewrite(input, boundary)?),
+            op: op.clone(),
+        },
         // A merge is the canonicalizer itself, so it asks nothing of its input: fragments are what it
         // was written to receive.
-        NativeExpr::Merge { input } => {
-            let (input, properties) = rewrite(input, boundary)?.into_parts();
-            (
-                NativeExpr::Merge {
-                    input: Box::new(input),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Merge { input } => NativeExpr::Merge {
+            input: Box::new(rewrite(input, boundary)?),
+        },
         // A window folds a range of one series' samples, so it needs that series whole.
-        NativeExpr::Window { input, op } => {
-            let (input, properties) = rewrite(input, boundary)?.canonical().into_parts();
-            (
-                NativeExpr::Window {
-                    input: Box::new(input),
-                    op: op.clone(),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Window { input, op } => NativeExpr::Window {
+            input: Box::new(canonical(rewrite(input, boundary)?, boundary)),
+            op: op.clone(),
+        },
         // A map is point-wise, so it reads each piece as it is; what it does to a label set is a fact
         // about its output, not a reason to collect its input.
-        NativeExpr::Map { input, op } => {
-            let (input, properties) = rewrite(input, boundary)?.into_parts();
-            (
-                NativeExpr::Map {
-                    input: Box::new(input),
-                    op: op.clone(),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Map { input, op } => NativeExpr::Map {
+            input: Box::new(rewrite(input, boundary)?),
+            op: op.clone(),
+        },
         // A timestamp reads one series' positions, so it reads each piece as it is.
-        NativeExpr::Timestamp { input } => {
-            let (input, properties) = rewrite(input, boundary)?.into_parts();
-            (
-                NativeExpr::Timestamp {
-                    input: Box::new(input),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Timestamp { input } => NativeExpr::Timestamp {
+            input: Box::new(rewrite(input, boundary)?),
+        },
         // An aggregate folds a group, which is one label set's series summed, counted or compared:
         // the pieces of that series have to be one series before the fold. A final aggregate reads
         // state instead, which `canonical` leaves alone because a merge binds samples.
-        NativeExpr::Aggregate { input, op } => {
-            let (input, properties) = rewrite(input, boundary)?.canonical().into_parts();
-            (
-                NativeExpr::Aggregate {
-                    input: Box::new(input),
-                    op: op.clone(),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Aggregate { input, op } => NativeExpr::Aggregate {
+            input: Box::new(canonical(rewrite(input, boundary)?, boundary)),
+            op: op.clone(),
+        },
         // A vector operation picks or orders series against each other, so it decides whole series.
-        NativeExpr::Vector { input, op } => {
-            let (input, properties) = rewrite(input, boundary)?.canonical().into_parts();
-            (
-                NativeExpr::Vector {
-                    input: Box::new(input),
-                    op: op.clone(),
-                },
-                vec![properties],
-            )
-        }
+        NativeExpr::Vector { input, op } => NativeExpr::Vector {
+            input: Box::new(canonical(rewrite(input, boundary)?, boundary)),
+            op: op.clone(),
+        },
         // Each side of a binary or set operation is matched by label on its own, so each is
         // canonicalized on its own. A constant side has nothing to canonicalize and a merge could not
         // sit over one, which is what `canonical` leaves it as.
@@ -197,43 +149,20 @@ fn rewrite(node: &NativeNode, boundary: &[NativeProperties]) -> DfResult<Rewritt
             left,
             right,
             matching,
-        } => {
-            let (left, left_properties) = rewrite(left, boundary)?.canonical().into_parts();
-            let (right, right_properties) = rewrite(right, boundary)?.canonical().into_parts();
-            (
-                NativeExpr::Binary {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    matching: matching.clone(),
-                },
-                vec![left_properties, right_properties],
-            )
-        }
-        NativeExpr::Set { left, right, op } => {
-            let (left, left_properties) = rewrite(left, boundary)?.canonical().into_parts();
-            let (right, right_properties) = rewrite(right, boundary)?.canonical().into_parts();
-            (
-                NativeExpr::Set {
-                    left: Box::new(left),
-                    right: Box::new(right),
-                    op: op.clone(),
-                },
-                vec![left_properties, right_properties],
-            )
-        }
+        } => NativeExpr::Binary {
+            left: Box::new(canonical(rewrite(left, boundary)?, boundary)),
+            right: Box::new(canonical(rewrite(right, boundary)?, boundary)),
+            matching: matching.clone(),
+        },
+        NativeExpr::Set { left, right, op } => NativeExpr::Set {
+            left: Box::new(canonical(rewrite(left, boundary)?, boundary)),
+            right: Box::new(canonical(rewrite(right, boundary)?, boundary)),
+            op: op.clone(),
+        },
     };
-    let rebuilt = NativeNode {
+    Ok(NativeNode {
         expr,
         output: node.output.clone(),
-    };
-    let properties = match &rebuilt.expr {
-        // A source's facts are the boundary's: the boundary is what it reads.
-        NativeExpr::Input(_) => rebuilt.properties(boundary),
-        _ => rebuilt.properties(&children),
-    };
-    Ok(Rewritten {
-        node: rebuilt,
-        properties,
     })
 }
 

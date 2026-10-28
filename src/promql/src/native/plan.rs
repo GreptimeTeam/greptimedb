@@ -141,6 +141,22 @@ pub struct BoundInput {
     pub ordering: SeriesOrdering,
 }
 
+impl BoundInput {
+    /// What the caller stated about the boundary this leaf was bound to.
+    ///
+    /// The facts travel beside the tree, one entry per source, and `source_index` is what names the
+    /// entry: two scans are two sources with their own placement, so reading the facts by position
+    /// in anything but the boundary would judge one source by another's proof. An entry the caller
+    /// did not supply proves nothing ([`NativeProperties::not_known`]) rather than falling back to a
+    /// neighbour's.
+    fn facts_in(&self, boundary: &[NativeProperties]) -> NativeProperties {
+        boundary
+            .get(self.source_index)
+            .copied()
+            .unwrap_or_else(NativeProperties::not_known)
+    }
+}
+
 /// A constant scalar bound for broadcast or a statement root.
 ///
 /// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
@@ -512,21 +528,37 @@ impl NativeProperties {
     /// series interleaved with another's. What label set a sample ends under is the operation's own
     /// decision (`by(...)`, `on(...)`, `group_left(...)`), which is not a fact the input has, so the
     /// input's grouping and its overlap status say nothing about the output's.
+    ///
+    /// Ownership is re-derived for the same reason instead of being carried over. An aggregate's
+    /// output identity is its group key and a match's is its modifiers, so a co-location proof about
+    /// the *input* keys says nothing about the output keys: two input label sets the boundary places
+    /// in this execution and one label set it places elsewhere can fold into one group here, and
+    /// that group is then not whole. A single execution is the one ownership that survives, because
+    /// it holds every series there is rather than a named set of keys.
     fn whole_vector(self) -> Self {
         Self {
+            owner: match self.owner {
+                CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
+                other => other,
+            },
             grouping: CanonicalGrouping::SourcePiecesOnly,
             overlaps: OverlapStatus::Pending,
             ordering: SeriesOrdering::Contiguous,
-            ..self
         }
     }
 
     /// What a merge proves.
     ///
-    /// A merge groups fragments by canonical label set and hands over one series per label set, so
-    /// it is the node that establishes both facts. What it read says nothing about what it emits
-    /// past that; the placement of what it read is still the placement of what it wrote, so the
-    /// ownership is kept.
+    /// A merge groups the fragments it received by canonical label set and hands over one series per
+    /// label set, so it is the node that establishes both facts for what it read: what it emits is
+    /// one series per label set among the fragments that arrived, and no two of those fragments hold
+    /// one label set. That is what a consumer folding a series needs of them.
+    ///
+    /// What it read says nothing about what it emits past that, and it cannot collect a fragment that
+    /// never arrived: the placement of what it read is still the placement of what it wrote, so the
+    /// ownership is kept unchanged and never upgraded. A merge running inside a partition that holds
+    /// pieces of several label sets therefore still leaves the ownership `Unknown`, even though it
+    /// grouped every fragment it was given.
     fn merged(self) -> Self {
         Self {
             grouping: CanonicalGrouping::CanonicalComplete,
@@ -553,45 +585,76 @@ impl NativeProperties {
 }
 
 impl NativeNode {
-    /// The static properties of this node, given the properties of what it reads.
+    /// The static properties of this node, given what the caller knows about what is below it.
     ///
-    /// The computation is bottom-up and keeps no state: the facts are derived from the node and the
-    /// facts of its inputs every time, so nothing here can go stale when the tree is rewritten.
+    /// `boundary` is the facts of the fused inputs this tree was compiled over, indexed by the
+    /// [`BoundInput::source_index`] each leaf was bound to: it is the *only* thing this derivation
+    /// is handed. A leaf answers from its own entry and from nothing else, and every other node's
+    /// facts are its children's, in child order, which the recursion below asks for one child at a
+    /// time. There is hence no place a node could read one child's facts for another's — the mistake
+    /// that made a tree with two sources judge every source by the first one's proof, and a scan's
+    /// pieces canonical by a neighbour's.
     ///
-    /// An [`NativeExpr::Input`] has no child node, so for it `inputs` is the boundary's own facts —
-    /// what the caller collected about the source this leaf was bound to, one entry at most. The
-    /// ordering is read off the binding instead, because that is where this tree states the stream
-    /// guarantee it was given. Every other node takes one entry per child, in child order, and
-    /// `inputs` may be shorter than that: a missing entry reads as [`NativeProperties::not_known`],
-    /// which claims nothing the caller did not supply.
-    pub fn properties(&self, inputs: &[NativeProperties]) -> NativeProperties {
+    /// Nothing is stored: the facts are derived from the tree and the boundary every time, so a
+    /// rewritten tree cannot keep a fact the rewrite invalidated. Asking for a node's facts walks the
+    /// subtree below it, so facts for every node of a tree cost one walk per consumer; a tree is a
+    /// few dozen nodes and this is compile-time work, which is worth a derivation with no second
+    /// representation to keep in step.
+    pub fn properties(&self, boundary: &[NativeProperties]) -> NativeProperties {
         match &self.expr {
+            // A leaf *is* the boundary it was bound to. The ordering is read off the binding, which
+            // is where this tree states the stream guarantee it was given.
             NativeExpr::Input(binding) => NativeProperties {
                 ordering: binding.ordering,
-                ..inputs
-                    .first()
-                    .copied()
-                    .unwrap_or_else(NativeProperties::not_known)
+                ..binding.facts_in(boundary)
             },
             // A constant is one value everywhere and holds no label set at all, so it is whole as it
             // stands: a merge has nothing to canonicalize and nothing can overlap.
             NativeExpr::Scalar(_) => no_label_sets(),
-            // A selection, a window and a timestamp each answer one series from one series' rows, so
-            // the whole series stays one stream under the label set it read.
+            // A selection answers one series from one series' rows and keeps the label set it read,
+            // so the whole series stays one stream under that label set.
             //
-            // A window function may drop the metric name on the way (`Rate`, `Delta`, ...), which
-            // `RangeFunction::drops_metric_name` reports; that is the window's own label policy and
-            // the window node merges the label sets it can make coincide itself, so the facts handed
-            // on are the input's. TODO(narthex): claim the drop here once the runtime no longer
-            // merges inside the window, so a consumer above gets the merge a tree-level rewrite
-            // would otherwise miss.
-            NativeExpr::Instant { .. }
-            | NativeExpr::Window { .. }
-            | NativeExpr::Timestamp { .. } => at(inputs, 0),
+            // The selection that reports the sample's time instead of its value does not:
+            // `instant_eval::timestamp_of_selection` rewrites the labels with
+            // `map::drop_metric_name` before it builds the series, so `a{job="x"}` and `b{job="x"}`
+            // both arrive as `{job="x"}` and the output identity is not the input's. Nothing the
+            // input proved about which series share a label set survives that, so the facts are a
+            // rewrite's.
+            NativeExpr::Instant { input, op } => {
+                let input = input.properties(boundary);
+                if op.timestamp {
+                    input.labels_rewritten()
+                } else {
+                    input
+                }
+            }
+            // A window folds a range of one series' samples and hands the answer over as that
+            // series, so the input's grouping is the output's — unless the function drops the metric
+            // name, which `RangeFunction::drops_metric_name` reports for every function but
+            // `last_over_time` and `first_over_time`. A dropping function rewrites the labels in
+            // `RangeEvaluator::emit`/`empty_chunk`, so `rate(a)` and `rate(b)` can coincide on
+            // `{job="x"}` where `a` and `b` did not: a proof about the input's label sets says
+            // nothing about the output's. The merge the window runtime can run itself
+            // (`RuntimeOp::Window`'s `merge`) joins the chunks it *reads*, so it cannot collect the
+            // aliases its own rewrite creates afterwards: those are a consumer's to merge, which is
+            // a merge above the window and not one below it.
+            NativeExpr::Window { input, op } => {
+                let input = input.properties(boundary);
+                if op.function.drops_metric_name() {
+                    input.labels_rewritten()
+                } else {
+                    input
+                }
+            }
+            // A timestamp replaces each value with its sample's time, and the labels with
+            // `drop_metric_name`'s (`NativeNode::timestamp` in
+            // [`execute`](crate::native::execute)), so the identity it answers under is not the one
+            // it read.
+            NativeExpr::Timestamp { input } => input.properties(boundary).labels_rewritten(),
             // A map is point-wise over one series at a time, so it reads its input as it is: what it
             // does to the label set is a fact about its output.
-            NativeExpr::Map { op, .. } => {
-                let input = at(inputs, 0);
+            NativeExpr::Map { input, op } => {
+                let input = input.properties(boundary);
                 if op.ops.iter().all(preserves_canonical_identity) {
                     input
                 } else {
@@ -600,18 +663,18 @@ impl NativeNode {
             }
             // A merge is the canonicalizer: it answers one series per label set whatever pieces it
             // read.
-            NativeExpr::Merge { .. } => at(inputs, 0).merged(),
+            NativeExpr::Merge { input } => input.properties(boundary).merged(),
             // An aggregate folds a group and a vector operation decides whole series against each
             // other, so the input's label sets are not what their output holds.
-            NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => {
-                at(inputs, 0).whole_vector()
+            NativeExpr::Aggregate { input, .. } | NativeExpr::Vector { input, .. } => {
+                input.properties(boundary).whole_vector()
             }
             NativeExpr::Binary {
                 left,
                 right,
                 matching,
             } => {
-                let operand = at(inputs, 0).united(at(inputs, 1));
+                let operand = left.properties(boundary).united(right.properties(boundary));
                 match (&left.output, &right.output) {
                     // Two constants make a constant: there is no label set to canonicalize.
                     (NativeType::Scalar(_), NativeType::Scalar(_)) => no_label_sets(),
@@ -631,7 +694,10 @@ impl NativeNode {
                     (_, _) => operand.whole_vector(),
                 }
             }
-            NativeExpr::Set { .. } => at(inputs, 0).united(at(inputs, 1)).whole_vector(),
+            NativeExpr::Set { left, right, .. } => left
+                .properties(boundary)
+                .united(right.properties(boundary))
+                .whole_vector(),
         }
     }
 }
@@ -684,10 +750,15 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
 /// A `Vector` operation (`topk`, `bottomk`, `limitk`, `limit_ratio`, `sort`, `absent`,
 /// `histogram_quantile`, `histogram_fraction`, `count_values`) picks, orders or reads its input's
 /// series against each other, and a `Complete` aggregate folds every contribution to a group: given
-/// part of the metric, either one answers part of the result instead of the result. `Merge`
-/// canonicalizes label sets of the whole vector and is asked here for the same reason. A `Partial` or
+/// part of the metric, either one answers part of the result instead of the result. A `Partial` or
 /// `Final` aggregate's own stage is not: its contract is exactly the part it was handed, so only what
 /// sits below it is followed.
+///
+/// This form proves nothing about where the sources below the tree sit, so it answers as the
+/// conservative reading of [`needs_single_execution_in`]: a merge in the tree counts as needing every
+/// partition. The native route's placement (`NativePlacement::of` in `promql::planner`) and the
+/// region-side admission ask this and both have no boundary facts at hand; a caller that has them,
+/// as the canonical-merge rewrite does, asks [`needs_single_execution_in`].
 ///
 /// Everything else recurses into its children. A window (`rate`, `sum_over_time`, ...), a map, an
 /// instant selection and a timestamp compute one series from one series' rows, and a binary or set
@@ -697,20 +768,63 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
 /// This is about placement, not admission: it says how many executions the tree needs, not whether
 /// it may run over part of the metric ([`reads_across_series`] answers that).
 pub fn needs_single_execution(node: &NativeNode) -> bool {
+    needs_single_execution_in(node, &[])
+}
+
+/// Whether `node` answers a value for the whole vector, given what the caller knows about where the
+/// sources below it sit.
+///
+/// `boundary` is the same slice [`NativeNode::properties`] takes: the facts of the fused inputs the
+/// tree was compiled over, indexed by `source_index`.
+///
+/// A `Merge` needs every piece of ONE canonical label set, which is where it differs from
+/// [`reads_across_series`]: there a merge answers `true` because it reads series the rest of the
+/// metric also holds. One execution already holds every piece when the boundary proves the sources
+/// below the merge are co-located ([`pieces_co_located`]). When it does not prove that, the merge
+/// does need every partition: a scan partitions by storage `read_key` and not by canonical key, so
+/// pieces of one canonical label set sit in different partitions and a merge in each of them would
+/// hand what reads it a partial series as a canonical one. Forcing one execution for a merge that
+/// does not need it is the other error: it collapses the owner partitions a canonical repartition
+/// just created back into one.
+pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => needs_single_execution(input),
+        | NativeExpr::Timestamp { input } => needs_single_execution_in(input, boundary),
         NativeExpr::Aggregate { input, op } => {
-            op.stage == AggregateStage::Complete || needs_single_execution(input)
+            op.stage == AggregateStage::Complete || needs_single_execution_in(input, boundary)
         }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            needs_single_execution(left) || needs_single_execution(right)
+            needs_single_execution_in(left, boundary) || needs_single_execution_in(right, boundary)
         }
-        NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => true,
+        NativeExpr::Vector { .. } => true,
+        // A merge needs every piece of one canonical label set, and not every label set in one
+        // execution: given the pieces it answers one series per label set. It is therefore placed
+        // per partition exactly when the pieces already arrive together.
+        NativeExpr::Merge { input } => {
+            needs_single_execution_in(input, boundary) || !pieces_co_located(input, boundary)
+        }
     }
+}
+
+/// Whether the boundary proves that the pieces of every canonical label set below `node` arrive in
+/// one execution, so a merge over them reads each label set whole.
+///
+/// The proof is ownership, and it is the ownership that survives to `node` that counts: an operator
+/// that rewrites the identity - a name-dropping window, an aggregate, a map - downgrades a per-key
+/// ownership to `Unknown`, because the label sets it invents are not the ones the boundary's
+/// canonical keys name. So `SinglePartition` ("this execution holds every series there is") or
+/// `ByCanonicalKey` ("it holds the label sets its own key names and no other execution holds a
+/// fragment of one of them") is what a merge needs, and anything else - `Unknown` in particular,
+/// which is all a raw scan proves, since it partitions by storage `read_key` and not by canonical
+/// key - leaves the pieces spread over partitions.
+fn pieces_co_located(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
+    matches!(
+        node.properties(boundary).owner,
+        CanonicalOwner::SinglePartition | CanonicalOwner::ByCanonicalKey
+    )
 }
 
 /// Whether `node` is a supported child of a [`NativeExpr::Merge`], and the evaluated vector it hands
@@ -1140,15 +1254,6 @@ fn no_label_sets() -> NativeProperties {
         overlaps: OverlapStatus::Checked,
         ordering: SeriesOrdering::Contiguous,
     }
-}
-
-/// The properties a node's `index`-th child reports, or [`NativeProperties::not_known`] when the
-/// caller supplied fewer entries than the node has children.
-fn at(inputs: &[NativeProperties], index: usize) -> NativeProperties {
-    inputs
-        .get(index)
-        .copied()
-        .unwrap_or_else(NativeProperties::not_known)
 }
 
 /// Whether a map operation leaves the label set it reads as it is.
