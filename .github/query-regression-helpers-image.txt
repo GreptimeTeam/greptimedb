@@ -1,0 +1,1 @@
+greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/query-regression-helpers@sha256:1e31f2cb7662cbe1aee80a9a9d7a32035f489498dfaf7ebc574abbe0f2fbff50
