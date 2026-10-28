@@ -615,3 +615,32 @@ Additional SQL optimizer cases:
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
   time filters, aggregate ordering, and `LIMIT`.
+
+### Precompiled query-regression helpers
+
+`helpers_image` is optional in Query Regression (dispatch and reusable calls).
+The empty default still builds both helpers from the candidate source. Set it to
+`pinned` to use `.github/query-regression-helpers-image.txt`, or provide an explicit
+`image@sha256:...` reference. With both database image inputs and a helper image,
+the run skips all Cargo builds and build-cache preparation. PR comment admission
+continues to require source builds.
+
+The helper image is an artifact image containing `query_perf_fixture` and
+`query_regression_runner`. They are extracted and run on the host, so their child
+processes can use the same database launchers and paths. Images are built on the
+query-regression ECS runner; alternate runner hosts must have compatible Linux
+x86_64 libraries. Extraction smoke-tests both executables and fails without a
+source-build fallback. `helpers-image.json` in the report artifact records the
+image digest, image ID, and source revision. Case files and orchestration still
+come from the candidate ref; choose a compatible helper revision when changing
+the case DSL.
+
+The **Publish query regression helpers** workflow builds and pushes to
+`greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/query-regression-helpers`.
+It runs manually or on main when helper sources, packaging, or Cargo.lock change.
+After verifying the published digest, it opens a draft PR updating the pin, like
+the runner-image update workflow. Review and merge that PR before using `pinned`
+for the first time (the initial pin is deliberately empty). No mutable `latest`
+tag is consumed and publication alone does not change the version used by runs.
+The existing **Release builder images** workflow can also invoke publication via
+`release_query_regression_helpers_image`, including for initial branch testing.

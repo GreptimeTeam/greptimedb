@@ -36,6 +36,11 @@ on:
         required: false
         type: string
         default: ""
+      helpers_image:
+        description: Helpers image@sha256 or pinned (empty builds helpers from source)
+        required: false
+        type: string
+        default: ""
       cargo_profile:
         description: Cargo profile to build base and candidate binaries with
         required: false
@@ -100,6 +105,11 @@ on:
         required: false
         type: string
         default: ""
+      helpers_image:
+        description: Helpers image@sha256 or pinned (empty builds helpers from source)
+        required: false
+        type: string
+        default: ""
       cargo_profile:
         description: Cargo profile to build base and candidate binaries with
         required: true
@@ -152,6 +162,7 @@ jobs:
           python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
           python3 tests/perf/test_query_regression_summary_otlp.py
           python3 tests/perf/test_query_regression_case_selection.py
+          python3 tests/perf/test_query_regression_helpers.py
           python3 tests/perf/test_query_regression_nightly_refs.py
           python3 tests/perf/test_query_regression_slash.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
@@ -191,7 +202,7 @@ jobs:
           # Preserve query regression's original resource and janitor budgets.
           system-disk-gib: '80'
           ttl-hours: '4'
-          enable-docker: ${{ inputs.base_image != '' || inputs.candidate_image != '' }}
+          enable-docker: ${{ inputs.base_image != '' || inputs.candidate_image != '' || inputs.helpers_image != '' }}
           resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
           image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
           runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
@@ -235,6 +246,7 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       HEAD_REPO: ${{ inputs.head_repo }}
       BASE_REPO: ${{ inputs.base_repo }}
+      HELPERS_IMAGE: ${{ inputs.helpers_image }}
       BASE_IMAGE: ${{ inputs.base_image }}
       CANDIDATE_IMAGE: ${{ inputs.candidate_image }}
       BASE_REF: ${{ inputs.base_ref }}
@@ -249,11 +261,11 @@ jobs:
     steps:
       - name: Validate image target admission
         run: |
-          if [[ "${PR_ADMISSION}" == "true" && ( -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" ) ]]; then
+          if [[ "${PR_ADMISSION}" == "true" && ( -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" || -n "${HELPERS_IMAGE}" ) ]]; then
             echo "PR admission requires source targets for verified commit attribution." >&2
             exit 1
           fi
-          if [[ -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" ]]; then
+          if [[ -n "${BASE_IMAGE}" || -n "${CANDIDATE_IMAGE}" || -n "${HELPERS_IMAGE}" ]]; then
             docker info >/dev/null
           fi
 
@@ -451,6 +463,7 @@ jobs:
             > "${GITHUB_WORKSPACE}/query-regression-trusted-scripts/query-regression-summary.py"
 
       - name: Verify runner image tools
+        if: ${{ inputs.base_image == '' || inputs.candidate_image == '' || inputs.helpers_image == '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -567,6 +580,7 @@ jobs:
           fi
 
       - name: Prepare query regression cache
+        if: ${{ inputs.base_image == '' || inputs.candidate_image == '' || inputs.helpers_image == '' }}
         shell: bash
         working-directory: src
         run: |
@@ -762,7 +776,16 @@ jobs:
           git reset --hard "${VERIFIED_CANDIDATE_SHA}"
           git clean -ffdx
 
+      - name: Extract precompiled query regression helpers
+        if: ${{ inputs.helpers_image != '' }}
+        working-directory: src
+        run: |
+          python3 .github/scripts/query-regression-helpers.py "$HELPERS_IMAGE" \
+            "$GITHUB_WORKSPACE/query-regression-bins/candidate"
+          cat "$GITHUB_WORKSPACE/query-regression-bins/candidate/helpers-image.json" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build candidate greptime and query regression helpers
+        if: ${{ inputs.candidate_image == '' || inputs.helpers_image == '' }}
         working-directory: src
         run: |
           set -euo pipefail
@@ -770,8 +793,10 @@ jobs:
           if [[ -z "${CANDIDATE_IMAGE}" ]]; then
             cargo build --profile "${CARGO_PROFILE}" -p cmd --bin greptime
           fi
-          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
-          cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
+          if [[ -z "${HELPERS_IMAGE}" ]]; then
+            cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_perf_fixture --features dev-tools
+            cargo build --profile "${CARGO_PROFILE}" -p cmd --bin query_regression_runner --features dev-tools
+          fi
           candidate_build_elapsed="${SECONDS}"
           printf 'Candidate greptime and query regression helper cargo builds elapsed: %s seconds\n' "${candidate_build_elapsed}"
           printf -- '- Candidate greptime and query regression helper cargo builds: %s seconds\n' "${candidate_build_elapsed}" >> "${GITHUB_STEP_SUMMARY}"
@@ -785,10 +810,12 @@ jobs:
             cp "${CARGO_TARGET_DIR}/${target_dir}/greptime" \
               "${GITHUB_WORKSPACE}/query-regression-bins/candidate/greptime"
           fi
-          cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
-            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
-          cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \
-            "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner"
+          if [[ -z "${HELPERS_IMAGE}" ]]; then
+            cp "${CARGO_TARGET_DIR}/${target_dir}/query_perf_fixture" \
+              "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_perf_fixture"
+            cp "${CARGO_TARGET_DIR}/${target_dir}/query_regression_runner" \
+              "${GITHUB_WORKSPACE}/query-regression-bins/candidate/query_regression_runner"
+          fi
 
       - name: Run query regression
         id: run
@@ -830,6 +857,7 @@ jobs:
             query-regression-work/**/logs/**
             query-regression-work/**/otelgen/**
             query-regression-summary.md
+            query-regression-bins/candidate/helpers-image.json
             machine-telemetry.log
           if-no-files-found: warn
           retention-days: 7
