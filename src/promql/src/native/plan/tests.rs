@@ -37,16 +37,13 @@ use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
 };
 
-// The tree builders below are `pub(crate)` because the rewrite in [`canonicalize`] is proved with
-// the trees they build, rather than with a second set of fixtures that could drift from these.
-//
-// [`canonicalize`]: crate::native::canonicalize
+// These builders are private to the plan tests; other test modules define their own fixtures.
 
-pub(crate) fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
+fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
 }
 
-pub(crate) fn evaluated(
+fn evaluated(
     schema_fields: Arc<[datatypes::series::samples::FieldSpec]>,
     grid: Arc<EvalGrid>,
 ) -> NativeType {
@@ -78,7 +75,7 @@ fn input() -> NativeNode {
 }
 
 /// A scan of raw samples bound to source `source_index`.
-pub(crate) fn raw_input_at(source_index: usize) -> NativeNode {
+fn raw_input_at(source_index: usize) -> NativeNode {
     let output = raw();
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
@@ -90,7 +87,7 @@ pub(crate) fn raw_input_at(source_index: usize) -> NativeNode {
     }
 }
 
-pub(crate) fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
+fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
     input_on_at(0, grid)
 }
 
@@ -98,7 +95,7 @@ pub(crate) fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
 ///
 /// Two of these are two sources, and the boundary holds one fact for each of them: what tells them
 /// apart is the index on the binding, not the order the tree is walked in.
-pub(crate) fn input_on_at(source_index: usize, grid: Arc<EvalGrid>) -> NativeNode {
+fn input_on_at(source_index: usize, grid: Arc<EvalGrid>) -> NativeNode {
     // One schema allocation shared by the binding and the output: `validate` checks that the output
     // is the binding it was bound to, which is about the binding itself, not the grid's spec.
     let output = evaluated(Arc::new([]), grid);
@@ -222,7 +219,7 @@ fn window_fields(inner: NativeNode, out: Arc<EvalGrid>, count: usize) -> NativeN
 }
 
 /// A window over `inner` that produces `out`, so two windows can be given the same grid.
-pub(crate) fn window_on(
+fn window_on(
     inner: NativeNode,
     input_grid: Option<Arc<EvalGrid>>,
     out: Arc<EvalGrid>,
@@ -231,7 +228,7 @@ pub(crate) fn window_on(
 }
 
 /// A window of `range_ms` with no offset, anchor or modifier: the shape a selector's range takes.
-pub(crate) fn range(range_ms: i64) -> RangeWindow {
+fn range(range_ms: i64) -> RangeWindow {
     RangeWindow {
         range_ms,
         offset_ms: 0,
@@ -244,7 +241,7 @@ pub(crate) fn range(range_ms: i64) -> RangeWindow {
 ///
 /// Which function it runs is what decides whether the output keeps the label set it read, so a test
 /// about the facts a window hands on picks the function it means.
-pub(crate) fn window_with(
+fn window_with(
     inner: NativeNode,
     function: RangeFunction,
     input_grid: Option<Arc<EvalGrid>>,
@@ -254,7 +251,7 @@ pub(crate) fn window_with(
 }
 
 /// The same, over a window `range_ms` wide.
-pub(crate) fn window_of_range(
+fn window_of_range(
     inner: NativeNode,
     function: RangeFunction,
     range_ms: i64,
@@ -277,11 +274,7 @@ pub(crate) fn window_of_range(
 
 /// An instant selection over raw samples. With `value` other than [`InstantValue::Sample`] it
 /// reports a time instead of the sample's value, which is the selection that rewrites the labels.
-pub(crate) fn instant_over(
-    inner: NativeNode,
-    value: InstantValue,
-    out: Arc<EvalGrid>,
-) -> NativeNode {
+fn instant_over(inner: NativeNode, value: InstantValue, out: Arc<EvalGrid>) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Instant {
             input: Box::new(inner),
@@ -298,7 +291,7 @@ pub(crate) fn instant_over(
 }
 
 /// A timestamp over an evaluated vector: each value replaced by its sample's time.
-pub(crate) fn timestamp_of(inner: NativeNode) -> NativeNode {
+fn timestamp_of(inner: NativeNode) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {
         expr: NativeExpr::Timestamp {
@@ -308,7 +301,7 @@ pub(crate) fn timestamp_of(inner: NativeNode) -> NativeNode {
     }
 }
 
-pub(crate) fn map_over(inner: NativeNode) -> NativeNode {
+fn map_over(inner: NativeNode) -> NativeNode {
     let out = inner.output.grid().expect("a map needs a grid").clone();
     NativeNode {
         expr: NativeExpr::Map {
@@ -323,7 +316,7 @@ pub(crate) fn map_over(inner: NativeNode) -> NativeNode {
 
 /// A canonical merge over `inner`, laid out as `inner` is: a merge writes no field and no grid of its
 /// own, so it reports its input's layout.
-pub(crate) fn merge_over(inner: NativeNode) -> NativeNode {
+fn merge_over(inner: NativeNode) -> NativeNode {
     let output = inner.output.clone();
     NativeNode {
         expr: NativeExpr::Merge {
@@ -333,7 +326,7 @@ pub(crate) fn merge_over(inner: NativeNode) -> NativeNode {
     }
 }
 
-pub(crate) fn add() -> BinaryMatching {
+fn add() -> BinaryMatching {
     BinaryMatching {
         op: BinaryOp::Add,
         return_bool: false,
@@ -364,7 +357,7 @@ fn on_host() -> BinaryMatching {
 
 /// A `sum by (job)` folded into `inner` within this execution, which is an aggregate whose output is
 /// a query value rather than state.
-pub(crate) fn complete_aggregate(inner: NativeNode) -> NativeNode {
+fn complete_aggregate(inner: NativeNode) -> NativeNode {
     let out = inner
         .output
         .grid()
@@ -384,7 +377,7 @@ pub(crate) fn complete_aggregate(inner: NativeNode) -> NativeNode {
 }
 
 /// A `sort` over `inner`, which is a vector operation: it decides the whole vector at a point.
-pub(crate) fn sorted(inner: NativeNode) -> NativeNode {
+fn sorted(inner: NativeNode) -> NativeNode {
     let out = inner
         .output
         .grid()
@@ -400,7 +393,7 @@ pub(crate) fn sorted(inner: NativeNode) -> NativeNode {
 }
 
 /// `left + right`, which matches two vectors by label.
-pub(crate) fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
+fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
     let out = left
         .output
         .grid()
@@ -420,11 +413,7 @@ pub(crate) fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
 ///
 /// The output is what the kinds of the two sides make it: two constants make a scalar and anything
 /// else an evaluated vector, which is what [`NativeNode::validate`] asks of a binary operation.
-pub(crate) fn binary_with(
-    left: NativeNode,
-    right: NativeNode,
-    matching: BinaryMatching,
-) -> NativeNode {
+fn binary_with(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
     let output = match (&left.output, &right.output) {
         (NativeType::Scalar(grid), NativeType::Scalar(_)) => NativeType::Scalar(Arc::clone(grid)),
         _ => evaluated(
@@ -447,7 +436,7 @@ pub(crate) fn binary_with(
 
 /// A `label_replace` over `inner`, which writes a label of its own choosing: the one map operation
 /// that keeps `__name__` and still changes which series share a label set.
-pub(crate) fn map_rewriting_labels(inner: NativeNode) -> NativeNode {
+fn map_rewriting_labels(inner: NativeNode) -> NativeNode {
     let out = inner.output.grid().expect("a map needs a grid").clone();
     let rewrite = LabelRewrite::replace("dst", "$1", "src", "(.*)")
         .expect("a label_replace with a valid expression");
@@ -618,7 +607,7 @@ fn proven_in_one_execution() -> NativeProperties {
 ///
 /// A scan partitions by storage `read_key` and not by canonical key, so it holds pieces of a metric
 /// with nothing grouped - which is the facts the node itself derives for an input.
-pub(crate) fn source_pieces() -> NativeProperties {
+fn source_pieces() -> NativeProperties {
     NativeProperties::source_pieces()
 }
 

@@ -5762,52 +5762,45 @@ fn a_whole_vector_tree_over_a_repartitioning_child_reports_one_execution() {
     }
 }
 
-/// A Fused completes over a repartitioning child whose routed chain does not fit one output's queue.
+/// A whole-vector Fused keeps consuming while a repartitioning child fills its bounded output queues.
 ///
-/// The child routes each chunk by canonical label set into bounded queues and reads its child one
-/// chain at a time, so a chain longer than one queue holds can only reach the Fused while the Fused
-/// keeps reading the output it went to: the first output's stream cannot end before the read behind
-/// it ends, and the read cannot end while the second output's full queue is unread. Reading one
-/// partition to its end before the next - which is what this node did - therefore deadlocked, and
-/// the timeout below is what turns that into a failure instead of a suite that never finishes.
-///
-/// The repartition node is kept alive beside the Fused for as long as it is read, which is not
-/// incidental: its output streams are bare receivers, while the task feeding them belongs to the
-/// plan, and dropping the plan aborts that task
-/// (`SharedExecution::drop` in [`crate::extension_plan::series_repartition`]). `collect` drops the
-/// plan it was handed as soon as `execute` returns, so a plan holding the only handle to its own
-/// producer stops mid-chain and its output reports an unfinished chain rather than an answer. Keeping
-/// the node here measures this node's read discipline rather than that abort; a caller that keeps its
-/// physical plan alive for the query - which is what DataFusion's own executor does - owes no such
-/// care. The abort is not this node's to fix and is reported rather than worked around.
+/// `OUTPUT_CAPACITY` counts chains, not chunks. Six distinct canonical label sets routed to one
+/// output therefore exceed its capacity even though each series is a single chunk. This exercises
+/// backpressure without relying on an unusually long chain.
 #[tokio::test]
 async fn a_fused_drains_every_partition_of_a_repartitioning_child() {
-    let on_second = label_set_routed_to(1).await;
-    let on_first = label_set_routed_to(0).await;
-    // One chain of five chunks, more than the four chunks an output queues, on the output a
-    // single-partition read never reaches; the other output holds one series and ends with it.
-    let long = (0..GRID_LEN as usize)
-        .map(|position| evaluated_chunk(&on_second, position, 1, position == GRID_LEN as usize - 1))
+    let hosts = (0..16)
+        .map(|index| format!("backpressure-{index}"))
         .collect::<Vec<_>>();
-    assert!(
-        long.len() > 4,
-        "the chain has to outgrow one output's queue: {} chunks",
-        long.len()
+    let names = hosts.iter().map(String::as_str).collect::<Vec<_>>();
+    let routed_outputs = routed_outputs(&names, 2).await;
+    let to_second = names
+        .iter()
+        .zip(routed_outputs)
+        .filter(|(_, output)| *output == 1)
+        .map(|(host, _)| metric(&[(HOST, host)], Some(METRIC)))
+        .take(6)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        6,
+        to_second.len(),
+        "six distinct label sets route to output 1"
     );
+    let on_first = label_set_routed_to(0).await;
+    let to_second_chunks = to_second
+        .iter()
+        .map(|labels| evaluated_chunk(labels, 0, 1, true))
+        .collect::<Vec<_>>();
+    let input = vec![
+        to_second_chunks,
+        vec![evaluated_chunk(&on_first, 0, 1, true)],
+    ];
     let routed: Arc<dyn ExecutionPlan> = Arc::new(
-        SeriesRepartitionExec::try_new(
-            ScriptedEvaluated::plan(vec![long, vec![evaluated_chunk(&on_first, 0, 1, true)]]),
-            2,
-        )
-        .expect("the repartition node is built"),
+        SeriesRepartitionExec::try_new(ScriptedEvaluated::plan(input), 2)
+            .expect("the repartition node is built"),
     );
     // `sum by (host)` reads every contribution to a group, so this tree is one execution over both
-    // outputs of the child - the read path that used to stop at the first one.
-    //
-    // The node is handed over rather than kept alive beside the plan: a consumer that takes the
-    // streams and drops the plan is the shape `execute_stream_partitioned` drives, and it has to
-    // finish. Keeping a reference here would hide a producer that stops when the plan goes, which
-    // is exactly what this test exists to catch.
+    // outputs of the child.
     let tree = evaluated_complete_aggregate_tree();
     let exec = plan_of(evaluated_node(&tree), routed).expect("the runtime executes it");
     assert_eq!(
@@ -5838,10 +5831,9 @@ async fn a_fused_drains_every_partition_of_a_repartitioning_child() {
     actual.sort_by(|left, right| left.partial_cmp(right).expect("rows of a grid compare"));
     let mut expected = vec![(grid_timestamps()[0], Some(0.0), Some(host_of(&on_first)))];
     expected.extend(
-        grid_timestamps()
-            .into_iter()
-            .enumerate()
-            .map(|(position, time)| (time, Some(position as f64), Some(host_of(&on_second)))),
+        to_second
+            .iter()
+            .map(|labels| (grid_timestamps()[0], Some(0.0), Some(host_of(labels)))),
     );
     expected.sort_by(|left, right| left.partial_cmp(right).expect("rows of a grid compare"));
     assert_eq!(
@@ -6368,8 +6360,7 @@ async fn a_real_merge_over_a_repartition_of_a_real_fused_merges_every_aliased_pi
                  B keeps the M owners instead of collapsing to one execution"
             );
 
-            // The repartition node is kept alive beside B, but that is not what keeps the read
-            // running: each output stream owns the read through an `OutputLease` on the execution,
+            // Each output stream owns the read through an `OutputLease` on the execution,
             // so it lives while any output is being read and stops only when none is being read and
             // none is left to hand out (`claimed` and `remaining` both at zero,
             // `SharedExecution::release_output` in `series_repartition`). Dropping the plan
@@ -6842,8 +6833,9 @@ fn zoned_series_chunk(host: &str, zone: &str, times: &[i64]) -> RawSeriesChunk {
     )
 }
 
-/// `merge(x) + on(host) merge(x)`: one source read twice, each occurrence canonicalized, and a
-/// one-to-one `on(host)` match over the two merges.
+/// A hand-built tree with one source read twice, each occurrence canonicalized, and a one-to-one
+/// `on(host)` match over the two merges. This is not a compiler-produced tree: the compiler binds
+/// each selector occurrence to a separate source index, even for identical selector text.
 ///
 /// This is the shape a canonical-merge placement reports: each `Merge(Input(0))` needs every piece
 /// of ONE canonical label set, which an output of a repartition proves, and the match above them
