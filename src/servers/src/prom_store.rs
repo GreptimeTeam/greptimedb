@@ -33,6 +33,7 @@ use arrow::datatypes::{
 };
 use common_grpc::precision::Precision;
 use common_memory_manager::MemoryGuard;
+use common_query::native_histogram;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{tracing, warn};
@@ -458,6 +459,7 @@ pub fn recordbatches_to_timeseries(
 
     for ts in &mut timeseries {
         ts.samples.sort_unstable_by_key(|s| s.timestamp);
+        ts.histograms.sort_unstable_by_key(|h| h.timestamp);
     }
 
     timeseries
@@ -531,21 +533,26 @@ fn append_recordbatch_to_timeseries(
             ),
         })?;
 
-    // TODO: Add native-histogram encoding when Prometheus Remote Read support is prioritized.
-    // The current path intentionally returns scalar samples only.
     let field_column = recordbatch
         .column_by_name(value_column_name)
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!("missing value column '{value_column_name}' in query result"),
         })?;
-    let field_column = field_column
-        .as_primitive_opt::<Float64Type>()
-        .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
+    let scalar_column = field_column.as_primitive_opt::<Float64Type>();
+    let histogram_column = recordbatch
+        .schema
+        .column_schema_by_name(value_column_name)
+        .filter(|column| native_histogram::is_native_histogram_value_type(&column.data_type))
+        .and_then(|_| field_column.as_struct_opt());
+    ensure!(
+        scalar_column.is_some() || histogram_column.is_some(),
+        error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!(
-                "Expect value column of datatype Float64, actual {:?}",
+                "Expect value column of datatype Float64 or canonical native histogram Struct, actual {:?}",
                 field_column.data_type()
             ),
-        })?;
+        }
+    );
 
     let columns = label_columns(&recordbatch, timestamp_column_name, value_column_name)?;
     let mut previous_timeseries: Option<usize> = None;
@@ -577,11 +584,25 @@ fn append_recordbatch_to_timeseries(
             continue;
         }
 
-        let value = field_column.value(row);
         let timestamp = ts_column.value(row);
-        let sample = Sample { value, timestamp };
-
-        timeseries[timeseries_index].samples.push(sample);
+        if let Some(column) = scalar_column {
+            timeseries[timeseries_index].samples.push(Sample {
+                value: column.value(row),
+                timestamp,
+            });
+        } else if let Some(column) = histogram_column {
+            let histogram =
+                native_histogram::decode_native_histogram_for_remote_read(column, row, timestamp)
+                    .map_err(|error| {
+                    error::InvalidPromRemoteReadQueryResultSnafu {
+                        msg: error.to_string(),
+                    }
+                    .build()
+                })?;
+            if let Some(histogram) = histogram {
+                timeseries[timeseries_index].histograms.push(histogram);
+            }
+        }
     }
 
     Ok(())
@@ -1537,6 +1558,305 @@ mod tests {
                 make_row_with_2_labels("z002", "biz", 7.0, 3000),
             ],
             rows
+        );
+    }
+
+    #[test]
+    fn test_native_histogram_remote_read_wire_fixture() {
+        use api::greptime_proto::io::prometheus::write::v2::{
+            BucketSpan, Histogram,
+            histogram::{Count, ZeroCount},
+        };
+        use api::prom_store::remote::{QueryResult, ReadResponse};
+        use common_query::native_histogram::testing::histogram_array;
+        use prost::Message;
+
+        let histograms = vec![
+            Histogram {
+                count: Some(Count::CountInt((1 << 53) + 13)),
+                zero_count: Some(ZeroCount::ZeroCountInt((1 << 53) + 1)),
+                sum: 10.0,
+                schema: 1,
+                zero_threshold: 0.001,
+                reset_hint: 2,
+                start_timestamp: 123,
+                positive_spans: vec![
+                    BucketSpan {
+                        offset: -2,
+                        length: 2,
+                    },
+                    BucketSpan {
+                        offset: 3,
+                        length: 1,
+                    },
+                ],
+                positive_deltas: vec![1, 2, -1],
+                negative_spans: vec![
+                    BucketSpan {
+                        offset: -3,
+                        length: 1,
+                    },
+                    BucketSpan {
+                        offset: 2,
+                        length: 2,
+                    },
+                ],
+                negative_deltas: vec![1, 2, -1],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(6.0)),
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                sum: 20.0,
+                schema: 2,
+                zero_threshold: 0.002,
+                reset_hint: 3,
+                positive_spans: vec![BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(1)),
+                sum: 1.0,
+                schema: -53,
+                custom_values: vec![1.0, 2.0],
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 1,
+                }],
+                positive_deltas: vec![1],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(3.5)),
+                sum: 4.0,
+                schema: -53,
+                custom_values: vec![1.0, 2.0],
+                reset_hint: 3,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_counts: vec![1.0, 2.5],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(0)),
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(0.0)),
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(8)),
+                sum: f64::from_bits(0x7ff8_0000_0000_0123),
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 2,
+                }],
+                positive_deltas: vec![3, -1],
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(0)),
+                sum: f64::from_bits(0x7ff0_0000_0000_0002),
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountInt(i64::MAX as u64)),
+                zero_count: Some(ZeroCount::ZeroCountInt(i64::MAX as u64)),
+                ..Default::default()
+            },
+        ];
+        let values = histograms
+            .iter()
+            .map(|h| Some(native_histogram::encode_native_histogram(h).unwrap()))
+            .collect::<Vec<_>>();
+        let array = histogram_array(&values);
+        let buckets = array
+            .column_by_name("positive_buckets_i64")
+            .unwrap()
+            .as_list::<i32>()
+            .value(0);
+        assert_eq!(
+            buckets
+                .as_primitive::<arrow::datatypes::Int64Type>()
+                .values()
+                .as_ref(),
+            &[1, 3, 2]
+        );
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("histogram", array.data_type().clone(), true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = DfRecordBatch::try_new(
+            arrow_schema,
+            vec![
+                Arc::new(TimestampMillisecondArray::from(
+                    (1..=9).map(|i| i * 1000).collect::<Vec<_>>(),
+                )),
+                Arc::new(array),
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(
+            schema.clone(),
+            vec![RecordBatch::from_df_record_batch(schema, batch)],
+        )
+        .unwrap();
+        let response = ReadResponse {
+            results: vec![QueryResult {
+                timeseries: recordbatches_to_timeseries(
+                    "native_histogram_remote_read",
+                    "ts",
+                    "histogram",
+                    batches,
+                )
+                .unwrap(),
+            }],
+        };
+        let body = snappy_compress(&response.encode_to_vec()).unwrap();
+        let mut decoded =
+            ReadResponse::decode(snappy_decompress(&body).unwrap().as_slice()).unwrap();
+        let mut expected = ReadResponse::decode(
+            include_bytes!(
+                "../../../tests/compatibility/wire/native_histogram_remote_read/response.pb"
+            )
+            .as_slice(),
+        )
+        .unwrap();
+        let actual_histograms = &mut decoded.results[0].timeseries[0].histograms;
+        assert_eq!(actual_histograms[0].positive_deltas, vec![1, 2, -1]);
+        assert_eq!(actual_histograms[0].negative_deltas, vec![1, 2, -1]);
+        assert_eq!(actual_histograms[6].positive_deltas, vec![3, -1]);
+        for (actual, expected) in actual_histograms
+            .iter_mut()
+            .zip(&mut expected.results[0].timeseries[0].histograms)
+        {
+            assert_eq!(actual.sum.to_bits(), expected.sum.to_bits());
+            actual.sum = 0.0;
+            expected.sum = 0.0;
+        }
+        assert_eq!(decoded, expected);
+        // The optional output is consumed by the pinned Prometheus iterator check.
+        if let Some(path) = std::env::var_os("GREPTIME_NATIVE_HISTOGRAM_REMOTE_READ_OUTPUT") {
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_native_histogram_remote_read_groups_and_sorts_batches() {
+        use api::greptime_proto::io::prometheus::write::v2::{Histogram, histogram::Count};
+        use common_query::native_histogram::testing::histogram_array;
+
+        let integer = native_histogram::encode_native_histogram(&Histogram {
+            count: Some(Count::CountInt(0)),
+            sum: f64::from_bits(0x7ff0_0000_0000_0002),
+            ..Default::default()
+        })
+        .unwrap();
+        let float = native_histogram::encode_native_histogram(&Histogram {
+            count: Some(Count::CountFloat(0.0)),
+            ..Default::default()
+        })
+        .unwrap();
+        let histograms = histogram_array(&[Some(integer), Some(float.clone()), None, Some(float)]);
+        let arrow_schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "event_time",
+                ArrowDataType::Timestamp(TimeUnit::Microsecond, None),
+                true,
+            ),
+            Field::new("legacy_histogram", histograms.data_type().clone(), true),
+            Field::new_dictionary("instance", ArrowDataType::UInt32, ArrowDataType::Utf8, true),
+        ]));
+        let schema = Arc::new(Schema::try_from(arrow_schema.clone()).unwrap());
+        let batch = |timestamps: Vec<Option<i64>>, labels: Vec<Option<u32>>| {
+            RecordBatch::from_df_record_batch(
+                schema.clone(),
+                DfRecordBatch::try_new(
+                    arrow_schema.clone(),
+                    vec![
+                        Arc::new(arrow::array::TimestampMicrosecondArray::from(timestamps)),
+                        Arc::new(histograms.clone()),
+                        Arc::new(DictionaryArray::<UInt32Type>::new(
+                            UInt32Array::from(labels),
+                            Arc::new(StringArray::from(vec![Some("b"), Some("a"), None])),
+                        )),
+                    ],
+                )
+                .unwrap(),
+            )
+        };
+        let batches = vec![
+            batch(
+                vec![Some(4000), Some(3000), Some(5000), Some(-1001)],
+                vec![Some(0), None, Some(0), Some(0)],
+            ),
+            batch(
+                vec![Some(2000), Some(1000), Some(6000), None],
+                vec![Some(0), Some(2), Some(1), Some(0)],
+            ),
+        ];
+        let series = recordbatches_to_timeseries(
+            "latency",
+            "event_time",
+            "legacy_histogram",
+            RecordBatches::try_new(schema.clone(), batches).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(series.len(), 3);
+        assert_eq!(
+            series[0].labels,
+            vec![new_label(
+                METRIC_NAME_LABEL.to_string(),
+                "latency".to_string()
+            )]
+        );
+        assert_eq!(
+            series[0]
+                .histograms
+                .iter()
+                .map(|h| h.timestamp)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(series[1].labels[1].value, "a");
+        assert!(series[1].histograms.is_empty());
+        assert_eq!(series[2].labels[1].value, "b");
+        assert_eq!(
+            series[2]
+                .histograms
+                .iter()
+                .map(|h| h.timestamp)
+                .collect::<Vec<_>>(),
+            vec![-2, 2, 4]
+        );
+        assert!(matches!(
+            series[2].histograms[0].count,
+            Some(api::prom_store::remote::histogram::Count::CountFloat(0.0))
+        ));
+        for histogram in &series[2].histograms[1..] {
+            assert!(matches!(
+                histogram.count,
+                Some(api::prom_store::remote::histogram::Count::CountInt(0))
+            ));
+            assert_eq!(histogram.sum.to_bits(), 0x7ff0_0000_0000_0002);
+        }
+        assert!(
+            series
+                .iter()
+                .all(|s| s.samples.is_empty()
+                    && s.labels.iter().all(|l| l.name != "legacy_histogram"))
         );
     }
 

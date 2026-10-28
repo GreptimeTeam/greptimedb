@@ -437,6 +437,24 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().read_preference = read_preference;
     }
 
+    /// Returns the latest procedure ID recorded in this Session.
+    pub fn last_procedure_id(&self) -> Option<String> {
+        self.mutable_session_data
+            .read()
+            .unwrap()
+            .last_procedure_id
+            .clone()
+    }
+
+    /// Records a procedure ID after successful statement execution and
+    /// construction of its ID result.
+    ///
+    /// Recording precedes `post_execute` hooks and protocol transmission, which
+    /// may still fail. It does not confirm that the client received the ID.
+    pub fn set_last_procedure_id(&self, procedure_id: String) {
+        self.mutable_session_data.write().unwrap().last_procedure_id = Some(procedure_id);
+    }
+
     pub fn current_user(&self) -> UserInfoRef {
         self.mutable_session_data.read().unwrap().user_info.clone()
     }
@@ -447,11 +465,6 @@ impl QueryContext {
 
     pub fn set_extension<S1: Into<String>, S2: Into<String>>(&mut self, key: S1, value: S2) {
         self.extensions.insert(key.into(), value.into());
-    }
-
-    #[cfg(feature = "enterprise")]
-    pub fn remove_extension(&mut self, key: &str) {
-        self.extensions.remove(key);
     }
 
     pub fn extension<S: AsRef<str>>(&self, key: S) -> Option<&str> {

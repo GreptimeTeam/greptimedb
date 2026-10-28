@@ -37,7 +37,8 @@ use crate::error::{PartitionOutOfRangeSnafu, Result};
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
-    PartitionMetrics, PartitionMetricsList, scan_flat_file_ranges, scan_flat_mem_ranges,
+    PartitionMetrics, PartitionMetricsList, prepare_flat_mem_stream, scan_flat_file_ranges,
+    scan_flat_mem_ranges,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{ScannerMetrics, scan_util};
@@ -134,6 +135,7 @@ impl UnorderedScan {
                         *index,
                         range_meta.time_range,
                     );
+                    let stream = prepare_flat_mem_stream(stream_ctx.clone(), stream);
                     for await record_batch in stream {
                         yield record_batch?;
                     }

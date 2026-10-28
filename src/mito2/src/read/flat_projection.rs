@@ -17,10 +17,7 @@
 use std::sync::Arc;
 
 use api::v1::SemanticType;
-use common_error::ext::BoxedError;
-use common_recordbatch::error::{
-    ArrowComputeSnafu, DataTypesSnafu, ExternalSnafu, NewDfRecordBatchSnafu,
-};
+use common_recordbatch::error::{ArrowComputeSnafu, NewDfRecordBatchSnafu};
 use common_recordbatch::{DfRecordBatch, RecordBatch};
 use datatypes::arrow::array::{Array, AsArray};
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field};
@@ -28,15 +25,13 @@ use datatypes::extension::json::is_json2_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::value::Value;
-use datatypes::vectors::Helper;
-use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
 
 use crate::cache::CacheStrategy;
-use crate::error::{InvalidRequestSnafu, RecordBatchSnafu, Result};
+use crate::error::{InvalidRequestSnafu, NewRecordBatchSnafu, Result};
 use crate::read::projection::{read_column_ids_from_projection, repeated_vector_with_cache};
 use crate::read::read_columns::{JsonTargetTypes, ReadColumns};
 use crate::sst::parquet::Json2RewriteTargets;
@@ -150,7 +145,7 @@ impl FlatProjectionMapper {
             flat_projected_columns(metadata, &format_projection, read_cols.json_target_types());
 
         let input_arrow_schema =
-            compute_input_arrow_schema(metadata, &batch_schema, &read_cols, json2_rewrite_targets);
+            compute_input_arrow_schema(metadata, &batch_schema, json2_rewrite_targets);
 
         // If projection is empty, we don't output any column.
         let output_schema = if is_empty_projection {
@@ -307,6 +302,7 @@ impl FlatProjectionMapper {
     /// Converts a flat format [RecordBatch] to a normal [RecordBatch].
     ///
     /// The batch must match the `projection` using to build the mapper.
+    /// JSON2 columns must already match query types before merge and deduplication.
     pub(crate) fn convert(
         &self,
         batch: &datatypes::arrow::record_batch::RecordBatch,
@@ -365,13 +361,6 @@ impl FlatProjectionMapper {
                 }
             }
 
-            let field = &self.output_schema.arrow_schema().fields()[output_idx];
-            if is_json2_extension_type(field) && array.data_type() != field.data_type() {
-                array = JsonArray::from(&array)
-                    .project_to_v2(batch.schema_ref().field(*index), field.data_type())
-                    .context(DataTypesSnafu)?;
-            }
-
             arrays.push(array);
         }
 
@@ -382,30 +371,6 @@ impl FlatProjectionMapper {
             self.output_schema.clone(),
             df_record_batch,
         ))
-    }
-
-    /// Projects columns from the input batch and converts them into vectors.
-    pub(crate) fn project_vectors(
-        &self,
-        batch: &datatypes::arrow::record_batch::RecordBatch,
-    ) -> common_recordbatch::error::Result<Vec<datatypes::vectors::VectorRef>> {
-        let mut columns = Vec::with_capacity(self.output_schema.num_columns());
-        for index in &self.batch_indices {
-            let mut array = batch.column(*index).clone();
-            // Casts dictionary values to the target type.
-            if let datatypes::arrow::datatypes::DataType::Dictionary(_key_type, value_type) =
-                array.data_type()
-            {
-                let casted = datatypes::arrow::compute::cast(&array, value_type)
-                    .context(ArrowComputeSnafu)?;
-                array = casted;
-            }
-            let vector = Helper::try_into_vector(array)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            columns.push(vector);
-        }
-        Ok(columns)
     }
 }
 
@@ -481,7 +446,6 @@ pub(crate) fn flat_projected_columns(
 pub(crate) fn compute_input_arrow_schema(
     metadata: &RegionMetadata,
     batch_schema: &[(ColumnId, ConcreteDataType)],
-    read_cols: &ReadColumns,
     json2_rewrite_targets: &Json2RewriteTargets,
 ) -> datatypes::arrow::datatypes::SchemaRef {
     let mut new_fields = Vec::with_capacity(batch_schema.len() + 3);
@@ -489,11 +453,6 @@ pub(crate) fn compute_input_arrow_schema(
         let data_type = json2_rewrite_targets
             .get(column_id)
             .map(|x| json2_physical_data_type(&x.target_layout))
-            .or_else(|| {
-                read_cols
-                    .json_target_type(*column_id)
-                    .map(|x| x.as_arrow_type())
-            })
             .unwrap_or_else(|| data_type.as_arrow_type());
 
         let column_metadata = metadata.column_by_id(*column_id).unwrap();
@@ -521,8 +480,7 @@ pub(crate) fn compute_input_arrow_schema(
 /// Helper to project compaction batches into flat format columns
 /// (fields + time index + __primary_key + __sequence + __op_type).
 pub(crate) struct CompactionProjectionMapper {
-    mapper: FlatProjectionMapper,
-    assembler: DfBatchAssembler,
+    projection: Vec<usize>,
 }
 
 impl CompactionProjectionMapper {
@@ -544,77 +502,74 @@ impl CompactionProjectionMapper {
         let read_col_ids = metadata.column_metadatas.iter().map(|col| col.column_id);
         let read_cols = ReadColumns::new(read_col_ids);
         let mapper = FlatProjectionMapper::new_with_read_columns(metadata, projection, read_cols)?;
-        let assembler = DfBatchAssembler::new(mapper.output_schema());
-
-        Ok(Self { mapper, assembler })
+        Ok(Self {
+            projection: mapper.batch_indices,
+        })
     }
 
     /// Projects columns and appends internal columns for compaction output.
     ///
     /// The input batch is expected to be in flat format with internal columns appended.
     pub(crate) fn project(&self, batch: DfRecordBatch) -> Result<DfRecordBatch> {
-        let columns = self
-            .mapper
-            .project_vectors(&batch)
-            .context(RecordBatchSnafu)?;
-        self.assembler
-            .build_df_record_batch_with_internal(&batch, columns)
-            .context(RecordBatchSnafu)
-    }
-}
-
-/// Builds [DfRecordBatch] with internal columns appended.
-pub(crate) struct DfBatchAssembler {
-    output_arrow_schema_with_internal: datatypes::arrow::datatypes::SchemaRef,
-}
-
-impl DfBatchAssembler {
-    /// Precomputes the output schema with internal columns.
-    pub(crate) fn new(output_schema: SchemaRef) -> Self {
-        let fields = output_schema
-            .arrow_schema()
-            .fields()
-            .into_iter()
-            .chain(internal_fields().iter())
-            .cloned()
-            .collect::<Vec<_>>();
-        let output_arrow_schema_with_internal =
-            Arc::new(datatypes::arrow::datatypes::Schema::new(fields));
-        Self {
-            output_arrow_schema_with_internal,
-        }
-    }
-
-    /// Builds a [DfRecordBatch] from projected vectors plus internal columns.
-    ///
-    /// Assumes the input batch already contains internal columns as the last three fields
-    /// ("__primary_key", "__sequence", "__op_type").
-    pub(crate) fn build_df_record_batch_with_internal(
-        &self,
-        batch: &datatypes::arrow::record_batch::RecordBatch,
-        mut columns: Vec<datatypes::vectors::VectorRef>,
-    ) -> common_recordbatch::error::Result<DfRecordBatch> {
-        let num_columns = batch.columns().len();
-        // The last 3 columns are the internal columns.
-        let internal_indices = [num_columns - 3, num_columns - 2, num_columns - 1];
-        for index in internal_indices.iter() {
-            let array = batch.column(*index).clone();
-            let vector = Helper::try_into_vector(array)
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            columns.push(vector);
-        }
-        RecordBatch::to_df_record_batch(self.output_arrow_schema_with_internal.clone(), columns)
+        let mut projection = self.projection.clone();
+        projection.extend(batch.num_columns() - 3..batch.num_columns());
+        // Projection must preserve the Arrow layouts already produced by compaction Rewrite.
+        batch.project(&projection).context(NewRecordBatchSnafu)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use datatypes::schema::ColumnSchema;
+    use datatypes::vectors::Helper;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::RegionId;
 
     use super::*;
+    use datatypes::types::json_type::JsonNativeType;
+
+    #[test]
+    fn test_json2_root_hint_uses_output_type_before_merge()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "j",
+                    ConcreteDataType::json2(JsonNativeType::object()),
+                    true,
+                ),
+                semantic_type: SemanticType::Field,
+                column_id: 0,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 1,
+            });
+        let metadata = Arc::new(builder.build()?);
+        let read_cols = ReadColumns::new([0, 1])
+            .with_json_target_types([(0, JsonNativeType::String)].into_iter().collect());
+        let mapper = FlatProjectionMapper::new_with_read_columns(&metadata, vec![0, 1], read_cols)?;
+        let input = mapper.input_arrow_schema(false);
+        assert_eq!(
+            &ArrowDataType::Binary,
+            input.field_with_name("j")?.data_type()
+        );
+        assert_eq!(
+            mapper
+                .output_schema()
+                .arrow_schema()
+                .field_with_name("j")?
+                .data_type(),
+            input.field_with_name("j")?.data_type(),
+        );
+        Ok(())
+    }
 
     fn metadata_with_legacy_json() -> RegionMetadataRef {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1024, 0));

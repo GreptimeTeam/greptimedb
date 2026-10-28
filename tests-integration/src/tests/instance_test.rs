@@ -949,6 +949,174 @@ ORDER BY t.key_id"#;
     );
 }
 
+/// Sorting by `CAST(ts AS TIMESTAMP(0))` must not be optimized as if it were sorting by the
+/// (millisecond) time index column.
+///
+/// The windowed sort rule still recognizes the cast as the time index column, but the working
+/// ranges it derives from the region scan's `PartitionRange`s stay in the unit of the table's time
+/// index (millisecond here). `PartSortExec` projects those ranges onto the unit of the sort column
+/// while `WindowedSortExec` does not, so sorted runs (second) are checked against working ranges
+/// (millisecond) and the range invariant trips with
+/// "Current batch have data on the left side of working range, something is very wrong".
+///
+/// The two rows are 1000 seconds apart, so casting the millisecond time index to second precision
+/// truncates sub-second parts and collapses the first row onto second 0, which is before the start
+/// of the region's time range.
+///
+/// `to_timestamp_seconds(ts)` casts the time index to second precision *inside* the function, so it
+/// has to be rejected exactly like the cast in the plan; the cast is just not visible as a
+/// `CastExpr`. `to_timestamp_millis(ts)` keeps the values of the millisecond time index and is used
+/// as the value-preserving control.
+#[apply(standalone_instance_case)]
+async fn test_windowed_sort_sort_column_cast_time_unit_mismatch(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_mito_wc (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = mito"#,
+    )
+    .await;
+
+    // The metric engine flavor only creates its physical table explicitly; rows are written to and
+    // read from the logical table built on it.
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_metric_phy (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = metric WITH ('physical_metric_table' = '')"#,
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        r#"CREATE TABLE f05_metric_wc (
+            ts TIMESTAMP(3) TIME INDEX,
+            host STRING PRIMARY KEY,
+            val DOUBLE
+        ) ENGINE = metric WITH ('on_physical_table' = 'f05_metric_phy')"#,
+    )
+    .await;
+
+    let rows_by_time_index = r#"+-------------------------+------+
+| ts                      | host |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | a    |
+| 1970-01-01T00:16:40.001 | b    |
++-------------------------+------+"#;
+    let rows_by_cast = r#"+---------------------+------+
+| t                   | host |
++---------------------+------+
+| 1970-01-01T00:00:00 | a    |
+| 1970-01-01T00:16:40 | b    |
++---------------------+------+"#;
+    // `ORDER BY t DESC` returns the same rows in the opposite order; without distinct cast values
+    // the two rows tie and this expectation would be vacuous. `rows_by_cast` is an ascending
+    // fixture, so the descending query needs its own.
+    let rows_by_cast_desc = r#"+---------------------+------+
+| t                   | host |
++---------------------+------+
+| 1970-01-01T00:16:40 | b    |
+| 1970-01-01T00:00:00 | a    |
++---------------------+------+"#;
+
+    // `to_timestamp_seconds` casts the millisecond time index to second precision inside the
+    // function, so it returns the same rows as the direct cast above (the function is registered
+    // without a session time zone, so its result stays a naive timestamp).
+    let rows_by_seconds_wrapper = rows_by_cast;
+    let rows_by_seconds_wrapper_desc = rows_by_cast_desc;
+    // `to_timestamp_millis` keeps the values of the millisecond time index, so the control below
+    // returns the same rows as sorting by the time index itself, only under the `t` alias.
+    let rows_by_millis_wrapper = r#"+-------------------------+------+
+| t                       | host |
++-------------------------+------+
+| 1970-01-01T00:00:00.001 | a    |
+| 1970-01-01T00:16:40.001 | b    |
++-------------------------+------+"#;
+
+    for table in ["f05_mito_wc", "f05_metric_wc"] {
+        let output = execute_sql(
+            &frontend,
+            &format!("INSERT INTO {table} (ts, host, val) VALUES (1, 'a', 1), (1000001, 'b', 2)"),
+        )
+        .await
+        .data;
+        assert!(matches!(output, OutputData::AffectedRows(2)), "{table}");
+
+        // Controls: sorting by the time index itself, applying a fetch, or sorting by the cast
+        // together with another column all keep working.
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT ts, host FROM {table} ORDER BY ts"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_time_index).await;
+
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT to_timestamp_millis(ts) AS t, host FROM {table} ORDER BY t"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_millis_wrapper).await;
+
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t LIMIT 10"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_cast).await;
+
+        let output = execute_sql(
+            &frontend,
+            &format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t, host"),
+        )
+        .await
+        .data;
+        check_output_stream(output, rows_by_cast).await;
+    }
+
+    // Ordering by the cast or a function wrapper that casts inside the function returns the same
+    // rows as the controls above.
+    for table in ["f05_mito_wc", "f05_metric_wc"] {
+        for parallelism in [1, 4] {
+            for (sql, expected) in [
+                (
+                    format!("SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t"),
+                    rows_by_cast,
+                ),
+                (
+                    format!(
+                        "SELECT CAST(ts AS TIMESTAMP(0)) AS t, host FROM {table} ORDER BY t DESC"
+                    ),
+                    rows_by_cast_desc,
+                ),
+                (
+                    format!("SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t"),
+                    rows_by_seconds_wrapper,
+                ),
+                (
+                    format!(
+                        "SELECT to_timestamp_seconds(ts) AS t, host FROM {table} ORDER BY t DESC"
+                    ),
+                    rows_by_seconds_wrapper_desc,
+                ),
+            ] {
+                let output = execute_sql_with_query_parallelism(&frontend, &sql, parallelism)
+                    .await
+                    .data;
+                check_output_stream(output, expected).await;
+            }
+        }
+    }
+}
+
 #[apply(both_instances_cases)]
 async fn test_show_create_table(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();
@@ -989,10 +1157,10 @@ PARTITION ON COLUMNS (n) (
 |       |   PRIMARY KEY ("n")                 |
 |       | )                                   |
 |       | PARTITION ON COLUMNS ("n") (        |
-|       |   n < 1,                            |
-|       |   n >= 1 AND n < 10,                |
-|       |   n >= 10 AND n < 100,              |
-|       |   n >= 100                          |
+|       |   "n" < 1,                          |
+|       |   "n" >= 1 AND "n" < 10,            |
+|       |   "n" >= 10 AND "n" < 100,          |
+|       |   "n" >= 100                        |
 |       | )                                   |
 |       | ENGINE=mito                         |
 |       |                                     |

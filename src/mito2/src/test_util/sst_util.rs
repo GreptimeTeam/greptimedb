@@ -24,10 +24,16 @@ use datatypes::arrow::array::{
     ArrayRef, BinaryDictionaryBuilder, RecordBatch, StringDictionaryBuilder,
     TimestampMillisecondArray, UInt8Array, UInt64Array,
 };
+use datatypes::arrow::array::{Int64Array, StructArray};
 use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::datatypes::{DataType, Field};
+use datatypes::extension::json::Json2ExtensionType;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
+use datatypes::types::json_type::JsonNativeType;
 use datatypes::value::ValueRef;
+use datatypes::vectors::json::array::JsonArray;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
 use object_store::layers::mock::{self, MockLayer, MockLayerBuilder, oio};
 use store_api::metadata::{
@@ -43,6 +49,57 @@ use crate::read::{Batch, FlatSource};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use crate::test_util::{new_batch_builder, new_noop_file_purger};
+
+/// Builds a current-layout JSON2 flat batch with two timestamps in one series.
+pub(crate) fn new_json2_record_batch()
+-> Result<(RegionMetadataRef, RecordBatch), Box<dyn std::error::Error>> {
+    let legacy: ArrayRef = Arc::new(StructArray::from(vec![(
+        Arc::new(Field::new("a", DataType::Int64, true)),
+        Arc::new(Int64Array::from_iter_values([1, 2])) as ArrayRef,
+    )]));
+    let field = Field::new("j", legacy.data_type().clone(), true)
+        .with_extension_type(Json2ExtensionType::default());
+    let settings = JsonSettings::default();
+    let physical = JsonArray::from(&legacy).rewrite_to_v2(&field, &settings, &settings)?;
+    let mut column_schema =
+        ColumnSchema::new("j", ConcreteDataType::json2(JsonNativeType::object()), true);
+    column_schema.with_extension_type(&Json2ExtensionType::default());
+    let mut metadata = RegionMetadataBuilder::new(RegionId::new(1024, 0));
+    metadata
+        .push_column_metadata(ColumnMetadata {
+            column_schema,
+            semantic_type: SemanticType::Field,
+            column_id: 0,
+        })
+        .push_column_metadata(ColumnMetadata {
+            column_schema: ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            semantic_type: SemanticType::Timestamp,
+            column_id: 1,
+        });
+    let metadata = Arc::new(metadata.build()?);
+    let mut options = FlatSchemaOptions::default();
+    options
+        .concretized_json_types
+        .insert("j".to_string(), physical.data_type().clone());
+    let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
+    keys.append(b"series")?;
+    keys.append(b"series")?;
+    let input = RecordBatch::try_new(
+        to_flat_sst_arrow_schema(&metadata, &options),
+        vec![
+            physical,
+            Arc::new(TimestampMillisecondArray::from(vec![1, 2])),
+            Arc::new(keys.finish()),
+            Arc::new(UInt64Array::from_value(1, 2)),
+            Arc::new(UInt8Array::from_value(OpType::Put as u8, 2)),
+        ],
+    )?;
+    Ok((metadata, input))
+}
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
