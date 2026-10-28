@@ -14,12 +14,15 @@
 
 //! Index build tests for mito engine.
 //!
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use api::helper::encode_json_value;
+use api::v1::helper::row;
 use api::v1::region::{StrictWindow, compact_request};
+use api::v1::value::ValueData;
 use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
@@ -30,8 +33,17 @@ use datafusion_expr::expr::InList;
 use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::value::JsonValue;
+use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions, SkippingIndexType};
+use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use datatypes::value::ValueRef;
+use index::inverted_index::search::predicate::{InListPredicate, Predicate};
+use index::target::IndexTarget;
+use mito_codec::index::IndexValueCodec;
+use mito_codec::row_converter::SortField;
 use store_api::metadata::ColumnMetadata;
 use store_api::region_engine::RegionEngine;
 use store_api::region_request::{
@@ -50,6 +62,8 @@ use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildL
 use crate::manifest::action::RegionEdit;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
+use crate::sst::index::existing_json_index_targets;
+use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
 use crate::sst::location;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
@@ -65,6 +79,246 @@ fn async_build_mode_config(is_create_on_flush: bool) -> MitoConfig {
         config.bloom_filter_index.create_on_flush = Mode::Disable;
     }
     config
+}
+
+#[tokio::test]
+async fn test_rebuild_preserves_existing_json_path_indexes() {
+    for (had_path_index, schema_change) in [(false, false), (true, false), (true, true)] {
+        let mut env = TestEnv::new().await;
+        let mut config = MitoConfig::default();
+        // Leave an ordinary column index missing so BUILD_INDEX must replace the file.
+        config.bloom_filter_index.create_on_flush = Mode::Disable;
+        let engine = env.create_engine(config).await;
+        let region_id = RegionId::new(1, 1);
+        env.get_schema_metadata_manager()
+            .register_region_table_info(
+                region_id.table_id(),
+                "test_table",
+                "test_catalog",
+                "test_schema",
+                None,
+                env.get_kv_backend(),
+            )
+            .await;
+        let settings = |paths: &[&str]| {
+            JsonSettings::try_new(
+                paths
+                    .iter()
+                    .map(|path| JsonTypeHint {
+                        path: vec![(*path).to_string()],
+                        data_type: ConcreteDataType::int64_datatype(),
+                        inverted_index: true,
+                    })
+                    .collect(),
+                Some(0),
+            )
+            .unwrap()
+        };
+        let mut request = CreateRequestBuilder::new()
+            .field_datatype(ConcreteDataType::json2(JsonNativeType::Object(
+                JsonObjectType::new(),
+            )))
+            .insert_option("memtable.type", "bulk")
+            .build();
+        request.column_metadatas[0]
+            .column_schema
+            .set_skipping_options(&SkippingIndexOptions::new_unchecked(
+                1024,
+                0.01,
+                SkippingIndexType::BloomFilter,
+            ))
+            .unwrap();
+        request.column_metadatas[1]
+            .column_schema
+            .with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings(if had_path_index { &["old"] } else { &[] }),
+            ))));
+        let table_dir = request.table_dir.clone();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema,
+                rows: (0..4)
+                    .map(|i| {
+                        row(vec![
+                            ValueData::StringValue("tag".into()),
+                            ValueData::JsonValue(encode_json_value(JsonValue::from(
+                                serde_json::json!({"old": i, "new": i + 10}),
+                            ))),
+                            ValueData::TimestampMillisecondValue(i),
+                        ])
+                    })
+                    .collect(),
+            },
+        )
+        .await;
+        flush_region(&engine, region_id, None).await;
+        let sst_metadata = engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .metadata
+            .clone();
+        let old_target = IndexTarget::new_json_path(1, vec!["old".into()])
+            .unwrap()
+            .encode();
+        let new_target = IndexTarget::new_json_path(1, vec!["new".into()])
+            .unwrap()
+            .encode();
+        let entries = engine.all_index_metas().await;
+        assert_eq!(
+            entries.iter().any(|entry| entry.target_key == old_target),
+            had_path_index
+        );
+        let before = current_file_metas(&engine, region_id).await;
+        assert_eq!(
+            before[0].json_path_indexes.as_ref().unwrap().len(),
+            usize::from(had_path_index)
+        );
+        if had_path_index && schema_change {
+            // An older manifest lacks the new field. Its Puffin still supplies
+            // the targets that must survive an index rebuild after upgrade.
+            let mut legacy = before[0].clone();
+            legacy.json_path_indexes = None;
+            let region = engine.get_region(region_id).unwrap();
+            assert_eq!(
+                existing_json_index_targets(&legacy, &region.access_layer)
+                    .await
+                    .unwrap(),
+                vec![IndexTarget::decode(&old_target).unwrap()]
+            );
+        }
+
+        if had_path_index && !schema_change {
+            // Known targets are available from FileMeta even if the old Puffin
+            // becomes unreadable. Rebuild from the SST and publish a good version.
+            let region = engine.get_region(region_id).unwrap();
+            let access = &region.access_layer;
+            let path = location::index_file_path(
+                access.table_dir(),
+                before[0].index_id(),
+                access.path_type(),
+            );
+            let store = access.object_store();
+            store.write(&path, b"corrupt index".to_vec()).await.unwrap();
+        }
+
+        // Current hints differ from the SST's hints. Neither add the new target nor
+        // discard the old target when rebuilding an ordinary column index.
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Alter(RegionAlterRequest {
+                    kind: AlterKind::SetJsonSettings {
+                        column_name: "field_0".into(),
+                        settings: settings(&["new"]),
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+        if schema_change {
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Alter(RegionAlterRequest {
+                        kind: AlterKind::SetIndexes {
+                            options: vec![SetIndexOption::Inverted {
+                                column_name: "tag_0".into(),
+                            }],
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+        }
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
+            )
+            .await
+            .unwrap();
+
+        let after = current_file_metas(&engine, region_id).await;
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].json_path_indexes.as_ref().unwrap().len(),
+            usize::from(had_path_index)
+        );
+        assert_eq!(after[0].file_id, before[0].file_id);
+        assert!(after[0].index_file_size > 0);
+        if had_path_index {
+            assert!(after[0].index_version > before[0].index_version);
+        }
+        let entries = engine.all_index_metas().await;
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.index_type == "bloom_filter" && entry.target_key == "0")
+        );
+        assert_eq!(
+            entries.iter().any(|entry| entry.target_key == old_target),
+            had_path_index
+        );
+        assert!(!entries.iter().any(|entry| entry.target_key == new_target));
+        if had_path_index {
+            // Exercise the same applier used by queries, not only the inspection table.
+            let target = IndexTarget::decode(&old_target).unwrap();
+            let region = engine.get_region(region_id).unwrap();
+            let access = &region.access_layer;
+            for (value, matches) in [(1, true), (100, false)] {
+                let mut encoded = Vec::new();
+                IndexValueCodec::encode_nonnull_value(
+                    ValueRef::Int64(value),
+                    &SortField::new(ConcreteDataType::int64_datatype()),
+                    &mut encoded,
+                )
+                .unwrap();
+                let applier = InvertedIndexApplier::new(
+                    access.table_dir().to_string(),
+                    access.path_type(),
+                    access.object_store().clone(),
+                    access.puffin_manager_factory().clone(),
+                    BTreeMap::from([(
+                        target.clone(),
+                        vec![Predicate::InList(InListPredicate {
+                            list: BTreeSet::from([encoded]),
+                        })],
+                    )]),
+                    BTreeMap::from([(target.clone(), ConcreteDataType::int64_datatype())]),
+                )
+                .unwrap();
+                let plan = applier.plan_for_sst(&sst_metadata).unwrap().unwrap();
+                let output = applier
+                    .apply(after[0].index_id(), None, &plan.index_applier, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    output.matched_segment_ids.iter_ones().next().is_some(),
+                    matches
+                );
+            }
+        }
+        reopen_region(
+            &engine,
+            region_id,
+            table_dir,
+            true,
+            HashMap::from([("memtable.type".to_string(), "bulk".to_string())]),
+        )
+        .await;
+        let reopened = current_file_metas(&engine, region_id).await;
+        assert_eq!(reopened.len(), 1);
+        assert_eq!(reopened[0].index_id(), after[0].index_id());
+        assert_eq!(reopened[0].json_path_indexes, after[0].json_path_indexes);
+    }
 }
 
 /// Get the number of generated index files for existed sst files in the scanner.

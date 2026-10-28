@@ -152,8 +152,8 @@ async fn sparse_and_materialized_tags_produce_identical_indexes() {
         let output = indexer.finish().await;
         assert_eq!(output.inverted_index.row_count, 11);
         assert_eq!(output.bloom_filter.row_count, 11);
-        assert_eq!(output.inverted_index.columns.len(), 4);
-        assert_eq!(output.bloom_filter.columns.len(), 4);
+        assert_eq!(output.inverted_index.targets.len(), 4);
+        assert_eq!(output.bloom_filter.targets.len(), 4);
 
         let reader = puffin.reader(&RegionIndexId::new(file, 0)).await.unwrap();
         let blob = reader.blob("greptime-inverted-index-v1").await.unwrap();

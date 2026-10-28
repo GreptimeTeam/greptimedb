@@ -27,6 +27,7 @@ use common_base::readable_size::ReadableSize;
 use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use datatypes::schema::FulltextBackend;
+use index::target::JsonPathTarget;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -230,6 +231,11 @@ pub struct FileMeta {
     /// Therefore, defaulting this `indexes` field to an empty list during deserialization is a
     /// reasonable and necessary step to ensure column information consistency.
     pub indexes: Vec<ColumnIndexMetadata>,
+    /// JSON path indexes actually created in this SST's current index file.
+    /// `None` means this information is unknown in a legacy manifest. `Some([])`
+    /// means the file was checked and has no JSON path indexes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_path_indexes: Option<Vec<JsonPathIndexMetadata>>,
     /// Size of the index file.
     pub index_file_size: u64,
     /// Version of the index file.
@@ -406,6 +412,15 @@ pub struct ColumnIndexMetadata {
     /// reports as version 1.
     #[serde(skip_serializing_if = "is_zero")]
     pub fulltext_bloom_version: u8,
+}
+
+/// An index created for one JSON path in an SST file.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct JsonPathIndexMetadata {
+    /// The root column and path indexed.
+    pub target: JsonPathTarget,
+    /// The index implementation used for this path.
+    pub index_type: IndexType,
 }
 
 fn is_zero(version: &u8) -> bool {
@@ -1121,6 +1136,7 @@ mod tests {
         ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions, SkippingIndexOptions,
     };
     use datatypes::value::Value;
+    use index::target::IndexTarget;
     use partition::expr::{PartitionExpr, col};
 
     use super::*;
@@ -1369,6 +1385,53 @@ mod tests {
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
         );
         assert!(!deserialized_file_meta.preserve_row_sequence);
+        assert_eq!(deserialized_file_meta.json_path_indexes, None);
+    }
+
+    #[test]
+    fn test_file_meta_json_path_indexes_serde() {
+        let legacy = include_str!(
+            "../../../../tests/compatibility/manifest/file_meta_json_path_indexes/legacy_file_meta.json"
+        );
+        let mut file_meta: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(file_meta.indexes.len(), 1);
+        let mut value = serde_json::to_value(&file_meta).unwrap();
+        assert!(value.get("json_path_indexes").is_none());
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(value.clone())
+                .unwrap()
+                .json_path_indexes,
+            None
+        );
+
+        file_meta.json_path_indexes = Some(Vec::new());
+        value = serde_json::to_value(&file_meta).unwrap();
+        assert_eq!(value["json_path_indexes"], serde_json::json!([]));
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(value)
+                .unwrap()
+                .json_path_indexes,
+            Some(Vec::new())
+        );
+
+        let IndexTarget::JsonPath(target) =
+            IndexTarget::new_json_path(7, vec!["service".into(), "name".into()]).unwrap()
+        else {
+            unreachable!()
+        };
+        let indexes = vec![JsonPathIndexMetadata {
+            target,
+            index_type: IndexType::InvertedIndex,
+        }];
+        file_meta.json_path_indexes = Some(indexes.clone());
+        let encoded = serde_json::to_value(&file_meta).unwrap();
+        assert_eq!(encoded["json_path_indexes"][0]["target"]["column_id"], 7);
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(encoded)
+                .unwrap()
+                .json_path_indexes,
+            Some(indexes)
+        );
     }
 
     #[test]

@@ -1499,11 +1499,23 @@ mod tests {
 
         assert!(info.index_metadata.inverted_index.index_size > 0);
         assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+        assert_eq!(
+            info.index_metadata
+                .inverted_index
+                .column_ids()
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
 
         assert!(info.index_metadata.bloom_filter.index_size > 0);
         assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_eq!(
+            info.index_metadata
+                .bloom_filter
+                .column_ids()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
 
         assert_eq!(
             (
@@ -2162,11 +2174,23 @@ mod tests {
 
         assert!(info.index_metadata.inverted_index.index_size > 0);
         assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+        assert_eq!(
+            info.index_metadata
+                .inverted_index
+                .column_ids()
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
 
         assert!(info.index_metadata.bloom_filter.index_size > 0);
         assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_eq!(
+            info.index_metadata
+                .bloom_filter
+                .column_ids()
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
 
         assert_eq!(
             (
@@ -3114,8 +3138,14 @@ mod tests {
         assert!(info.index_metadata.fulltext_index.index_size > 0);
         assert_eq!(info.index_metadata.fulltext_index.row_count, 200);
         // text_bloom (column_id 1) and text_tantivy (column_id 2)
-        info.index_metadata.fulltext_index.columns.sort_unstable();
-        assert_eq!(info.index_metadata.fulltext_index.columns, vec![1, 2]);
+        info.index_metadata.fulltext_index.targets.sort_unstable();
+        assert_eq!(
+            info.index_metadata
+                .fulltext_index
+                .column_ids()
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
 
         assert_eq!(
             (

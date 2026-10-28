@@ -451,6 +451,11 @@ impl InvertedIndexer {
         self.temp_file_provider.cleanup().await
     }
 
+    /// Returns all targets handled by this creator.
+    pub fn indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
+        self.index_targets.iter().map(|(target, _)| target)
+    }
+
     /// Returns column-level index IDs, excluding JSON path targets.
     pub fn indexed_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.index_targets

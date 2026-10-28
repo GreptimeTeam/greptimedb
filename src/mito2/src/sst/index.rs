@@ -39,16 +39,18 @@ use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::Json2ExtensionType;
+use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
-use snafu::ResultExt;
+use snafu::{OptionExt, ResultExt, ensure};
 use statistics::{ByteCount, RowCount};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, FileId, RegionId};
 use strum::IntoStaticStr;
 use tokio::sync::mpsc::Sender;
@@ -60,8 +62,9 @@ use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, Error, JoinSnafu, RegionClosedSnafu, RegionDroppedSnafu,
-    RegionTruncatedSnafu, Result,
+    ApplyInvertedIndexSnafu, BuildIndexAsyncSnafu, Error, InvalidMetadataSnafu, JoinSnafu,
+    PreserveJsonIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, RegionClosedSnafu,
+    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
@@ -78,7 +81,8 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
+    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, JsonPathIndexMetadata,
+    RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
@@ -175,6 +179,28 @@ pub struct IndexOutput {
 }
 
 impl IndexOutput {
+    /// Returns the path indexes successfully written to this index file.
+    pub fn build_json_path_indexes(&self) -> Vec<JsonPathIndexMetadata> {
+        let mut indexes = Vec::new();
+        for (output, index_type) in [
+            (&self.inverted_index, IndexType::InvertedIndex),
+            (&self.fulltext_index, IndexType::FulltextIndex),
+            (&self.bloom_filter, IndexType::BloomFilterIndex),
+        ] {
+            if !output.is_available() {
+                continue;
+            }
+            indexes.extend(output.targets.iter().filter_map(|target| match target {
+                IndexTarget::JsonPath(target) => Some(JsonPathIndexMetadata {
+                    target: target.clone(),
+                    index_type,
+                }),
+                IndexTarget::ColumnId(_) => None,
+            }));
+        }
+        indexes
+    }
+
     pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
         let mut indexes = SmallVec::new();
         if self.inverted_index.is_available() {
@@ -193,17 +219,17 @@ impl IndexOutput {
         let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
 
         if self.inverted_index.is_available() {
-            for &col in &self.inverted_index.columns {
+            for col in self.inverted_index.column_ids() {
                 map.entry(col).or_default().push(IndexType::InvertedIndex);
             }
         }
         if self.fulltext_index.is_available() {
-            for &col in &self.fulltext_index.columns {
+            for col in self.fulltext_index.column_ids() {
                 map.entry(col).or_default().push(IndexType::FulltextIndex);
             }
         }
         if self.bloom_filter.is_available() {
-            for &col in &self.bloom_filter.columns {
+            for col in self.bloom_filter.column_ids() {
                 map.entry(col)
                     .or_default()
                     .push(IndexType::BloomFilterIndex);
@@ -233,11 +259,20 @@ pub struct IndexBaseOutput {
     pub index_size: ByteCount,
     /// Number of rows in the index.
     pub row_count: RowCount,
-    /// Available columns in the index.
-    pub columns: Vec<ColumnId>,
+    /// Targets successfully indexed, including JSON paths.
+    pub targets: Vec<IndexTarget>,
 }
 
 impl IndexBaseOutput {
+    /// Whole-column indexes for the legacy column-level manifest metadata.
+    /// A path index must never advertise its root as a whole-column index.
+    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
+        self.targets.iter().filter_map(|target| match target {
+            IndexTarget::ColumnId(id) => Some(*id),
+            IndexTarget::JsonPath(_) => None,
+        })
+    }
+
     pub fn is_available(&self) -> bool {
         self.index_size > 0
     }
@@ -396,6 +431,19 @@ pub trait IndexerBuilder {
         index_version: u64,
         row_group_size: Option<usize>,
     ) -> Indexer;
+
+    /// Rebuilds ordinary indexes while preserving explicitly selected JSON targets.
+    async fn build_for_rebuild(
+        &self,
+        region_file_id: RegionFileId,
+        index_version: u64,
+        row_group_size: Option<usize>,
+        _metadata: RegionMetadataRef,
+        _json_targets: &[IndexTarget],
+    ) -> Indexer {
+        self.build(region_file_id, index_version, row_group_size)
+            .await
+    }
 }
 #[derive(Clone)]
 pub(crate) struct IndexerBuilderImpl {
@@ -419,29 +467,28 @@ impl IndexerBuilder for IndexerBuilderImpl {
         index_version: u64,
         row_group_size: Option<usize>,
     ) -> Indexer {
-        let mut indexer = Indexer {
-            file_id: region_file_id.file_id(),
-            region_id: self.metadata.region_id,
-            physical_region_id: region_file_id.region_id(),
-            index_version,
-            write_cache_enabled: self.write_cache_enabled,
-            ..Default::default()
-        };
+        self.build_with_json_targets(region_file_id, index_version, row_group_size, None)
+            .await
+    }
 
-        indexer.inverted_indexer =
-            self.build_inverted_indexer(region_file_id.file_id(), row_group_size);
-        indexer.fulltext_indexer = self.build_fulltext_indexer(region_file_id.file_id()).await;
-        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(region_file_id.file_id());
-        indexer.prepare_dense_pk_decoder(&self.metadata);
-        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
-
-        if indexer.is_empty() {
-            indexer.abort().await;
-            return Indexer::default();
-        }
-
-        indexer.puffin_manager = Some(self.puffin_manager.clone());
-        indexer
+    async fn build_for_rebuild(
+        &self,
+        region_file_id: RegionFileId,
+        index_version: u64,
+        row_group_size: Option<usize>,
+        metadata: RegionMetadataRef,
+        json_targets: &[IndexTarget],
+    ) -> Indexer {
+        let mut builder = self.clone();
+        builder.metadata = metadata;
+        builder
+            .build_with_json_targets(
+                region_file_id,
+                index_version,
+                row_group_size,
+                Some(json_targets),
+            )
+            .await
     }
 }
 
@@ -520,10 +567,43 @@ pub(crate) async fn build_index_from_parquet_bytes(
 }
 
 impl IndexerBuilderImpl {
+    async fn build_with_json_targets(
+        &self,
+        region_file_id: RegionFileId,
+        index_version: u64,
+        row_group_size: Option<usize>,
+        json_targets: Option<&[IndexTarget]>,
+    ) -> Indexer {
+        let mut indexer = Indexer {
+            file_id: region_file_id.file_id(),
+            region_id: self.metadata.region_id,
+            physical_region_id: region_file_id.region_id(),
+            index_version,
+            write_cache_enabled: self.write_cache_enabled,
+            ..Default::default()
+        };
+
+        indexer.inverted_indexer =
+            self.build_inverted_indexer(region_file_id.file_id(), row_group_size, json_targets);
+        indexer.fulltext_indexer = self.build_fulltext_indexer(region_file_id.file_id()).await;
+        indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(region_file_id.file_id());
+        indexer.prepare_dense_pk_decoder(&self.metadata);
+        indexer.intermediate_manager = Some(self.intermediate_manager.clone());
+
+        if indexer.is_empty() {
+            indexer.abort().await;
+            return Indexer::default();
+        }
+
+        indexer.puffin_manager = Some(self.puffin_manager.clone());
+        indexer
+    }
+
     fn build_inverted_indexer(
         &self,
         file_id: FileId,
         row_group_size: Option<usize>,
+        json_targets: Option<&[IndexTarget]>,
     ) -> Option<InvertedIndexer> {
         let create = match self.build_type {
             IndexBuildType::Flush => self.inverted_index_config.create_on_flush.auto(),
@@ -546,7 +626,11 @@ impl IndexerBuilderImpl {
             .into_iter()
             .map(IndexTarget::ColumnId)
             .collect();
-        index_targets.extend(self.collect_json_inverted_index_targets());
+        if let Some(json_targets) = json_targets {
+            index_targets.extend_from_slice(json_targets);
+        } else {
+            index_targets.extend(self.collect_json_inverted_index_targets());
+        }
 
         if index_targets.is_empty() {
             debug!(
@@ -1061,12 +1145,37 @@ impl IndexBuildTask {
         region_file_id: RegionFileId,
         new_index_version: u64,
     ) -> Result<ControlFlow<IndexBuildReport, (Indexer, IndexOutput)>> {
+        let is_rebuild = matches!(
+            self.reason,
+            IndexBuildType::Manual | IndexBuildType::SchemaChange
+        );
+        let json_targets = if is_rebuild {
+            self.read_existing_json_index_targets().await?
+        } else {
+            Vec::new()
+        };
         let mut parquet_reader = self
             .access_layer
             .read_sst(self.file.clone()) // use the latest file handle instead of creating a new one
             .expected_metadata(Some(self.target_region_metadata.clone()))
             .build()
             .await?;
+
+        let mut metadata = self.target_region_metadata.clone();
+        if !json_targets.is_empty() {
+            let reader = parquet_reader
+                .as_ref()
+                .with_context(|| PreserveJsonIndexSnafu {
+                    reason: "SST with existing JSON indexes has no readable rows".to_string(),
+                })?;
+            metadata = rebuild_json_metadata(&metadata, reader.metadata(), &json_targets)?;
+            parquet_reader = self
+                .access_layer
+                .read_sst(self.file.clone())
+                .expected_metadata(Some(metadata.clone()))
+                .build()
+                .await?;
+        }
 
         let row_group_size = parquet_reader.as_ref().and_then(|reader| {
             reader
@@ -1077,10 +1186,21 @@ impl IndexBuildTask {
                 .filter(|size| *size > 0)
         });
 
-        let mut indexer = self
-            .indexer_builder
-            .build(region_file_id, new_index_version, row_group_size)
-            .await;
+        let mut indexer = if is_rebuild {
+            self.indexer_builder
+                .build_for_rebuild(
+                    region_file_id,
+                    new_index_version,
+                    row_group_size,
+                    metadata,
+                    &json_targets,
+                )
+                .await
+        } else {
+            self.indexer_builder
+                .build(region_file_id, new_index_version, row_group_size)
+                .await
+        };
         // The build type or index options may leave nothing to build. Return before reading
         // any row; an empty indexer finishes with no output, which publishes nothing.
         if indexer.is_empty() {
@@ -1104,11 +1224,27 @@ impl IndexBuildTask {
         }
         let index_output = indexer.finish().await;
 
+        ensure!(
+            json_targets
+                .iter()
+                .all(|target| index_output.inverted_index.targets.contains(target))
+                && (json_targets.is_empty() || index_output.inverted_index.is_available()),
+            PreserveJsonIndexSnafu {
+                reason: "Rebuilt index is missing existing JSON targets"
+            },
+        );
+
         if index_output.file_size == 0 {
             // The indexer logs and drops index creation failures.
             return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
         Ok(ControlFlow::Continue((indexer, index_output)))
+    }
+
+    /// Reads existing JSON targets from FileMeta or a legacy index file.
+    /// Failure must stop publication rather than silently discard existing path indexes.
+    async fn read_existing_json_index_targets(&self) -> Result<Vec<IndexTarget>> {
+        existing_json_index_targets(&self.source.file_meta, &self.access_layer).await
     }
 
     /// Uploads the index files and commits them to the manifest.
@@ -1266,6 +1402,7 @@ impl IndexBuildTask {
         let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_indexes();
         updated.indexes = output.build_indexes();
+        updated.json_path_indexes = Some(output.build_json_path_indexes());
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
         let publication = self
@@ -1285,6 +1422,113 @@ impl IndexBuildTask {
         }
         Ok(publication)
     }
+}
+
+/// Gets existing path targets from the manifest, falling back to the old Puffin
+/// when a legacy manifest does not contain the path index field.
+pub(crate) async fn existing_json_index_targets(
+    file_meta: &FileMeta,
+    access_layer: &AccessLayerRef,
+) -> Result<Vec<IndexTarget>> {
+    if let Some(indexes) = &file_meta.json_path_indexes {
+        ensure!(
+            indexes
+                .iter()
+                .all(|index| index.index_type == IndexType::InvertedIndex),
+            PreserveJsonIndexSnafu {
+                reason: "Cannot rebuild a JSON path index type other than inverted"
+            },
+        );
+        return Ok(indexes
+            .iter()
+            .map(|index| IndexTarget::JsonPath(index.target.clone()))
+            .collect());
+    }
+    if !file_meta.inverted_index_available() {
+        return Ok(Vec::new());
+    }
+    let manager = access_layer.build_puffin_manager();
+    let reader = manager
+        .reader(&file_meta.index_id())
+        .await
+        .context(PuffinBuildReaderSnafu)?
+        .with_file_size_hint(Some(file_meta.index_file_size));
+    let blob = reader
+        .blob(inverted_index::INDEX_BLOB_TYPE)
+        .await
+        .context(PuffinReadBlobSnafu)?;
+    let reader = InvertedIndexBlobReader::new(blob.reader().await.context(PuffinBuildReaderSnafu)?);
+    let metadata = reader
+        .metadata(None)
+        .await
+        .context(ApplyInvertedIndexSnafu)?;
+    let mut targets = Vec::new();
+    for key in metadata.metas.keys() {
+        let target = IndexTarget::decode(key).map_err(|err| {
+            PreserveJsonIndexSnafu {
+                reason: format!("Invalid existing index target {key}: {err}"),
+            }
+            .build()
+        })?;
+        if matches!(target, IndexTarget::JsonPath(_)) {
+            targets.push(target);
+        }
+    }
+    Ok(targets)
+}
+
+/// Keeps current ordinary-column options but reads indexed JSON columns using the
+/// SST's layout. Current hints may omit or change the type of an existing target.
+fn rebuild_json_metadata(
+    current: &RegionMetadataRef,
+    sst: &RegionMetadata,
+    targets: &[IndexTarget],
+) -> Result<RegionMetadataRef> {
+    let mut metadata = current.as_ref().clone();
+    for target in targets {
+        let IndexTarget::JsonPath(path) = target else {
+            continue;
+        };
+        let invalid = || PreserveJsonIndexSnafu {
+            reason: format!(
+                "Existing target {} has no compatible SST JSON column or type hint",
+                target.encode()
+            ),
+        };
+        let source = sst.column_by_id(path.column_id()).with_context(invalid)?;
+        let extension = source
+            .column_schema
+            .extension_type::<Json2ExtensionType>()
+            .map_err(|err| {
+                PreserveJsonIndexSnafu {
+                    reason: err.to_string(),
+                }
+                .build()
+            })?
+            .with_context(invalid)?;
+        ensure!(
+            extension
+                .metadata()
+                .json_settings()
+                .type_hints()
+                .iter()
+                .any(|hint| hint.path == path.path()),
+            invalid()
+        );
+        let column = metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_id == path.column_id())
+            .with_context(invalid)?;
+        ensure!(column.column_schema.data_type.is_json2(), invalid());
+        column.column_schema.data_type = source.column_schema.data_type.clone();
+        column.column_schema.with_extension_type(&extension);
+    }
+    Ok(Arc::new(
+        RegionMetadataBuilder::from_existing(metadata)
+            .build()
+            .context(InvalidMetadataSnafu)?,
+    ))
 }
 
 impl PartialEq for IndexBuildTask {

@@ -67,6 +67,10 @@ memory tracker. Direct scanner callers default to an unbounded operator pool.
 
 - **Manifest format** (`manifest/action.rs`): affects crash recovery and
   follower replay. Keep it backward compatible.
+- **SST path index metadata** (`sst/file.rs`): `FileMeta.json_path_indexes` is
+  absent in older manifests; absence means unknown, while an empty list means
+  known to have no path indexes. Keep flush, compaction, and index publication
+  in sync, and retain the old-Puffin fallback for rebuilds.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
   and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
