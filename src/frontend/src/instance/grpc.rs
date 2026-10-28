@@ -66,20 +66,6 @@ impl GrpcQueryHandler for Instance {
         request: Request,
         ctx: QueryContextRef,
     ) -> server_error::Result<Output> {
-        #[cfg(feature = "enterprise")]
-        if let Some(command) = ctx
-            .extension(common_grpc::flow_write::COMMAND_KEY)
-            .map(str::to_string)
-        {
-            if ctx.channel() != session::context::Channel::Internal {
-                return Err(server_error::Error::InvalidQuery {
-                    reason: "flow write commands are only accepted on the internal channel".into(),
-                    location: snafu::Location::new(file!(), line!(), column!()),
-                });
-            }
-            return self.handle_flow_write_request(request, ctx, command).await;
-        }
-
         let result: Result<Output> = async {
             let interceptor_ref = self.plugins.get::<GrpcQueryInterceptorRef<Error>>();
             let interceptor = interceptor_ref.as_ref();
