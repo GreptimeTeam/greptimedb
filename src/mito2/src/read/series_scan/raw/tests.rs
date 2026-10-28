@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
 use common_error::ext::ErrorExt;
@@ -1070,4 +1070,230 @@ async fn filtered_boundary_fuses_chunks_where_the_per_record_stream_kept_two() {
         vec![(b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// The longest a test waits for a chunk the producer must derive on its own. The producer does its
+/// work synchronously before it polls again, so a second is well above the time it needs and still
+/// tells "waiting for input" from "working".
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// A stream that yields `items` and then never produces anything again: no next package, no EOF.
+///
+/// Its `Poll::Pending` never registers a waker, so a producer that waits for the next package or for
+/// the end of the input to close a series is caught by [`CLOSE_TIMEOUT`] instead of hanging the test.
+struct PendingAfter {
+    items: std::vec::IntoIter<Result<ScanBatch>>,
+}
+
+impl Stream for PendingAfter {
+    type Item = Result<ScanBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.items.next() {
+            Some(item) => Poll::Ready(Some(item)),
+            None => Poll::Pending,
+        }
+    }
+}
+
+/// Returns the next chunk, failing instead of hanging when the producer withholds it.
+async fn next_within(output: &mut SendableRawSeriesStream) -> RawSeriesChunk {
+    tokio::time::timeout(CLOSE_TIMEOUT, output.next())
+        .await
+        .expect("the producer must not wait for more input to produce this chunk")
+        .expect("the stream must not end before this chunk")
+        .unwrap()
+}
+
+/// Asserts that the producer waits for input instead of producing another chunk.
+async fn assert_waits_for_input(output: &mut SendableRawSeriesStream) {
+    assert!(
+        tokio::time::timeout(CLOSE_TIMEOUT, output.next())
+            .await
+            .is_err(),
+        "the producer must not produce another chunk"
+    );
+}
+
+fn package(batches: Vec<RecordBatch>) -> ScanBatch {
+    let mut flat = smallvec::SmallVec::new();
+    flat.extend(batches);
+    ScanBatch::Series(SeriesBatch::Flat(FlatSeriesBatch { batches: flat }))
+}
+
+/// A package that holds several complete series must close its last one by itself: the stream is
+/// never asked for the next package and never ends, so only the package end can close `b`.
+#[tokio::test]
+async fn a_complete_package_closes_its_last_series_without_the_next_package() {
+    let mut output = convert(
+        Box::pin(PendingAfter {
+            items: vec![Ok(package(vec![
+                dictionary_batch(&[b"a"], &[1], &[Some(1)]),
+                dictionary_batch(&[b"b", b"b"], &[1, 2], &[Some(2), Some(3)]),
+            ]))]
+            .into_iter(),
+        }),
+        schema(),
+    );
+
+    // `a` is closed by the primary-key change and `b` ends the package, so both are complete and
+    // arrive before the producer asks for anything else.
+    let first = next_within(&mut output).await;
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(first.is_last);
+    let second = next_within(&mut output).await;
+    assert_eq!(second.primary_key.as_slice(), b"b");
+    assert_eq!(values(&second), vec![Some(2.0), Some(3.0)]);
+    assert!(second.is_last);
+    assert_waits_for_input(&mut output).await;
+}
+
+/// A package end closes the last series even when the predicate drops the run that would have closed
+/// it, and an emptied package adds no chunk of its own.
+#[tokio::test]
+async fn a_package_end_closes_the_series_whose_tail_run_the_predicate_dropped() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut output = convert_with_predicate(
+        Box::pin(PendingAfter {
+            items: vec![Ok(package(vec![
+                dictionary_batch(&[b"a", b"a"], &[1, 2], &[Some(1), Some(2)]),
+                dictionary_batch(&[b"a", b"a"], &[3, 4], &[Some(-1), Some(-2)]),
+            ]))]
+            .into_iter(),
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    );
+
+    // The second record holds the rest of `a` and ends the package; the predicate empties it, so the
+    // chunk built from the first record is the one the package end has to close.
+    let chunk = next_within(&mut output).await;
+    assert_eq!(chunk.primary_key.as_slice(), b"a");
+    assert_eq!(values(&chunk), vec![Some(1.0), Some(2.0)]);
+    assert!(chunk.is_last);
+    assert_waits_for_input(&mut output).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+    // A package the predicate empties entirely yields no chunk, and the end of the input has nothing
+    // left to close: closing twice would either duplicate or lose the last `a`.
+    let chunks = collect_chunks(convert_with_predicate(
+        input(vec![
+            Ok(package(vec![dictionary_batch(
+                &[b"a", b"a"],
+                &[1, 2],
+                &[Some(1), Some(2)],
+            )])),
+            Ok(package(vec![dictionary_batch(
+                &[b"b", b"b"],
+                &[1, 2],
+                &[Some(-1), Some(-2)],
+            )])),
+        ]),
+        schema(),
+        positive_value_predicate(Arc::new(AtomicUsize::new(0))),
+    ))
+    .await;
+    assert_eq!(
+        chunks,
+        vec![(b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
+    );
+}
+
+/// A series that continues past the package that completed it must be rejected: yielding it again
+/// would split one series into two runs that both claim to be final.
+#[tokio::test]
+async fn a_series_continued_after_its_package_is_terminal() {
+    let mut output = convert_ordered(
+        input(vec![
+            Ok(package(vec![
+                dictionary_batch(&[b"a"], &[1], &[Some(1)]),
+                dictionary_batch(&[b"b"], &[1], &[Some(2)]),
+            ])),
+            Ok(package(vec![dictionary_batch(&[b"a"], &[2], &[Some(3)])])),
+        ]),
+        schema(),
+    );
+
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert!(first.is_last);
+    let second = output.next().await.unwrap().unwrap();
+    assert_eq!(second.primary_key.as_slice(), b"b");
+    assert!(second.is_last);
+    let error = output.next().await.unwrap().unwrap_err();
+    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(
+        reason,
+        "legacy series primary keys are not strictly increasing"
+    );
+    assert!(output.next().await.is_none());
+}
+
+/// A new run of the key a package closed means the input keeps that series going past the package
+/// that completed it, which the flat contract forbids. It is rejected whatever the declared
+/// ordering, instead of being yielded as a second complete run of the same series.
+#[tokio::test]
+async fn a_key_closed_by_a_package_must_not_continue_in_a_later_one() {
+    let mut output = convert(
+        input(vec![
+            Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
+            Ok(package(vec![dictionary_batch(&[b"a"], &[2], &[Some(2)])])),
+        ]),
+        schema(),
+    );
+
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(first.is_last);
+    let error = output.next().await.unwrap().unwrap_err();
+    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(
+        reason,
+        "raw series continued after the package that completed it"
+    );
+    assert!(output.next().await.is_none());
+}
+
+/// An ordinary `RecordBatch` says nothing about where a series ends, so the same rows in that shape
+/// keep the old behaviour: the last series stays open until the next run of another series or the
+/// end of the input arrives.
+///
+/// This is the same input as `a_complete_package_closes_its_last_series_without_the_next_package`,
+/// and it is also the check that the package test is the package fact alone closing `b`: with the
+/// fact removed the producer waits forever, which is exactly what happens for a plain record batch.
+#[tokio::test]
+async fn record_batch_boundaries_do_not_close_a_series() {
+    let mut output = convert(
+        Box::pin(PendingAfter {
+            items: vec![
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
+                    &[b"a"],
+                    &[1],
+                    &[Some(1)],
+                ))),
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
+                    &[b"b", b"b"],
+                    &[1, 2],
+                    &[Some(2), Some(3)],
+                ))),
+            ]
+            .into_iter(),
+        }),
+        schema(),
+    );
+
+    // `a` is closed by the primary-key change as usual.
+    let first = next_within(&mut output).await;
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert!(first.is_last);
+    // `b` has no package end behind it, so it is still open here.
+    assert_waits_for_input(&mut output).await;
 }
