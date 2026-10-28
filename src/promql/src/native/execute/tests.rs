@@ -52,11 +52,12 @@ use crate::info::InfoSelector;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
+use crate::native::canonicalize::insert_native_merge_inside_current_fused;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -10792,4 +10793,121 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// Runs `tree` over `inputs` and answers every chunk it produced.
+///
+/// The inputs are pushed in order and the input is ended before anything is pulled: a merge answers
+/// nothing until its input ends, so pulling earlier would only prove that.
+fn run_to_end(tree: &NativeTree, inputs: &[EvaluatedChunk]) -> Vec<EvaluatedChunk> {
+    let pool = pool();
+    let mut execution = executor(tree, Arc::clone(&pool));
+    for chunk in inputs {
+        execution
+            .push_evaluated(InputId::new(0), chunk.clone())
+            .unwrap();
+    }
+    execution.end_of_input().unwrap();
+    let mut out = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        out.push(chunk);
+    }
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    out
+}
+
+/// A merge the insertion pass put above a per-series tree answers the rows the tree answered without
+/// it.
+///
+/// The tree is the one the route compiles for `abs(x)` and the merge is the pass's own output, not a
+/// node placed by the fixture, so what runs here is the shape a production tree gains. Two streams
+/// are checked: a label set arriving whole, and one arriving as two fragments, which is what one
+/// scan partition hands over when the series is split across chunks.
+#[test]
+fn an_inserted_merge_answers_the_rows_the_unmerged_tree_answered() {
+    let grid = grid(0, 60_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let unmerged = NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]))
+        .expect("a map over an evaluated input is a legal tree");
+    let merged =
+        insert_native_merge_inside_current_fused(&unmerged, &[NativeProperties::source_pieces()])
+            .expect("the pass keeps the tree legal");
+    // What is executed below is the pass's insertion: the pass put the merge at the root.
+    assert!(
+        matches!(merged.root().expr, NativeExpr::Merge { .. }),
+        "{merged}"
+    );
+    assert_eq!(1, merged.to_string().matches("Merge").count(), "{merged}");
+
+    let metric = named_metric("some_metric", "x");
+    let cases: [(&str, Vec<EvaluatedChunk>); 2] = [
+        (
+            "one label set arriving whole",
+            vec![evaluated_chunk_of(
+                &schema,
+                metric.clone(),
+                0,
+                vec![Some(-1.0), Some(2.0), Some(-3.0), Some(4.0)],
+                true,
+            )],
+        ),
+        (
+            "one label set arriving as two fragments",
+            vec![
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    0,
+                    vec![Some(-1.0), Some(2.0)],
+                    false,
+                ),
+                evaluated_chunk_of(
+                    &schema,
+                    metric.clone(),
+                    2,
+                    vec![Some(-3.0), Some(4.0)],
+                    true,
+                ),
+            ],
+        ),
+    ];
+    let expected = vec![
+        (0, Some(1.0)),
+        (1, Some(2.0)),
+        (2, Some(3.0)),
+        (3, Some(4.0)),
+    ];
+    for (what, inputs) in cases {
+        let without = run_to_end(&unmerged, &inputs);
+        let with = run_to_end(&merged, &inputs);
+        assert_eq!(
+            expected,
+            decided(&without),
+            "{what}: the tree without the merge"
+        );
+        // The merge collects the pieces of one label set, so both streams answer the same rows: the
+        // merge changed what a consumer receives, not what the query computes.
+        assert_eq!(
+            decided(&without),
+            decided(&with),
+            "{what}: the inserted merge answered different rows"
+        );
+        // And it answers one series per label set, which is what it was inserted for. The label set
+        // is the one the unmerged tree answered: `abs` drops `__name__`, and a merge writes no label
+        // of its own, so both runs name the same series.
+        assert_eq!(1, with.len(), "{what}: {}", merged);
+        assert_eq!(
+            without.first().map(|chunk| chunk.series.metric.clone()),
+            with.first().map(|chunk| chunk.series.metric.clone()),
+            "{what}: the inserted merge answered a different series"
+        );
+        if inputs.len() > 1 {
+            assert_eq!(
+                2,
+                without.len(),
+                "{what}: the unmerged tree hands the pieces over separately"
+            );
+        }
+    }
 }
