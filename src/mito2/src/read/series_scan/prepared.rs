@@ -23,17 +23,19 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
+use common_recordbatch::filter::SimpleFilterEvaluator;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
+use datafusion_expr::utils::split_conjunction;
 use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, BooleanArray, DictionaryArray, StringArray, UInt32Array,
     UInt64Array,
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
 use datatypes::arrow::compute::{cast, filter_record_batch};
-use datatypes::arrow::datatypes::UInt32Type;
+use datatypes::arrow::datatypes::{Schema, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::SeriesOrdering;
-use datatypes::value::ValueRef;
+use datatypes::value::{Value, ValueRef};
 use futures::TryStreamExt;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use snafu::{IntoError, ResultExt};
@@ -57,7 +59,6 @@ use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
-use crate::series_index::MetricSeriesId;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::ColumnarSeriesFormat;
 use crate::series_index::format::{
@@ -65,6 +66,7 @@ use crate::series_index::format::{
     SeriesReadRequest,
 };
 use crate::series_index::samples::ColumnarSamplesFormat;
+use crate::series_index::{MetricSeriesId, ROW_COUNT_COLUMN};
 
 fn invalid(reason: impl Into<String>) -> Error {
     InvalidRecordBatchSnafu {
@@ -229,6 +231,50 @@ fn collect_inputs(
     Ok(ready.then_some((file_indices, indexes)))
 }
 
+/// Push only supported conjuncts; residual evaluation still enforces the complete predicate.
+fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> SeriesReadRequest {
+    let exprs: Vec<_> = predicate
+        .into_iter()
+        .flat_map(|predicate| predicate.exprs())
+        .flat_map(split_conjunction)
+        .collect();
+    let mut request = SeriesReadRequest {
+        projection: schema
+            .fields()
+            .iter()
+            .filter(|field| field.name() != ROW_COUNT_COLUMN)
+            .map(|field| field.name().clone())
+            .collect(),
+        ..Default::default()
+    };
+    for expr in exprs {
+        let Some(filter) = SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
+            schema
+                .field_with_name(name)
+                .ok()
+                .map(|field| field.data_type().clone())
+        }) else {
+            continue;
+        };
+        if !request
+            .projection
+            .iter()
+            .any(|name| name == filter.column_name())
+        {
+            continue;
+        }
+        if filter.column_name() == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
+            && filter.is_eq()
+            && let Some(Value::UInt32(table_id)) = filter.literal_value()
+        {
+            // Keep all equality filters, including contradictory ones, for exact evaluation.
+            request.table_id = Some(table_id);
+        }
+        request.filters.push(filter);
+    }
+    request
+}
+
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
@@ -292,59 +338,75 @@ impl ColumnarPreparedSource {
                 .fields()
                 .iter()
                 .skip(3)
-                .enumerate()
-                .map(|(i, field)| {
+                .map(|field| {
                     let id = format::field_id(field)?;
-                    Ok((i + 3, id, field.name().clone()))
+                    Ok((id, field.name().clone()))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            tags.sort_unstable_by(|a, b| a.2.cmp(&b.2));
+            tags.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+            let request = series_read_request(&schema, input.predicate_group().predicate());
+            let projection = request
+                .projection
+                .iter()
+                .map(|name| schema.index_of(name).map_err(|e| invalid(e.to_string())))
+                .collect::<Result<Vec<_>>>()?;
+            let projected_schema = Arc::new(
+                schema
+                    .project(&projection)
+                    .map_err(|e| invalid(e.to_string()))?,
+            );
             let mut filters = Vec::new();
             if let Some(predicate) = input.predicate_group().predicate() {
                 for expr in predicate.exprs() {
                     if expr
                         .column_refs()
                         .iter()
-                        .all(|column| schema.index_of(&column.name).is_ok())
+                        .all(|column| projected_schema.index_of(&column.name).is_ok())
                     {
                         filters.push(
-                            Predicate::to_physical_expr(expr, &schema)
+                            Predicate::to_physical_expr(expr, &projected_schema)
                                 .map_err(|e| invalid(e.to_string()))?,
                         );
                     }
                 }
             }
-            let mut batches = reader.read(SeriesReadRequest {
-                projection: schema.fields().iter().map(|f| f.name().clone()).collect(),
-                ..Default::default()
-            })?;
+            let mut batches = reader.read(request)?;
             while let Some(mut batch) = batches.try_next().await? {
                 for filter in &filters {
                     batch = common_recordbatch::filter::batch_filter(&batch, filter)
                         .map_err(|e| invalid(e.to_string()))?;
                 }
                 let table = batch
-                    .column(0)
+                    .column_by_name(DATA_SCHEMA_TABLE_ID_COLUMN_NAME)
+                    .ok_or_else(|| invalid("missing table ID column"))?
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .ok_or_else(|| invalid("invalid table ID column"))?;
                 let tsid = batch
-                    .column(1)
+                    .column_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
+                    .ok_or_else(|| invalid("missing TSID column"))?
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .ok_or_else(|| invalid("invalid TSID column"))?;
+                let tag_arrays = tags
+                    .iter()
+                    .map(|(id, name)| {
+                        let strings = batch
+                            .column_by_name(name)
+                            .ok_or_else(|| invalid("missing series tag column"))?
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .ok_or_else(|| invalid("invalid series tag array"))?;
+                        Ok((*id, strings))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 for row in 0..batch.num_rows() {
                     let id = MetricSeriesId {
                         table_id: table.value(row),
                         tsid: tsid.value(row),
                     };
                     let mut values = HashMap::new();
-                    for (i, column_id, _) in &tags {
-                        let strings = batch
-                            .column(*i)
-                            .as_any()
-                            .downcast_ref::<StringArray>()
-                            .ok_or_else(|| invalid("invalid series tag array"))?;
+                    for (column_id, strings) in &tag_arrays {
                         values.insert(
                             *column_id,
                             (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
@@ -360,7 +422,7 @@ impl ColumnarPreparedSource {
                         .map_err(|e| invalid(e.to_string()))?;
                     codec
                         .encode_to_vec(
-                            tags.iter().map(|(_, id, _)| {
+                            tags.iter().map(|(id, _)| {
                                 (
                                     *id,
                                     values[id]
