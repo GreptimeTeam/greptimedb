@@ -32,7 +32,7 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::buffer::{Buffer, OffsetBuffer};
 use datatypes::arrow::compute::{cast, filter_record_batch};
-use datatypes::arrow::datatypes::{DataType, Schema, UInt32Type};
+use datatypes::arrow::datatypes::{Schema, UInt32Type};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::series::SeriesOrdering;
 use datatypes::value::{Value, ValueRef};
@@ -238,16 +238,11 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
         .flat_map(|predicate| predicate.exprs())
         .flat_map(split_conjunction)
         .collect();
-    let needs_count = exprs.iter().any(|expr| {
-        expr.column_refs()
-            .iter()
-            .any(|column| column.name == ROW_COUNT_COLUMN)
-    });
     let mut request = SeriesReadRequest {
         projection: schema
             .fields()
             .iter()
-            .filter(|field| field.name() != ROW_COUNT_COLUMN || needs_count)
+            .filter(|field| field.name() != ROW_COUNT_COLUMN)
             .map(|field| field.name().clone())
             .collect(),
         ..Default::default()
@@ -261,20 +256,11 @@ fn series_read_request(schema: &Schema, predicate: Option<&Predicate>) -> Series
         }) else {
             continue;
         };
-        let Ok(field) = schema.field_with_name(filter.column_name()) else {
-            continue;
-        };
-        // Physical residual evaluation performs numeric coercion. The format evaluator does
-        // not, so only push numeric comparisons whose literal already has the stored type.
-        let compatible = match field.data_type() {
-            DataType::UInt32 => matches!(filter.literal_value(), Some(Value::UInt32(_))),
-            DataType::UInt64 => matches!(filter.literal_value(), Some(Value::UInt64(_))),
-            DataType::Utf8 => filter
-                .literal_value()
-                .is_none_or(|value| matches!(value, Value::String(_) | Value::Null)),
-            _ => false,
-        };
-        if !compatible {
+        if !request
+            .projection
+            .iter()
+            .any(|name| name == filter.column_name())
+        {
             continue;
         }
         if filter.column_name() == DATA_SCHEMA_TABLE_ID_COLUMN_NAME
@@ -375,7 +361,7 @@ impl ColumnarPreparedSource {
                     if expr
                         .column_refs()
                         .iter()
-                        .all(|column| schema.index_of(&column.name).is_ok())
+                        .all(|column| projected_schema.index_of(&column.name).is_ok())
                     {
                         filters.push(
                             Predicate::to_physical_expr(expr, &projected_schema)
@@ -402,19 +388,25 @@ impl ColumnarPreparedSource {
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .ok_or_else(|| invalid("invalid TSID column"))?;
-                for row in 0..batch.num_rows() {
-                    let id = MetricSeriesId {
-                        table_id: table.value(row),
-                        tsid: tsid.value(row),
-                    };
-                    let mut values = HashMap::new();
-                    for (column_id, name) in &tags {
+                let tag_arrays = tags
+                    .iter()
+                    .map(|(id, name)| {
                         let strings = batch
                             .column_by_name(name)
                             .ok_or_else(|| invalid("missing series tag column"))?
                             .as_any()
                             .downcast_ref::<StringArray>()
                             .ok_or_else(|| invalid("invalid series tag array"))?;
+                        Ok((*id, strings))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for row in 0..batch.num_rows() {
+                    let id = MetricSeriesId {
+                        table_id: table.value(row),
+                        tsid: tsid.value(row),
+                    };
+                    let mut values = HashMap::new();
+                    for (column_id, strings) in &tag_arrays {
                         values.insert(
                             *column_id,
                             (!strings.is_null(row)).then(|| strings.value(row).to_owned()),
