@@ -39,12 +39,10 @@ use bytes::Bytes;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::Json2ExtensionType;
-use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use puffin::puffin_manager::{PuffinManager, PuffinReader};
 use puffin_manager::SstPuffinManager;
 use smallvec::SmallVec;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -62,9 +60,8 @@ use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    ApplyInvertedIndexSnafu, BuildIndexAsyncSnafu, Error, InvalidMetadataSnafu, JoinSnafu,
-    PreserveJsonIndexSnafu, PuffinBuildReaderSnafu, PuffinReadBlobSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, Error, InvalidMetadataSnafu, JoinSnafu, PreserveJsonIndexSnafu,
+    RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
@@ -81,8 +78,8 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, FileMeta, IndexType, IndexTypes, JsonPathIndexMetadata,
-    RegionFileId, RegionIndexId,
+    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, JsonPathIndexMetadata, RegionFileId,
+    RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
@@ -1150,7 +1147,19 @@ impl IndexBuildTask {
             IndexBuildType::Manual | IndexBuildType::SchemaChange
         );
         let json_targets = if is_rebuild {
-            self.read_existing_json_index_targets().await?
+            let indexes = &self.source.file_meta.json_path_indexes;
+            ensure!(
+                indexes
+                    .iter()
+                    .all(|index| index.index_type == IndexType::InvertedIndex),
+                PreserveJsonIndexSnafu {
+                    reason: "Cannot rebuild a JSON path index type other than inverted"
+                },
+            );
+            indexes
+                .iter()
+                .map(|index| IndexTarget::JsonPath(index.target.clone()))
+                .collect()
         } else {
             Vec::new()
         };
@@ -1239,12 +1248,6 @@ impl IndexBuildTask {
             return Ok(ControlFlow::Break(self.aborted("No index was created")));
         }
         Ok(ControlFlow::Continue((indexer, index_output)))
-    }
-
-    /// Reads existing JSON targets from FileMeta or a legacy index file.
-    /// Failure must stop publication rather than silently discard existing path indexes.
-    async fn read_existing_json_index_targets(&self) -> Result<Vec<IndexTarget>> {
-        existing_json_index_targets(&self.source.file_meta, &self.access_layer).await
     }
 
     /// Uploads the index files and commits them to the manifest.
@@ -1402,7 +1405,7 @@ impl IndexBuildTask {
         let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_indexes();
         updated.indexes = output.build_indexes();
-        updated.json_path_indexes = Some(output.build_json_path_indexes());
+        updated.json_path_indexes = output.build_json_path_indexes();
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
         let publication = self
@@ -1422,59 +1425,6 @@ impl IndexBuildTask {
         }
         Ok(publication)
     }
-}
-
-/// Gets existing path targets from the manifest, falling back to the old Puffin
-/// when a legacy manifest does not contain the path index field.
-pub(crate) async fn existing_json_index_targets(
-    file_meta: &FileMeta,
-    access_layer: &AccessLayerRef,
-) -> Result<Vec<IndexTarget>> {
-    if let Some(indexes) = &file_meta.json_path_indexes {
-        ensure!(
-            indexes
-                .iter()
-                .all(|index| index.index_type == IndexType::InvertedIndex),
-            PreserveJsonIndexSnafu {
-                reason: "Cannot rebuild a JSON path index type other than inverted"
-            },
-        );
-        return Ok(indexes
-            .iter()
-            .map(|index| IndexTarget::JsonPath(index.target.clone()))
-            .collect());
-    }
-    if !file_meta.inverted_index_available() {
-        return Ok(Vec::new());
-    }
-    let manager = access_layer.build_puffin_manager();
-    let reader = manager
-        .reader(&file_meta.index_id())
-        .await
-        .context(PuffinBuildReaderSnafu)?
-        .with_file_size_hint(Some(file_meta.index_file_size));
-    let blob = reader
-        .blob(inverted_index::INDEX_BLOB_TYPE)
-        .await
-        .context(PuffinReadBlobSnafu)?;
-    let reader = InvertedIndexBlobReader::new(blob.reader().await.context(PuffinBuildReaderSnafu)?);
-    let metadata = reader
-        .metadata(None)
-        .await
-        .context(ApplyInvertedIndexSnafu)?;
-    let mut targets = Vec::new();
-    for key in metadata.metas.keys() {
-        let target = IndexTarget::decode(key).map_err(|err| {
-            PreserveJsonIndexSnafu {
-                reason: format!("Invalid existing index target {key}: {err}"),
-            }
-            .build()
-        })?;
-        if matches!(target, IndexTarget::JsonPath(_)) {
-            targets.push(target);
-        }
-    }
-    Ok(targets)
 }
 
 /// Keeps current ordinary-column options but reads indexed JSON columns using the

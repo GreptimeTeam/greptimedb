@@ -62,7 +62,6 @@ use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildL
 use crate::manifest::action::RegionEdit;
 use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
-use crate::sst::index::existing_json_index_targets;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
 use crate::sst::location;
 use crate::test_util::batch_util::sort_batches_and_print;
@@ -178,26 +177,13 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         );
         let before = current_file_metas(&engine, region_id).await;
         assert_eq!(
-            before[0].json_path_indexes.as_ref().unwrap().len(),
+            before[0].json_path_indexes.len(),
             usize::from(had_path_index)
         );
-        if had_path_index && schema_change {
-            // An older manifest lacks the new field. Its Puffin still supplies
-            // the targets that must survive an index rebuild after upgrade.
-            let mut legacy = before[0].clone();
-            legacy.json_path_indexes = None;
-            let region = engine.get_region(region_id).unwrap();
-            assert_eq!(
-                existing_json_index_targets(&legacy, &region.access_layer)
-                    .await
-                    .unwrap(),
-                vec![IndexTarget::decode(&old_target).unwrap()]
-            );
-        }
 
         if had_path_index && !schema_change {
-            // Known targets are available from FileMeta even if the old Puffin
-            // becomes unreadable. Rebuild from the SST and publish a good version.
+            // Targets come from FileMeta even if the old Puffin becomes
+            // unreadable. Rebuild from the SST and publish a good version.
             let region = engine.get_region(region_id).unwrap();
             let access = &region.access_layer;
             let path = location::index_file_path(
@@ -249,7 +235,7 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         let after = current_file_metas(&engine, region_id).await;
         assert_eq!(after.len(), 1);
         assert_eq!(
-            after[0].json_path_indexes.as_ref().unwrap().len(),
+            after[0].json_path_indexes.len(),
             usize::from(had_path_index)
         );
         assert_eq!(after[0].file_id, before[0].file_id);

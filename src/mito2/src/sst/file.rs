@@ -232,10 +232,8 @@ pub struct FileMeta {
     /// reasonable and necessary step to ensure column information consistency.
     pub indexes: Vec<ColumnIndexMetadata>,
     /// JSON path indexes actually created in this SST's current index file.
-    /// `None` means this information is unknown in a legacy manifest. `Some([])`
-    /// means the file was checked and has no JSON path indexes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub json_path_indexes: Option<Vec<JsonPathIndexMetadata>>,
+    /// An absent field in an older manifest means no JSON path indexes.
+    pub json_path_indexes: Vec<JsonPathIndexMetadata>,
     /// Size of the index file.
     pub index_file_size: u64,
     /// Version of the index file.
@@ -1385,7 +1383,7 @@ mod tests {
             FileId::from_str("bc5896ec-e4d8-4017-a80d-f2de73188d55").unwrap()
         );
         assert!(!deserialized_file_meta.preserve_row_sequence);
-        assert_eq!(deserialized_file_meta.json_path_indexes, None);
+        assert!(deserialized_file_meta.json_path_indexes.is_empty());
     }
 
     #[test]
@@ -1395,23 +1393,14 @@ mod tests {
         );
         let mut file_meta: FileMeta = serde_json::from_str(legacy).unwrap();
         assert_eq!(file_meta.indexes.len(), 1);
-        let mut value = serde_json::to_value(&file_meta).unwrap();
-        assert!(value.get("json_path_indexes").is_none());
-        assert_eq!(
-            serde_json::from_value::<FileMeta>(value.clone())
-                .unwrap()
-                .json_path_indexes,
-            None
-        );
-
-        file_meta.json_path_indexes = Some(Vec::new());
-        value = serde_json::to_value(&file_meta).unwrap();
+        assert!(file_meta.json_path_indexes.is_empty());
+        let value = serde_json::to_value(&file_meta).unwrap();
         assert_eq!(value["json_path_indexes"], serde_json::json!([]));
         assert_eq!(
             serde_json::from_value::<FileMeta>(value)
                 .unwrap()
                 .json_path_indexes,
-            Some(Vec::new())
+            Vec::new()
         );
 
         let IndexTarget::JsonPath(target) =
@@ -1423,14 +1412,14 @@ mod tests {
             target,
             index_type: IndexType::InvertedIndex,
         }];
-        file_meta.json_path_indexes = Some(indexes.clone());
+        file_meta.json_path_indexes = indexes.clone();
         let encoded = serde_json::to_value(&file_meta).unwrap();
         assert_eq!(encoded["json_path_indexes"][0]["target"]["column_id"], 7);
         assert_eq!(
             serde_json::from_value::<FileMeta>(encoded)
                 .unwrap()
                 .json_path_indexes,
-            Some(indexes)
+            indexes
         );
     }
 
