@@ -9,6 +9,7 @@ members = [
     "src/cmd",
     "src/common/base",
     "src/common/batcher",
+    "src/common/cache",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
