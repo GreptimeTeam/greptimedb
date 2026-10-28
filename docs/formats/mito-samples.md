@@ -429,4 +429,3 @@ New column encodings or compression methods receive new IDs. Structural changes,
 changed field meanings, or incompatible limits require a new version. Deeper
 metadata trees require an explicit reader-support and rollout decision; an
 unchanged layout alone does not make them readable by version-1 implementations.
-
