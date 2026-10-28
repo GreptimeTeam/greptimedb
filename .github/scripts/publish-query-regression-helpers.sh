@@ -15,7 +15,19 @@ for binary in query_perf_fixture query_regression_runner; do
 done
 docker build --build-arg "SOURCE_REVISION=$revision" \
   --file docker/query-regression-helpers/Dockerfile --tag "$tag" "$staging"
-docker push "$tag"
+# ACR token exchange can time out even after docker login succeeds. Retry
+# publication without rebuilding the binaries or changing the image tag.
+for attempt in 1 2 3; do
+  if timeout 600 docker push "$tag"; then
+    break
+  fi
+  if [[ "$attempt" == 3 ]]; then
+    echo "Helper image push failed after $attempt attempts." >&2
+    exit 1
+  fi
+  echo "Helper image push failed (attempt $attempt/3); retrying in 15 seconds." >&2
+  sleep 15
+done
 image="$(docker image inspect "$tag" --format '{{index .RepoDigests 0}}')"
 [[ "$image" == "$repository@sha256:"* ]]
 # Verify the published artifact through the same extraction path as consumers.
