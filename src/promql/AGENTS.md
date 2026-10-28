@@ -63,8 +63,8 @@ nodes also need a physical planner reachable from
 `DfQueryPlanner::create_physical_plan`, assembled in
 `src/query/src/query_engine/state.rs`.
 
-A `FusedSeries` over two tables stays on the frontend over one merge scan per
-table, each carrying a `RawSeriesSource` that answers explicit-label raw frames.
+A `FusedSeries` over more than one table stays on the frontend over one merge
+scan per selector, each carrying a `RawSeriesSource` that answers explicit-label raw frames.
 The frame schema is compared exactly at the merge scan, so its declaration and
 the region's output change together.
 

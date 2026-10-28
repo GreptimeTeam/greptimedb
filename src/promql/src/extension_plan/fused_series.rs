@@ -1405,7 +1405,8 @@ pub struct FusedSeriesStream {
     /// Every input partition, read concurrently, or `None` once they all ended.
     ///
     /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
-    /// error releases them even if the consumer keeps the terminated stream.
+    /// error releases them even if the consumer keeps the terminated stream; a partition read on a
+    /// spawned task is released once its runtime cancels the task, not by the time this returns.
     inputs: Option<SeriesGather>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
@@ -1493,7 +1494,7 @@ impl FusedSeriesStream {
         }
     }
 
-    /// Ends the stream in an error, releasing the execution and the input at once.
+    /// Ends the stream in an error, releasing the execution and the inputs.
     ///
     /// An ordinary drop of the stream releases all of this as well, so this is not about the last
     /// release: it is about a consumer that keeps the terminated stream, which would otherwise

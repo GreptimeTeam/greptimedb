@@ -1988,14 +1988,12 @@ async fn native_fused_plans_varying_map_parameters() {
     let query = "clamp_min(some_metric, scalar(some_metric))";
     let plan = build_native_fused_plan(query, true).await;
     assert!(find_fused_series(&plan).is_some(), "{query}");
+    let query = "clamp(some_metric, scalar(some_metric), scalar(some_metric))";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("each parameter reads its own scan");
+    assert_eq!(3, fused.children().len(), "{query}");
 
-    for (query, partitions) in [
-        ("clamp_min(some_metric, scalar(some_metric))", vec![0]),
-        (
-            "clamp(some_metric, scalar(some_metric), scalar(some_metric))",
-            vec![],
-        ),
-    ] {
+    for (query, partitions) in [("clamp_min(some_metric, scalar(some_metric))", vec![0])] {
         // Asked of the native route alone: what the existing planner does with the query is not
         // this route's to decide.
         let stmt = build_eval_stmt(query);
@@ -2258,6 +2256,28 @@ async fn native_fused_metric_fields_follow_logical_order() {
             ))
             .eq(datafusion::logical_expr::lit(1024u32))
     }));
+}
+
+/// More than one selector over metric-engine logical tables is not one multi-input node, though
+/// one selector over the same tables is native.
+#[tokio::test]
+async fn native_fused_multiple_metric_engine_selectors_fall_back() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    let single =
+        build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
+    assert!(find_fused_series(&single).is_some(), "{single}");
+    for query in [
+        "some_metric / other_metric",
+        "some_metric + some_metric",
+        "some_metric + other_metric + some_metric",
+    ] {
+        let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
+        assert!(!has_pair_node(&native), "{query}: {native}");
+    }
 }
 
 /// A metric table without logical-table metadata declines to the legacy plan.
@@ -2738,19 +2758,22 @@ async fn native_fused_cross_table_pair_reads_each_table_through_its_own_source()
     }
 }
 
+/// Whether `plan` holds a native node over more than one input. The hybrid route plans a binary's
+/// selector operands as single-input nodes under the existing join, which this does not count.
+fn has_pair_node(plan: &LogicalPlan) -> bool {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        && fused.inputs().len() > 1
+    {
+        return true;
+    }
+    plan.inputs().into_iter().any(has_pair_node)
+}
+
 /// Two selectors over tables split into regions are not one two-input node, across tables as on
 /// one; the hybrid route may still plan each operand natively under the existing join.
 #[tokio::test]
 async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
-    fn has_pair_node(plan: &LogicalPlan) -> bool {
-        if let LogicalPlan::Extension(Extension { node }) = plan
-            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
-            && fused.inputs().len() > 1
-        {
-            return true;
-        }
-        plan.inputs().into_iter().any(has_pair_node)
-    }
     let plan = build_native_fused_plan_with_provider(
         "some_metric / other_metric",
         true,
@@ -2873,6 +2896,89 @@ async fn native_fused_pointwise_wrapper_around_a_pair_is_admitted() {
             "{query}"
         );
         assert_eq!(2, fused.inputs().len(), "{query}");
+    }
+}
+
+/// A tree of more than two selectors binds one input per occurrence: under the node directly when
+/// they all read one table, through a raw source each when any reads another table.
+#[tokio::test]
+async fn native_fused_three_selector_trees_bind_every_occurrence() {
+    for (query, tables) in [
+        (
+            "some_metric + some_metric + some_metric",
+            ["some_metric", "some_metric", "some_metric"],
+        ),
+        (
+            "(some_metric - some_metric) / on(tag_0) some_metric",
+            ["some_metric", "some_metric", "some_metric"],
+        ),
+        (
+            "some_metric / other_metric * some_metric",
+            ["some_metric", "other_metric", "some_metric"],
+        ),
+        (
+            "100 * (some_metric - some_metric) / on(tag_0) other_metric",
+            ["some_metric", "some_metric", "other_metric"],
+        ),
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![]).await,
+        )
+        .await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        let cross_table = tables.iter().any(|table| *table != tables[0]);
+        let read_tables = fused
+            .inputs()
+            .iter()
+            .map(|input| match input {
+                LogicalPlan::TableScan(scan) if !cross_table => scan.table_name.table().to_string(),
+                LogicalPlan::Extension(Extension { node }) if cross_table => {
+                    let source = node
+                        .as_any()
+                        .downcast_ref::<RawSeriesSource>()
+                        .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
+                    let [LogicalPlan::TableScan(scan)] =
+                        UserDefinedLogicalNodeCore::inputs(source)[..]
+                    else {
+                        panic!("{query}: the raw source reads its table scan directly");
+                    };
+                    assert_eq!(source.metric_name(), scan.table_name.table(), "{query}");
+                    scan.table_name.table().to_string()
+                }
+                other => panic!("{query}: unexpected input {other}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(read_tables, tables, "{query}");
+        assert_eq!(
+            cross_table,
+            fused.binding().metric_name.is_none(),
+            "{query}"
+        );
+        assert_eq!(
+            vec!["field_0", "tag_0", "timestamp"],
+            sorted_column_names(&plan),
+            "{query}"
+        );
+    }
+}
+
+/// More than two selectors over tables split into regions are not one multi-input node, on one
+/// table as across two.
+#[tokio::test]
+async fn native_fused_three_selectors_on_partitioned_tables_fall_back() {
+    for query in [
+        "some_metric + some_metric + some_metric",
+        "some_metric / other_metric * some_metric",
+    ] {
+        let plan = build_native_fused_plan_with_provider(
+            query,
+            true,
+            native_two_table_provider(vec![0]).await,
+        )
+        .await;
+        assert!(!has_pair_node(&plan), "{query}: {plan}");
     }
 }
 
