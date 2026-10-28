@@ -1858,19 +1858,17 @@ impl MultiBulkPart {
 
 #[cfg(test)]
 mod tests {
-    use api::v1::{Row, SemanticType, WriteHint};
+    use api::v1::{Row, WriteHint};
     use datafusion_common::ScalarValue;
     use datatypes::arrow::array::{
         BinaryArray, DictionaryArray, Float64Array, TimestampMillisecondArray,
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::prelude::{ConcreteDataType, Value};
-    use datatypes::schema::ColumnSchema;
     use mito_codec::row_converter::build_primary_key_codec;
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
-    use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-    use store_api::storage::RegionId;
+    use store_api::metadata::RegionMetadataBuilder;
     use store_api::storage::consts::ReservedColumnId;
     use table::predicate::Predicate;
 
@@ -2594,47 +2592,30 @@ mod tests {
         KeyValues::new(metadata.as_ref(), mutation).unwrap()
     }
 
+    fn sparse_metadata_for_test() -> RegionMetadataRef {
+        let mut metadata = metadata_for_test().as_ref().clone();
+        metadata.column_metadatas[1].column_schema.data_type = ConcreteDataType::string_datatype();
+        let mut builder = RegionMetadataBuilder::from_existing(metadata);
+        let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        for column in reserved.column_metadatas.into_iter().take(2) {
+            builder.push_column_metadata(column);
+        }
+        builder
+            .primary_key(vec![
+                ReservedColumnId::table_id(),
+                ReservedColumnId::tsid(),
+                0,
+                1,
+            ])
+            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
+        Arc::new(builder.build().unwrap())
+    }
+
     #[test]
     fn test_bulk_part_converter_sparse_primary_key_encoding() {
-        use api::v1::SemanticType;
-        use datatypes::schema::ColumnSchema;
-        use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
-        use store_api::storage::RegionId;
-
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 0,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 4,
-            })
-            .primary_key(vec![0, 1])
-            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
-        let metadata = Arc::new(builder.build().unwrap());
+        let metadata = sparse_metadata_for_test();
 
         let primary_key_codec = build_primary_key_codec(&metadata);
         let schema = to_flat_sst_arrow_schema(
@@ -2923,40 +2904,7 @@ mod tests {
 
     #[test]
     fn test_convert_bulk_part_sparse_encoding() {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(123, 456));
-        builder
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k0", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 0,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("k1", ConcreteDataType::string_datatype(), false),
-                semantic_type: SemanticType::Tag,
-                column_id: 1,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                ),
-                semantic_type: SemanticType::Timestamp,
-                column_id: 2,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v0", ConcreteDataType::int64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 3,
-            })
-            .push_column_metadata(ColumnMetadata {
-                column_schema: ColumnSchema::new("v1", ConcreteDataType::float64_datatype(), true),
-                semantic_type: SemanticType::Field,
-                column_id: 4,
-            })
-            .primary_key(vec![0, 1])
-            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
-        let metadata = Arc::new(builder.build().unwrap());
+        let metadata = sparse_metadata_for_test();
 
         let primary_key_codec = build_primary_key_codec(&metadata);
 

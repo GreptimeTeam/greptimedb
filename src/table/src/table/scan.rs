@@ -717,6 +717,7 @@ mod test {
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use futures::TryStreamExt;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::metric_engine_consts::DATA_SCHEMA_TABLE_ID_COLUMN_NAME;
     use store_api::region_engine::{
@@ -1108,7 +1109,14 @@ mod test {
     /// order or hash partition columns.
     #[test]
     fn test_metric_projection_claims_only_projected_row_key_prefix() {
+        for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            check_metric_projection_ordering(encoding);
+        }
+    }
+
+    fn check_metric_projection_ordering(encoding: PrimaryKeyEncoding) {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5691));
+        builder.primary_key_encoding(encoding);
         for (name, column_id) in [
             (
                 DATA_SCHEMA_TABLE_ID_COLUMN_NAME,
@@ -1139,6 +1147,12 @@ mod test {
         let metadata = Arc::new(builder.build().unwrap());
 
         for (projection, partitioned_by_tsid, claimed, unclaimed) in [
+            (
+                vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "A", "ts"],
+                false,
+                vec![vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME]],
+                vec![vec!["A"], vec![DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "ts"]],
+            ),
             // The logical projection drops the row key prefix, so `A` is not a prefix of the
             // row key and neither `A` nor `ts` is ordered.
             (
