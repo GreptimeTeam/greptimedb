@@ -17,6 +17,20 @@
 //! Node metrics retain no names or tree topology: [`NodeMetrics::register`] names the handles for
 //! one registration, and the set holds them from there. What outlives an execution is therefore its
 //! counters and gauges, not the nodes that recorded them.
+//!
+//! The name carries the node's position in the runtime tree: the whole native tree registers into
+//! the one [`ExecutionPlanMetricsSet`] the enclosing physical operator (`FusedSeriesExec` or
+//! `AggregateFinalizeExec`) owns, and the reader aggregates by name, so two nodes of a kind sharing
+//! a name would be summed into a single figure. What a consumer can rely on is the grammar
+//! `native.<path>.<metric>` with the suffixes of [`NodeMetric::ALL`]: splitting off the final
+//! component leaves the metric, and the path before it keys the node within that operator. That key
+//! is promised only inside the topology that produced it:
+//!
+//! - the path names a node of one runtime topology;
+//! - queries, plan rewrites, and versions move it, so it is neither a persisted nor a public
+//!   identifier;
+//! - `peak_reserved_bytes` alone carries `p<partition>`, because the reader sums gauges by name and
+//!   a sum of peaks is not a peak.
 
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::metrics::{

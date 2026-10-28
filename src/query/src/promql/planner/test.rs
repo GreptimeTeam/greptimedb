@@ -1873,7 +1873,7 @@ async fn native_fused_timestamp_admits_raw_and_evaluated_vectors() {
         if raw_selector {
             assert!(matches!(
                 &fused.tree().root().expr,
-                NativeExpr::Instant { op, .. } if op.timestamp
+                NativeExpr::Instant { op, .. } if op.value == promql::native::plan::InstantValue::Timestamp
             ));
         } else {
             assert!(matches!(
@@ -2608,7 +2608,13 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 | NativeExpr::Merge { input }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Timestamp { input } => sources(input, out),
-                NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                NativeExpr::Binary { left, right, .. }
+                | NativeExpr::Set { left, right, .. }
+                | NativeExpr::Info {
+                    base: left,
+                    info: right,
+                    ..
+                } => {
                     sources(left, out);
                     sources(right, out);
                 }
@@ -2786,12 +2792,16 @@ async fn native_fused_cross_table_pair_on_partitioned_tables_falls_back() {
 /// `some_metric` as [`native_two_table_provider`] builds it, and `other_metric` whose tags are
 /// `tag_0` and `field_0`: the second is the name of `some_metric`'s value field.
 async fn native_colliding_tag_provider() -> DfTableSourceProvider {
+    native_tables_provider(&[
+        ("some_metric", &["tag_0"], "timestamp", "field_0"),
+        ("other_metric", &["tag_0", "field_0"], "ts", "value"),
+    ])
+}
+
+/// Single-region tables of `(name, tags, time index, field)`.
+fn native_tables_provider(tables: &[(&str, &[&str], &str, &str)]) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
-    let tables = [
-        ("some_metric", vec!["tag_0"], "timestamp", "field_0"),
-        ("other_metric", vec!["tag_0", "field_0"], "ts", "value"),
-    ];
-    for (table_id, (name, tags, time_index, field)) in (1024..).zip(tables) {
+    for (table_id, &(name, tags, time_index, field)) in (1024..).zip(tables) {
         let mut columns = tags
             .iter()
             .map(|tag| {
@@ -2873,6 +2883,97 @@ async fn native_fused_cross_table_union_with_a_colliding_column_falls_back() {
     )
     .await;
     assert!(find_fused_series(&plan).is_some(), "{plan}");
+}
+
+/// `up` and the info table `target_info`, whose data labels are `version` and `zone`.
+fn native_info_provider() -> DfTableSourceProvider {
+    native_tables_provider(&[
+        ("up", &["instance", "job"], "ts", "val"),
+        (
+            "target_info",
+            &["instance", "job", "version", "zone"],
+            "greptime_timestamp",
+            "greptime_value",
+        ),
+    ])
+}
+
+/// `info` reads its info table through a raw source of its own, after the base, and reports the
+/// data labels it can copy: every label of the info table, or only the ones the selector names.
+#[tokio::test]
+async fn native_fused_info_reads_the_info_table_after_the_base() {
+    for (query, columns) in [
+        (
+            "info(up)",
+            vec!["instance", "job", "ts", "val", "version", "zone"],
+        ),
+        (
+            "info(rate(up[5m]), {version=~\"v.+\"})",
+            vec!["instance", "job", "ts", "val", "version"],
+        ),
+    ] {
+        let plan = build_native_fused_plan_with_provider(query, true, native_info_provider()).await;
+        let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{query}: {plan}"));
+        assert!(
+            matches!(fused.tree().root().expr, NativeExpr::Info { .. }),
+            "{query}"
+        );
+        let tables = fused
+            .inputs()
+            .iter()
+            .map(|input| {
+                let LogicalPlan::Extension(Extension { node }) = input else {
+                    panic!("{query}: expected a raw source, got {input}");
+                };
+                let source = node
+                    .as_any()
+                    .downcast_ref::<RawSeriesSource>()
+                    .unwrap_or_else(|| panic!("{query}: expected a raw source, got {input}"));
+                source.metric_name().to_string()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(vec!["up", "target_info"], tables, "{query}");
+        assert_eq!(columns, sorted_column_names(&plan), "{query}");
+    }
+}
+
+/// `info` over the info table itself reads both scans of that one table under the node, which
+/// stays in the region: `rate` drops the base's name, so its series are enriched rather than
+/// passed through as info series.
+#[tokio::test]
+async fn native_fused_info_over_its_own_table_reads_two_scans_in_the_region() {
+    let query = "info(rate(target_info[5m]))";
+    let plan = build_native_fused_plan_with_provider(query, true, native_info_provider()).await;
+    let fused = find_fused_series(&plan).unwrap_or_else(|| panic!("{plan}"));
+    assert!(matches!(fused.tree().root().expr, NativeExpr::Info { .. }));
+    let tables = fused
+        .inputs()
+        .iter()
+        .map(|input| match input {
+            LogicalPlan::TableScan(scan) => scan.table_name.table().to_string(),
+            other => panic!("expected a direct scan, got {other}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(vec!["target_info", "target_info"], tables);
+    assert_eq!(Some("target_info"), fused.binding().metric_name.as_deref());
+    assert!(matches!(
+        crate::dist_plan::Categorizer::check_extension_plan(
+            fused as &dyn datafusion::logical_expr::UserDefinedLogicalNode,
+            &Default::default(),
+        ),
+        crate::dist_plan::Commutativity::Commutative
+    ));
+    assert_eq!(
+        vec![
+            "greptime_timestamp",
+            "greptime_value",
+            "instance",
+            "job",
+            "version",
+            "zone"
+        ],
+        sorted_column_names(&plan)
+    );
 }
 
 /// A function of each value or an operation with a constant around a pair keeps the pair native,

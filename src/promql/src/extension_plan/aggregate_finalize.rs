@@ -504,6 +504,17 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
                 _ => Err(declined("an aggregate under a set operation")),
             }
         }
+        // The suffix above a split aggregate reads the merged state alone, so it has no source for
+        // the info series.
+        NativeExpr::Info { base, info, .. } => {
+            match (
+                split(base, fields, time_index)?,
+                split(info, fields, time_index)?,
+            ) {
+                (None, None) => Ok(None),
+                _ => Err(declined("an aggregate under info")),
+            }
+        }
     }
 }
 
@@ -535,9 +546,13 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
             } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                raw_fields(left).or_else(|| raw_fields(right))
-            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => raw_fields(left).or_else(|| raw_fields(right)),
         }
     }
 

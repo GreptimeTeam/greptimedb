@@ -48,6 +48,7 @@ use super::{
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use crate::info::InfoSelector;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
@@ -55,8 +56,8 @@ use crate::map_time::DateFunction;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
-    BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, ParameterizedOp,
+    BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -263,7 +264,7 @@ fn instant(
                 lookback_ms,
                 offset_ms,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&output_grid),
             },
         },
@@ -281,7 +282,7 @@ fn timestamp_instant_rejects_negative_lookback() {
     let NativeExpr::Instant { op, .. } = &mut root.expr else {
         unreachable!();
     };
-    op.timestamp = true;
+    op.value = InstantValue::Timestamp;
     op.at_ms = Some(500);
     let tree = NativeTree::try_new(root).unwrap();
     let pool = pool();
@@ -8363,6 +8364,181 @@ fn queued_set_results_hold_their_labels_until_handed_on() {
     let dropped = pool();
     drop(start(&dropped));
     assert_eq!(dropped.reserved(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// `info`, driven through `NativeExecutor`.
+// ---------------------------------------------------------------------------
+
+/// `name` with `labels`.
+fn labelled(name: &str, labels: &[(&str, &str)]) -> SeriesLabels {
+    SeriesLabels::try_new(
+        Some(name.into()),
+        labels
+            .iter()
+            .map(|(name, value)| Label {
+                name: (*name).into(),
+                value: (*value).into(),
+            })
+            .collect(),
+    )
+    .unwrap()
+}
+
+/// `info` over evaluated base chunks at source 0 and the raw info series at source 1, selected the
+/// way the compiler selects them: within `lookback_ms`, reporting each selected sample's time.
+fn info_tree(grid: &Arc<EvalGrid>, lookback_ms: i64, selector: InfoSelector) -> NativeTree {
+    let base = evaluated_input_with_source_index(Arc::clone(grid), 0);
+    let mut info = instant(
+        raw_input_with_source_index_and_ordering(1, SeriesOrdering::KeyThenTime),
+        lookback_ms,
+        0,
+        Arc::clone(grid),
+    );
+    let NativeExpr::Instant { op, .. } = &mut info.expr else {
+        unreachable!("`instant` builds an instant selection");
+    };
+    op.value = InstantValue::InfoTimestamp;
+    let output = base.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector,
+        },
+        output,
+    })
+    .unwrap()
+}
+
+/// A base series takes the data labels of the newest info series sharing its identifying labels at
+/// each point, which the runtime can only tell from the sample times its info side reports, and a
+/// base series no info series matches is dropped when the selector's data matcher needs a value.
+///
+/// `version="v1"` is sampled at 0s and 10s and `version="v2"` at 15s and 30s, read within 15s: the
+/// point at 20s sees both and keeps `v2`, the newer one.
+#[test]
+fn info_labels_each_point_from_the_newest_info_series() {
+    let grid = grid(0, 10_000, 4);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = info_tree(
+        &grid,
+        15_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: vec!["version".into()],
+            keep_unmatched: false,
+        },
+    );
+    let mut execution = executor(&tree, pool());
+    let base = execution.state().input_ids(0).next().unwrap();
+    let info = execution.state().input_ids(1).next().unwrap();
+    for (instance, values) in [("a", [1.0, 2.0, 3.0, 4.0]), ("b", [5.0, 6.0, 7.0, 8.0])] {
+        execution
+            .push_evaluated(
+                base,
+                evaluated_chunk_of(
+                    &schema,
+                    labelled("up", &[("instance", instance), ("job", "j")]),
+                    0,
+                    values.into_iter().map(Some).collect(),
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    for (key, version, timestamps) in [
+        (b"info-v1", "v1", [0, 10_000]),
+        (b"info-v2", "v2", [15_000, 30_000]),
+    ] {
+        execution
+            .push_raw(
+                info,
+                raw_chunk_of(
+                    &raw_schema(),
+                    key,
+                    labelled(
+                        "target_info",
+                        &[("instance", "a"), ("job", "j"), ("version", version)],
+                    ),
+                    &timestamps,
+                    &[1.0, 1.0],
+                    true,
+                ),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        decided_by_label_set(&run(&mut execution)),
+        vec![
+            (
+                "__name__=up,instance=a,job=j,version=v1".to_string(),
+                vec![(0, Some(1.0)), (1, Some(2.0))]
+            ),
+            (
+                "__name__=up,instance=a,job=j,version=v2".to_string(),
+                vec![(2, Some(3.0)), (3, Some(4.0))]
+            ),
+        ]
+    );
+    assert_eq!(execution.state().reserved_bytes(), 0);
+}
+
+/// The rows `info` keeps for every base point are reserved from the pool before the kernel files
+/// them: a pool that holds the operands but not those rows refuses the operation and gets back what
+/// the node held.
+#[test]
+fn an_oversized_info_workspace_is_refused_by_the_pool() {
+    let points = 10_000;
+    let grid = grid(0, 60_000, points);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let tree = info_tree(
+        &grid,
+        60_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: Vec::new(),
+            keep_unmatched: true,
+        },
+    );
+    // About two operand copies of the base, far less than a row per point.
+    let pool = bounded_pool(points as usize * 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let base = execution.state().input_ids(0).next().unwrap();
+    let info = execution.state().input_ids(1).next().unwrap();
+    execution
+        .push_evaluated(
+            base,
+            evaluated_chunk_of(
+                &schema,
+                labelled("up", &[("job", "j")]),
+                0,
+                vec![Some(1.0); points as usize],
+                true,
+            ),
+        )
+        .unwrap();
+    execution
+        .push_raw(
+            info,
+            raw_chunk_of(
+                &raw_schema(),
+                b"info",
+                labelled("target_info", &[("job", "j"), ("version", "v1")]),
+                &[0],
+                &[1.0],
+                true,
+            ),
+        )
+        .unwrap();
+    let error = execution.finish().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "the info workspace was not refused by the pool: {error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+    assert_eq!(execution.state().reserved_bytes(), 0);
+    assert!(!root_holds(&execution, holds_binary));
 }
 
 // ---------------------------------------------------------------------------

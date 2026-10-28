@@ -24,7 +24,7 @@ use super::super::plan::{
     NativeType,
 };
 use crate::map::MathOp;
-use crate::native::plan::MapOp;
+use crate::native::plan::{InstantValue, MapOp};
 use crate::range_eval::{RangeFunction, RangeModifier, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{
@@ -269,7 +269,7 @@ fn a_scalar_and_an_instant_line_show_what_they_hold() {
                 lookback_ms: 300_000,
                 offset_ms: 60_000,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&out),
             },
         },
@@ -465,7 +465,7 @@ fn instant_at_and_timestamp_are_displayed() {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: Some(1_234),
-                timestamp: true,
+                value: InstantValue::Timestamp,
                 output_grid: Arc::clone(&out),
             },
         },

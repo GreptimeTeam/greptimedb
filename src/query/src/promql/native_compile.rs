@@ -40,6 +40,7 @@
 //!   <date function>()                              e.g. hour(), which is `hour(vector(time()))`
 //!   -<expression>                                  e.g. -x
 //!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
+//!   info(<expression>[, {<matchers>}])             e.g. info(rate(x[5m]), {version=~".+"})
 //!   <aggregator> [(by|without)(<labels>)] (<expression>)
 //!                                                  e.g. avg by(job)(rate(x[5m]) * 100)
 //!   <aggregator> (<expression>) [(by|without)(<labels>)]
@@ -86,7 +87,8 @@
 //! argument evaluates to) and, over
 //! any of those, `Binary` (an arithmetic or comparison operation between vectors or with a
 //! constant on one side), `Scalar` (that constant), `Set` (`and`, `or` or `unless` between two
-//! vectors), `Aggregate` (one of the nine aggregators that
+//! vectors), `Info` (the expression and an `Instant` of the info metric reporting sample times),
+//! `Aggregate` (one of the nine aggregators that
 //! fold a group's values into one value per grid point, optionally grouped) and `Vector` (an
 //! operation over the whole vector at each point: a sort, `absent`, a classic histogram function, a
 //! selecting aggregator or `count_values`). Everything else is a
@@ -144,20 +146,21 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use promql::info::InfoSelector;
 use promql::map::{ArithmeticOp, ComparisonOp, MathOp};
 use promql::map_label::LabelRewrite;
 use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType, ParameterizedOp,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
+    NativeTree, NativeType, ParameterizedOp,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
 use promql::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp, binary_output_schema,
 };
-use promql_parser::label::{MatchOp as ParserMatchOp, Matchers};
+use promql_parser::label::{MatchOp as ParserMatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
@@ -254,9 +257,10 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          `time()`, `scalar(<expression>)` or a binary operation between scalars — \
                          `vector(<scalar>)`, a date function without an argument (`hour()`), a \
                          negation of one of them (`-x`), a set operation between two of them \
-                         (`x and on(job) y`, `x or y`, `x unless y`), or one of the aggregators \
-                         that folds a group's values into one value per grid point — `sum`, `avg`, \
-                         `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
+                         (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
+                         one info metric (`info(x, {version=~\".+\"})`), or one of the \
+                         aggregators that folds a group's values into one value per grid point — \
+                         `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
                          grouped by `by` or `without` as in `avg by(job)(rate(x[5m]) * 100)`; \
                          `topk`, `bottomk`, `limitk`, `limit_ratio` or `count_values` over any of \
@@ -395,9 +399,13 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => check(input, inputs, next),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                check(left, inputs, next) && check(right, inputs, next)
-            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => check(left, inputs, next) && check(right, inputs, next),
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
             } => {
@@ -914,7 +922,7 @@ fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNod
         return Err(not_implemented("timestamp argument is not a vector"));
     }
     if let PromExpr::VectorSelector(selector) = argument {
-        return instant_selection_timestamp(context, selector, true);
+        return instant_selection_of(context, selector, InstantValue::Timestamp);
     }
     let input = compile_expr(context, argument)?;
     let NativeType::Samples(schema) = &input.output else {
@@ -934,6 +942,265 @@ fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNod
     })
 }
 
+/// Compiles `info(v[, {selector}])` as its base `v` and the instant selection of the info series it
+/// reads.
+///
+/// The info series are selected the way Prometheus' `fetchInfoSeries` and `evalSeries` select
+/// them: by the info metric's name and the data matchers, at the reference time the selectors of
+/// `v` share ([`info_input`]), with the statement's lookback. Which of them a base series matches by
+/// its identifying labels is the kernel's.
+fn info_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNode> {
+    let InfoInput { selector, kernel } = info_input(context.stmt, args)?;
+    let base = compile_expr(context, &args[0])?;
+    if base
+        .output
+        .samples()
+        .is_none_or(|schema| schema.eval_grid.is_none())
+    {
+        return Err(DataFusionError::Internal(format!(
+            "info's first argument `{}` compiled to something other than an evaluated vector: the \
+             parser only accepts a vector there",
+            args[0]
+        )));
+    }
+    let info = instant_selection_of(context, &selector, InstantValue::InfoTimestamp)?;
+    let fields = info
+        .output
+        .samples()
+        .map_or(0, |schema| schema.fields.len());
+    // Prometheus reads one sample per info series and point, and the existing planner has no
+    // `info` to follow for several fields.
+    if fields != 1 {
+        return Err(not_implemented(&format!(
+            "info over the info metric `{selector}` with {fields} fields: an info series is read as \
+             one field"
+        )));
+    }
+    let output = base.output.clone();
+    Ok(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector: kernel,
+        },
+        output,
+    })
+}
+
+/// The info series `info(v[, {selector}])` reads, as a selector, and the selector its kernel
+/// combines by.
+pub(crate) struct InfoInput {
+    /// The info metric with the data matchers, at the reference time the selectors of `v` share.
+    pub selector: VectorSelector,
+    pub kernel: InfoSelector,
+}
+
+/// Splits the arguments of `info` into the selector of its info series and the kernel's selector.
+///
+/// The compiler binds the selector as the call's last input and the planner prepares a scan for it
+/// at the same position, so both read it here. One info metric is one table, so the name has to be
+/// `target_info` (no name matcher) or one `__name__="..."`: a regular expression or a negative
+/// matcher can select several tables. `__field__`, `__schema__` and `__database__` choose what a
+/// selector reads rather than match a label, which Prometheus would read them as, so they are
+/// refused too.
+pub(crate) fn info_input(stmt: &EvalStmt, args: &[Box<PromExpr>]) -> Result<InfoInput> {
+    let (base, labels) = match args {
+        [base] => (base, None),
+        [base, labels] => (base, Some(labels)),
+        _ => {
+            return Err(not_implemented(&format!(
+                "a call to `info` with {} argument(s)",
+                args.len()
+            )));
+        }
+    };
+    let matchers: &[Matcher] = match labels.map(|labels| labels.as_ref()) {
+        None => &[],
+        Some(PromExpr::VectorSelector(VectorSelector {
+            name: None,
+            matchers,
+            offset: None,
+            at: None,
+        })) if matchers.or_matchers.is_empty() => &matchers.matchers,
+        Some(other) => {
+            return Err(not_implemented(&format!(
+                "`info` whose second argument `{other}` is not one label selector without a name \
+                 or modifiers"
+            )));
+        }
+    };
+    let (names, data): (Vec<&Matcher>, Vec<&Matcher>) = matchers
+        .iter()
+        .partition(|matcher| matcher.name == "__name__");
+    let metric = match names.as_slice() {
+        [] => "target_info".to_string(),
+        [name] if name.op == ParserMatchOp::Equal => name.value.clone(),
+        _ => {
+            return Err(not_implemented(
+                "`info` over the info metrics a regular expression, a negative matcher or several \
+                 `__name__` matchers select, which can be several tables",
+            ));
+        }
+    };
+    if data.iter().any(|matcher| {
+        matches!(
+            matcher.name.as_str(),
+            "__field__" | "__schema__" | "__database__"
+        )
+    }) {
+        return Err(not_implemented(
+            "`info` with a `__field__`, `__schema__` or `__database__` matcher, which selects \
+             what is read rather than a data label",
+        ));
+    }
+    let (at, offset_ms) = info_reference(stmt, base)?;
+    let offset = match offset_ms {
+        0 => None,
+        ms if ms > 0 => Some(Offset::Pos(Duration::from_millis(ms.unsigned_abs()))),
+        ms => Some(Offset::Neg(Duration::from_millis(ms.unsigned_abs()))),
+    };
+    let kernel = InfoSelector {
+        name_matchers: names
+            .iter()
+            .map(|matcher| (match_op(&matcher.op), Arc::from(matcher.value.as_str())))
+            .collect(),
+        data_labels: data
+            .iter()
+            .map(|matcher| Arc::from(matcher.name.as_str()))
+            .collect(),
+        keep_unmatched: data.iter().all(|matcher| matcher.is_match("")),
+    };
+    Ok(InfoInput {
+        selector: VectorSelector {
+            name: Some(metric),
+            matchers: Matchers::new(data.into_iter().cloned().collect()),
+            offset,
+            at,
+        },
+        kernel,
+    })
+}
+
+/// The `@` anchor and offset the info series are selected at: those of the first selector of
+/// `expr` when every vector-producing path of it reaches a selector with the same effective
+/// reference time, and none otherwise, as Prometheus `infoSeriesSelectTimestampAndOffset` decides.
+///
+/// A selector inside subqueries adds their offsets until one of them anchors it with `@`. A path
+/// that produces a vector without a selector, such as `vector(1)`, is evaluated at the step itself,
+/// so it leaves no shared reference.
+fn info_reference(stmt: &EvalStmt, expr: &PromExpr) -> Result<(Option<AtModifier>, i64)> {
+    #[derive(Default)]
+    struct Walk {
+        /// The first selector's anchor, its resolved time and its offset.
+        first: Option<(Option<AtModifier>, Option<i64>, i64)>,
+        uniform: bool,
+        reference_free: bool,
+    }
+
+    fn inspect<'a>(
+        stmt: &EvalStmt,
+        expr: &'a PromExpr,
+        subqueries: &mut Vec<&'a SubqueryExpr>,
+        walk: &mut Walk,
+    ) -> Result<bool> {
+        if !matches!(expr.value_type(), ValueType::Vector | ValueType::Matrix) {
+            return Ok(false);
+        }
+        let selector = match expr {
+            PromExpr::VectorSelector(selector) => Some(selector),
+            PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => Some(vs),
+            _ => None,
+        };
+        if let Some(selector) = selector {
+            let mut at = selector.at.clone();
+            let mut offset = selector_offset_ms(&selector.offset)?;
+            for subquery in subqueries.iter().rev() {
+                if at.is_some() {
+                    break;
+                }
+                offset = offset
+                    .checked_add(selector_offset_ms(&subquery.offset)?)
+                    .ok_or_else(|| DataFusionError::Plan("selector offset overflows".into()))?;
+                at = subquery.at.clone();
+            }
+            let at_ms = selector_anchor_ms(&at, stmt)?;
+            match &walk.first {
+                None => walk.first = Some((at, at_ms, offset)),
+                Some((_, first_at, first_offset)) => {
+                    let same = match (first_at, at_ms) {
+                        (None, None) => *first_offset == offset,
+                        (Some(first_at), Some(at)) => {
+                            i128::from(*first_at) - i128::from(*first_offset)
+                                == i128::from(at) - i128::from(offset)
+                        }
+                        _ => false,
+                    };
+                    walk.uniform &= same;
+                }
+            }
+            return Ok(true);
+        }
+        let children: Vec<&PromExpr> = match expr {
+            PromExpr::Paren(paren) => vec![&paren.expr],
+            PromExpr::Unary(unary) => vec![&unary.expr],
+            PromExpr::Binary(binary) => vec![&binary.lhs, &binary.rhs],
+            PromExpr::Aggregate(aggregate) => aggregate
+                .param
+                .iter()
+                .chain([&aggregate.expr])
+                .map(|child| child.as_ref())
+                .collect(),
+            // The second argument of a nested `info` is selector syntax, not a vector it evaluates.
+            PromExpr::Call(call) if call.func.name == "info" => call
+                .args
+                .args
+                .iter()
+                .take(1)
+                .map(|arg| arg.as_ref())
+                .collect(),
+            PromExpr::Call(call) => call.args.args.iter().map(|arg| arg.as_ref()).collect(),
+            PromExpr::Subquery(subquery) => {
+                subqueries.push(subquery);
+                let found = inspect(stmt, &subquery.expr, subqueries, walk);
+                subqueries.pop();
+                let found = found?;
+                walk.reference_free |= !found;
+                return Ok(found);
+            }
+            other => {
+                return Err(not_implemented(&format!(
+                    "`info` over `{other}`, whose reference time is not derived here"
+                )));
+            }
+        };
+        let mut found = false;
+        for child in children {
+            found |= inspect(stmt, child, subqueries, walk)?;
+        }
+        walk.reference_free |= !found;
+        Ok(found)
+    }
+
+    let mut walk = Walk {
+        uniform: true,
+        ..Default::default()
+    };
+    inspect(stmt, expr, &mut Vec::new(), &mut walk)?;
+    match walk.first {
+        Some((at, _, offset)) if walk.uniform && !walk.reference_free => Ok((at, offset)),
+        _ => Ok((None, 0)),
+    }
+}
+
+fn match_op(op: &ParserMatchOp) -> MatchOp {
+    match op {
+        ParserMatchOp::Equal => MatchOp::Equal,
+        ParserMatchOp::NotEqual => MatchOp::NotEqual,
+        ParserMatchOp::Re(_) => MatchOp::Regex,
+        ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
+    }
+}
+
 /// Compiles a range, pointwise, histogram or label function call.
 ///
 /// The name lists are disjoint, and a range function is decided first because it binds its own
@@ -943,6 +1210,9 @@ fn timestamp_call(context: &Context, args: &[Box<PromExpr>]) -> Result<NativeNod
 fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     if call.func.name == "timestamp" {
         return timestamp_call(context, &call.args.args);
+    }
+    if call.func.name == "info" {
+        return info_call(context, &call.args.args);
     }
     let Call { func, args } = call;
     if let Some(node) = scalar_call(context, func.name, &args.args)? {
@@ -1312,12 +1582,7 @@ fn absent_labels_of(expr: &PromExpr) -> Result<SeriesLabels> {
         })
         .map(|matcher| LabelMatcher {
             name: Arc::from(matcher.name.as_str()),
-            op: match matcher.op {
-                ParserMatchOp::Equal => MatchOp::Equal,
-                ParserMatchOp::NotEqual => MatchOp::NotEqual,
-                ParserMatchOp::Re(_) => MatchOp::Regex,
-                ParserMatchOp::NotRe(_) => MatchOp::NotRegex,
-            },
+            op: match_op(&matcher.op),
             value: Arc::from(matcher.value.as_str()),
             matches_empty: matcher.is_match(""),
         })
@@ -1511,13 +1776,13 @@ fn subquery_window(
 /// The lookback, the offset and the grid are the whole of an instant selection: it reports the last
 /// sample at or before each grid point, within the statement's lookback.
 fn instant_selection(context: &Context, selector: &VectorSelector) -> Result<NativeNode> {
-    instant_selection_timestamp(context, selector, false)
+    instant_selection_of(context, selector, InstantValue::Sample)
 }
 
-fn instant_selection_timestamp(
+fn instant_selection_of(
     context: &Context,
     selector: &VectorSelector,
-    timestamp: bool,
+    value: InstantValue,
 ) -> Result<NativeNode> {
     let lookback_ms = lookback_millis(context.stmt.lookback_delta.as_millis())?;
     let offset_ms = selector_offset_ms(&selector.offset)?;
@@ -1536,7 +1801,7 @@ fn instant_selection_timestamp(
             timing: SelectorTiming::Instant { lookback_ms },
         },
     )?;
-    if timestamp && schema.fields.len() != 1 {
+    if value == InstantValue::Timestamp && schema.fields.len() != 1 {
         return Err(not_implemented(
             "timestamp() over a multi-value input is not supported natively",
         ));
@@ -1560,7 +1825,7 @@ fn instant_selection_timestamp(
                 lookback_ms,
                 offset_ms,
                 at_ms,
-                timestamp,
+                value,
                 output_grid,
             },
         },

@@ -91,7 +91,7 @@ fn instant() -> NativeNode {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: crate::native::plan::InstantValue::Sample,
                 output_grid: grid(),
             },
         },
@@ -621,7 +621,13 @@ fn the_prefix_and_the_suffix_each_name_their_own_source_zero() {
             | NativeExpr::Vector { input, .. }
             | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => inputs(input, found),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 inputs(left, found);
                 inputs(right, found);
             }

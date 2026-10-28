@@ -89,7 +89,7 @@ use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -249,7 +249,7 @@ fn binary_tree_over_sources(
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -269,7 +269,7 @@ fn binary_tree_over_sources(
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -321,7 +321,7 @@ fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(grid),
             },
         },
@@ -364,7 +364,13 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             | NativeExpr::VectorOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
             }

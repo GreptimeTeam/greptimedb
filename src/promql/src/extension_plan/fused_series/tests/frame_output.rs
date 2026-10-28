@@ -15,7 +15,7 @@
 use super::*;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
-use crate::native::plan::{BoundMap, MapOp};
+use crate::native::plan::{BoundMap, InstantValue, MapOp};
 
 fn instant_tree(schema: Arc<SeriesSchema>, grid: Arc<EvalGrid>) -> NativeTree {
     let output = NativeType::Samples(Arc::new(SeriesSchema {
@@ -36,7 +36,7 @@ fn instant_tree(schema: Arc<SeriesSchema>, grid: Arc<EvalGrid>) -> NativeTree {
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: grid,
             },
         },

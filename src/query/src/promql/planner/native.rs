@@ -36,6 +36,7 @@
 //! `scalar(v)` reads the whole vector at each point. A tree that needs it is admitted only over a
 //! table of one region, where one execution that reads every scan partition sees every series.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -64,7 +65,7 @@ use store_api::metric_engine_consts::{DATA_SCHEMA_TABLE_ID_COLUMN_NAME, METRIC_E
 
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
 use crate::promql::native_compile::{
-    compile_selectors, compile_statement, constant_value, statement_grid,
+    InfoInput, compile_selectors, compile_statement, constant_value, info_input, statement_grid,
 };
 use crate::promql::planner::{DEFAULT_FIELD_COLUMN, DEFAULT_TIME_INDEX_COLUMN, PromPlanner};
 use crate::query_engine::QueryEngineState;
@@ -225,8 +226,11 @@ impl PromPlanner {
             return Ok(None);
         }
 
+        let Some(stmt) = self.native_statement(prom_expr) else {
+            return Ok(None);
+        };
         let mut selectors = Vec::new();
-        if !collect_selectors(prom_expr, &mut selectors) {
+        if !collect_selectors(&stmt, prom_expr, &mut selectors) {
             return Ok(None);
         }
         // Preserve the original single-selector admission allowlist. Broader binary syntax is only
@@ -234,9 +238,6 @@ impl PromPlanner {
         if selectors.len() == 1 && !admitted_single_selector(prom_expr) {
             return Ok(None);
         }
-        let Some(stmt) = self.native_statement(prom_expr) else {
-            return Ok(None);
-        };
         let Ok(grid) = statement_grid(&stmt) else {
             return Ok(None);
         };
@@ -790,7 +791,7 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
     lower.and(column.lt_eq(upper))
 }
 
-/// Whether `root` is a supported one-to-one match or set operation over independent scan
+/// Whether `root` is a supported one-to-one match, set operation or `info` over independent scan
 /// occurrences, under any number of point-wise wrappers.
 ///
 /// Any arithmetic or comparison operator qualifies: they pair series by the same matching rules,
@@ -815,6 +816,9 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
         NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
             return scan_operand(left) && scan_operand(right);
+        }
+        NativeExpr::Info { base, info, .. } => {
+            return pointwise_operand(base) && pointwise_operand(info);
         }
         _ => return false,
     };
@@ -849,10 +853,10 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; an operation with a scalar or a function of each value keeps its operand's; a scalar and
-/// `vector(s)` have none. `None` for a node whose labels this walk does not derive - an aggregate's
-/// groups, or a whole-vector operation - so a tree holding one is declined rather than given its
-/// input's labels.
+/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
+/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
+/// labels this walk does not derive - an aggregate's groups, or a whole-vector operation - so a tree
+/// holding one is declined rather than given its input's labels.
 fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -914,6 +918,26 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             }
             Some(tags)
         }
+        // A base series keeps its labels and takes the data labels of its info series: the ones the
+        // selector names, or all of them when it names none.
+        NativeExpr::Info {
+            base,
+            info,
+            selector,
+        } => {
+            let mut tags = fused_output_tags(base, source_tags)?;
+            for tag in fused_output_tags(info, source_tags)? {
+                let copied = selector.data_labels.is_empty()
+                    || selector
+                        .data_labels
+                        .iter()
+                        .any(|label| label.as_ref() == tag.as_str());
+                if copied && !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            Some(tags)
+        }
     }
 }
 
@@ -959,6 +983,7 @@ pub(crate) fn whole_input_scalar(root: &NativeNode) -> bool {
             NativeExpr::Aggregate { .. }
             | NativeExpr::Vector { .. }
             | NativeExpr::Set { .. }
+            | NativeExpr::Info { .. }
             | NativeExpr::Merge { .. } => false,
         }
     }
@@ -1019,7 +1044,8 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
-        | NativeExpr::Merge { .. } => false,
+        | NativeExpr::Merge { .. }
+        | NativeExpr::Info { .. } => false,
     }
 }
 
@@ -1093,42 +1119,54 @@ fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     }
 }
 
-fn collect_selectors<'a>(expr: &'a PromExpr, out: &mut Vec<&'a VectorSelector>) -> bool {
+/// The selectors `expr` reads, in the order the compiler binds them.
+///
+/// `info` reads its info series through a selector it does not write: [`info_input`] derives it, for
+/// the compiler as for this walk, and the compiler binds it after the selectors of the base.
+fn collect_selectors<'a>(
+    stmt: &EvalStmt,
+    expr: &'a PromExpr,
+    out: &mut Vec<Cow<'a, VectorSelector>>,
+) -> bool {
     match expr {
-        PromExpr::VectorSelector(selector) => out.push(selector),
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(vs),
-        PromExpr::Paren(ParenExpr { expr }) => {
-            return collect_selectors(expr, out);
-        }
+        PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
+        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
+        PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(stmt, expr, out),
         PromExpr::Call(call)
             if matches!(
                 call.func.name,
                 "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
             ) && call.args.args.len() == 1 =>
         {
-            return collect_selectors(&call.args.args[0], out);
+            return collect_selectors(stmt, &call.args.args[0], out);
+        }
+        PromExpr::Call(call) if call.func.name == "info" => {
+            let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
+                return false;
+            };
+            if !collect_selectors(stmt, &call.args.args[0], out) {
+                return false;
+            }
+            out.push(Cow::Owned(selector));
         }
         PromExpr::Binary(binary) => {
-            return collect_selectors(&binary.lhs, out) && collect_selectors(&binary.rhs, out);
+            return collect_selectors(stmt, &binary.lhs, out)
+                && collect_selectors(stmt, &binary.rhs, out);
         }
         // Literals are permitted only as compiler-recognized broadcasts in a bounded binary tree.
         PromExpr::NumberLiteral(_) => return true,
-        PromExpr::Unary(unary) => {
-            return collect_selectors(&unary.expr, out);
-        }
+        PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
         PromExpr::Call(call) => {
             if matches!(call.func.name, "label_replace" | "label_join") {
                 return false;
             }
             for arg in &call.args.args {
-                if !collect_selectors(arg, out) {
+                if !collect_selectors(stmt, arg, out) {
                     return false;
                 }
             }
         }
-        PromExpr::Aggregate(aggregate) => {
-            return collect_selectors(&aggregate.expr, out);
-        }
+        PromExpr::Aggregate(aggregate) => return collect_selectors(stmt, &aggregate.expr, out),
         PromExpr::Subquery(_) => return false,
         _ => {}
     }
@@ -1241,7 +1279,13 @@ mod tests {
                 | NativeExpr::Merge { input }
                 | NativeExpr::Map { input, .. }
                 | NativeExpr::Timestamp { input } => collect(input, sources),
-                NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+                NativeExpr::Binary { left, right, .. }
+                | NativeExpr::Set { left, right, .. }
+                | NativeExpr::Info {
+                    base: left,
+                    info: right,
+                    ..
+                } => {
                     collect(left, sources);
                     collect(right, sources);
                 }
@@ -1263,8 +1307,15 @@ mod tests {
     /// The selectors `query` names, in the order the compiler binds them.
     fn collected_selectors(query: &str) -> Vec<String> {
         let expr = promql_parser::parser::parse(query).expect("the query parses");
+        let statement = promql_parser::parser::EvalStmt {
+            expr: expr.clone(),
+            start: UNIX_EPOCH,
+            end: UNIX_EPOCH + Duration::from_secs(10),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(5),
+        };
         let mut selectors = Vec::new();
-        assert!(collect_selectors(&expr, &mut selectors));
+        assert!(collect_selectors(&statement, &expr, &mut selectors));
         selectors
             .iter()
             .map(|selector| selector.name.clone().unwrap_or_default())
@@ -1283,17 +1334,7 @@ mod tests {
                 vec!["x", "y"],
             ),
         ] {
-            let expr = promql_parser::parser::parse(query).unwrap();
-            let mut selectors = Vec::new();
-            assert!(collect_selectors(&expr, &mut selectors));
-            assert_eq!(
-                selectors
-                    .iter()
-                    .map(|s| s.name.as_deref().unwrap())
-                    .collect::<Vec<_>>(),
-                expected,
-                "{query}"
-            );
+            assert_eq!(collected_selectors(query), expected, "{query}");
         }
     }
 

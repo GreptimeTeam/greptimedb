@@ -41,8 +41,10 @@ use crate::grid_series::{
     series_bytes, table_bytes,
 };
 use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
+use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
-    select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
+    info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
+    timestamp_of_selection,
 };
 use crate::map::{
     ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
@@ -54,8 +56,8 @@ use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
 use crate::native::plan::{
-    BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType, ParameterizedOp,
+    BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 #[cfg(test)]
 pub(crate) use crate::native::runs::absorb_rebuilds;
@@ -969,7 +971,9 @@ impl InstantRuntime {
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
         if let Some(at_ms) = self.selection.at_ms {
-            let timestamp_window = if self.selection.timestamp && self.selection.lookback_ms >= 0 {
+            let timestamp_window = if self.selection.value == InstantValue::Timestamp
+                && self.selection.lookback_ms >= 0
+            {
                 let anchor = at_ms as i128;
                 let shifted = anchor - self.selection.offset_ms as i128;
                 let lower = anchor.max(shifted) - self.selection.lookback_ms as i128;
@@ -994,38 +998,23 @@ impl InstantRuntime {
                 &fields,
                 selection_at,
                 selection_lookback,
-                if self.selection.timestamp {
+                if self.selection.value == InstantValue::Timestamp {
                     0
                 } else {
                     self.selection.offset_ms
                 },
             )?
             else {
-                let metric = if self.selection.timestamp {
-                    drop_metric_name(&metric)?
-                } else {
-                    metric
-                };
-                return no_row_chunk(&self.schema, metric);
+                return no_row_chunk(&self.schema, self.output_metric(&metric)?);
             };
             let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
-            if self.selection.timestamp {
+            if self.selection.value != InstantValue::Sample {
                 let indices = vec![index; grid_len];
                 let timestamps = grid
                     .timestamps()
                     .map_err(crate::grid_series::external)?
                     .to_vec();
-                return match timestamp_of_selection(
-                    &self.schema,
-                    &metric,
-                    &time,
-                    &fields,
-                    &indices,
-                    &timestamps,
-                )? {
-                    Some(series) => EvaluatedChunk::try_new(series, true),
-                    None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
-                };
+                return self.project(&metric, &time, &fields, &indices, &timestamps);
             }
             self.output.begin_series();
             let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
@@ -1053,18 +1042,8 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
-        if self.selection.timestamp {
-            return match timestamp_of_selection(
-                &self.schema,
-                &metric,
-                &time,
-                &fields,
-                &indices,
-                &timestamps,
-            )? {
-                Some(series) => EvaluatedChunk::try_new(series, true),
-                None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
-            };
+        if self.selection.value != InstantValue::Sample {
+            return self.project(&metric, &time, &fields, &indices, &timestamps);
         }
         self.output.begin_series();
         // One cursor per field, so a row is read as the field holds it rather than by walking the
@@ -1095,6 +1074,42 @@ impl InstantRuntime {
         match self.output.finish(metric.clone())? {
             Some(series) => EvaluatedChunk::try_new(series, true),
             None => no_row_chunk(&self.schema, metric),
+        }
+    }
+
+    /// The labels this selection reports a series under: `timestamp(x)` drops the metric name.
+    fn output_metric(&self, metric: &SeriesLabels) -> Result<SeriesLabels> {
+        match self.selection.value {
+            InstantValue::Timestamp => drop_metric_name(metric),
+            InstantValue::Sample | InstantValue::InfoTimestamp => Ok(metric.clone()),
+        }
+    }
+
+    /// The sample times of a selection, for a selection that reports them rather than the samples.
+    fn project(
+        &self,
+        metric: &SeriesLabels,
+        time: &RawTimestamps,
+        fields: &SeriesFields,
+        indices: &[u64],
+        timestamps: &[i64],
+    ) -> Result<EvaluatedChunk> {
+        let projected = match self.selection.value {
+            InstantValue::Timestamp => {
+                timestamp_of_selection(&self.schema, metric, time, fields, indices, timestamps)?
+            }
+            InstantValue::InfoTimestamp => {
+                info_sample_times(&self.schema, metric, time, fields, indices, timestamps)?
+            }
+            InstantValue::Sample => {
+                return Err(DataFusionError::Internal(
+                    "an instant selection of samples has no sample times to project".to_string(),
+                ));
+            }
+        };
+        match projected {
+            Some(series) => EvaluatedChunk::try_new(series, true),
+            None => no_row_chunk(&self.schema, self.output_metric(metric)?),
         }
     }
 }
@@ -1432,6 +1447,8 @@ enum PairKernel {
     Binary(Arc<BinaryMatching>),
     /// `and`, `or` or `unless`, which keeps samples of either side as they are.
     Set(BoundSetOp),
+    /// `info`, whose left operand is the base and right operand the info series' sample times.
+    Info(InfoSelector),
 }
 
 impl PairKernel {
@@ -1440,6 +1457,7 @@ impl PairKernel {
         match self {
             Self::Binary(_) => "the binary node",
             Self::Set(_) => "the set node",
+            Self::Info(_) => "the info node",
         }
     }
 }
@@ -1646,6 +1664,11 @@ impl BinaryRuntime {
                     right,
                     &mut reserve,
                 ),
+                // The result keeps the base's fields on the base's grid, so the base's layout is
+                // the one the kernel builds it on.
+                PairKernel::Info(selector) => {
+                    info_with_reservation(left_schema, left, right, selector, &mut reserve)
+                }
             }
         };
         // The operands and the assembled series have been handed to the kernel and the reservation
@@ -2552,13 +2575,13 @@ impl RuntimeNode {
                                 Arc::clone(&metrics),
                                 pool,
                             );
-                            if op.timestamp {
+                            if op.value == InstantValue::Timestamp {
                                 state.emitted = Some(Emitted::default());
                             }
                             state
                         },
                     },
-                    shared || op.timestamp,
+                    shared || op.value == InstantValue::Timestamp,
                 )
             }
             NativeExpr::Merge { input } => {
@@ -2797,6 +2820,39 @@ impl RuntimeNode {
                         binary: Some(set),
                         state: NodeState::new(
                             format!("native.set at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
+                    false,
+                )
+            }
+            NativeExpr::Info {
+                base,
+                info,
+                selector,
+            } => {
+                let (Some(base_schema), Some(info_schema)) =
+                    (base.output.samples(), info.output.samples())
+                else {
+                    return Err(DataFusionError::Execution(
+                        "info consumes two vectors".to_string(),
+                    ));
+                };
+                let runtime = BinaryRuntime::new(
+                    PairKernel::Info(selector.clone()),
+                    [Arc::clone(base_schema), Arc::clone(info_schema)],
+                );
+                let (base_node, _) = Self::build(base, pool, inputs, format!("{location}.base"))?;
+                let (info_node, _) = Self::build(info, pool, inputs, format!("{location}.info"))?;
+                // The kernel merges the results that share a label set, so its output shares none.
+                (
+                    RuntimeOp::Binary {
+                        left: Box::new(base_node),
+                        right: Box::new(info_node),
+                        binary: Some(runtime),
+                        state: NodeState::new(
+                            format!("native.info at {location}"),
                             Arc::clone(&metrics),
                             pool,
                         ),
@@ -4613,7 +4669,7 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            if instant.selection.timestamp {
+            if instant.selection.value == InstantValue::Timestamp {
                 self.track(output)?;
             }
         }
