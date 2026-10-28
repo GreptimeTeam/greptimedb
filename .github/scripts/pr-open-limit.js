@@ -6,12 +6,11 @@
 // This is advisory only — it never closes a pull request or fails the job.
 
 import { appendFileSync } from "node:fs";
+import { isTeamMember, listAuthorOpenPrs, openPrLimit } from "./pr-open-limit-policy.js";
 
 const MARKER = "<!-- pr-open-limit -->";
 // GITHUB_TOKEN can only edit comments authored by the Actions bot itself.
 const COMMENT_AUTHOR = "github-actions[bot]";
-// Repository permissions that mark someone as part of the team.
-const TEAM_PERMISSIONS = ["admin", "maintain", "write"];
 // Keep the comment readable for authors who are far over the limit.
 const MAX_LISTED_PRS = 10;
 
@@ -20,29 +19,6 @@ function summary(text) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
   }
   console.log(text);
-}
-
-// `author_association` cannot be used here: it is computed from what the caller
-// is allowed to see, so GITHUB_TOKEN reports a private organization member as
-// CONTRIBUTOR. Repository permission is viewer-independent.
-//
-// On error this returns true rather than false. A token that cannot read
-// permissions would otherwise make the whole check silently pass everyone.
-async function isTeamMember(octokit, owner, repo, username) {
-  try {
-    const { data } = await octokit.repos.getCollaboratorPermissionLevel({
-      owner,
-      repo,
-      username,
-    });
-    // Never log the level itself: job logs are public.
-    return TEAM_PERMISSIONS.includes(data.permission);
-  } catch (error) {
-    console.log(
-      `Cannot read repository permission for \`${username}\` (HTTP ${error.status}); applying the limit anyway.`
-    );
-    return true;
-  }
 }
 
 function buildComment(author, total, limit, owner, repo, openPrs) {
@@ -71,7 +47,8 @@ pushing this one forward.
 
 ${list}[View your open pull requests](${url})
 
-This check is advisory for now and blocks nothing.`;
+This reminder does not block merging. Integration CI reduces matrix parallelism
+to 1 for team members over the limit when a new PR run starts.`;
 }
 
 async function upsertComment(octokit, params, body) {
@@ -102,8 +79,7 @@ async function upsertComment(octokit, params, body) {
   const [owner, repo] = process.env.GITHUB_REPOSITORY.split("/");
   const prNumber = Number(process.env.PR_NUMBER);
   const author = process.env.PR_AUTHOR;
-  const rawLimit = Number(process.env.MAX_OPEN_PRS);
-  const limit = Number.isInteger(rawLimit) && rawLimit >= 0 ? rawLimit : 5;
+  const limit = openPrLimit(process.env.MAX_OPEN_PRS);
 
   if (author.endsWith("[bot]")) {
     summary(`Skipping bot author \`${author}\`.`);
@@ -122,19 +98,9 @@ async function upsertComment(octokit, params, body) {
     return;
   }
 
-  const allOpen = await octokit.paginate(octokit.pulls.list, {
-    owner,
-    repo,
-    state: "open",
-    sort: "created",
-    direction: "asc",
-    per_page: 100,
-  });
-  // The pull request that triggered this run is already open, so exclude it and
-  // report the total separately.
-  const others = allOpen.filter(
-    (pr) => pr.user?.login === author && pr.number !== prNumber && !pr.draft
-  );
+  const allOpen = await listAuthorOpenPrs(octokit, owner, repo, author);
+  // Include the triggering PR even if the listing has not caught up yet.
+  const others = allOpen.filter((pr) => pr.number !== prNumber);
   const total = others.length + 1;
 
   if (others.length < limit) {
