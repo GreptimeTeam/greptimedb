@@ -6037,11 +6037,13 @@ async fn a_real_merge_over_a_repartition_of_a_real_fused_merges_every_aliased_pi
                  B keeps the M owners instead of collapsing to one execution"
             );
 
-            // The repartition node is kept alive beside B for as long as B is read: its output
-            // streams are bare receivers while the task feeding them belongs to the plan, and
-            // dropping the plan aborts that task (`SharedExecution::drop` in `series_repartition`).
-            // A caller that keeps its physical plan alive for the query - which DataFusion's own
-            // executor does - owes no such care.
+            // The repartition node is kept alive beside B, but that is not what keeps the read
+            // running: each output stream owns the read through an `OutputLease` on the execution,
+            // so it lives while any output is being read and stops only when none is being read and
+            // none is left to hand out (`claimed` and `remaining` both at zero,
+            // `SharedExecution::release_output` in `series_repartition`). Dropping the plan
+            // therefore does not abort a read its streams still need, and a caller that keeps it
+            // for the query - as DataFusion's own executor does - is one owner among several.
             let polled = polled_partition_rows(&b).await;
 
             for (partition, (_, ended)) in polled.iter().enumerate() {
@@ -6152,4 +6154,553 @@ async fn a_real_merge_over_a_repartition_of_a_real_fused_merges_every_aliased_pi
     })
     .await
     .expect("the composition finishes instead of waiting for a partition nobody reads");
+}
+
+/// Every output of `plan`, read at once, with the evaluated chunks each of them handed over.
+///
+/// Reading all of them at once is what the node requires of its caller: one output's queue fills and
+/// suspends the input tasks whose chains belong there, so draining one output to its end before
+/// starting the next would test the backpressure rather than what was routed. An output may be
+/// executed once - a second `execute` of the same output is refused as a second read of it - so a
+/// test that wants the chunks again builds the plan again.
+async fn output_chunks(plan: &Arc<dyn ExecutionPlan>) -> Vec<Vec<(Series, bool)>> {
+    let context = SessionContext::default().task_ctx();
+    let reads = (0..plan.properties().partitioning.partition_count())
+        .map(|output| {
+            let plan = Arc::clone(plan);
+            let context = Arc::clone(&context);
+            async move {
+                let frames = plan.execute(output, context).expect("the output executes");
+                unpack_evaluated_series(frames, None)
+                    .expect("an output declares an evaluated frame")
+                    .try_collect::<Vec<_>>()
+                    .await
+            }
+        })
+        .collect::<Vec<_>>();
+    futures::future::try_join_all(reads)
+        .await
+        .expect("every output is read")
+}
+
+/// Asserts that every chain `chunks` hands over is whole, in the terms a merge downstream reads it.
+///
+/// `series_repartition`'s own tests check this with a helper of the same name, but it is private to
+/// that module and a composition test in this one cannot call it; the rules checked here are the
+/// ones it states. A chunk that leaves a series open must be followed by the same series' next
+/// chunk, at a position after the last one the chain carried: another series' chunk in between is
+/// what a merge downstream cannot repair, because it would have to hold two open series to read
+/// either, and a position that does not advance is a chunk the merge would have to reorder to read.
+/// Ending with a chain open fails too, since that means a chunk's finality was lost on the way, and a
+/// chunk of no rows fails unless it is the closing chunk of the chain it belongs to - the shape a
+/// series ends in when nothing of it is left.
+fn assert_output_chains_are_whole(chunks: &[(Series, bool)]) {
+    let named = |labels: &SeriesLabels| format!("{:?}", labels.get(HOST));
+    // What the validator keeps of a chain it has not seen close: the identity it opened with, and
+    // the last position it carried.
+    let mut open: Option<(SeriesLabels, usize)> = None;
+    for (series, is_last) in chunks {
+        let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
+        else {
+            assert!(
+                *is_last,
+                "{} carries no positions and does not close its series",
+                named(&series.metric)
+            );
+            if let Some((open_labels, _)) = &open {
+                assert_eq!(
+                    open_labels, &series.metric,
+                    "another series' chunk interrupted an open chain"
+                );
+            }
+            open = None;
+            continue;
+        };
+        if let Some((open_labels, previous)) = &open {
+            assert_eq!(
+                open_labels, &series.metric,
+                "another series' chunk interrupted an open chain"
+            );
+            assert!(
+                first > *previous,
+                "the positions of one chain did not advance across its chunks: {} starts at \
+                 {first} after the chain's previous chunk ended at {previous}",
+                named(&series.metric)
+            );
+        }
+        open = (!*is_last).then(|| (series.metric.clone(), last));
+    }
+    assert!(open.is_none(), "an output ended with a chain open");
+}
+
+/// A real `Fused A` with **two** partitions, a **three**-output `SeriesRepartitionExec` and a real
+/// `Fused B` with **three** partitions: the composition of
+/// `a_real_merge_over_a_repartition_of_a_real_fused_merges_every_aliased_piece`, with N != M.
+///
+/// The equal-count case cannot tell a correct composition from one that assumes a partition index is
+/// preserved: two outputs and two partitions hide "output `i` is A's partition `i`", and the merge
+/// would answer correctly under that assumption as long as it held. Three outputs over two upstream
+/// partitions cannot hide it - there is no such index to carry - so this test states the stages
+/// separately (2, 3, 3) and lets no count stand for another.
+///
+/// The input is the aliasing this composition exists for: `http_requests_total{host=..}` and
+/// `http_errors_total{host=..}` are two raw identities that both leave `count_over_time`'s window as
+/// the one canonical label set `{host=..}`, on disjoint grid positions (see
+/// `EARLY_PIECE_MS`/`LATE_PIECE_MS`), so the two pieces only form one series (`1, 1, 1, 2, 2`) once
+/// they reach one owner and `sum_over_time` folds it to `1, 2, 3, 5, 7`. They are placed on
+/// *different* A partitions, which is what keeps them from being refused as two raw keys closing on
+/// one label set inside a single execution.
+///
+/// Which of the three outputs each label set reaches is measured through these same nodes
+/// (`counted_series_routing`) and asserted rather than assumed. The repartition is also read on its
+/// own, before the composition, so that what it hands over is checked where it decides it: every
+/// output is a run of whole chains, and every chunk that went in comes out of exactly one output.
+#[tokio::test]
+async fn a_real_three_owner_repartition_between_two_real_fuseds_merges_every_piece() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        // Where `A`'s rewritten label sets go, asked of these nodes instead of restated from the
+        // node's hash. Sixteen candidates reach more than one of the three outputs.
+        let probes = (0..16)
+            .map(|index| format!("probe-{index}"))
+            .collect::<Vec<_>>();
+        let names = probes.iter().map(String::as_str).collect::<Vec<_>>();
+        let landed = counted_series_routing(&names, 3).await;
+        let aliased = names[0].to_string();
+        let aliased_at = landed[0];
+        let (plain, plain_at) = names
+            .iter()
+            .zip(&landed)
+            .find(|(_, output)| **output != aliased_at)
+            .map(|(host, output)| (host.to_string(), *output))
+            .unwrap_or_else(|| {
+                panic!("every probe label set reached output {aliased_at}: {landed:?}")
+            });
+
+        let aliased_early = || named_series_chunk(&aliased, "http_requests_total", &EARLY_PIECE_MS);
+        let aliased_late = || named_series_chunk(&aliased, "http_errors_total", &LATE_PIECE_MS);
+        let plain_series = || named_series_chunk(&plain, "http_requests_total", &EARLY_PIECE_MS);
+        // Two partitions: the early piece of the aliased label set on one, the late piece beside the
+        // plain series on the other, so two canonical label sets go in over two partitions.
+        let partitions = vec![
+            vec![frame(&aliased_early())],
+            vec![frame(&aliased_late()), frame(&plain_series())],
+        ];
+
+        // First the repartition alone: both of its stages, and what it hands over.
+        let (probe_a, _) = count_over_every_partition(partitions.clone());
+        assert_eq!(
+            2,
+            probe_a.properties().partitioning.partition_count(),
+            "A runs its window once per scan partition, so two partitions go in"
+        );
+        let probe: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(probe_a, 3)
+                .expect("the repartition node is built over A's evaluated frames"),
+        );
+        assert_eq!(
+            3,
+            probe.properties().partitioning.partition_count(),
+            "the repartition publishes the three outputs it was asked for, and not A's two"
+        );
+
+        let routed = output_chunks(&probe).await;
+        assert_eq!(3, routed.len(), "one read per output, all of them at once");
+        let handed_over: usize = routed.iter().map(Vec::len).sum();
+        assert_eq!(
+            partitions.iter().flatten().count(),
+            handed_over,
+            "every chunk that went in came out of exactly one output"
+        );
+        let mut label_sets_in = vec![aliased.clone(), plain.clone()];
+        label_sets_in.sort();
+        let mut label_sets_out = routed
+            .iter()
+            .flatten()
+            .map(|(series, _)| {
+                series
+                    .metric
+                    .get(HOST)
+                    .expect("`A`'s window keeps the host label")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        label_sets_out.sort();
+        label_sets_out.dedup();
+        assert_eq!(
+            label_sets_in, label_sets_out,
+            "the two canonical label sets that went in are the two that came out"
+        );
+        for (output, chunks) in routed.iter().enumerate() {
+            assert_output_chains_are_whole(chunks);
+            let mut expected = Vec::new();
+            if output == aliased_at {
+                expected.push(aliased.clone());
+            }
+            if output == plain_at {
+                expected.push(plain.clone());
+            }
+            let mut found = chunks
+                .iter()
+                .map(|(series, _)| {
+                    series
+                        .metric
+                        .get(HOST)
+                        .expect("`A`'s window keeps the host label")
+                        .to_string()
+                })
+                .collect::<Vec<_>>();
+            found.sort();
+            found.dedup();
+            assert_eq!(
+                expected, found,
+                "output {output} hands over the label sets the probe measured for it and no other"
+            );
+        }
+        // Both pieces of the aliased label set reach one owner, and only there: a piece left on
+        // another output would be a partial series presented as a canonical one.
+        let aliased_pieces = routed
+            .iter()
+            .enumerate()
+            .flat_map(|(output, chunks)| {
+                chunks
+                    .iter()
+                    .filter(|(series, _)| series.metric.get(HOST) == Some(aliased.as_str()))
+                    .map(move |_| output)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            2,
+            aliased_pieces.len(),
+            "both pieces of the aliased label set are handed over, once each"
+        );
+        assert!(
+            aliased_pieces.iter().all(|output| *output == aliased_at),
+            "the pieces reached more than one owner: {aliased_pieces:?} against {aliased_at}"
+        );
+
+        // Then the whole composition, on the same fixtures.
+        let (a, _) = count_over_every_partition(partitions);
+        assert_eq!(
+            2,
+            a.properties().partitioning.partition_count(),
+            "A's own stage: one window per scan partition, so two"
+        );
+        let repartition: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(a, 3)
+                .expect("the repartition node is built over A's evaluated frames"),
+        );
+        assert_eq!(
+            3,
+            repartition.properties().partitioning.partition_count(),
+            "the repartition's own stage: three owners over two upstream partitions"
+        );
+        let b = merge_then_window_over(Arc::clone(&repartition));
+        assert_eq!(
+            3,
+            b.properties().partitioning.partition_count(),
+            "the merge reads each canonical label set whole in the output that owns it, so B keeps \
+             the three owners instead of collapsing to one execution or following A's two"
+        );
+
+        let polled = polled_partition_rows(&b).await;
+        assert_eq!(3, polled.len(), "B runs once per output of the repartition");
+        for (partition, (_, ended)) in polled.iter().enumerate() {
+            assert!(
+                *ended,
+                "partition {partition} of B reported the end of its stream, and the poll after it \
+                 reported `None` again"
+            );
+        }
+
+        let answering = polled
+            .iter()
+            .enumerate()
+            .filter(|(_, (rows, _))| !rows.is_empty())
+            .map(|(partition, (rows, _))| (partition, rows.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            2,
+            answering.len(),
+            "one owner per canonical label set, and the third output answers nothing: {answering:?}"
+        );
+        // Each answering output holds one series, in the output the probe measured for its label
+        // set: a merge that assumed output `i` were A's partition `i` could not place both here.
+        for (output, rows) in &answering {
+            let mut hosts = rows
+                .iter()
+                .map(|(_, _, row_host, _)| {
+                    row_host.clone().expect("`B`'s window keeps the host label")
+                })
+                .collect::<Vec<_>>();
+            hosts.sort();
+            hosts.dedup();
+            assert_eq!(
+                1,
+                hosts.len(),
+                "output {output} answers more than one canonical label set: {hosts:?}"
+            );
+            let expected_owner = match hosts[0].as_str() {
+                host if host == aliased.as_str() => aliased_at,
+                host if host == plain.as_str() => plain_at,
+                other => {
+                    panic!("output {output} answered a label set the probe never routed: {other}")
+                }
+            };
+            assert_eq!(
+                expected_owner, *output,
+                "`{}` answers in an output the probe did not put it on: {} against {}",
+                hosts[0], output, expected_owner
+            );
+        }
+        let rows_of = |host: &str| -> Vec<Row> {
+            answering
+                .iter()
+                .find(|(_, rows)| {
+                    rows.iter()
+                        .all(|(_, _, row_host, _)| row_host.as_deref() == Some(host))
+                })
+                .map(|(_, rows)| rows.clone())
+                .unwrap_or_else(|| panic!("`{host}` answers in no output: {answering:?}"))
+        };
+        // The values only hold if both pieces reached the one owner and were merged there: the early
+        // piece alone answers 1, 1, 1 and nothing after, the late one nothing before and 2, 2, and
+        // `sum_over_time` of either never reaches 5 or 7.
+        assert_eq!(
+            summed_series(&aliased, &[1.0, 2.0, 3.0, 5.0, 7.0]),
+            ordered(&rows_of(&aliased)),
+            "`{{host=\"{aliased}\"}}` is one series over the whole grid, carrying both A \
+             partitions' pieces"
+        );
+        assert_eq!(
+            summed_series(&plain, &[1.0, 2.0, 3.0, 3.0, 3.0]),
+            ordered(&rows_of(&plain)),
+            "`{{host=\"{plain}\"}}` is its own series, answered in its own owner"
+        );
+        // In and out agree at the end of the chain too: two canonical label sets went in and two
+        // series are answered, each over the whole grid and each in exactly one output.
+        assert_eq!(
+            2 * GRID_LEN as usize,
+            answering.iter().map(|(_, rows)| rows.len()).sum::<usize>(),
+            "two canonical label sets in, two series out, one row per grid point"
+        );
+    })
+    .await
+    .expect("the composition finishes instead of waiting for a partition nobody reads");
+}
+
+/// The raw sample times of the two zoned series of the duplicate-match test: one per minute from
+/// three minutes to eight.
+///
+/// `count_over_time(x[5m])` reads the window `(g - 5m, g]`, so every one of the statement's grid
+/// points has a sample inside its window and the two label sets are present at the same positions.
+/// The duplicate a whole match owes is decided at the first point where two series of one match
+/// group are present, and both series are present at every point here.
+const ZONED_SAMPLES_MS: [i64; 6] = [180_000, 240_000, 300_000, 360_000, 420_000, 480_000];
+
+/// One raw chunk of the series `{__name__ = METRIC, host, zone}`, holding one sample of 1.0 at each
+/// of `times` and closing it: `count_over_time` counts the samples, so what they hold never reaches
+/// the answer.
+fn zoned_series_chunk(host: &str, zone: &str, times: &[i64]) -> RawSeriesChunk {
+    chunk_of(
+        &raw_schema(),
+        &format!("{host}/{zone}"),
+        metric(&[(HOST, host), (ZONE, zone)], Some(METRIC)),
+        times,
+        vec![times.iter().map(|_| Some(1.0)).collect()],
+        true,
+    )
+}
+
+/// `merge(x) + on(host) merge(x)`: one source read twice, each occurrence canonicalized, and a
+/// one-to-one `on(host)` match over the two merges.
+///
+/// This is the shape a canonical-merge placement reports: each `Merge(Input(0))` needs every piece
+/// of ONE canonical label set, which an output of a repartition proves, and the match above them
+/// needs something narrower that the same placement does not prove - every series of one
+/// `on(host)` group in the execution that pairs them.
+fn matched_merge_tree() -> NativeTree {
+    let input = evaluated_input();
+    let merge = || NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(input.clone()),
+        },
+        output: input.output.clone(),
+    };
+    let (left, right) = (merge(), merge());
+    let output = crate::vector_match::binary_output_schema(
+        left.output.samples().expect("a merge answers samples"),
+        right.output.samples().expect("a merge answers samples"),
+    )
+    .expect("an `on(host)` one-to-one match has an output schema");
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("an `on(host)` match over two merges is a legal tree")
+}
+
+/// Which output of an `outputs`-way [`SeriesRepartitionExec`] the canonical label set of each of
+/// `label_sets` reaches, once it has passed through a real `Fused` running `count_over_time(x[5m])`.
+///
+/// The window this `A` runs keeps `host` and `zone` and drops only the metric name, so the label set
+/// the repartition routes by is the one the chunk carried minus the name. Which output that is, is
+/// asked of these nodes rather than restated from the node's hash: the decision is a function of the
+/// label set and the output count alone, so one measurement holds for a composition built from the
+/// same nodes.
+///
+/// Every output is read at once, which is what the node requires of its caller.
+async fn zoned_series_routing(label_sets: &[(&str, &str)], outputs: usize) -> Vec<usize> {
+    let chunks = label_sets
+        .iter()
+        .map(|(host, zone)| frame(&zoned_series_chunk(host, zone, &ZONED_SAMPLES_MS)))
+        .collect::<Vec<_>>();
+    let (a, _) = count_over_every_partition(vec![chunks]);
+    let repartition: Arc<dyn ExecutionPlan> = Arc::new(
+        SeriesRepartitionExec::try_new(a, outputs)
+            .expect("the repartition node is built over A's evaluated frames"),
+    );
+    let per_output = output_chunks(&repartition).await;
+    let mut landed = Vec::new();
+    for (output, chunks) in per_output.iter().enumerate() {
+        for (series, _) in chunks {
+            let found = (
+                series
+                    .metric
+                    .get(HOST)
+                    .expect("`A`'s window keeps the host label")
+                    .to_string(),
+                series
+                    .metric
+                    .get(ZONE)
+                    .expect("`A`'s window keeps the zone label")
+                    .to_string(),
+            );
+            landed.push((found, output));
+        }
+    }
+    label_sets
+        .iter()
+        .map(|(host, zone)| {
+            landed
+                .iter()
+                .find(|((found_host, found_zone), _)| found_host == host && found_zone == zone)
+                .unwrap_or_else(|| {
+                    panic!("`{{host=\"{host}\", zone=\"{zone}\"}}` reaches no output: {landed:?}")
+                })
+                .1
+        })
+        .collect()
+}
+
+/// The refusal a whole `on(host)` match owes when two series of one match group reach it.
+///
+/// This is the message `vector_match::binary_field` appends when the one side of a match group holds
+/// two series present at one point (the `one_duplicate` message, rank 0, which is what
+/// `earliest_error` reports first at the point it names). The one side of a one-to-one match is the
+/// right one, and `render` prints a group as `{name="value"}` pairs.
+fn duplicate_series_message(host: &str, timestamp_ms: i64) -> String {
+    format!(
+        "found duplicate series for the match group {{host=\"{host}\"}} on the right hand-side of \
+         the operation at {timestamp_ms} ms; many-to-many matching not allowed: matching labels \
+         must be unique on one side"
+    )
+}
+
+/// A match over two canonical owners of one `on(host)` group is refused, not answered locally.
+///
+/// `{host="h", zone="a"}` and `{host="h", zone="b"}` are two canonical label sets and one `on(host)`
+/// match group. A repartition routes each to an output of its own - asserted here, not assumed - so
+/// each owner holds one series of that group on each side. Read per owner, the match finds one
+/// candidate per side, pairs them, and the duplicate check a whole match owes over the real group
+/// never runs: the user gets two partial answers where Prometheus reports many-to-many matching.
+///
+/// The fix this test is the regression for is a placement rule, and the test asserts both halves of
+/// it. `needs_single_execution_in` asks a match for `matching_co_located` - both sides in
+/// `SinglePartition` - instead of the canonical-key ownership a merge needs, so the node declares
+/// one execution here and reads both owners in it. Only then does the group reach
+/// `vector_match::binary_field` whole, and only then is the refusal below produced at all. A
+/// placement that accepted `ByCanonicalKey` would answer here, which is what the failure of this
+/// test would report.
+#[tokio::test]
+async fn a_match_over_two_canonical_owners_is_refused_instead_of_answered_locally() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        // One host, two zones. Which of these label sets reach different outputs is asked of the
+        // real nodes: a two-output repartition splits this group over two owners only when the two
+        // label sets do not collide on one output, and that is a fact about the hash.
+        let hosts = (0..16)
+            .map(|index| format!("zoned-{index}"))
+            .collect::<Vec<_>>();
+        let candidates = hosts
+            .iter()
+            .flat_map(|host| [(host.as_str(), "a"), (host.as_str(), "b")])
+            .collect::<Vec<_>>();
+        let landed = zoned_series_routing(&candidates, 2).await;
+        let (host, first_owner, second_owner) = hosts
+            .iter()
+            .enumerate()
+            .find(|(index, _)| landed[2 * index] != landed[2 * index + 1])
+            .map(|(index, host)| (host.clone(), landed[2 * index], landed[2 * index + 1]))
+            .unwrap_or_else(|| {
+                panic!("no host's two zone label sets reached different outputs: {landed:?}")
+            });
+        assert_ne!(
+            first_owner, second_owner,
+            "the same host's two zone label sets landed on one output: {landed:?}"
+        );
+
+        // The composition: both series of that host through `A` and the two-output repartition,
+        // then the match over two merges of the same source.
+        let partitions = vec![vec![
+            frame(&zoned_series_chunk(&host, "a", &ZONED_SAMPLES_MS)),
+            frame(&zoned_series_chunk(&host, "b", &ZONED_SAMPLES_MS)),
+        ]];
+        let (a, _) = count_over_every_partition(partitions);
+        let repartition: Arc<dyn ExecutionPlan> = Arc::new(
+            SeriesRepartitionExec::try_new(a, 2)
+                .expect("the repartition node is built over A's evaluated frames"),
+        );
+        assert_eq!(
+            2,
+            repartition.properties().partitioning.partition_count(),
+            "the repartition publishes the two owners it was asked for"
+        );
+        let exec = plan_of(fused(matched_merge_tree()), Arc::clone(&repartition))
+            .expect("the runtime executes a match over two merges");
+        assert_eq!(
+            1,
+            exec.properties().partitioning.partition_count(),
+            "an `on(host)` match pairs by `host`, which is not the canonical key the owners divide, \
+             so the node reads both owners in one execution instead of pairing each owner's series \
+             with its own"
+        );
+
+        // The run: the match needs every series of the group, the group holds two, and a whole match
+        // owes an error rather than two answers that each paired a series with itself.
+        let pool = Arc::new(GreedyMemoryPool::new(1 << 26));
+        let error = collect(exec, task_context(&pool))
+            .await
+            .expect_err("the match group holds two series, so the match owes its refusal");
+        let message = error_chain(&error);
+        assert!(
+            message.contains(&duplicate_series_message(&host, GRID_START)),
+            "refused for another reason: {message}"
+        );
+        assert_eq!(
+            0,
+            pool.reserved(),
+            "the failed execution holds no bytes after it ended"
+        );
+    })
+    .await
+    .expect("the match is refused instead of waiting for a partition nobody reads");
 }
