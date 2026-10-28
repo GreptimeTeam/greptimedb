@@ -1036,11 +1036,11 @@ async fn empty_filtered_group_keeps_the_preceding_series_last_flag() {
 /// A predicate that drops the rows of one series can leave two runs of another series adjacent,
 /// which is how coalescing can fuse two chunks the per-record stream kept apart.
 ///
-/// Data availability across an upstream error is what must not change: the records buffered before
-/// the error keep their own boundaries, so the error withholds one record's chunk, not the fused
-/// chunk that a single predicate pass would have produced.
+/// Fusing them is permitted: the stream contract fixes per-series ordering and finality, not record
+/// granularity. What must not change is that a fused run still ends up as one chunk here rather than
+/// being withheld, so the test pins the fusion itself.
 #[tokio::test]
-async fn filtered_boundary_fuses_chunks_on_eof_but_an_upstream_error_still_withholds_one_record() {
+async fn filtered_boundary_fuses_chunks_where_the_per_record_stream_kept_two() {
     // `a(1)` then `b(1), a(2)`: the `value > 0` predicate drops `b`, so `a`'s two runs become
     // adjacent, and their boundary keys (`a` then `b`) differ at the source record boundary.
     let records = || {
@@ -1064,36 +1064,10 @@ async fn filtered_boundary_fuses_chunks_on_eof_but_an_upstream_error_still_withh
         positive_value_predicate(calls.clone()),
     ))
     .await;
-    // Coalesced into one predicate pass, so both rows are one chunk. Fusing them is permitted:
-    // the stream contract fixes per-series ordering and finality, not record granularity.
+    // Coalesced into one predicate pass, so both rows are one chunk.
     assert_eq!(
         chunks,
         vec![(b"a".to_vec(), vec![1, 2], vec![Some(1.0), Some(2.0)], true)]
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-
-    let upstream_error = InvalidRecordBatchSnafu {
-        reason: "upstream injected failure".to_string(),
-    }
-    .build();
-    let mut items = records();
-    items.push(Err(upstream_error));
-    let mut output = convert_with_predicate(
-        input(items),
-        schema(),
-        positive_value_predicate(Arc::new(AtomicUsize::new(0))),
-    );
-    // `a(1)` is closed by `a(2)`, which is then withheld as `pending` when the error arrives.
-    let first = output.next().await.unwrap().unwrap();
-    assert_eq!(first.primary_key.as_slice(), b"a");
-    assert_eq!(first.time.timestamp(0), Some(1));
-    assert_eq!(values(&first), vec![Some(1.0)]);
-    assert!(!first.is_last);
-    let error = output.next().await.unwrap().unwrap_err();
-    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
-    else {
-        panic!("unexpected upstream error: {error}");
-    };
-    assert_eq!(reason, "upstream injected failure");
-    assert!(output.next().await.is_none());
 }

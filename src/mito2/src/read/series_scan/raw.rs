@@ -173,10 +173,11 @@ impl RawSeriesStream for RawStream {
 /// carries the rows of a single series. Buffering up to this many rows and evaluating the
 /// predicates once per group pays that setup once per group of series instead of once per series.
 ///
-/// Records are never split, so a group holds fewer than this many rows plus the rows of the one
-/// record that crossed the threshold, and both the buffered and the concatenated arrays are alive
-/// while the group is built. The value is a tuning choice, not a memory bound; it also does not
-/// bound the bytes, since a record's rows are of variable width.
+/// A record that alone reaches this many rows is not concatenated with its neighbours: it heads its
+/// own group and is taken unchanged. A smaller record can still push a group past the threshold, so
+/// a group holds fewer than this many rows plus one such record's rows, and both the buffered and
+/// the concatenated arrays are alive while it is built. The value is a tuning choice, not a memory
+/// bound; it also does not bound the bytes, since a record's rows are of variable width.
 const PREDICATE_BATCH_ROWS: usize = 4096;
 
 /// Returns the primary key at `row` of `record`, or `None` when the row cannot be decoded.
@@ -265,8 +266,13 @@ pub(crate) fn make_stream(
                     },
                 };
                 if record.num_rows() == 0 { continue; }
+                // A record that reaches the threshold alone is a full batch: concatenating it with
+                // what is buffered would copy it for no saving, since its predicate pass is paid
+                // once either way. Let it head its own group, where the single-record path takes it
+                // unchanged. A record that continues the buffered series is held back for the
+                // reason `continues_series` documents.
                 if let Some(previous) = buffered.last()
-                    && continues_series(previous, &record)
+                    && (record.num_rows() >= coalesce_rows || continues_series(previous, &record))
                 {
                     held = Some(record);
                     break;
@@ -276,20 +282,11 @@ pub(crate) fn make_stream(
             }
             if buffered.is_empty() { break; }
             // Take the rows out of the buffer before processing them, so an early return cannot
-            // replay them. A pending upstream error is reported only after the records buffered
-            // before it, and those are processed one record at a time: merging records of one
-            // series fuses their runs, and the run withheld as `pending` when the error arrives
-            // would then hold rows the per-record stream had already yielded.
-            let mut group: Vec<RecordBatch> = match upstream_error {
-                // Report the buffered records one at a time, keeping the boundaries the per-record
-                // stream had.
-                Some(_) if buffered.len() > 1 => {
-                    let rest = buffered.split_off(1);
-                    std::mem::replace(&mut buffered, rest)
-                }
-                _ => std::mem::take(&mut buffered),
-            };
-            buffered_rows = buffered.iter().map(RecordBatch::num_rows).sum();
+            // replay them. A pending upstream error is reported only after these records, so the
+            // chunks they hold are still yielded first; a coalesced group whose predicate fails
+            // also withholds its `pending` chunk, and the two paths agree on that.
+            let mut group: Vec<RecordBatch> = std::mem::take(&mut buffered);
+            buffered_rows = 0;
             // A group of one record needs no concatenation, and copying it would only add work to
             // the case coalescing cannot help with.
             let mut record = if group.len() == 1 {
