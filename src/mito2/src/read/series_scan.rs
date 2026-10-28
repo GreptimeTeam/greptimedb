@@ -124,7 +124,7 @@ pub(crate) fn candidate_assignment_rounds() -> usize {
 }
 
 /// Legacy data receivers for output partitions.
-type LegacyReceiverList = Vec<Option<Receiver<Result<DistributedBatch>>>>;
+type LegacyReceiverList = Vec<Option<Receiver<Result<SeriesBatch>>>>;
 
 /// Candidate assignment receivers for output partitions.
 type CandidateReceiverList = Vec<Option<CandidateReceiver>>;
@@ -599,18 +599,11 @@ impl SeriesScan {
             while let Some(series) = receiver.recv().await {
                 let series = series?;
                 metrics.scan_cost += fetch_start.elapsed();
-                // The distributor counted the series of the batch it sent, because one batch may
-                // hold several series; counting the batches received would not. The count is zero
-                // when detailed metrics are off, and recording it is then skipped: the counter is
-                // only reported by `EXPLAIN VERBOSE`.
-                if series.num_series > 0 {
-                    part_metrics.add_assigned_series(series.num_series);
-                }
-                metrics.num_batches += series.batch.num_batches();
-                metrics.num_rows += series.batch.num_rows();
+                metrics.num_batches += series.num_batches();
+                metrics.num_rows += series.num_rows();
 
                 let yield_start = Instant::now();
-                yield ScanBatch::Series(series.batch);
+                yield ScanBatch::Series(series);
                 metrics.yield_cost += yield_start.elapsed();
                 fetch_start = Instant::now();
             }
@@ -693,8 +686,7 @@ impl SeriesScan {
             return;
         }
 
-        let (senders, receivers) =
-            new_legacy_channel_list(self.properties.num_partitions(), explain_verbose);
+        let (senders, receivers) = new_legacy_channel_list(self.properties.num_partitions());
         let mut distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
@@ -821,21 +813,14 @@ impl SeriesScan {
     }
 }
 
-/// Creates the legacy distributor's senders and the partitions' receivers.
-///
-/// `count_series` decides whether the distributor counts the series of every batch it hands over for
-/// the `assigned_series` counter, which only `EXPLAIN VERBOSE` reports.
-fn new_legacy_channel_list(
-    num_partitions: usize,
-    count_series: bool,
-) -> (SenderList, LegacyReceiverList) {
+fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiverList) {
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
             let (sender, receiver) = mpsc::channel(1);
             (Some(sender), Some(receiver))
         })
         .unzip();
-    (SenderList::new(senders, count_series), receivers)
+    (SenderList::new(senders), receivers)
 }
 
 fn new_candidate_channel_list(
@@ -1453,88 +1438,6 @@ impl SeriesBatch {
             SeriesBatch::Flat(flat_batch) => flat_batch.batches.iter().map(|x| x.num_rows()).sum(),
         }
     }
-
-    /// Returns the number of series in the batch.
-    ///
-    /// A [`FlatSeriesBatch`] may hold rows of more than one series and one series may span more than
-    /// one record batch, so this counts series rather than batches. Series rows stay contiguous, so a
-    /// series is a run of equal primary keys and two runs are the same series when their primary keys
-    /// are equal across a record batch boundary. Counting therefore costs a lookup of every row's
-    /// primary key, which is why the distributor only does it for the `assigned_series` counter that
-    /// `EXPLAIN VERBOSE` reports: a scan that does not collect detailed metrics never calls this.
-    pub fn num_series(&self) -> usize {
-        match self {
-            SeriesBatch::Flat(flat_batch) => num_series_in(&flat_batch.batches),
-        }
-    }
-}
-
-/// Counts the series of the record batches that make up one [`FlatSeriesBatch`].
-fn num_series_in(batches: &[RecordBatch]) -> usize {
-    let mut num_series = 0;
-    let mut last_key_of_previous_batch: Option<&[u8]> = None;
-    for batch in batches {
-        let Some((runs, first_key, last_key)) = primary_key_runs(batch) else {
-            // An empty batch holds no series.
-            continue;
-        };
-        num_series += runs;
-        if last_key_of_previous_batch == Some(first_key) {
-            // The series continues over the batch boundary, so its first run is not a new series.
-            num_series -= 1;
-        }
-        last_key_of_previous_batch = Some(last_key);
-    }
-    num_series
-}
-
-/// Returns the number of runs of equal primary keys in a batch, and the first and the last of them.
-///
-/// Returns `None` if the batch has no rows.
-fn primary_key_runs(batch: &RecordBatch) -> Option<(usize, &[u8], &[u8])> {
-    if batch.num_rows() == 0 {
-        return None;
-    }
-
-    let pk_column = batch.column(primary_key_column_index(batch.num_columns()));
-    // Safety: the flat format always stores the primary key as a dictionary of binary keys.
-    let pk_array = pk_column
-        .as_any()
-        .downcast_ref::<PrimaryKeyArray>()
-        .unwrap();
-    let pk_values = pk_array
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .unwrap();
-
-    // Keys are compared by their bytes, not by their dictionary indices: two indices of one array
-    // may hold the same key, and equal bytes are what make two rows the same series. A repeated
-    // index, however, *is* the same entry and therefore the same key, so it needs no byte
-    // comparison at all: only a changed index compares bytes. A long series in one dictionary then
-    // costs one integer comparison per row instead of a comparison over the whole primary key,
-    // which for a sparse key of long labels is the bulk of the work.
-    let keys = pk_array.keys();
-    let mut runs = 1;
-    let mut previous_index = keys.value(0);
-    let mut previous_key = pk_values.value(previous_index as usize);
-    for &index in keys.values().iter().skip(1) {
-        if index == previous_index {
-            continue;
-        }
-        let current_key = pk_values.value(index as usize);
-        if current_key != previous_key {
-            runs += 1;
-        }
-        previous_index = index;
-        previous_key = current_key;
-    }
-
-    Some((
-        runs,
-        primary_key_at(pk_array, pk_values, 0),
-        primary_key_at(pk_array, pk_values, batch.num_rows() - 1),
-    ))
 }
 
 /// Batches of the same series in flat format.
@@ -1543,100 +1446,41 @@ pub struct FlatSeriesBatch {
     pub batches: SmallVec<[RecordBatch; 4]>,
 }
 
-/// A series batch in flight from the distributor to a partition.
-///
-/// The count travels with the batch because the distributor counts the series once, before it hands
-/// the batch over: one [`FlatSeriesBatch`] may hold rows of more than one series, so a partition
-/// cannot recover the number of series it was assigned by counting the batches it receives.
-struct DistributedBatch {
-    batch: SeriesBatch,
-    /// Number of series in `batch`, or zero when the scan does not collect the counter.
-    num_series: usize,
-}
-
-impl DistributedBatch {
-    /// Wraps `batch`, counting its series only if `count_series` is set.
-    ///
-    /// The count feeds the `assigned_series` counter that `EXPLAIN VERBOSE` reports, and it costs a
-    /// primary key lookup per row. A scan that does not collect detailed metrics records a zero
-    /// count instead, so the ordinary path pays nothing per batch for a metric nobody reads.
-    fn new(batch: SeriesBatch, count_series: bool) -> Self {
-        let num_series = if count_series { batch.num_series() } else { 0 };
-        Self { batch, num_series }
-    }
-
-    fn num_rows(&self) -> usize {
-        self.batch.num_rows()
-    }
-}
-
 /// List of senders.
 struct SenderList {
-    senders: Vec<Option<Sender<Result<DistributedBatch>>>>,
+    senders: Vec<Option<Sender<Result<SeriesBatch>>>>,
     /// Number of None senders.
     num_nones: usize,
+    /// Index of the current partition to send.
+    sender_idx: usize,
     /// Number of full senders.
     num_full: usize,
-    /// Rows already sent to each partition.
-    ///
-    /// Sending each batch to the partition that has carried the least keeps the partitions finishing
-    /// together when their series differ in length, which round-robin cannot do: it hands the long
-    /// series to whichever partition came next, and that partition reads long after the others are
-    /// done.
-    ///
-    /// The count is a heuristic, not an exact ledger. A [`FlatSeriesBatch`] may hold rows of more
-    /// than one series -- the divider promises only that one series' rows stay together, not that a
-    /// batch holds a single series -- so a batch spanning a series boundary charges its whole row
-    /// count to one partition. It stays accurate to within those boundary batches, which is enough
-    /// for choosing a partition: every row is still sent to exactly one partition and read once.
-    sent_rows: Vec<usize>,
-    /// Whether to count the series of every batch for the `assigned_series` counter.
-    ///
-    /// Only the detailed metrics of `EXPLAIN VERBOSE` report that counter, so the distributor counts
-    /// only then and leaves the ordinary path one primary key lookup per row cheaper.
-    count_series: bool,
 }
 
 impl SenderList {
-    fn new(senders: Vec<Option<Sender<Result<DistributedBatch>>>>, count_series: bool) -> Self {
+    fn new(senders: Vec<Option<Sender<Result<SeriesBatch>>>>) -> Self {
         let num_nones = senders.iter().filter(|sender| sender.is_none()).count();
-        let partitions = senders.len();
         Self {
             senders,
             num_nones,
+            sender_idx: 0,
             num_full: 0,
-            sent_rows: vec![0; partitions],
-            count_series,
         }
     }
 
     /// Finds a partition and tries to send the batch to the partition.
     /// Returns None if it sends successfully.
-    fn try_send_batch(&mut self, mut batch: DistributedBatch) -> Result<Option<DistributedBatch>> {
-        let rows = batch.num_rows();
-        // Lightest first, so the batch goes to the partition that has carried the least. The index
-        // breaks ties, which keeps the order the batches were produced in for equal loads.
-        let mut order: Vec<usize> = (0..self.senders.len())
-            .filter(|index| self.senders[*index].is_some())
-            .collect();
-        order.sort_by_key(|index| (self.sent_rows[*index], *index));
-
-        let mut tried = 0;
-        for sender_idx in order {
+    fn try_send_batch(&mut self, mut batch: SeriesBatch) -> Result<Option<SeriesBatch>> {
+        for _ in 0..self.senders.len() {
             ensure!(self.num_nones < self.senders.len(), InvalidSenderSnafu);
-            tried += 1;
-            if tried > self.senders.len() {
-                break;
-            }
+
+            let sender_idx = self.fetch_add_sender_idx();
             let Some(sender) = &self.senders[sender_idx] else {
                 continue;
             };
 
             match sender.try_send(Ok(batch)) {
-                Ok(()) => {
-                    self.sent_rows[sender_idx] = self.sent_rows[sender_idx].saturating_add(rows);
-                    return Ok(None);
-                }
+                Ok(()) => return Ok(None),
                 Err(TrySendError::Full(res)) => {
                     self.num_full += 1;
                     // Safety: we send Ok.
@@ -1656,10 +1500,6 @@ impl SenderList {
 
     /// Finds a partition and sends the batch to the partition.
     async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
-        // Counts the series of the batch here, once, so the partition records the count it receives,
-        // and only when the detailed metrics that report it are being collected.
-        let batch = DistributedBatch::new(batch, self.count_series);
-        let rows = batch.num_rows();
         let Some(batch) = self.try_send_batch(batch)? else {
             return Ok(());
         };
@@ -1680,7 +1520,6 @@ impl SenderList {
                 match reserved {
                     Ok(permit) => {
                         permit.send(Ok(batch));
-                        self.sent_rows[idx] = self.sent_rows[idx].saturating_add(rows);
                         return Ok(());
                     }
                     Err(_) => idx,
@@ -1697,6 +1536,12 @@ impl SenderList {
             let result = Err(error.clone()).context(ScanSeriesSnafu);
             let _ = sender.send(result).await;
         }
+    }
+
+    fn fetch_add_sender_idx(&mut self) -> usize {
+        let sender_idx = self.sender_idx;
+        self.sender_idx = (self.sender_idx + 1) % self.senders.len();
+        sender_idx
     }
 }
 
@@ -1835,13 +1680,12 @@ fn primary_key_at<'a>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, Int64Array,
-        StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -1896,7 +1740,7 @@ mod tests {
     #[tokio::test]
     async fn distributor_does_not_stall_on_partitions_read_one_after_another() {
         const NUM_BATCHES: usize = 2000;
-        let (mut senders, receivers) = new_legacy_channel_list(16, false);
+        let (mut senders, receivers) = new_legacy_channel_list(16);
         let producer = tokio::spawn(async move {
             for _ in 0..NUM_BATCHES {
                 senders
@@ -1926,10 +1770,10 @@ mod tests {
 
     /// The row count of each record batch of each input [SeriesBatch].
     ///
-    /// Three long series and seven short ones, which is the skew the greedy distributor exists for.
-    /// The first long series arrives as two record batches, which one [FlatSeriesBatch] may hold:
-    /// the divider promises only that a series is complete inside the batch, not that it fits in a
-    /// single record batch.
+    /// Three long series and seven short ones, so the batches differ enough in size that the
+    /// partition a batch goes to shows in what each partition receives. The first long series
+    /// arrives as two record batches, which one [FlatSeriesBatch] may hold: the divider promises
+    /// only that a series is complete inside the batch, not that it fits in a single record batch.
     const SKEWED_BATCHES: [&[usize]; 10] = [
         &[600, 400],
         &[1000],
@@ -1943,32 +1787,30 @@ mod tests {
         &[10],
     ];
 
-    /// Batches of very different sizes are spread over the partitions by rows carried, not by turn.
+    /// Every batch the legacy distributor hands over reaches exactly one partition, whole.
     ///
-    /// Round robin hands the long series to whichever partition comes next and lets the short ones
-    /// fill the partitions in turn, so the last partition can end up with little to read while the
-    /// others read long series. Sending to the least loaded partition instead lets the short ones
-    /// pile onto the partition the long ones left empty.
+    /// Which partition a batch goes to is the distributor's choice, so this pins what must hold
+    /// however it chooses: a batch is delivered once and only once, its record batches arrive
+    /// un-split and in order, and the rows that arrive are the rows that were sent.
     #[test]
-    fn sender_list_balances_skewed_batches_better_than_round_robin() {
+    fn legacy_distributor_delivers_every_batch_once_and_whole() {
         const PARTITIONS: usize = 4;
         const ROWS: usize = 3070;
 
         // Capacity is the number of batches, so every `try_send` below succeeds and the test
-        // exercises the choice of partition rather than the back pressure path.
+        // exercises the delivery rather than the back pressure path.
         let (senders, receivers): (Vec<_>, Vec<_>) = (0..PARTITIONS)
             .map(|_| {
-                let (sender, receiver) =
-                    mpsc::channel::<Result<DistributedBatch>>(SKEWED_BATCHES.len());
+                let (sender, receiver) = mpsc::channel::<Result<SeriesBatch>>(SKEWED_BATCHES.len());
                 (Some(sender), receiver)
             })
             .unzip();
-        let mut senders = SenderList::new(senders, false);
+        let mut senders = SenderList::new(senders);
         for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
             let batch = tagged_flat_series_batch(rows, tag as u64);
             assert!(
                 senders
-                    .try_send_batch(DistributedBatch::new(SeriesBatch::Flat(batch), false))
+                    .try_send_batch(SeriesBatch::Flat(batch))
                     .unwrap()
                     .is_none(),
                 "the distributor could not place batch {tag}"
@@ -1976,17 +1818,17 @@ mod tests {
         }
 
         // What each partition actually received: the tag of every batch and its inner row counts.
-        let mut received: BTreeMap<u64, (usize, Vec<usize>)> = BTreeMap::new();
-        let mut received_rows = vec![0usize; PARTITIONS];
-        let mut received_batches = vec![0usize; PARTITIONS];
+        let mut received: Vec<Option<(usize, Vec<usize>)>> = vec![None; SKEWED_BATCHES.len()];
+        let mut received_batches = 0;
+        let mut received_rows = 0;
         for (partition, mut receiver) in receivers.into_iter().enumerate() {
             while let Ok(result) = receiver.try_recv() {
-                let SeriesBatch::Flat(flat) = result.unwrap().batch;
+                let SeriesBatch::Flat(flat) = result.unwrap();
                 assert!(
                     !flat.batches.is_empty(),
                     "partition {partition} received an empty batch"
                 );
-                received_batches[partition] += 1;
+                received_batches += 1;
                 let tags: Vec<u64> = flat.batches.iter().map(batch_tag).collect();
                 let tag = tags[0];
                 assert!(
@@ -1994,259 +1836,48 @@ mod tests {
                     "partition {partition} received one batch mixing tags {tags:?}"
                 );
                 let rows: Vec<usize> = flat.batches.iter().map(|batch| batch.num_rows()).collect();
-                received_rows[partition] += rows.iter().sum::<usize>();
+                received_rows += rows.iter().sum::<usize>();
                 assert!(
-                    received.insert(tag, (partition, rows)).is_none(),
+                    received[tag as usize].replace((partition, rows)).is_none(),
                     "batch {tag} was sent twice, so a series is split over partitions"
                 );
             }
         }
 
-        // (a) Every input batch reached exactly one partition, whole and un-split.
+        // Every input batch reached exactly one partition, whole and un-split.
         assert_eq!(
             SKEWED_BATCHES.len(),
-            received.len(),
+            received.iter().flatten().count(),
             "an input batch was lost or merged: {received:?}"
         );
         assert_eq!(
             SKEWED_BATCHES.len(),
-            received_batches.iter().sum::<usize>(),
-            "a batch was received twice: {received_batches:?}"
+            received_batches,
+            "a batch was received twice"
         );
         assert_eq!(
-            ROWS,
-            received_rows.iter().sum::<usize>(),
-            "the split lost or duplicated rows: {received_rows:?}"
+            ROWS, received_rows,
+            "the split lost or duplicated rows: {received:?}"
         );
         for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
-            let (partition, received) = &received[&(tag as u64)];
+            let (partition, received) = received[tag]
+                .as_ref()
+                .unwrap_or_else(|| panic!("batch {tag} never arrived: {received:?}"));
             assert_eq!(
-                *rows, received,
+                *rows,
+                received.as_slice(),
                 "batch {tag} arrived incomplete at partition {partition}, so a series is split"
             );
         }
-        assert_eq!(
-            received_rows, senders.sent_rows,
-            "the rows the distributor charged differ from the rows the partitions received"
-        );
 
-        // (c) The long series that arrived in two record batches stayed together: both parts came
-        // back inside one batch of one partition, which `received` holds only once per tag.
-        let (first_partition, first_rows) = &received[&0u64];
+        // The long series that arrived in two record batches stayed together: both parts came back
+        // inside one batch of one partition, which `received` holds only once per tag.
+        let (first_partition, first_rows) = received[0].as_ref().unwrap();
         assert_eq!(
-            vec![600, 400],
-            *first_rows,
+            [600, 400].as_slice(),
+            first_rows.as_slice(),
             "the two record batches of one series did not reach partition {first_partition} together"
         );
-
-        // (b) The same input under round robin: batch `idx` goes to partition `(idx + 1) % n`.
-        let mut round_robin_rows = vec![0usize; PARTITIONS];
-        for (idx, rows) in SKEWED_BATCHES.iter().enumerate() {
-            round_robin_rows[(idx + 1) % PARTITIONS] += rows.iter().sum::<usize>();
-        }
-        let greedy_spread = spread(&senders.sent_rows);
-        let round_robin_spread = spread(&round_robin_rows);
-        assert_eq!(
-            vec![1000, 1000, 1000, 70],
-            senders.sent_rows,
-            "each long series should take a partition and the short ones share the last"
-        );
-        assert!(
-            greedy_spread < round_robin_spread,
-            "the least loaded partition first split spread {senders_read:?} over {greedy_spread} rows, \
-             round robin spread {round_robin_rows:?} over {round_robin_spread} rows",
-            senders_read = senders.sent_rows
-        );
-    }
-
-    /// Returns the gap between the most loaded and the least loaded partition.
-    fn spread(rows: &[usize]) -> usize {
-        rows.iter().max().unwrap() - rows.iter().min().unwrap()
-    }
-
-    /// A legacy partition records the series it was assigned, not the batches it received.
-    ///
-    /// One [`FlatSeriesBatch`] may hold rows of several series -- the divider promises only that a
-    /// series stays whole inside one batch, not that a batch holds one series -- and one series may
-    /// span several record batches. The batch below holds three series in two record batches:
-    /// `series-a` continues over the boundary while `series-b` and `series-c` are new. Counting the
-    /// batches received would report two, and counting the runs inside each record batch would report
-    /// four, so the legacy partition has to use the count the distributor made when it handed the
-    /// batch over.
-    #[tokio::test]
-    async fn legacy_partition_records_the_series_it_received_not_the_batches() {
-        let series_batch = SeriesBatch::Flat(FlatSeriesBatch {
-            batches: SmallVec::from_vec(vec![
-                // Two rows of `series-a`, which continue into the next record batch.
-                new_test_record_batch(
-                    &[b"series-a", b"series-a"],
-                    &[1000, 2000],
-                    &[1, 2],
-                    &[OpType::Put, OpType::Put],
-                    &[10, 20],
-                ),
-                // The last row of `series-a`, then one row of each of two other series.
-                new_test_record_batch(
-                    &[b"series-a", b"series-b", b"series-c"],
-                    &[3000, 1000, 1000],
-                    &[3, 4, 5],
-                    &[OpType::Put, OpType::Put, OpType::Put],
-                    &[30, 40, 50],
-                ),
-            ]),
-        });
-        assert_eq!(2, series_batch.num_batches());
-        assert_eq!(
-            3,
-            series_batch.num_series(),
-            "three series arrive in two record batches"
-        );
-
-        let env = SchedulerEnv::new().await;
-        let metadata = Arc::new(sst_region_metadata_with_encoding(
-            store_api::codec::PrimaryKeyEncoding::Sparse,
-        ));
-        let input = ScanInput::builder(
-            env.access_layer.clone(),
-            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
-        )
-        .build();
-        // The default configuration runs the legacy path.
-        let scan = SeriesScan::new(input, false);
-        assert_eq!("legacy", scan.mode());
-
-        // Installing the receivers first keeps the distributor from starting: the partition reads the
-        // batch sent below, which is what a distributor hands a partition.
-        // The counter this test pins is the one `EXPLAIN VERBOSE` reports, so count it here.
-        let (mut senders, receivers) =
-            new_legacy_channel_list(scan.properties.num_partitions(), true);
-        *scan.legacy_receivers.lock().unwrap() = receivers;
-        senders.send_batch(series_batch).await.unwrap();
-        drop(senders);
-
-        let metrics_set = ExecutionPlanMetricsSet::new();
-        let part_metrics =
-            new_partition_metrics(&scan.stream_ctx, false, &metrics_set, 0, &scan.metrics_list);
-        let mut stream = scan
-            .scan_batch_in_partition(
-                &QueryScanContext::default(),
-                0,
-                part_metrics.clone(),
-                &metrics_set,
-            )
-            .unwrap();
-        let mut recovered = Vec::new();
-        while let Some(batch) = stream.next().await {
-            let ScanBatch::Series(series) = batch.unwrap() else {
-                panic!("the legacy path yields series batches");
-            };
-            recovered.push(series);
-        }
-        assert_eq!(1, recovered.len(), "the partition received the batch once");
-
-        // `ScanMetricsSet` reports the counter only through its verbose output, which is what
-        // `EXPLAIN VERBOSE` prints for a partition.
-        let debug = format!("{part_metrics:?}");
-        let reported_at = debug.find("assigned_series").unwrap_or_else(|| {
-            panic!("the partition must report the series it was assigned: {debug}")
-        });
-        let assigned = debug[reported_at..]
-            .chars()
-            .skip_while(|c| !c.is_ascii_digit())
-            .take_while(char::is_ascii_digit)
-            .collect::<String>();
-        assert_eq!(
-            "3", assigned,
-            "the partition must report the three series it was assigned, not the two batches: {debug}"
-        );
-    }
-
-    /// A series is counted by the rows it spans, not by the dictionary entries they refer to.
-    ///
-    /// The primary key column is a dictionary, and counting runs of equal keys is what the counter
-    /// needs. A dictionary may hold the same key under two indices, so the count cannot trust the
-    /// indices alone and compares bytes when an index changes; a repeated index, however, is the same
-    /// entry and therefore the same key, so a long series refreshes its key once per distinct index
-    /// instead of comparing the whole key at every row.
-    #[test]
-    fn repeated_rows_of_one_series_are_counted_once_per_dictionary_index() {
-        // One series in three rows that share a dictionary index, then a second series.
-        let batch = new_test_record_batch(
-            &[b"series-a", b"series-a", b"series-a", b"series-b"],
-            &[1000, 2000, 3000, 4000],
-            &[1, 2, 3, 4],
-            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
-            &[10, 20, 30, 40],
-        );
-        let mut batches = SmallVec::<[RecordBatch; 4]>::new();
-        batches.push(batch);
-        assert_eq!(
-            2,
-            num_series_in(&batches),
-            "three rows of one series and one of another are two series"
-        );
-
-        // Two indices that hold equal bytes are still one series: the bytes decide, not the index.
-        let pk_values = BinaryArray::from_iter_values([
-            b"series-a".as_slice(),
-            b"series-c".as_slice(),
-            b"series-a".as_slice(),
-        ]);
-        let keys = UInt32Array::from(vec![0u32, 2, 1]);
-        let pk_column =
-            Arc::new(DictionaryArray::<UInt32Type>::try_new(keys, Arc::new(pk_values)).unwrap());
-        let mut columns = new_test_record_batch(
-            &[b"series-a", b"series-c", b"series-a"],
-            &[1000, 2000, 3000],
-            &[1, 2, 3],
-            &[OpType::Put, OpType::Put, OpType::Put],
-            &[10, 20, 30],
-        )
-        .columns()
-        .to_vec();
-        let pk_index = primary_key_column_index(columns.len());
-        columns[pk_index] = pk_column;
-        let batch = RecordBatch::try_new(build_test_flat_schema(), columns).unwrap();
-        let mut batches = SmallVec::<[RecordBatch; 4]>::new();
-        batches.push(batch);
-        assert_eq!(
-            2,
-            num_series_in(&batches),
-            "rows one and three are the same series through different dictionary indices"
-        );
-    }
-
-    /// Counting the series of a batch is the only part of handing it over that costs per row.
-    ///
-    /// The count feeds the `assigned_series` counter of `EXPLAIN VERBOSE` and nothing else: the
-    /// distributor balances partitions by rows. So a scan that does not collect detailed metrics
-    /// leaves the count at zero and pays no primary key lookup per row at all.
-    #[tokio::test]
-    async fn a_batch_handed_over_without_detailed_metrics_is_not_counted() {
-        let rows = 1000;
-        // Detailed metrics on: the count travels with the batch and is the series, not the batches.
-        let (mut senders, receivers) = new_legacy_channel_list(1, true);
-        senders
-            .send_batch(SeriesBatch::Flat(tagged_flat_series_batch(&[600, 400], 0)))
-            .await
-            .unwrap();
-        drop(senders);
-        let mut receiver = receivers.into_iter().next().unwrap().unwrap();
-        let counted = receiver.recv().await.unwrap().unwrap();
-        assert_eq!(1, counted.num_series, "one series in two record batches");
-        assert_eq!(rows, counted.num_rows(), "the row count is unaffected");
-
-        // Detailed metrics off: no series count is made, and the row count is all that is read.
-        let (mut senders, receivers) = new_legacy_channel_list(1, false);
-        senders
-            .send_batch(SeriesBatch::Flat(tagged_flat_series_batch(&[600, 400], 0)))
-            .await
-            .unwrap();
-        drop(senders);
-        let mut receiver = receivers.into_iter().next().unwrap().unwrap();
-        let uncounted = receiver.recv().await.unwrap().unwrap();
-        assert_eq!(0, uncounted.num_series, "no per-row work without metrics");
-        assert_eq!(rows, uncounted.num_rows());
     }
 
     /// Builds a [FlatSeriesBatch] of one series, one record batch per entry in `rows`, tagged in

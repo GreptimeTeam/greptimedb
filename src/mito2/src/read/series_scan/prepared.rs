@@ -246,18 +246,17 @@ fn collect_inputs(
 
 /// The work one series of this source is estimated to cost when a partition assignment weighs it.
 ///
-/// The assignment uses the coarse first-version model, series count times grid points, and both
-/// factors weigh every series of one source equally: the grid is the scan's time range, not a
-/// property of a single series, and the series count is what the source already knows. A uniform
-/// weight therefore *is* that model, and it makes the split a count-based one (grid points cancel
-/// out because they scale the whole source, and the split only compares costs within one source).
+/// The cost is the row count the series index records for the series (`__series_row_count`), summed
+/// over every index artifact the series appears in. One artifact covers one time bucket and reports
+/// only the rows of its own bucket, so the sum is the rows the query reads for that series, and that
+/// is the model the split uses: a long series weighs more than a short one, so a partition's share is
+/// a share of the rows rather than of the series count.
 ///
-/// The series index also records a per-series row count (`__series_row_count`), which the candidate
-/// batch already carries, so reading it would cost no extra I/O and would describe a long series as
-/// heavier than a short one. That is the finer model this version deliberately does not use: it
-/// would make the assignment depend on per-series sample counts, which the coarse model rejects.
-/// Switching to it means overriding [`PreparedSeriesSource::series_cost`] per ordinal with that
-/// column and nothing else.
+/// The row count is a column of the candidate batch the index already returned, so reading it costs
+/// no extra I/O. The sum is built once while the source is prepared ([`Self::cost`] and
+/// [`Self::costed_by`] say how repeats are handled) and reported per ordinal by
+/// [`PreparedSeriesSource::series_cost`], so every partition divides the same copy instead of
+/// rebuilding it.
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
