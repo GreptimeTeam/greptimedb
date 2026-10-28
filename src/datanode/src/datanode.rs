@@ -466,8 +466,8 @@ impl DatanodeBuilder {
     /// object store it contains, unless `probe_on_startup` is disabled.
     ///
     /// The probe fails the build when a store rejects any of the operations the
-    /// engines and the WAL rely on, so a misconfigured storage surfaces here instead
-    /// of failing on the first write.
+    /// engines rely on, so a misconfigured storage surfaces here instead of failing
+    /// on the first write.
     pub async fn build_object_store_manager(
         cfg: &StorageConfig,
         node_id: u64,

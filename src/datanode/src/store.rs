@@ -101,9 +101,9 @@ const PROBE_DIR: &str = ".greptime_probe";
 /// store makes on top of its 30s request timeout.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// The maximum random delay before a probe starts. It is on the order of one
-/// healthy probe (a few round trips), so providers that share an object storage are
-/// spread out instead of starting together and startup waits at most this delay.
+/// The maximum random delay before a probe starts. It is short enough that startup
+/// waits at most this delay, and it spreads out the probes of providers that share
+/// an object storage.
 const PROBE_STAGGER: Duration = Duration::from_millis(500);
 
 /// The budget of the best-effort cleanup after a timed-out probe, kept short so an
@@ -130,8 +130,8 @@ fn probe_object_key(prefix: &str) -> String {
     format!("{prefix}/probe")
 }
 
-/// Checks that `store` supports the operations the storage engines and the WAL rely
-/// on: write, read, read-modify-write, list and delete.
+/// Checks that `store` supports the operations the storage engines rely on: write,
+/// read, overwrite, list and delete.
 ///
 /// The probe object is removed before returning, after a failed step too. A caller
 /// that abandons the check early must call [`remove_probe_object`].
@@ -152,8 +152,8 @@ pub(crate) async fn probe_object_store(
             })?;
         verify_content(store, name, &key, PROBE_CONTENT).await?;
 
-        // Object stores cannot append in place, so the engines and the WAL read the
-        // object, append to it and overwrite it; this exercises that path.
+        // Object stores cannot append in place, so this reads the object, appends to
+        // it and overwrites it, exercising an overwrite of an existing object.
         let mut content = store
             .read(&key)
             .await
