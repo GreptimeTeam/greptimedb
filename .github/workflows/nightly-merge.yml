@@ -1,0 +1,138 @@
+# Setup and behavior: .github/nightly-merge.md
+name: Nightly Merge
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+  schedule:
+    # Hourly from 02:10 through 08:10 Asia/Shanghai (UTC+8), inclusive.
+    # GitHub may delay scheduled runs.
+    - cron: '10 0,18-23 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: List eligible PRs without adding them to the merge queue
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  sync-label:
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+      issues: write
+    concurrency:
+      group: nightly-merge-label-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      # No checkout: PR contents are untrusted data, never executable code.
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.pull_request.number;
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
+            const selected = /^- \[[xX]\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.test(pr.body || '');
+            const label = 'merge nightly';
+            const labeled = pr.labels.some(item => item.name === label);
+            if (selected && !labeled) {
+              await github.rest.issues.addLabels({ owner, repo, issue_number, labels: [label] });
+            } else if (!selected && labeled) {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: label });
+            }
+
+  enqueue:
+    if: github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: nightly-merge-enqueue
+      cancel-in-progress: false
+    steps:
+      # Reuses the automation credential used by backport and compat updates.
+      # A PAT (or App token) lets subsequent merge_group workflows run.
+      - uses: actions/github-script@v7
+        env:
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        with:
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const dryRun = process.env.DRY_RUN === 'true';
+            const candidates = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: 'open', labels: 'merge nightly',
+              sort: 'created', direction: 'asc', per_page: 100
+            });
+            const rows = [];
+            let enqueued = 0;
+            for (const candidate of candidates) {
+              if (!candidate.pull_request || enqueued >= 5) continue;
+              const number = candidate.number;
+              try {
+                // Fetch current body/labels, not the earlier list snapshot.
+                const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+                if (current.state !== 'open' || current.draft || current.base.ref !== 'main' ||
+                    !current.labels.some(label => label.name === 'merge nightly') ||
+                    !/^- \[[xX]\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.test(current.body || '')) {
+                  rows.push([String(number), 'Skipped: not opted in, draft, closed, or not targeting main']);
+                  continue;
+                }
+                const { repository: { pullRequest: pr } } = await github.graphql(`
+                  query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        id headRefOid reviewDecision mergeStateStatus
+                        mergeQueueEntry { id }
+                        autoMergeRequest { enabledAt }
+                      }
+                    }
+                  }`, { owner, repo, number });
+                if (pr.mergeQueueEntry || pr.autoMergeRequest ||
+                    pr.reviewDecision !== 'APPROVED' || pr.mergeStateStatus !== 'CLEAN') {
+                  rows.push([String(number), 'Skipped: already queued/auto-merge enabled, or not approved and clean']);
+                  continue;
+                }
+                let cursor = null;
+                let unresolved = false;
+                do {
+                  const { repository: { pullRequest: { reviewThreads } } } = await github.graphql(`
+                    query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                      repository(owner: $owner, name: $repo) {
+                        pullRequest(number: $number) {
+                          reviewThreads(first: 100, after: $cursor) {
+                            nodes { isResolved }
+                            pageInfo { hasNextPage endCursor }
+                          }
+                        }
+                      }
+                    }`, { owner, repo, number, cursor });
+                  unresolved = reviewThreads.nodes.some(thread => !thread.isResolved);
+                  cursor = reviewThreads.pageInfo.hasNextPage ? reviewThreads.pageInfo.endCursor : null;
+                } while (cursor && !unresolved);
+                if (unresolved) {
+                  rows.push([String(number), 'Skipped: unresolved review threads']);
+                  continue;
+                }
+                if (!dryRun) {
+                  // GitHub enforces branch rules; never bypass or enable auto-merge.
+                  await github.graphql(`
+                    mutation($id: ID!, $sha: GitObjectID!) {
+                      enqueuePullRequest(input: {pullRequestId: $id, expectedHeadOid: $sha}) {
+                        mergeQueueEntry { id }
+                      }
+                    }`, { id: pr.id, sha: pr.headRefOid });
+                }
+                enqueued++;
+                rows.push([String(number), dryRun ? 'Would enqueue' : 'Enqueued']);
+              } catch (error) {
+                core.warning(`PR #${number}: ${error.message}`);
+                rows.push([String(number), 'Failed: see workflow logs']);
+                core.setFailed('Some PRs could not be processed; see workflow logs.');
+              }
+            }
+            await core.summary.addHeading(dryRun ? 'Nightly merge (dry run)' : 'Nightly merge')
+              .addTable([['PR', 'Result'], ...rows]).write();

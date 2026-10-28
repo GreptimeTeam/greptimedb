@@ -75,7 +75,7 @@ jobs:
         with:
           node-version: 24
       - name: Run Node GitHub script tests
-        run: node --test .github/scripts/query-regression-comment.test.cjs
+        run: node --test .github/scripts/query-regression-comment.test.cjs .github/scripts/tests/nightly-merge.test.cjs
       - name: Setup uv
         uses: astral-sh/setup-uv@v3
         with:
