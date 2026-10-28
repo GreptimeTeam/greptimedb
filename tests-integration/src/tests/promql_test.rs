@@ -4744,6 +4744,78 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
     }
 }
 
+/// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
+/// statement.
+///
+/// The multi-input route skips the aggregate split, and the split is what refuses a tree the runtime
+/// cannot run. The native node is chosen while planning the logical plan, so a refusal the physical
+/// layer raises later is an error the statement reports, not a fall back - which would turn a query
+/// the existing plan answers into a failure. `quantile` is outside the eight complete kinds the
+/// runtime computes, and a grouping by a value field needs a per-point adapter it does not have, so
+/// both are checked here on the shape that would otherwise reach the node: two aggregates, one per
+/// logical table of one physical table, which is the multi-input case.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_tree_the_runtime_cannot_execute() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_unexecutable_tree",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_unexec_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_unexec_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_unexec_phy');
+        CREATE TABLE native_unexec_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_unexec_phy');
+        INSERT INTO native_unexec_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_unexec_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        // `quantile` computes a value the eight complete kinds do not, so the runtime refuses it.
+        "quantile(0.5, native_unexec_demo) / sum(native_unexec_other)",
+        // The outer `count` clears the labels the inner grouping writes, so no column check stops
+        // this one: the refusal is the grouping by a value field, which the runtime has no adapter
+        // for.
+        "count(count by (val) (native_unexec_demo)) / sum(native_unexec_other)",
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+        );
+
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "{query}: a tree the runtime cannot execute must keep the existing plan"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline it instead of planning a node the runtime refuses"
+        );
+    }
+}
+
 /// OTLP delta temporality on the public TQL route: a `delta`-marked series answers the raw sample
 /// sum (10 + 10 = 20) while a cumulative series with the same samples answers 0. The fused node
 /// computes one cumulative window for every series, so it must decline a marker-bearing table

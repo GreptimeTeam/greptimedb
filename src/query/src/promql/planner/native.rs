@@ -42,12 +42,14 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
+use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{MapOp, NativeExpr, NativeNode, NativeType, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
@@ -629,6 +631,23 @@ impl PromPlanner {
         // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
         // such a tree keeps its one-selector-or-decline behaviour, unchanged.
         let multi_input = selectors.len() > 1 && logical_ids_differ;
+        // A multi-input tree skips the split above, and the split is what refuses a tree the runtime
+        // cannot execute: `check_cut` declines a `quantile` and a grouping by a value field. The node
+        // is chosen while planning the logical plan, so a refusal the physical layer raises later is
+        // an error the statement reports rather than a fall back - which would turn a query the
+        // existing plan answers into a failure. Ask the runtime here instead, with the same
+        // construction the physical layer validates by, and keep the existing plan for whatever it
+        // refuses. Doing it this way is what makes the check cover every refusal the runtime has,
+        // including ones this planner does not know about.
+        if multi_input
+            && NativeExecutionState::try_new(
+                &compiled.tree,
+                Arc::new(UnboundedMemoryPool::default()),
+            )
+            .is_err()
+        {
+            return Ok(None);
+        }
         if !per_partition && !multi_input {
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
