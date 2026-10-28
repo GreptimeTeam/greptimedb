@@ -21,8 +21,8 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeProperties, NativeTree, NativeType, needs_single_execution,
+    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp,
+    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType, needs_single_execution,
     needs_single_execution_in, no_label_sets, preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -31,7 +31,9 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
 
 // The tree builders below are `pub(crate)` because the rewrite in [`canonicalize`] is proved with
 // the trees they build, rather than with a second set of fixtures that could drift from these.
@@ -340,6 +342,15 @@ fn matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
     BinaryMatching {
         op,
         return_bool,
+        ..add()
+    }
+}
+
+/// `on(host)` one-to-one, the match a caller writes when it means to pair series by a label set of
+/// its own rather than by the canonical keys a placement groups by.
+fn on_host() -> BinaryMatching {
+    BinaryMatching {
+        labels: MatchingLabels::On(vec!["host".into()]),
         ..add()
     }
 }
@@ -1556,11 +1567,15 @@ fn only_a_whole_vector_tree_needs_one_execution() {
         scalar_on(1.0, Arc::clone(&shared)),
         rate()
     )));
-    assert!(!needs_single_execution(&binary(rate(), rate())));
     assert!(!needs_single_execution(&aggregate(
         rate(),
         AggregateStage::Partial
     )));
+    // `rate(a) + rate(b)` is a match, not a broadcast, so it is *not* per-series: it pairs the two
+    // sides' series by label, and with no boundary facts there is no proof that one execution holds
+    // both. This answered `false` while a match was decided by its sides alone, which is the gap the
+    // match's own co-location proof closes.
+    assert!(needs_single_execution(&binary(rate(), rate())));
 
     // `topk(1, rate(x[5m]))`, `sort(rate(x[5m]))` and `limitk(1, rate(x[5m]))` read every series
     // against the others, as does a complete aggregate.
@@ -1675,6 +1690,161 @@ fn a_merge_needs_one_execution_only_when_the_pieces_are_not_proved_co_located() 
         &folded,
         &[proven_in_one_execution()]
     ));
+}
+
+/// The reported shape: one source read twice, a canonical merge over each occurrence, and a match
+/// over the two merges.
+///
+/// `Merge(Input(0))` on both sides is a tree the native API accepts - `collect_source_schemas` takes
+/// the same `source_index` in several leaves - and a per-canonical-key placement proves each
+/// *canonical* label set whole, which is what each merge needs and is not what the match needs. With
+/// `{host="h", zone="a"}` and `{host="h", zone="b"}` under two canonical owners, each owner holds one
+/// series per side, matches them locally, and the whole-vector `on(host)` duplicate-series check
+/// (`vector_match`) never runs over the real group: a silently wrong answer where an error is owed.
+///
+/// Before the fix this answered `false`: both sides were `ByCanonicalKey`, which the match arm took
+/// as a proof of its own co-location because the arm asked only what each side needs on its own.
+#[test]
+fn a_match_over_two_canonical_key_merges_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+
+    assert!(
+        needs_single_execution_in(&matched(), &[proven_by_key()]),
+        "an `on(host)` match pairs by `host`, and a canonical key is not that key"
+    );
+
+    // Each side alone is the case the merge already settles: one merge over a per-key placement stays
+    // in its owner partition, so the `true` above is the match's requirement and not the merges'.
+    let side = || merge_over(input_on(Arc::clone(&shared)));
+    assert!(!needs_single_execution_in(&side(), &[proven_by_key()]));
+}
+
+/// The same match in an execution that holds every series there is: both sides are already here, so
+/// the match needs nothing beyond it and the tree keeps running as the one execution it is.
+#[test]
+fn a_match_over_two_merges_in_one_execution_stays_parallel() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+
+    assert!(
+        !needs_single_execution_in(&matched(), &[proven_in_one_execution()]),
+        "one execution already pairs every series of the `on(host)` group"
+    );
+}
+
+/// A set operation matches two vectors the same way a binary one does, so the boundary answers the
+/// same way for it: `ByCanonicalKey` is not a matching-key proof, and one execution needs no proof.
+#[test]
+fn a_set_over_two_canonical_key_merges_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let set = || NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(merge_over(input_on(Arc::clone(&shared)))),
+            right: Box::new(merge_over(input_on(Arc::clone(&shared)))),
+            op: BoundSetOp {
+                op: SetOp::Or,
+                labels: MatchingLabels::On(vec!["host".into()]),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+
+    assert!(
+        needs_single_execution_in(&set(), &[proven_by_key()]),
+        "`or on(host)` pairs by `host`, and a canonical key is not that key"
+    );
+    assert!(
+        !needs_single_execution_in(&set(), &[proven_in_one_execution()]),
+        "one execution already pairs every series of the `on(host)` group"
+    );
+}
+
+/// A broadcast is not a match: it pairs a vector with one value, so no label set is paired on the
+/// constant's side and nothing about matching keys has to be proved for it. The fix for the match
+/// must therefore not collapse `x > 0` or `x * 2` into one execution.
+#[test]
+fn a_scalar_broadcast_over_a_canonical_key_vector_stays_parallel() {
+    let shared = grid(0, 60_000, 4);
+    let by_key = [proven_by_key()];
+    let vector = || input_on(Arc::clone(&shared));
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+
+    // `x > 0`, `x * 2` and the same two written with the constant on the left, all over a vector side
+    // placed by canonical key: each is one value against each series, not a pair of series.
+    for node in [
+        binary_with(vector(), constant(), matching(BinaryOp::Gt, false)),
+        binary_with(vector(), constant(), matching(BinaryOp::Mul, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Lt, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Mul, false)),
+    ] {
+        assert!(
+            !needs_single_execution_in(&node, &by_key),
+            "a broadcast reaches each series of its vector side on its own:\n{node:?}"
+        );
+    }
+}
+
+/// A merge is grouped by the canonical label set, so a per-key boundary is exactly the proof it needs
+/// and it must keep staying within the owner partitions the fix above does not touch.
+#[test]
+fn a_merge_over_canonical_keys_still_keeps_the_owner_partitions() {
+    let shared = grid(0, 60_000, 4);
+    let merge = merge_over(input_on(Arc::clone(&shared)));
+
+    assert!(
+        !needs_single_execution_in(&merge, &[proven_by_key()]),
+        "a canonical key is what a merge groups by, so it is a proof of a merge's input"
+    );
+    // The contrast that keeps the assertion above from being vacuous: the same merge over a scan that
+    // proves nothing about canonical keys still needs one execution.
+    assert!(needs_single_execution_in(&merge, &[scan_pieces()]));
+}
+
+/// A per-series wrapper composes with the match's requirement by recursing into it: `rate` over the
+/// match needs what the match needs and adds no requirement of its own, so the answer is the match's.
+#[test]
+fn a_window_over_a_match_hands_the_matches_requirement_up_unchanged() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+    // `rate(<match>)`, with a name-dropping function, so the window itself changes the label sets the
+    // match pairs and cannot add a co-location proof of its own either way.
+    let windowed = || {
+        window_with(
+            matched(),
+            RangeFunction::Rate,
+            Some(Arc::clone(&shared)),
+            Arc::clone(&shared),
+        )
+    };
+
+    // One execution holds both sides, so the match is whole there and the window over it needs
+    // nothing more.
+    assert!(!needs_single_execution_in(
+        &windowed(),
+        &[proven_in_one_execution()]
+    ));
+    // Placed by canonical key, the window cannot make the match whole: what it hands on is the
+    // match's requirement, one execution.
+    assert!(needs_single_execution_in(&windowed(), &[proven_by_key()]));
 }
 
 /// A tree whose only whole-vector-looking node is a merge is placed per partition once the boundary

@@ -743,9 +743,16 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
 /// as the canonical-merge rewrite does, asks [`needs_single_execution_in`].
 ///
 /// Everything else recurses into its children. A window (`rate`, `sum_over_time`, ...), a map, an
-/// instant selection and a timestamp compute one series from one series' rows, and a binary or set
-/// operation is decided by its sides, so a tree built from those still answers each of its series on
-/// its own: splitting it across scan partitions splits the answer rather than an operator's view.
+/// instant selection and a timestamp compute one series from one series' rows, and a binary
+/// operation that broadcasts a constant is decided by its vector side alone, so a tree built from
+/// those still answers each of its series on its own: splitting it across scan partitions splits the
+/// answer rather than an operator's view.
+///
+/// A binary or set operation that *matches* two vectors is not decided by its sides alone, though.
+/// It pairs the series of one side with the series of the other that shares the match's label set,
+/// which is a read across the whole vector on both sides, and with no boundary facts at hand a match
+/// has no proof that one execution holds both. So it needs one execution, which is the conservative
+/// answer for the same reason a merge gets it here.
 ///
 /// This is about placement, not admission: it says how many executions the tree needs, not whether
 /// it may run over part of the metric ([`reads_across_series`] answers that).
@@ -768,6 +775,17 @@ pub fn needs_single_execution(node: &NativeNode) -> bool {
 /// hand what reads it a partial series as a canonical one. Forcing one execution for a merge that
 /// does not need it is the other error: it collapses the owner partitions a canonical repartition
 /// just created back into one.
+///
+/// A *match* needs something else. A `Binary` over two vectors and a `Set` pair each series of one
+/// side with the series of the other that shares the label set the modifiers name, and a whole match
+/// owes an error when one side holds two series of that label set. Canonical-key co-location does
+/// not prove that: the keys it proves whole are the canonical label sets, and the match's label set
+/// is the caller's. Two series that agree on `on(host)` can differ in every other label and sit
+/// under two canonical keys, so two owner partitions can each hold one series of that match group,
+/// pair them locally, and never run the duplicate-series check over the real group: the error a
+/// whole match reports is silently not reported. A match therefore needs one execution unless both
+/// sides are proven to sit in it ([`matching_co_located`]). A broadcast is not a match, so a
+/// constant's side is not asked for that proof.
 pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
@@ -778,8 +796,28 @@ pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties
         NativeExpr::Aggregate { input, op } => {
             op.stage == AggregateStage::Complete || needs_single_execution_in(input, boundary)
         }
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            needs_single_execution_in(left, boundary) || needs_single_execution_in(right, boundary)
+        // A match pairs the series of both sides by the label set its modifiers name, which is not
+        // the canonical key a placement proves whole ([`matching_co_located`]), so it needs one
+        // execution unless both sides are already in it. A broadcast is not a match: it pairs a
+        // vector with one value, so the constant's side holds no series to pair and proves nothing it
+        // was asked for - `x > 0` and `x * 2` stay as parallel as the vector side.
+        NativeExpr::Binary { left, right, .. } => {
+            let both_vectors = matches!(
+                (&left.output, &right.output),
+                (NativeType::Samples(_), NativeType::Samples(_))
+            );
+            needs_single_execution_in(left, boundary)
+                || needs_single_execution_in(right, boundary)
+                || (both_vectors
+                    && !(matching_co_located(left, boundary)
+                        && matching_co_located(right, boundary)))
+        }
+        // A set operation keeps samples of two evaluated vectors, so both sides are always matched:
+        // `validate` refuses a scalar on either side and there is no broadcast form of it.
+        NativeExpr::Set { left, right, .. } => {
+            needs_single_execution_in(left, boundary)
+                || needs_single_execution_in(right, boundary)
+                || !(matching_co_located(left, boundary) && matching_co_located(right, boundary))
         }
         NativeExpr::Vector { .. } => true,
         // A merge needs every piece of one canonical label set, and not every label set in one
@@ -802,11 +840,37 @@ pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties
 /// fragment of one of them") is what a merge needs, and anything else - `Unknown` in particular,
 /// which is all a raw scan proves, since it partitions by storage `read_key` and not by canonical
 /// key - leaves the pieces spread over partitions.
+///
+/// This is a merge's proof and only a merge's, because a merge groups by exactly the key it names: a
+/// canonical label set. It proves nothing about the label set a *match* pairs by
+/// ([`matching_co_located`]), which is the modifiers' and not the canonical key's, so a match that
+/// read this answer would take a per-key placement for a whole one.
 fn pieces_co_located(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
     matches!(
         node.properties(boundary).owner,
         CanonicalOwner::SinglePartition | CanonicalOwner::ByCanonicalKey
     )
+}
+
+/// Whether `node`'s series all sit in this one execution, so a label match over them pairs every
+/// series it should.
+///
+/// A match pairs the series of two sides by the label set its own modifiers name (`on(host)`,
+/// `ignoring(zone)`, ...), and a whole match owes an error when one side holds two series of that
+/// label set. Only an execution holding every series it could pair can answer that, which is what
+/// `SinglePartition` states and what nothing weaker states.
+///
+/// `ByCanonicalKey` in particular does not, and that is the whole point of this predicate being
+/// separate from [`pieces_co_located`]: it proves the canonical label sets its keys name are whole,
+/// and a match does not read those keys. `{host="h", zone="a"}` and `{host="h", zone="b"}` are two
+/// canonical label sets owned by two partitions, they are one `on(host)` match group, and each owner
+/// would pair its own series against its own and report no duplicate - the answer a whole match
+/// refuses.
+///
+/// The facts are read off `node` rather than off `node`'s children because what has to be whole is
+/// what the match pairs, which is what `node` answers: the same derivation every merge proof uses.
+fn matching_co_located(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
+    node.properties(boundary).owner == CanonicalOwner::SinglePartition
 }
 
 /// Whether `node` is a supported child of a [`NativeExpr::Merge`], and the evaluated vector it hands
