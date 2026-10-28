@@ -573,21 +573,20 @@ impl NativeNode {
             // A selection answers one series from one series' rows and keeps the label set it read,
             // so the whole series stays one stream under that label set.
             //
-            // The selection that reports the sample's time instead of its value does not:
-            // `instant_eval::timestamp_of_selection` rewrites the labels with
-            // `map::drop_metric_name` before it builds the series, so `a{job="x"}` and `b{job="x"}`
-            // both arrive as `{job="x"}` and the output identity is not the input's. Nothing the
-            // input proved about which series share a label set survives that, so the facts are a
-            // rewrite's.
+            // The selection that reports the sample's *time* keeps the label set it read only when
+            // the time it reports is the info series' own (`InfoTimestamp`, which `info` reads): the
+            // runtime files that under every label of the series. `Timestamp` (`timestamp(x)`)
+            // drops the metric name before it builds the series, so `a{job="x"}` and `b{job="x"}`
+            // both arrive as `{job="x"}` and nothing the input proved about which series share a
+            // label set survives that.
             NativeExpr::Instant { input, op } => {
                 let input = input.properties(boundary);
-                // `Sample` answers the label set the selection read. `Timestamp` and
-                // `InfoTimestamp` both report a time instead of the value and rewrite the labels on
-                // the way, so the facts are a rewrite's.
-                if matches!(op.value, InstantValue::Sample) {
-                    input
-                } else {
-                    input.label_sets_of_its_own()
+                // `Sample` answers the label set the selection read, and so does `InfoTimestamp`.
+                // `Timestamp` reports a time instead of the value and rewrites the labels on the
+                // way, so its facts are a rewrite's.
+                match op.value {
+                    InstantValue::Sample | InstantValue::InfoTimestamp => input,
+                    InstantValue::Timestamp => input.label_sets_of_its_own(),
                 }
             }
             // A window folds a range of one series' samples and hands the answer over as that
@@ -746,11 +745,13 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
 /// `Final` aggregate's own stage is not: its contract is exactly the part it was handed, so only what
 /// sits below it is followed.
 ///
-/// This form proves nothing about where the sources below the tree sit, so it answers as the
-/// conservative reading of [`needs_single_execution_in`]: a merge in the tree counts as needing every
-/// partition. The native route's placement (`NativePlacement::of` in `promql::planner`) and the
-/// region-side admission ask this and both have no boundary facts at hand; a caller that has them,
-/// as the canonical-merge rewrite does, asks [`needs_single_execution_in`].
+/// This form passes an empty boundary, so what it asks of a merge is what
+/// [`needs_single_execution_in`] answers for one: the merge's own need, which is its input's. Whether
+/// a merge can be placed at all is [`merges_are_placeable_in`]'s question, and it is not this one -
+/// it is asked by a caller that knows which execution it is placing the tree in. The native route's
+/// placement (`NativePlacement::of` in `promql::planner`) and the region-side admission ask this and
+/// both have no boundary facts at hand; a caller that has them, as the canonical-merge rewrite does,
+/// asks [`needs_single_execution_in`].
 ///
 /// Everything else recurses into its children. A window (`rate`, `sum_over_time`, ...), a map, an
 /// instant selection and a timestamp compute one series from one series' rows, and a binary
@@ -761,8 +762,7 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
 /// A binary or set operation that *matches* two vectors is not decided by its sides alone, though.
 /// It pairs the series of one side with the series of the other that shares the match's label set,
 /// which is a read across the whole vector on both sides, and with no boundary facts at hand a match
-/// has no proof that one execution holds both. So it needs one execution, which is the conservative
-/// answer for the same reason a merge gets it here.
+/// has no proof that one execution holds both. So it needs one execution.
 ///
 /// This is about placement, not admission: it says how many executions the tree needs, not whether
 /// it may run over part of the metric ([`reads_across_series`] answers that).
@@ -776,15 +776,12 @@ pub fn needs_single_execution(node: &NativeNode) -> bool {
 /// `boundary` is the same slice [`NativeNode::properties`] takes: the facts of the fused inputs the
 /// tree was compiled over, indexed by `source_index`.
 ///
-/// A `Merge` needs every piece of ONE canonical label set, which is where it differs from
-/// [`reads_across_series`]: there a merge answers `true` because it reads series the rest of the
-/// metric also holds. One execution already holds every piece when the boundary proves the sources
-/// below the merge are co-located ([`pieces_co_located`]). When it does not prove that, the merge
-/// does need every partition: a scan partitions by storage `read_key` and not by canonical key, so
-/// pieces of one canonical label set sit in different partitions and a merge in each of them would
-/// hand what reads it a partial series as a canonical one. Forcing one execution for a merge that
-/// does not need it is the other error: it collapses the owner partitions a canonical repartition
-/// just created back into one.
+/// A `Merge` needs every piece of ONE canonical label set, and one execution is one way of having
+/// them - but which way applies is not this predicate's question. A merge's own need is therefore
+/// its input's ([`NativeExpr::Merge`] below), and whether the execution this tree is placed in can
+/// answer a merge at all is [`merges_are_placeable_in`], asked by the caller that knows the
+/// placement: a canonical merge is right in a single execution, and in a per-partition one only
+/// where the boundary proves the pieces already arrive together ([`pieces_co_located`]).
 ///
 /// A *match* needs something else. A `Binary` over two vectors and a `Set` pair each series of one
 /// side with the series of the other that shares the label set the modifiers name, and a whole match
@@ -840,10 +837,57 @@ pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties
         }
         NativeExpr::Vector { .. } => true,
         // A merge needs every piece of one canonical label set, and not every label set in one
-        // execution: given the pieces it answers one series per label set. It is therefore placed
-        // per partition exactly when the pieces already arrive together.
+        // execution: given the pieces it answers one series per label set. One execution provides
+        // that for any input; a per-partition execution provides it only when the pieces are
+        // co-located. Which of the two applies is not this predicate's question: it answers what the
+        // tree needs from an execution, and a merge's own need is its input's. Whether the merge can
+        // be *placed* here is `merges_are_placeable_in`, asked by the caller that knows the
+        // placement.
+        NativeExpr::Merge { input } => needs_single_execution_in(input, boundary),
+    }
+}
+
+/// Whether every merge in `node` can be answered by an execution placed as `co_located` says.
+///
+/// `co_located` is what the caller already decided about the execution this tree will run in:
+/// `true` when the execution reads every input partition, so every piece of every label set is
+/// present and a merge is always placeable; `false` when it reads one partition, so a merge is
+/// placeable only where [`pieces_co_located`] proves the pieces arrive together.
+///
+/// This is deliberately not part of [`needs_single_execution_in`]: a merge that cannot be placed
+/// is a tree this route does not support here, not a tree that needs one execution. Collapsing the
+/// partitions to make it work would take the caller's parallelism away to serve a shape nobody
+/// proved was placeable.
+pub fn merges_are_placeable_in(
+    node: &NativeNode,
+    boundary: &[NativeProperties],
+    co_located: bool,
+) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) => true,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => merges_are_placeable_in(input, boundary, co_located),
+        // A merge reads the pieces of one canonical label set and answers one series of it, so it is
+        // placeable where the execution holds every piece. The recursion does not stop here: a merge
+        // of a merge has to be placeable at every level, and a label-rewriting node between two of
+        // them rewrites the identity the inner proof was about, so the inner merge can be the one
+        // that has no proof left.
         NativeExpr::Merge { input } => {
-            needs_single_execution_in(input, boundary) || !pieces_co_located(input, boundary)
+            (co_located || pieces_co_located(input, boundary))
+                && merges_are_placeable_in(input, boundary, co_located)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            merges_are_placeable_in(base, boundary, co_located)
+                && merges_are_placeable_in(info, boundary, co_located)
+        }
+        NativeExpr::Aggregate { input, .. } | NativeExpr::Vector { input, .. } => {
+            merges_are_placeable_in(input, boundary, co_located)
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            merges_are_placeable_in(left, boundary, co_located)
+                && merges_are_placeable_in(right, boundary, co_located)
         }
     }
 }
@@ -1274,8 +1318,16 @@ impl NativeNode {
                     )));
                 };
                 // The kernel reads the info side's values as sample times, which only an instant
-                // selection that reports them produces.
-                let NativeExpr::Instant { op, .. } = &info.expr else {
+                // selection that reports them produces. A canonical merge above that selection only
+                // collects the pieces of one label set into one series, so it hands the times on
+                // unchanged and the check looks through it. Nothing else is looked through: an
+                // evaluated value vector is not a set of sample times, and reading one as times
+                // would compare a sample's value against another's.
+                let mut source = info.as_ref();
+                while let NativeExpr::Merge { input } = &source.expr {
+                    source = input;
+                }
+                let NativeExpr::Instant { op, .. } = &source.expr else {
                     return Err(invalid(
                         "info reads its info series from an instant selection",
                     ));

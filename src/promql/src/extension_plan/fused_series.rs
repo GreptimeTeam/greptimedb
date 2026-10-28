@@ -87,8 +87,8 @@ use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, CanonicalOwner, Grouping, NativeExpr, NativeNode,
-    NativeProperties, NativeTree, NativeType, needs_single_execution_in, reads_across_series,
+    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeProperties, NativeTree,
+    NativeType, merges_are_placeable_in, needs_single_execution_in, reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
@@ -746,13 +746,14 @@ fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
 ///
 /// This is the boundary [`NativeNode::properties`] takes, so it is read by the merge and by every
 /// node above it that follows the ownership. The one fact this node can establish is which node
-/// produced a partition: a child that places pieces by canonical key holds every piece of the label sets
-/// it names and no other output holds a fragment of one of them
-/// ([`CanonicalOwner::ByCanonicalKey`]), because that node routes each chunk by the canonical label
-/// set of the series it carries. Every other child proves nothing - a scan partitions by storage
-/// `read_key`, and a node that reorders without claiming a relation says nothing about which series
-/// share a label set - so it is [`CanonicalOwner::Unknown`] and a merge above it keeps one
-/// execution.
+/// produced a partition: a child that places pieces by canonical key holds every piece of the label
+/// sets it names and no other output holds a fragment of one of them
+/// ([`ByCanonicalKey`](CanonicalOwner::ByCanonicalKey)), because that node routes each chunk by the
+/// canonical label set of the series it carries. Every other child proves nothing - a scan
+/// partitions by storage `read_key`, and a node that reorders without claiming a relation says
+/// nothing about which series share a label set - so it is
+/// [`Unknown`](CanonicalOwner::Unknown), and a merge above it is not placeable in a per-partition
+/// execution ([`merges_are_placeable_in`]).
 ///
 /// The declared partitioning is not the proof, and this is the point to be exact about.
 /// `UnknownPartitioning(M)` is precisely "this node promises nothing about where a key lives": it is
@@ -776,8 +777,9 @@ fn input_boundary(
 ) -> Vec<NativeProperties> {
     // What a fused input proves on its own: the pieces of a metric one scan partition holds.
     // Nothing here places those pieces by canonical key, so nothing is claimed about ownership - a
-    // merge over what this boundary describes therefore needs every partition, which is the
-    // conservative answer this node gives every tree it cannot prove more about.
+    // merge over what this boundary describes is therefore not placeable in a per-partition
+    // execution, which is what [`merges_are_placeable_in`] is asked and what a single execution
+    // provides without needing a proof.
     inputs
         .iter()
         .map(|_| NativeProperties::source_pieces())
@@ -1026,15 +1028,49 @@ impl FusedSeriesExec {
     /// More than one source is one execution: its operands are matched against each other, so a
     /// partition-by-partition run would pair each side's series with only its own partition's. A
     /// single-source tree is asked what it reads ([`needs_single_execution_in`]) with the facts
-    /// [`input_boundary`] reads off the child: a whole-vector operator is one execution, and a merge
-    /// is one only when the child does not already hand every piece of a label set over in the
-    /// partition it names. Otherwise every series is an independent answer and one execution per scan
-    /// partition is the parallelism that keeps those answers cheap.
+    /// [`input_boundary`] reads off the child: a whole-vector operator is one execution. A merge is
+    /// not asked for one - what it needs is its input's, because whether a merge can be placed at
+    /// all is a question about the execution, not a reason to shrink the execution to one. That
+    /// question is [`merges_are_placeable_in`], asked by [`Self::reject_unplaceable_merges`] below.
     fn requires_single_execution(
         inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
         tree: &NativeTree,
     ) -> bool {
         inputs.len() > 1 || needs_single_execution_in(tree.root(), &input_boundary(inputs))
+    }
+
+    /// Refuses a tree whose merges the execution this node is about to run cannot answer.
+    ///
+    /// A merge collects every piece of one canonical label set and answers one series of it. An
+    /// execution that reads every input partition has all of them; one that reads a single partition
+    /// has them only where the boundary proves the pieces arrive together. Nothing else may make a
+    /// merge work, and collapsing this node to one execution to serve a tree nobody proved was
+    /// placeable is exactly that error: it takes the caller's parallelism away instead of declining
+    /// the shape. The planner declines such a tree before it is built
+    /// (`PromPlanner::try_plan_native_fused_with_context`), so this only fires for a plan that was
+    /// built by hand or rebuilt over a different child.
+    fn reject_unplaceable_merges(
+        single_execution: bool,
+        inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
+        tree: &NativeTree,
+    ) -> DataFusionResult<()> {
+        // The one case a per-partition execution is not a part of its input is an input of one
+        // partition: then the partition it reads *is* every partition, and every piece of every
+        // label set is in it. That is not a proof the child gave but a fact about the boundary, and
+        // it is why this asks the boundary facts rather than assuming they prove nothing.
+        let co_located = single_execution
+            || inputs
+                .iter()
+                .all(|(input, _, _)| input.properties().partitioning.partition_count() <= 1);
+        if merges_are_placeable_in(tree.root(), &input_boundary(inputs), co_located) {
+            return Ok(());
+        }
+        Err(DataFusionError::Plan(
+            "FusedSeries cannot place this tree's canonical merge: the execution reads one input \
+             partition and nothing proves the pieces of a canonical label set are co-located, so \
+             the merge would present one partition's fragments as a whole series"
+                .to_string(),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1160,8 +1196,11 @@ impl FusedSeriesExec {
         // One execution over every input partition, rather than one execution per partition: a tree
         // that reads the whole vector has to see every series at once, more than one source is one
         // execution because its operands are matched against each other, and otherwise what the child
-        // proves about the pieces of a label set decides.
+        // proves about the pieces of a label set decides. A merge is not one of those reasons: what a
+        // merge needs from an execution is asked below, and an execution that cannot answer it is
+        // refused rather than shrunk to one.
         let single_execution = Self::requires_single_execution(&inputs, &tree);
+        Self::reject_unplaceable_merges(single_execution, &inputs, &tree)?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(if single_execution { 1 } else { partition_count }),
@@ -1277,11 +1316,20 @@ impl ExecutionPlan for FusedSeriesExec {
                 children.len()
             )));
         }
-        let children = children
+        let children: Vec<_> = children
             .into_iter()
             .zip(&self.inputs)
             .map(|(child, (_, label_source, ordering))| (child, label_source.clone(), *ordering))
             .collect();
+        // A replaced child can take the proof away: a canonical repartition swapped for a plain
+        // multi-partition child hands the pieces of a label set to different executions again. The
+        // rebuilt node therefore asks the placement question over the children it was handed, and
+        // never inherits the answer the old ones gave.
+        Self::reject_unplaceable_merges(
+            Self::requires_single_execution(&children, &self.tree),
+            &children,
+            &self.tree,
+        )?;
         // Rebuilt rather than patched: the new child's schema is what the frame is validated
         // against, so a child that changed shape is refused instead of decoded with a stale layout.
         Ok(Arc::new(Self::build(

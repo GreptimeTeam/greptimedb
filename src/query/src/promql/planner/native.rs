@@ -49,8 +49,8 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
 use promql::native::canonicalize::insert_native_merge_inside_current_fused;
 use promql::native::plan::{
-    NativeExpr, NativeNode, NativeProperties, NativeTree, needs_single_execution,
-    reads_across_series,
+    NativeExpr, NativeNode, NativeProperties, NativeTree, merges_are_placeable_in,
+    needs_single_execution, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
@@ -597,6 +597,15 @@ impl PromPlanner {
         ) else {
             return Ok(None);
         };
+        // What the route knows about each fused input: one scan partition's pieces of the metric,
+        // read by the pass at the leaf the compiler bound to that source index. It is the whole
+        // boundary this route has, and it proves nothing about where the pieces of a label set sit.
+        let boundary = vec![NativeProperties::source_pieces(); children.len()];
+        // Whether the execution this placement runs in reads every input partition, which is the
+        // question a canonical merge turns on. A single execution reads all of them - every piece of
+        // every label set is in it - and a per-partition one reads one, where the boundary above
+        // proves no co-location at all.
+        let co_located = matches!(placement, NativePlacement::SingleExecution);
         if let NativePlacement::SplitAggregate = placement {
             // A split inserts nothing. Its prefix is per-partition per-series work and its finalize
             // already merges the state every partition exports, so a canonical merge would both
@@ -637,22 +646,26 @@ impl PromPlanner {
             )));
         }
         // What a merge may be inserted for is a property of the placement, so this is where the
-        // pass runs and nowhere else. A single execution reads every input partition at once, so
-        // the pieces of one label set arrive together and a consumer that needs the whole series
-        // can be handed a merge. A per-partition execution reads one of them, so the tree is handed
-        // over exactly as compiled: a merge there could only collect that partition's fragments and
-        // would present them as a canonical series, which is worse than no merge at all.
-        // Cross-partition aliasing therefore stays unsolved on a per-partition placement until a
-        // repartition node makes more placements single-execution.
-        let tree = if let NativePlacement::SingleExecution = placement {
-            // What the route knows about each fused input: one scan partition's pieces of the
-            // metric, read by the pass at the leaf the compiler bound to that source index.
-            let boundary = vec![NativeProperties::source_pieces(); children.len()];
+        // pass runs and nowhere else. A single execution reads every input partition at once, so the
+        // pieces of one label set arrive together and a consumer that needs the whole series can be
+        // handed a merge. A per-partition execution reads one of them, so the tree is handed over
+        // exactly as compiled: a merge there could only collect that partition's fragments and would
+        // present them as a canonical series.
+        let tree = if co_located {
             insert_native_merge_inside_current_fused(&compiled.tree, &boundary)
                 .context(DataFusionPlanningSnafu)?
         } else {
             compiled.tree
         };
+        // The tree the route hands over is then checked against the execution that will run it, and
+        // the decision belongs here rather than to the node's constructor. What must not happen is
+        // the answer this route used to give: a merge the execution cannot place turned into one
+        // execution over every input partition, which makes the shape work by taking the caller's
+        // parallelism away. A tree that carries such a merge is therefore declined, and the existing
+        // planner answers the query instead.
+        if !merges_are_placeable_in(tree.root(), &boundary, co_located) {
+            return Ok(None);
+        }
         let root_fields = tree
             .root()
             .output
@@ -1224,8 +1237,8 @@ mod tests {
     use promql::native::canonicalize::insert_native_merge_inside_current_fused;
     use promql::native::execute::{NativeExecutionState, NativeExecutor};
     use promql::native::plan::{
-        NativeExpr, NativeNode, NativeProperties, NativeTree, needs_single_execution,
-        reads_across_series,
+        NativeExpr, NativeNode, NativeProperties, NativeTree, merges_are_placeable_in,
+        needs_single_execution, reads_across_series,
     };
     use session::context::QueryContextBuilder;
 
@@ -1505,37 +1518,68 @@ mod tests {
         NativePlacement::of(tree, selectors, &[FieldSpec { name: "v0".into() }], "ts")
     }
 
+    /// The tree [`PromPlanner::try_plan_native_fused_with_context`] hands over for the *compiled*
+    /// tree `tree`, or `None` when the route declines the shape.
+    ///
+    /// This is the planner's own decision, asked in the order the planner asks it: the placement is
+    /// read off the compiled tree, the pass runs only for the placement whose execution reads every
+    /// input partition, and what is handed over is then checked against the execution that will run
+    /// it. A tree carrying a merge that execution cannot place is declined, never handed over and
+    /// never made to work by collapsing the node to one execution.
+    fn handed_over(tree: &NativeTree, selectors: usize) -> Option<NativeTree> {
+        let boundary = vec![source_pieces(); selectors];
+        let co_located = placement_of(tree, selectors) == Some(NativePlacement::SingleExecution);
+        let handed = if co_located {
+            insert_native_merge_inside_current_fused(tree, &boundary)
+                .expect("the pass keeps the tree legal")
+        } else {
+            tree.clone()
+        };
+        merges_are_placeable_in(handed.root(), &boundary, co_located).then_some(handed)
+    }
+
     /// What the route answers for `tree`, in the order
     /// [`PromPlanner::try_plan_native_fused_with_context`] applies it: the placement first, then
-    /// whether the labels the fused node declares can be derived for the tree's root.
+    /// whether the tree this placement would hand over is placeable in it, then whether the labels
+    /// the fused node declares can be derivable for that tree's root.
     ///
     /// `sources` holds the tags of each selector's scan, which the label walk reads.
     fn route_answer(tree: &NativeTree, selectors: usize, sources: &[Vec<String>]) -> &'static str {
         match placement_of(tree, selectors) {
-            Some(NativePlacement::PerPartition) => "per-partition",
             Some(NativePlacement::SplitAggregate) => "split aggregate",
-            // A single execution is handed to the fused node like any other tree, so the labels that
-            // node declares have to be derivable for its root. Nothing has taught the walk to name
-            // them for a whole-vector root, so a tree rooted at one is declined there.
-            Some(NativePlacement::SingleExecution) => match fused_output_tags(tree.root(), sources)
-            {
-                Some(_) => "single execution",
-                None => "legacy plan",
-            },
+            Some(placement) => {
+                let Some(handed) = handed_over(tree, selectors) else {
+                    return "legacy plan";
+                };
+                if placement != NativePlacement::SingleExecution {
+                    return "per-partition";
+                }
+                // A single execution is handed to the fused node like any other tree, so the labels
+                // that node declares have to be derivable for its root. Nothing has taught the walk
+                // to name them for a whole-vector root, so a tree rooted at one is declined there.
+                match fused_output_tags(handed.root(), sources) {
+                    Some(_) => "single execution",
+                    None => "legacy plan",
+                }
+            }
             None => "legacy plan",
         }
     }
 
-    /// The tree [`PromPlanner::try_plan_native_fused_with_context`] hands to the node it builds: the
-    /// compiled tree, or - when the placement is a single execution - the one the insertion pass
-    /// canonicalized.
-    fn routed_tree(query: &str) -> NativeTree {
+    /// The tree [`PromPlanner::try_plan_native_fused_with_context`] hands to the node it builds, or
+    /// `None` when the route declines `query`.
+    ///
+    /// A split inserts nothing and is handed its tree as compiled; a single execution is handed the
+    /// one the insertion pass canonicalized; a per-partition placement is handed the tree as
+    /// compiled, because a merge there could only collect one partition's fragments.
+    fn routed_tree(query: &str) -> Option<NativeTree> {
         let selectors = collected_selectors(query).len();
-        let tree = compiled_test_tree(query);
-        if placement_of(&tree, selectors) == Some(NativePlacement::SingleExecution) {
-            return passed_tree(query, selectors);
+        let compiled = compiled_test_tree(query);
+        match placement_of(&compiled, selectors) {
+            Some(NativePlacement::SplitAggregate) => Some(compiled),
+            Some(_) => handed_over(&compiled, selectors),
+            None => None,
         }
-        tree
     }
 
     /// The labels a one-selector statement's scan reports, for the label walk.
@@ -1569,7 +1613,7 @@ mod tests {
                 "`{query}`"
             );
             // A split inserts nothing, so the finalize is handed the tree as compiled.
-            let routed = routed_tree(query);
+            let routed = routed_tree(query).expect("a split is a shape the route plans");
             assert_eq!(
                 0,
                 routed.to_string().matches("Merge").count(),
@@ -1603,6 +1647,11 @@ mod tests {
     /// only collect the fragments of the partition it happens to run on - a partial merge presented
     /// as a canonical series - so the tree is handed over as compiled and cross-partition aliasing
     /// stays unsolved until a repartition node exists.
+    ///
+    /// What that costs is not the placement: the pass wraps these trees (the second half of each
+    /// case), and the route refuses to hand a merge over here instead of collapsing the node to one
+    /// execution to serve it. The tree it does hand over is the compiled one, which carries no merge
+    /// for this execution to be unable to place.
     #[test]
     fn the_insertion_pass_does_not_take_a_per_series_tree_off_the_route() {
         for query in ["rate(x[5m])", "x", "abs(x)", "x * 2"] {
@@ -1618,7 +1667,7 @@ mod tests {
                 "`{query}`"
             );
             // The placement inserts nothing, so what the node is handed is the compiled tree.
-            let routed = routed_tree(query);
+            let routed = routed_tree(query).expect("a per-series tree is what the route plans");
             assert_eq!(
                 0,
                 routed.to_string().matches("Merge").count(),
@@ -1666,8 +1715,8 @@ mod tests {
                 needs_single_execution(compiled.root()),
                 "`{query}`: the placement and the tree disagree"
             );
-            // The pass runs for this placement, and it is the only one it runs for.
-            let routed = routed_tree(query);
+            // The pass runs for this placement, which is the only one that can place its merges.
+            let routed = routed_tree(query).expect("a single execution places every merge");
             assert!(
                 routed.to_string().matches("Merge").count() >= 2,
                 "`{query}`: the single-execution tree gained no merge:\n{routed}"
@@ -1677,10 +1726,13 @@ mod tests {
                 routed.to_string(),
                 "`{query}`: the route handed over the tree as compiled"
             );
-            // The insertion leaves the placement and the labels alone.
+            // The insertion leaves the placement and the labels alone. What still needs one
+            // execution is the vector operation under the merge's input, and not the merge itself:
+            // a merge inherits what its input needs and demands nothing of its own, so the
+            // placement survives an insertion that adds one above it.
             assert!(
                 needs_single_execution(routed.root()),
-                "`{query}`: the merge took the single execution away:\n{routed}"
+                "`{query}`: the insertion took the single execution away:\n{routed}"
             );
             assert_eq!(
                 fused_output_tags(compiled.root(), &one_source_tags()),
@@ -1694,6 +1746,8 @@ mod tests {
                 route_answer(&compiled, 1, &one_source_tags()),
                 "`{query}`"
             );
+            // The insertion itself changes nothing about the route's answer: the placement and the
+            // labels are the same questions they were for the compiled tree.
             assert_eq!(
                 "legacy plan",
                 route_answer(&routed, 1, &one_source_tags()),
@@ -1822,7 +1876,7 @@ mod tests {
             placement_of(&compiled, 1),
             "{compiled}"
         );
-        let inserted = routed_tree(query);
+        let inserted = routed_tree(query).expect("a single execution places every merge");
         assert!(
             inserted.to_string().matches("Merge").count() > 0,
             "the single execution did not gain a merge:\n{inserted}"
@@ -1900,13 +1954,16 @@ mod tests {
                 "`{query}`: the placement changed\n{compiled}"
             );
             let routed = routed_tree(query);
-            let merges = routed.to_string().matches("Merge").count();
+            let merges = routed
+                .as_ref()
+                .map(|routed| routed.to_string().matches("Merge").count())
+                .unwrap_or(0);
             let answer = route_answer(&compiled, selectors, &sources);
             if placement == NativePlacement::SingleExecution {
                 // The only placement that inserts, and it is not built.
                 assert!(
                     merges > 0,
-                    "`{query}`: a single execution gained no merge:\n{routed}"
+                    "`{query}`: a single execution gained no merge:\n{routed:?}"
                 );
                 assert_eq!(
                     "legacy plan", answer,
@@ -1916,7 +1973,7 @@ mod tests {
             } else {
                 assert_eq!(
                     0, merges,
-                    "`{query}`: the {placement:?} placement inserted a merge:\n{routed}"
+                    "`{query}`: the {placement:?} placement inserted a merge:\n{routed:?}"
                 );
                 assert_ne!(
                     "legacy plan", answer,
@@ -1928,7 +1985,8 @@ mod tests {
 
     /// The pass's own insertion, kept in view from the planner's side: the window still reads its
     /// raw input and what the pass adds above it is one merge, but a per-partition placement does not
-    /// run the pass, so the route hands over the window.
+    /// run the pass, so the route hands over the window - and refuses the wrapped tree, because that
+    /// merge has no co-location proof in this execution.
     ///
     /// A merge writes no label of its own, so the shape the pass would produce declares the same tags
     /// the compiled tree declares - which is what lets the walk above stay a function of the tree.
@@ -1961,11 +2019,68 @@ mod tests {
             "`{query}`: the pass changed the labels the node declares"
         );
         // What the route hands over is the window, not the wrapped tree: a per-partition execution
-        // would present one partition's fragments as a canonical series.
+        // would present one partition's fragments as a canonical series. The wrapped tree is the
+        // shape the route declines rather than one it answers.
         assert_eq!(
             unpassed.to_string(),
-            routed_tree(query).to_string(),
+            routed_tree(query)
+                .expect("a per-series tree is what the route plans")
+                .to_string(),
             "`{query}`: the route handed over a passed tree"
+        );
+        assert!(
+            handed_over(&passed, 1).is_none(),
+            "`{query}`: the route answered the merge it cannot place"
+        );
+    }
+
+    /// A tree that carries a merge its execution cannot place is declined by the route.
+    ///
+    /// The merge's own need is its input's, so nothing in this tree asks for a single execution: the
+    /// placement stays per-partition, which is the whole point of the change. What the merge does
+    /// ask for is that the pieces of one canonical label set arrive together, and a per-partition
+    /// execution has no proof of that. The two answers the route must not give are the ones that
+    /// used to be given: running the tree anyway presents one partition's fragments as a canonical
+    /// series, and collapsing the node to one execution makes the shape work by taking the caller's
+    /// parallelism away. Declining it leaves the existing planner to answer.
+    #[test]
+    fn a_per_partition_tree_that_carries_an_unplaceable_merge_is_declined() {
+        let compiled = compiled_test_tree("rate(x[5m])");
+        assert_eq!(
+            Some(NativePlacement::PerPartition),
+            placement_of(&compiled, 1),
+            "{compiled}"
+        );
+        // The shape a filter, a repartition pass or a hand-built plan can hand this route: the same
+        // tree with a canonical merge over it.
+        let merged =
+            NativeTree::try_new(merge_of(compiled.root())).expect("a merge over a window is legal");
+        assert!(
+            !needs_single_execution(merged.root()),
+            "the merge demanded a single execution of a per-series tree"
+        );
+        assert!(
+            handed_over(&merged, 1).is_none(),
+            "the route answered a tree its execution cannot place: {merged}"
+        );
+        assert_eq!(
+            "legacy plan",
+            route_answer(&merged, 1, &one_source_tags()),
+            "the route did not decline the unplaceable merge"
+        );
+
+        // The decline is about the merge and not about the tree around it: the compiled tree, which
+        // carries none, is placed exactly as it was.
+        assert_eq!(
+            "per-partition",
+            route_answer(&compiled, 1, &one_source_tags())
+        );
+        // A single execution would place the same merge, which is why the answer is a decline and
+        // not a refusal of the shape altogether: the *same* merge is placeable where the execution
+        // reads every partition.
+        assert!(
+            merges_are_placeable_in(&merge_of(compiled.root()), &[source_pieces()], true),
+            "a single execution places any merge"
         );
     }
 

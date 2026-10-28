@@ -71,8 +71,10 @@ use datatypes::series::frame::{
     raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
@@ -85,6 +87,7 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::info::InfoSelector;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
@@ -4786,4 +4789,287 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
             "each chain preserves every exact grid position and value",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The merge placement: what this node will and will not run.
+// ---------------------------------------------------------------------------
+
+/// A canonical merge over an instant selection, laid out as the selection is.
+///
+/// The selection reports the samples themselves, so nothing rewrites the label sets between the
+/// input and the merge: the merge is the only operator in the tree, which is what makes the
+/// placement question below about the boundary alone.
+fn merged_selection_tree() -> NativeTree {
+    let grid = grid();
+    let inner = instant_of(0, &grid);
+    let output = inner.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    })
+    .expect("a merge over an evaluated selection is a legal tree")
+}
+
+/// A merge over a child whose boundary proves nothing is not placed in one partition.
+///
+/// The scan partitions by storage `read_key` and not by canonical key, so nothing says the pieces of
+/// one canonical label set are in one partition: a merge answered per partition would hand one
+/// partition's fragments over as a canonical series. The node refuses that shape instead of reading
+/// every child partition in a single execution, which is what it used to do - taking the caller's
+/// parallelism away to serve a tree nobody proved was placeable.
+#[tokio::test]
+async fn a_merge_over_an_unknown_partitioning_child_is_not_placed() {
+    let frames_of_partition = |index: usize| {
+        vec![frame(&series_chunk(
+            &format!("web-{index}"),
+            &series_samples(1.0),
+            true,
+        ))]
+    };
+    let partitions = (0..3).map(frames_of_partition).collect::<Vec<_>>();
+    let error = plan(merged_selection_tree(), memory_exec_partitioned(partitions))
+        .expect_err("nothing proves the pieces of a label set are co-located");
+    let message = error.to_string();
+    assert!(
+        message.contains("canonical merge") && message.contains("co-located"),
+        "refused for another reason than the missing co-location proof: {message}"
+    );
+
+    // The refusal is about the proof and not about merges: the same tree over an input of one
+    // partition is built, because that one partition is every partition and it holds every piece.
+    let exec = plan(
+        merged_selection_tree(),
+        memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)])),
+    )
+    .expect("a one-partition input proves the pieces arrive together by being one partition");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the input's one partition is the node's"
+    );
+}
+
+/// A rebuilt node asks the placement question again over the children it was handed.
+///
+/// A child that placed the pieces of a label set by canonical key can be swapped for one that does
+/// not - a plain multi-partition source, a coalesce, a union - and the merge above it would then
+/// collect one partition's fragments. The rebuilt node therefore re-derives the answer from the new
+/// children instead of inheriting the one the old children gave.
+#[tokio::test]
+async fn with_new_children_revalidates_the_merge_placement() {
+    let single = || memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)]));
+    let exec =
+        plan(merged_selection_tree(), single()).expect("a one-partition input places the merge");
+    // Rebuilt over the child it already had: the same answer, because the same boundary.
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![single()],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("one partition still holds every piece");
+    assert_eq!(
+        1,
+        rebuilt.properties().output_partitioning().partition_count()
+    );
+
+    // The same node over a child of three partitions: the old proof is gone and the node says so.
+    let partitions = (0..3)
+        .map(|index| {
+            vec![frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(1.0),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let error = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec_partitioned(partitions)],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect_err("the rebuilt node cannot inherit the old child's proof");
+    let message = error.to_string();
+    assert!(
+        message.contains("canonical merge") && message.contains("co-located"),
+        "the rebuilt node refused for another reason: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `info`, driven through `NativeExecutor`: what its canonical merge must not change.
+// ---------------------------------------------------------------------------
+
+/// `info(base, {})` over an evaluated base at source 0 and the raw info series at source 1, with the
+/// info side selected the way the compiler selects it: reporting each selected sample's own time.
+fn info_tree_of(grid: &Arc<EvalGrid>, lookback_ms: i64, selector: InfoSelector) -> NativeTree {
+    let base_type = evaluated_of(&raw_schema(), grid);
+    let base = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: base_type.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: base_type.clone(),
+    };
+    let mut info = instant_of(1, grid);
+    let NativeExpr::Instant { op, .. } = &mut info.expr else {
+        unreachable!("`instant_of` builds an instant selection");
+    };
+    op.value = InstantValue::InfoTimestamp;
+    op.lookback_ms = lookback_ms;
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector,
+        },
+        output: base_type,
+    })
+    .expect("`info` over a sample-time selection is a legal tree")
+}
+
+/// `metric` as `__name__=up,instance=a,version=v1`, the way the runtime files a series.
+fn label_set_of(metric: &SeriesLabels) -> String {
+    metric
+        .name()
+        .into_iter()
+        .map(|name| format!("__name__={name}"))
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={}", tag.name, tag.value)),
+        )
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// One answered series: its label set, and the grid positions it holds with the value at each.
+type AnsweredSeries = (String, Vec<(usize, Option<f64>)>);
+
+/// Every series `tree` answers from `pushes`, by label set, as the positions it holds and the values
+/// there. The executor is drained the way its consumer drains it: until it settles, then closed.
+fn info_answer(
+    tree: &NativeTree,
+    base: EvaluatedChunk,
+    info: Vec<RawSeriesChunk>,
+) -> Vec<AnsweredSeries> {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let state = NativeExecutionState::try_new(tree, pool).expect("the tree's state builds");
+    let mut execution = NativeExecutor::new(state);
+    let base_id = execution.state().input_ids(0).next().unwrap();
+    let info_id = execution.state().input_ids(1).next().unwrap();
+    execution.push_evaluated(base_id, base).unwrap();
+    for chunk in info {
+        execution.push_raw(info_id, chunk).unwrap();
+    }
+    // Pulled the way a consumer pulls it: what has settled first, then the ending stages.
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        chunks.push(chunk);
+    }
+    chunks.extend(execution.finish().unwrap());
+
+    let mut answer: Vec<AnsweredSeries> = Vec::new();
+    for chunk in chunks {
+        let values = chunk
+            .series
+            .fields
+            .as_slice()
+            .first()
+            .map(|field| {
+                field
+                    .iter()
+                    .map(|sample| match sample {
+                        SampleRef::Float(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let rows = chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, row)| (position, values.get(row).copied().flatten()))
+            .collect::<Vec<_>>();
+        let labels = label_set_of(&chunk.series.metric);
+        match answer.iter_mut().find(|(seen, _)| *seen == labels) {
+            Some((_, held)) => held.extend(rows),
+            None => answer.push((labels, rows)),
+        }
+    }
+    answer.sort_by(|a, b| a.0.cmp(&b.0));
+    answer
+}
+
+/// A base series takes the data labels of the newest info series sharing its identifying labels at
+/// each point, which only the sample times its info side reports can decide.
+///
+/// `version="v1"` is sampled at 0s and 10s and `version="v2"` at 15s and 30s, read within 15s: the
+/// points at 0s and 10s see only `v1`, the point at 20s sees both and keeps the newer `v2`, and the
+/// point at 30s sees `v2` alone. A canonical merge over the info side collects those pieces into one
+/// series per label set and hands the times on unchanged, so the sample time still decides - which
+/// is the runtime contract the merge above `info` must not break.
+#[test]
+fn an_info_tree_still_answers_the_newer_info_series() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 4).unwrap()).unwrap());
+    let tree = info_tree_of(
+        &grid,
+        15_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: Vec::new(),
+            keep_unmatched: true,
+        },
+    );
+    let base = {
+        let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]));
+        let range = GridRange::try_new(Arc::clone(&grid), 0, samples.len()).unwrap();
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(&[("instance", "a"), ("job", "j")], Some("up")),
+                time: TimeAxis::Grid(range),
+                fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            },
+            true,
+        )
+        .expect("the chunk is addressed on the grid")
+    };
+    let info = [
+        ("info-v1", "v1", [0i64, 10_000]),
+        ("info-v2", "v2", [15_000, 30_000]),
+    ]
+    .into_iter()
+    .map(|(key, version, times)| {
+        chunk_of(
+            &raw_schema(),
+            key,
+            metric(
+                &[("instance", "a"), ("job", "j"), ("version", version)],
+                Some("target_info"),
+            ),
+            &times,
+            vec![vec![Some(1.0), Some(1.0)]],
+            true,
+        )
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        vec![
+            (
+                "__name__=up,instance=a,job=j,version=v1".to_string(),
+                vec![(0, Some(1.0)), (1, Some(2.0))]
+            ),
+            (
+                "__name__=up,instance=a,job=j,version=v2".to_string(),
+                vec![(2, Some(3.0)), (3, Some(4.0))]
+            ),
+        ],
+        info_answer(&tree, base, info)
+    );
 }
