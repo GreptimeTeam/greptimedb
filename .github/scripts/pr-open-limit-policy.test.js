@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { hasEffectiveApproval, isTeamMember, listAuthorPendingPrs, openPrLimit, shouldThrottleMatrix } from "./pr-open-limit-policy.js";
+import { hasEffectiveApproval, isTeamMember, listAuthorOpenPrs, openPrLimit, shouldThrottleMatrix } from "./pr-open-limit-policy.js";
 
 const context = {
   eventName: "pull_request",
@@ -98,12 +98,12 @@ for (const [name, reviews, expected] of [
 }
 
 test("listing excludes approved PRs, drafts and other authors", async () => {
-  const prs = await listAuthorPendingPrs(client({ count: 105, approved: 2 }), "GreptimeTeam", "greptimedb", "member");
+  const prs = await listAuthorOpenPrs(client({ count: 105, approved: 2 }), "GreptimeTeam", "greptimedb", "member");
   assert.equal(prs.length, 103);
   assert.deepEqual(prs.map((pr) => pr.number), Array.from({ length: 103 }, (_, i) => i + 2));
 });
 
-test("approval and dismissal change the pending count on the next run", async () => {
+test("approval and dismissal change the open PR count on the next run", async () => {
   const api = client();
   const original = api.paginate;
   let reviews = [];
@@ -129,7 +129,7 @@ test("limit parser preserves the advisory configuration contract", () => {
 // Exercise the executable advisory with a local Octokit stand-in; no API writes.
 for (const [name, approved, expectedComments] of [
   ["approved triggering PR is not added back to the count", 1, 0],
-  ["six pending PRs produce an accurate reminder", 0, 1],
+  ["six unapproved open PRs produce an accurate reminder", 0, 1],
 ]) {
   test(name, async () => {
     const { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, readFileSync, rmSync } = await import("node:fs");
@@ -175,9 +175,9 @@ for (const [name, approved, expectedComments] of [
       assert.equal(result.status, 0, result.stderr);
       const comments = readFileSync(commentsFile, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
       assert.equal(comments.length, expectedComments);
-      assert.match(readFileSync(join(dir, "summary.md"), "utf8"), new RegExp(`${6 - approved} pending pull requests`));
+      assert.match(readFileSync(join(dir, "summary.md"), "utf8"), new RegExp(`${6 - approved} open pull requests`));
       if (expectedComments) {
-        assert.match(comments[0].body, /\*\*6\*\* pending pull requests/);
+        assert.match(comments[0].body, /\*\*6\*\* open pull requests/);
         assert.equal(comments[0].issue_number, 0);
       }
     } finally {

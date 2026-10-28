@@ -169,8 +169,9 @@ should have skipped, or a classifier failure takes CI down with it.
 
 ## PR matrix parallelism
 
-The `scope` job also checks the PR author's pending PR count using
+The `scope` job also checks the PR author's open PR count using
 `.github/scripts/pr-open-limit-policy.js`, shared with the open-PR reminder.
+Drafts and PRs with an effective approval are excluded from this count.
 On `pull_request` runs, team members (repository write, maintain or admin
 permission) above `MAX_OPEN_PRS_PER_AUTHOR` (default 5 open, non-draft PRs
 without an effective approval) get `max-parallel: 1`

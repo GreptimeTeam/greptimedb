@@ -1,4 +1,4 @@
-// Warns when a repository member has too many pending pull requests.
+// Warns when a repository member has too many open pull requests.
 //
 // Review capacity is the bottleneck, so authors are expected to land or close
 // existing work before opening more. Drafts and approved PRs are not counted:
@@ -6,7 +6,7 @@
 // This is advisory only — it never closes a pull request or fails the job.
 
 import { appendFileSync } from "node:fs";
-import { isTeamMember, listAuthorPendingPrs, openPrLimit } from "./pr-open-limit-policy.js";
+import { isTeamMember, listAuthorOpenPrs, openPrLimit } from "./pr-open-limit-policy.js";
 
 const MARKER = "<!-- pr-open-limit -->";
 // GITHUB_TOKEN can only edit comments authored by the Actions bot itself.
@@ -21,8 +21,8 @@ function summary(text) {
   console.log(text);
 }
 
-function buildComment(author, total, limit, owner, repo, pendingPrs) {
-  const listed = pendingPrs.slice(0, MAX_LISTED_PRS).map((pr) => {
+function buildComment(author, total, limit, owner, repo, openPrs) {
+  const listed = openPrs.slice(0, MAX_LISTED_PRS).map((pr) => {
     // Escape ASCII punctuation so titles stay literal Markdown link labels.
     const title = pr.title
       .replace(/\s+/g, " ")
@@ -30,7 +30,7 @@ function buildComment(author, total, limit, owner, repo, pendingPrs) {
     // Redirect links avoid creating backlinks on the listed PRs.
     return `- [PR ${pr.number}: ${title}](https://redirect.github.com/${owner}/${repo}/pull/${pr.number})`;
   });
-  const hidden = pendingPrs.length - listed.length;
+  const hidden = openPrs.length - listed.length;
   if (hidden > 0) {
     listed.push(`- ...and ${hidden} more`);
   }
@@ -40,7 +40,8 @@ function buildComment(author, total, limit, owner, repo, pendingPrs) {
 
   return `${MARKER}
 > [!WARNING]
-> @${author} has **${total}** pending pull requests (open, non-draft, not approved) in this repository, over the limit of **${limit}**.
+> @${author} has **${total}** open pull requests counted toward the limit in this repository, over the limit of **${limit}**.
+> Drafts and PRs with an effective approval are excluded.
 
 Review is the scarcest resource here. Please land or close some of these before
 pushing this one forward.
@@ -98,19 +99,19 @@ async function upsertComment(octokit, params, body) {
     return;
   }
 
-  const pending = await listAuthorPendingPrs(octokit, owner, repo, author);
-  const total = pending.length;
+  const openPrs = await listAuthorOpenPrs(octokit, owner, repo, author);
+  const total = openPrs.length;
 
   if (total <= limit) {
-    summary(`\`${author}\` has ${total} pending pull requests (limit ${limit}). OK.`);
+    summary(`\`${author}\` has ${total} open pull requests counted toward the limit (excluding drafts and approved PRs; limit ${limit}). OK.`);
     return;
   }
 
-  summary(`\`${author}\` has ${total} pending pull requests, over the limit of ${limit}.`);
+  summary(`\`${author}\` has ${total} open pull requests counted toward the limit (excluding drafts and approved PRs), over the limit of ${limit}.`);
   await upsertComment(
     octokit,
     { owner, repo, issue_number: prNumber },
-    buildComment(author, total, limit, owner, repo, pending)
+    buildComment(author, total, limit, owner, repo, openPrs)
   );
 })().catch((error) => {
   console.error(error);

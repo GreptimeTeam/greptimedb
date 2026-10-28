@@ -41,19 +41,21 @@ export function hasEffectiveApproval(reviews) {
   return [...decisions.values()].includes("APPROVED");
 }
 
-export async function listAuthorPendingPrs(octokit, owner, repo, author) {
+// Returns the author's open PRs counted toward the limit, excluding drafts
+// and PRs with an effective approval.
+export async function listAuthorOpenPrs(octokit, owner, repo, author) {
   const prs = await octokit.paginate(octokit.pulls.list, {
     owner, repo, state: "open", sort: "created", direction: "asc", per_page: 100,
   });
-  const pending = [];
+  const openPrs = [];
   for (const pr of prs) {
     if (pr.user?.login !== author || pr.draft) continue;
     const reviews = await octokit.paginate(octokit.pulls.listReviews, {
       owner, repo, pull_number: pr.number, per_page: 100,
     });
-    if (!hasEffectiveApproval(reviews)) pending.push(pr);
+    if (!hasEffectiveApproval(reviews)) openPrs.push(pr);
   }
-  return pending;
+  return openPrs;
 }
 
 // Called with the read-only github-script client. Only a positive decision
@@ -69,10 +71,10 @@ export async function shouldThrottleMatrix(octokit, context, rawLimit) {
     if (!(await isTeamMember(octokit, owner, repo, pr.user.login, false))) {
       return false;
     }
-    const prs = await listAuthorPendingPrs(octokit, owner, repo, pr.user.login);
+    const prs = await listAuthorOpenPrs(octokit, owner, repo, pr.user.login);
     return prs.length > openPrLimit(rawLimit);
   } catch (error) {
-    console.log(`Cannot count pending pull requests (HTTP ${error.status}); preserving matrix parallelism.`);
+    console.log(`Cannot count open pull requests (HTTP ${error.status}); preserving matrix parallelism.`);
     return false;
   }
 }
