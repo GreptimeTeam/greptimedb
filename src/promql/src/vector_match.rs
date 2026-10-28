@@ -775,10 +775,10 @@ fn binary_field(
     }
 
     let drop_name = !matching.op.is_comparison() || matching.return_bool;
+    let mut results = Results::default();
     let mut pairs = Pairs {
         matching,
         one_is_left,
-        results: Results::default(),
         group_keys: Vec::new(),
         group_ids: HashMap::new(),
         // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
@@ -824,6 +824,9 @@ fn binary_field(
             // requires. A cursor per run would restart at row 0 and re-walk every row before it.
             let (mut many_cursor, mut one_cursor) =
                 (many.cursor(many_index), one.cursor(one_index));
+            // The pairing's row is opened by the first point it files and reused by every later
+            // one, so a pairing whose axes do not intersect never builds its key.
+            let mut slot = RowSlot::Unfiled(&mut results.series);
             for pair in many.shared_runs(many_index, one, one_index) {
                 for offset in 0..pair.len {
                     let point = pair.position + offset;
@@ -835,13 +838,15 @@ fn binary_field(
                             .at(pair.other_row + offset)
                             .expect("a row never goes back"),
                     );
-                    pairs.apply(
-                        group,
+                    slot = pairs.apply(
+                        slot,
+                        &mut results.totals,
                         &metric,
+                        label_set,
+                        group,
                         point,
                         many_value,
                         one_value,
-                        label_set,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -865,6 +870,8 @@ fn binary_field(
             let mut cursor = many.cursor(many_index);
             let mut candidate_cursors: Vec<RowCursor<'_>> =
                 candidates.iter().map(|&index| one.cursor(index)).collect();
+            // One fill label set for this many-side series, opened by the first point it files.
+            let mut slot = RowSlot::Unfiled(&mut results.series);
             for (point, row) in many.positions(many_index) {
                 let sample = cursor.at(row).expect("a row never goes back");
                 let matched = candidates
@@ -873,13 +880,15 @@ fn binary_field(
                     .any(|(&index, cursor)| one.present(index, point, cursor));
                 if !matched {
                     // A fill row pairs no two series, so it builds no pairing label set.
-                    pairs.apply(
-                        group,
+                    slot = pairs.apply(
+                        slot,
+                        &mut results.totals,
                         &metric,
+                        label_set,
+                        group,
                         point,
                         sample,
                         SampleRef::Float(value),
-                        label_set,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -905,6 +914,7 @@ fn binary_field(
                 0
             };
             let mut cursor = one.cursor(one_index);
+            let mut slot = RowSlot::Unfiled(&mut results.series);
             for (point, row) in one.positions(one_index) {
                 if !pairs
                     .matched
@@ -914,13 +924,15 @@ fn binary_field(
                     let sample = cursor.at(row).expect("a row never goes back");
                     // A fill row pairs no two series, so it builds no pairing label set: what it
                     // keeps is the label set it is filed under.
-                    pairs.apply(
-                        group,
+                    slot = pairs.apply(
+                        slot,
+                        &mut results.totals,
                         &metric,
+                        label_set,
+                        group,
                         point,
                         SampleRef::Float(value),
                         sample,
-                        label_set,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -930,7 +942,6 @@ fn binary_field(
     // The match set, the groups and the pairing state are gone with the walk: taking them apart
     // here drops them, so the sort and the messages are what is live from here on.
     let Pairs {
-        mut results,
         group_keys,
         implicit_many_to_one,
         ..
@@ -943,7 +954,7 @@ fn binary_field(
                 .tables
                 .saturating_add(metadata.errors)
                 .saturating_add(metadata.largest_key)
-                .saturating_add(results.rows.saturating_mul(SORT_ROW_BYTES)),
+                .saturating_add(results.totals.rows.saturating_mul(SORT_ROW_BYTES)),
         )?;
     }
     // Prometheus fails at the first failing step. Within a step it checks the one side, then
@@ -1012,10 +1023,12 @@ fn binary_field(
 }
 
 /// The matched pairs of one field and the state Prometheus checks them against.
+///
+/// The results are filed beside it, not in it: a pairing's open row borrows the table it files into
+/// while the match state stays free to move with the point.
 struct Pairs<'a> {
     matching: &'a BinaryMatching,
     one_is_left: bool,
-    results: Results,
     group_keys: Vec<GroupKey>,
     group_ids: HashMap<GroupKey, usize>,
     /// The match groups an operation matched at a point, kept where Prometheus consults them:
@@ -1042,20 +1055,24 @@ impl Pairs<'_> {
     /// Nothing here is charged per point: the operator's histograms are part of the phase, and the
     /// only figures a row can charge are the two allocation boundaries it crosses -- a block the match
     /// set grows into, and `label_set`, the bytes a result label set keeps when this row is the first
-    /// filed under it, or the value the results retain.
+    /// filed under it, or the value the results retain. The row a pairing files under its label set
+    /// is opened by [`RowSlot`] on the first point the pairing files, and the slot is handed back to
+    /// file the pairing's next point with.
     #[allow(clippy::too_many_arguments)]
-    fn apply(
+    fn apply<'s>(
         &mut self,
-        group: usize,
+        slot: RowSlot<'s>,
+        totals: &mut ResultTotals,
         metric: &SeriesLabels,
+        label_set: usize,
+        group: usize,
         point: usize,
         many_value: SampleRef<'_>,
         one_value: SampleRef<'_>,
-        label_set: usize,
         mut budget: Option<&mut Budget<'_>>,
-    ) -> Result<()> {
+    ) -> Result<RowSlot<'s>> {
         if matches!(many_value, SampleRef::Missing) || matches!(one_value, SampleRef::Missing) {
-            return Ok(());
+            return Ok(slot);
         }
         let (lhs_value, rhs_value) = if self.one_is_left {
             (one_value, many_value)
@@ -1064,7 +1081,7 @@ impl Pairs<'_> {
         };
         let Some((result, keep)) = elem_binop(self.matching.op, lhs_value, rhs_value)? else {
             // The operator skipped the pair and nothing of it was filed.
-            return Ok(());
+            return Ok(slot);
         };
         // One-to-one: a match group may be matched once per point; Prometheus counts a filtered
         // comparison as a match too, but not an operation that failed.
@@ -1102,8 +1119,7 @@ impl Pairs<'_> {
             drop(result);
             None
         };
-        self.results
-            .insert(metric, group, point, value, label_set, budget)
+        slot.file(totals, metric, label_set, group, point, value, budget)
     }
 }
 
@@ -1307,14 +1323,18 @@ fn set_field(
             let metric = &lhs.series[index].metric;
             let label_set = label_set(metric);
             let mut cursor = lhs.cursor(index);
+            // The series' row is opened by the first point it files, and every later point of the
+            // series is pushed to it.
+            let mut slot = RowSlot::Unfiled(&mut results.series);
             for (point, row) in lhs.positions(index) {
                 if let Some(value) = owned(cursor.at(row).expect("a row never goes back"))? {
-                    results.insert(
+                    slot = slot.file(
+                        &mut results.totals,
                         metric,
+                        label_set,
                         0,
                         point,
                         Some(value),
-                        label_set,
                         budget.as_deref_mut(),
                     )?;
                 }
@@ -1325,6 +1345,7 @@ fn set_field(
         let label_set = label_set(&series.metric);
         let bits = presence.get(&group_key(&series.metric, labels));
         let mut cursor = kept.cursor(index);
+        let mut slot = RowSlot::Unfiled(&mut results.series);
         for (point, row) in kept.positions(index) {
             let sample = cursor.at(row).expect("a row never goes back");
             if matches!(sample, SampleRef::Missing) {
@@ -1332,12 +1353,14 @@ fn set_field(
             }
             let matched = bits.is_some_and(|bits| bits[point / 64] & (1 << (point % 64)) != 0);
             if matched == keep_matched {
-                results.insert(
+                let value = owned(sample)?;
+                slot = slot.file(
+                    &mut results.totals,
                     &series.metric,
+                    label_set,
                     0,
                     point,
-                    owned(sample)?,
-                    label_set,
+                    value,
                     budget.as_deref_mut(),
                 )?;
             }
@@ -1351,7 +1374,7 @@ fn set_field(
             metadata
                 .error
                 .saturating_add(metadata.scratch)
-                .saturating_add(results.rows.saturating_mul(SORT_ROW_BYTES)),
+                .saturating_add(results.totals.rows.saturating_mul(SORT_ROW_BYTES)),
         )?;
     }
     if let Some(duplicate) = results.sort_rows() {
@@ -1423,9 +1446,9 @@ fn merge_fields(
         for results in &fields {
             sets = sets.saturating_add(results.series.len());
             merge = (
-                merge.0.saturating_add(results.kept),
-                merge.1.saturating_add(results.histograms),
-                merge.2.saturating_add(results.histogram_heap),
+                merge.0.saturating_add(results.totals.kept),
+                merge.1.saturating_add(results.totals.histograms),
+                merge.2.saturating_add(results.totals.histogram_heap),
             );
         }
         budget.phase(merge_bytes(merge.0, sets, width, merge.1, merge.2))?;
@@ -1842,11 +1865,23 @@ fn elem_binop(
 }
 
 /// The result rows of one field by result label set.
+///
+/// A pairing opens one [`RowSlot`] and looks its label set up on the first row it files, so the key
+/// is built, hashed and compared once per pairing that files -- not once per point.
 #[derive(Default)]
 struct Results {
     series: HashMap<GroupKey, ResultRows>,
-    /// The rows filed, the rows holding a value, the rows holding a histogram and the heap those
-    /// histograms hold: counted as each row is filed, so neither later phase walks them again.
+    /// The figures a filed row advances; see [`ResultTotals`].
+    totals: ResultTotals,
+}
+
+/// The rows filed, the rows holding a value, the rows holding a histogram and the heap those
+/// histograms hold: counted as each row is filed, so neither later phase walks them again.
+///
+/// Held beside the table rather than in it, so a pairing's open row borrows the table it files into
+/// while these figures stay free to move with the point.
+#[derive(Default)]
+struct ResultTotals {
     rows: usize,
     kept: usize,
     histograms: usize,
@@ -1877,37 +1912,57 @@ fn same_labelset(key: &GroupKey, timestamp: i64) -> String {
     )
 }
 
-impl Results {
-    /// Files one row of one field, retaining the block its row vectors take when they outgrow what
-    /// they hold.
+/// One pairing's result row, opened by the first point the pairing files.
+///
+/// A pairing builds its label set once, but the row it files under is looked up, created and
+/// charged only when that pairing files the first of its points: a pairing whose samples never
+/// pair, or whose axes do not intersect, costs what it cost before -- nothing. Once open, the row
+/// is pushed to directly, so the points of one pairing build no key, hash nothing and clone no
+/// metric.
+enum RowSlot<'a> {
+    /// No point filed yet, and the table the first one is filed in.
+    Unfiled(&'a mut HashMap<GroupKey, ResultRows>),
+    /// The row every point of this pairing files under.
+    Row(&'a mut ResultRows),
+}
+
+impl<'a> RowSlot<'a> {
+    /// Files one row of one field, opening the pairing's row on its first filed point, and returns
+    /// the slot to file the pairing's next point with.
     ///
-    /// The label set the row is filed under is only built when the table does not hold it yet, so
-    /// `label_set` -- the bytes that set keeps -- is charged on the vacant entry alone. A row whose
-    /// value the operator filtered is still a row: it keeps its slots and its label set, which the
-    /// merge carries as a set without a value. A kept histogram is boxed beside its row, so its
-    /// payload is charged here, where the value is retained, and never per grid point of a float.
-    fn insert(
-        &mut self,
+    /// A row whose value the operator filtered is still a row: it keeps its slots and its label
+    /// set, which the merge carries as a set without a value. A kept histogram is boxed beside its
+    /// row, so its payload is charged here, where the value is retained, and never per grid point
+    /// of a float.
+    #[allow(clippy::too_many_arguments)]
+    fn file(
+        self,
+        totals: &mut ResultTotals,
         metric: &SeriesLabels,
+        label_set: usize,
         group: usize,
         point: usize,
         value: Option<GridSample>,
-        label_set: usize,
         mut budget: Option<&mut Budget<'_>>,
-    ) -> Result<()> {
-        let rows = match self.series.entry(key_of(metric)) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                if let Some(budget) = budget.as_deref_mut() {
-                    budget.hold(label_set)?;
+    ) -> Result<Self> {
+        let rows = match self {
+            Self::Row(rows) => rows,
+            Self::Unfiled(series) => match series.entry(key_of(metric)) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    // The label set the row is filed under is only built when the table does not
+                    // hold it yet, so these bytes are charged on the vacant entry alone.
+                    if let Some(budget) = budget.as_deref_mut() {
+                        budget.hold(label_set)?;
+                    }
+                    entry.insert(ResultRows {
+                        metric: metric.clone(),
+                        points: Vec::new(),
+                        groups: Vec::new(),
+                        values: Vec::new(),
+                    })
                 }
-                entry.insert(ResultRows {
-                    metric: metric.clone(),
-                    points: Vec::new(),
-                    groups: Vec::new(),
-                    values: Vec::new(),
-                })
-            }
+            },
         };
         // The row vectors grow together, so one block of them is charged once when the point,
         // group and value vectors outgrow the capacity they hold.
@@ -1921,12 +1976,13 @@ impl Results {
                     .saturating_mul(RESULT_ROW_BYTES),
             )?;
         }
-        self.rows = self.rows.saturating_add(1);
+        totals.rows = totals.rows.saturating_add(1);
         if let Some(value) = &value {
-            self.kept = self.kept.saturating_add(1);
+            totals.kept = totals.kept.saturating_add(1);
             if let GridSample::Histogram(histogram) = value {
-                self.histograms = self.histograms.saturating_add(1);
-                self.histogram_heap = self.histogram_heap.saturating_add(histogram.heap_bytes());
+                totals.histograms = totals.histograms.saturating_add(1);
+                totals.histogram_heap =
+                    totals.histogram_heap.saturating_add(histogram.heap_bytes());
                 if let Some(budget) = budget {
                     budget.hold(result_histogram_bytes(histogram))?;
                 }
@@ -1935,9 +1991,11 @@ impl Results {
         rows.points.push(point);
         rows.groups.push(group);
         rows.values.push(value);
-        Ok(())
+        Ok(Self::Row(rows))
     }
+}
 
+impl Results {
     /// Sorts the rows of each label set by point and returns the earliest point where a label
     /// set has two rows, preferring one within a match group at that point. Prometheus
     /// evaluates step by step and fails at the first such step.
