@@ -2924,9 +2924,20 @@ fn one_series(rows: &[Row], rate: f64, host: &str) -> Vec<Row> {
     series
 }
 
-/// A single repeated source feeds both operands once in each of four independent partitions.
+/// One repeated source, read once inside one execution, still applies its operands in order.
+///
+/// Both leaves of the tree bind the same source and the outer node is an `on(host)` one-to-one
+/// match, so the node is placed in a single execution that reads all four scan partitions (the
+/// reason is pinned by `a_one_to_one_match_over_one_repeated_source_runs_in_one_execution` below).
+/// The source is nevertheless read once and not once per recipient: the runtime decodes each child
+/// partition's frames once and hands them to both operands, so every child partition is executed
+/// exactly once, by the one execution that reads them all.
+///
+/// The arithmetic is what proves the operands kept their order: this tree answers `x - 2 * x`, which
+/// is `-x` and not `+x`. The fixture gives each series distinct values, so no row of another series
+/// can pass for one of these.
 #[tokio::test]
-async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
+async fn a_repeated_source_runs_once_and_keeps_its_operand_order() {
     let partitions = (0..4)
         .map(|partition| {
             let samples = (0..GRID_LEN as i64)
@@ -2950,84 +2961,153 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
     });
     let exec = plan(subtracted_scaled_tree(), counted)
         .expect("the repeated source tree runs over one physical child");
-    assert_eq!(4, exec.properties().output_partitioning().partition_count());
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the match over the repeated source reads every series in one execution"
+    );
     assert_eq!(1, exec.children().len());
 
+    // The one execution, which has to read all four child partitions.
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
+    let mut stream = exec
+        .execute(0, context)
+        .expect("the single execution exists");
+    let batches = stream
+        .as_mut()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the execution completes without errors");
+    // Each row's timestamp, value and host, in the order the execution emitted them.
+    let actual = batches
+        .iter()
+        .flat_map(|batch| {
+            let time = batch
+                .column_by_name(TIME)
+                .expect("binary output has time")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("time output is millisecond timestamp");
+            let value = batch
+                .column_by_name(VALUE)
+                .expect("binary output has value")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("value output is Float64");
+            let host = batch
+                .column_by_name(HOST)
+                .expect("binary output retains host")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("host output is Utf8");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        time.value(row),
+                        value.is_valid(row).then(|| value.value(row)),
+                        host.is_valid(row).then(|| host.value(row).to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        4 * GRID_LEN as usize,
+        actual.len(),
+        "every partition's series comes back over the whole grid: {actual:?}"
+    );
+
+    // The four series keep their own hosts: a collapse that dropped or duplicated a partition's
+    // series would not answer all four.
+    let mut hosts = actual
+        .iter()
+        .filter_map(|row| row.2.clone())
+        .collect::<Vec<_>>();
+    hosts.sort();
+    hosts.dedup();
+    assert_eq!(
+        vec!["web-0", "web-1", "web-2", "web-3"],
+        hosts,
+        "the four series keep their own hosts"
+    );
+
     let expected_times = grid_timestamps();
-    let mut total_rows = 0;
-    for partition in 0..4 {
-        let mut stream = exec
-            .execute(partition, Arc::clone(&context))
-            .expect("each requested partition exists");
-        let batches = stream
-            .as_mut()
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("the partition completes without errors");
-        let actual = batches
-            .iter()
-            .flat_map(|batch| {
-                let time = batch
-                    .column_by_name(TIME)
-                    .expect("binary output has time")
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .expect("time output is millisecond timestamp");
-                let value = batch
-                    .column_by_name(VALUE)
-                    .expect("binary output has value")
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("value output is Float64");
-                let host = batch
-                    .column_by_name(HOST)
-                    .expect("binary output retains host")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("host output is Utf8");
-                (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            time.value(row),
-                            value.is_valid(row).then(|| value.value(row)),
-                            host.is_valid(row).then(|| host.value(row).to_string()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        total_rows += actual.len();
+    for partition in 0..4usize {
         let host = format!("web-{partition}");
-        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
+        // This series' rows in emission order: one series' rows come out in grid order.
+        let series = actual
+            .iter()
+            .filter(|row| row.2.as_deref() == Some(host.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(GRID_LEN as usize, series.len(), "{host}: {series:?}");
         assert_eq!(
             expected_times,
-            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
+            series.iter().map(|row| row.0).collect::<Vec<_>>(),
             "{host} timestamps preserve grid order"
         );
-        assert!(
-            actual
-                .iter()
-                .all(|row| row.2.as_deref() == Some(host.as_str()))
-        );
+        // `x - 2 * x` is `-x`. Read the other way round the same operands answer `+x`, so a swapped
+        // operand shows up here as the wrong sign and nowhere else.
         let expected_values = (0..GRID_LEN as usize)
             .map(|index| Some(-((partition * 10 + index + 1) as f64)))
             .collect::<Vec<_>>();
         assert_eq!(
             expected_values,
-            actual.iter().map(|row| row.1).collect::<Vec<_>>()
+            series.iter().map(|row| row.1).collect::<Vec<_>>(),
+            "{host} answers x - 2 * x"
         );
-        assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
-    assert_eq!(4 * GRID_LEN as usize, total_rows);
+
+    // The repeated source is read once, not once per recipient: every child partition was executed
+    // exactly once, and the single execution above is what executed them.
     assert_eq!(
         vec![1, 1, 1, 1],
         calls_by_partition
             .iter()
             .map(|call| call.load(Ordering::SeqCst))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "the repeated source is read once per child partition"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the execution released reservations at EOF"
+    );
+}
+
+/// A one-to-one match over one repeated source is placed in one execution, and this is why.
+///
+/// Both leaves of [`subtracted_scaled_tree`] bind the same source and the outer node is an
+/// `on(host)` one-to-one match. Canonical-key co-location - a whole partition, or one owner per
+/// canonical label set - proves a *merge*'s input whole, and proves nothing about a match's label
+/// set: `on(host)` can group two series that differ in every other label and so sit under two
+/// canonical keys in two partitions. Each partition would then pair only its own series against its
+/// own and never report the duplicate label set a whole one-to-one match owes.
+///
+/// So the node reports one partition, which is what makes its single execution see every series the
+/// match could pair. The four-partition child here is the shape that would expose a per-partition
+/// placement, so a reader who "fixes" this count back to four reopens exactly that hole.
+#[test]
+fn a_one_to_one_match_over_one_repeated_source_runs_in_one_execution() {
+    let partitions = (0..4)
+        .map(|partition| {
+            vec![frame(&series_chunk(
+                &format!("web-{partition}"),
+                &series_samples(1.0),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let exec = plan(
+        subtracted_scaled_tree(),
+        memory_exec_partitioned(partitions),
+    )
+    .expect("the repeated source tree runs over one physical child");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "a per-partition placement would pair each partition's series only against its own and \
+         never report the duplicate label set a whole one-to-one match owes"
     );
 }
 
