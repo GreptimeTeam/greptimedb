@@ -310,7 +310,12 @@ pub async fn open_compaction_region(
         region_options: req.region_options.clone(),
         engine_config: Arc::new(mito_config.clone()),
         region_metadata: region_metadata.clone(),
-        cache_manager: Arc::new(CacheManager::default()),
+        // Lets the scan reuse the input footers read while planning the merge.
+        cache_manager: Arc::new(
+            CacheManager::builder()
+                .sst_meta_cache_size(mito_config.sst_meta_cache_size.as_bytes())
+                .build(),
+        ),
         access_layer,
         manifest_ctx,
         current_version,

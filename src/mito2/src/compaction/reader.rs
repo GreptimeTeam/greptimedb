@@ -21,6 +21,7 @@ use common_time::range::TimestampRange;
 use common_time::timestamp::TimeUnit;
 use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
+use futures::{StreamExt, TryStreamExt};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData};
 use snafu::OptionExt;
 use store_api::metadata::RegionMetadataRef;
@@ -150,35 +151,49 @@ impl CompactionSstReaderBuilder<'_> {
         Ok(scan_input.build())
     }
 
+    /// Reads the footers of all inputs concurrently, keeping the input order.
     async fn collect_parquet_metadata(&self) -> Result<Vec<Arc<ParquetMetaData>>> {
-        let mut metadata = Vec::with_capacity(self.inputs.len());
+        let reads: Vec<_> = self
+            .inputs
+            .iter()
+            .map(|file_handle| self.read_parquet_metadata(file_handle))
+            .collect();
+        let metadata: Vec<_> = futures::stream::iter(reads)
+            .buffered(MAX_CONCURRENT_METADATA_READS)
+            .try_collect()
+            .await?;
+        Ok(metadata.into_iter().flatten().collect())
+    }
 
-        for file_handle in self.inputs {
-            let file_path =
-                file_handle.file_path(self.sst_layer.table_dir(), self.sst_layer.path_type());
-            let file_size = file_handle.meta_ref().file_size;
-            let parquet_metadata = match self
-                .sst_layer
-                .read_sst(file_handle.clone())
-                .cache(CacheStrategy::Compaction(self.cache.clone()))
-                .read_parquet_metadata(
-                    &file_path,
-                    file_size,
-                    &mut MetadataCacheMetrics::default(),
-                    PageIndexPolicy::default(),
-                )
-                .await
-                .map(|x| x.0.parquet_metadata())
-            {
-                Ok(x) => x,
-                Err(e) if e.is_object_not_found() => continue,
-                Err(e) => return Err(e),
-            };
-            metadata.push(parquet_metadata);
+    /// Reads the parquet metadata of `file_handle`, or `None` if the file is gone.
+    async fn read_parquet_metadata(
+        &self,
+        file_handle: &FileHandle,
+    ) -> Result<Option<Arc<ParquetMetaData>>> {
+        let file_path =
+            file_handle.file_path(self.sst_layer.table_dir(), self.sst_layer.path_type());
+        let file_size = file_handle.meta_ref().file_size;
+        match self
+            .sst_layer
+            .read_sst(file_handle.clone())
+            .cache(CacheStrategy::Compaction(self.cache.clone()))
+            .read_parquet_metadata(
+                &file_path,
+                file_size,
+                &mut MetadataCacheMetrics::default(),
+                PageIndexPolicy::default(),
+            )
+            .await
+        {
+            Ok(metadata) => Ok(Some(metadata.0.parquet_metadata())),
+            Err(e) if e.is_object_not_found() => Ok(None),
+            Err(e) => Err(e),
         }
-        Ok(metadata)
     }
 }
+
+/// Max number of input footers read at the same time.
+const MAX_CONCURRENT_METADATA_READS: usize = 8;
 
 /// Converts time range to predicates so that rows outside the range will be filtered.
 fn time_range_to_predicate(
