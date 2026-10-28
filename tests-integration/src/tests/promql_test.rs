@@ -5239,6 +5239,22 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
             "{sql}: legacy answered {legacy:?}"
         );
     }
+
+    // `count_values` names a label no scan carries, so the statement keeps a plan that reports it.
+    let sql = "TQL EVAL (0, 0, '1s') count_values(\"bucket\", vector(1))";
+    let pretty = |output: Output| async {
+        match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        }
+        .pretty_print()
+        .unwrap()
+    };
+    let native = pretty(native_tql_output(&instance, sql, true).await).await;
+    let legacy = pretty(native_tql_output(&instance, sql, false).await).await;
+    assert!(native.contains("bucket"), "{native}");
+    assert_eq!(native, legacy);
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
