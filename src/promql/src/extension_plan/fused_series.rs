@@ -84,6 +84,7 @@ use store_api::region_engine::RawLabelSource;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
 use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
+use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
@@ -775,14 +776,28 @@ fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
 fn input_boundary(
     inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
 ) -> Vec<NativeProperties> {
-    // What a fused input proves on its own: the pieces of a metric one scan partition holds.
-    // Nothing here places those pieces by canonical key, so nothing is claimed about ownership - a
-    // merge over what this boundary describes is therefore not placeable in a per-partition
-    // execution, which is what [`merges_are_placeable_in`] is asked and what a single execution
-    // provides without needing a proof.
+    // What a fused input proves about the pieces it hands over.
+    //
+    // A `SeriesRepartitionExec` routes every chunk by the canonical label set it carries and is
+    // recognised **by node identity**, not by its declared partitioning: it publishes
+    // `UnknownPartitioning(M)`, which says "this node promises nothing about where a key lives" and
+    // is deliberately not upgraded to a proof. Every other child places pieces by the storage
+    // `read_key`, so pieces of one canonical label set can sit in different partitions and nothing
+    // is claimed about their ownership.
+    //
+    // What that means for a merge is [`merges_are_placeable_in`]'s question, not this function's:
+    // over an unproven input a merge is not placeable in a per-partition execution, so the route
+    // that would need one declines rather than collapsing the node to a single execution.
     inputs
         .iter()
-        .map(|_| NativeProperties::source_pieces())
+        .map(|(input, _, _)| NativeProperties {
+            owner: if input.downcast_ref::<SeriesRepartitionExec>().is_some() {
+                CanonicalOwner::ByCanonicalKey
+            } else {
+                CanonicalOwner::Unknown
+            },
+            ..NativeProperties::source_pieces()
+        })
         .collect()
 }
 
