@@ -1609,7 +1609,7 @@ impl RegionEngine for MitoEngine {
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
-            region.leader_deadline.extend(deadline);
+            region.manifest_ctx.leader_deadline.extend(deadline);
         }
         if role == RegionRole::Leader {
             return Ok(region

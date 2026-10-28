@@ -87,7 +87,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                     if request.set_writable {
                         // The region takes writes under the node lease until its next Leader
                         // grant.
-                        node_lease.seed(&region.leader_deadline);
+                        node_lease.seed(&region.manifest_ctx.leader_deadline);
                         region.set_role(RegionRole::Leader);
                         // Finalize leadership: persist backfilled metadata.
                         match region

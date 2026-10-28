@@ -23,8 +23,8 @@ pub(crate) mod version;
 use std::cell::OnceCell;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use common_base::hash::partition_expr_version;
@@ -59,6 +59,7 @@ use crate::error::{
     FlushableRegionStateSnafu, InvalidPartitionExprSnafu, RegionNotFoundSnafu, RegionStateSnafu,
     RegionTruncatedSnafu, Result, UnexpectedSnafu, UpdateManifestSnafu,
 };
+use crate::lease::Deadline;
 use crate::manifest::action::{
     RegionChange, RegionManifest, RegionMetaAction, RegionMetaActionList,
 };
@@ -186,8 +187,6 @@ pub struct MitoRegion {
     /// There are no WAL entries in range [flushed_entry_id, topic_latest_entry_id] for current region,
     /// which means these WAL entries maybe able to be pruned up to `topic_latest_entry_id`.
     pub(crate) topic_latest_entry_id: AtomicU64,
-    /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv.
-    pub(crate) leader_deadline: Deadline,
     /// Region stats.
     pub(crate) region_stats: RegionStats,
     /// manifest stats
@@ -223,80 +222,6 @@ impl RegionStats {
 }
 
 pub type MitoRegionRef = Arc<MitoRegion>;
-
-/// The instant lease deadlines count from, so that a deadline fits in an [AtomicU64].
-static LEASE_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
-
-fn lease_nanos(instant: Instant) -> u64 {
-    instant.saturating_duration_since(*LEASE_EPOCH).as_nanos() as u64
-}
-
-/// A lease deadline in nanoseconds since [LEASE_EPOCH]. It only moves forward; 0 means none.
-#[derive(Debug, Default)]
-pub(crate) struct Deadline(AtomicU64);
-
-impl Deadline {
-    pub(crate) fn extend(&self, deadline: Instant) {
-        self.0.fetch_max(lease_nanos(deadline), Ordering::Relaxed);
-    }
-
-    pub(crate) fn get(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
-    }
-}
-
-/// Lease of this node: the latest deadline of the heartbeat responses that carry region leases.
-#[derive(Debug, Default)]
-pub(crate) struct NodeLease {
-    /// Whether writes need a lease. Only a datanode the metasrv controls sets it.
-    enabled: AtomicBool,
-    deadline: Deadline,
-    /// The time of the lease checks while a test freezes it, in the unit of [Deadline]; 0 when
-    /// it is not frozen.
-    #[cfg(any(test, feature = "test"))]
-    frozen_now: AtomicU64,
-}
-
-impl NodeLease {
-    pub(crate) fn enable(&self) {
-        self.enabled.store(true, Ordering::Relaxed);
-    }
-
-    pub(crate) fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::Relaxed)
-    }
-
-    pub(crate) fn renew(&self, deadline: Instant) {
-        self.deadline.extend(deadline);
-    }
-
-    /// Returns the current time in the unit of [Deadline].
-    pub(crate) fn now(&self) -> u64 {
-        #[cfg(any(test, feature = "test"))]
-        {
-            let frozen_now = self.frozen_now.load(Ordering::Relaxed);
-            if frozen_now != 0 {
-                return frozen_now;
-            }
-        }
-        lease_nanos(Instant::now())
-    }
-
-    #[cfg(any(test, feature = "test"))]
-    pub(crate) fn freeze_clock(&self, at: Instant) {
-        self.frozen_now
-            .store(lease_nanos(at).max(1), Ordering::Relaxed);
-    }
-
-    /// Lets a region created or upgraded on this node write until the node's deadline. The
-    /// metasrv granted that deadline before the creation or upgrade, so a later migration of the
-    /// region waits past it. Later responses do not extend it; the region's Leader grants do.
-    pub(crate) fn seed(&self, leader_deadline: &Deadline) {
-        leader_deadline
-            .0
-            .fetch_max(self.deadline.get(), Ordering::Relaxed);
-    }
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct StagingPartitionInfo {
@@ -1296,6 +1221,10 @@ pub(crate) struct ManifestContext {
     /// It starts at creation time. A context that replaces this one is created after the worker
     /// loop closes or reopens the region, so after its last demotion.
     demoted_at: Mutex<Instant>,
+    /// Deadline of the region's latest Leader or StagingLeader lease from the metasrv, which is how
+    /// long the Leader role stays valid. The engine extends it from those leases, and writes check
+    /// it.
+    pub(crate) leader_deadline: Deadline,
     /// Partition info of the region in staging mode.
     ///
     /// During the staging mode, the region metadata in [`VersionControlRef`] is not updated,
@@ -1315,6 +1244,7 @@ impl ManifestContext {
             manifest_manager: tokio::sync::RwLock::new(manager),
             state: AtomicCell::new(state),
             demoted_at: Mutex::new(Instant::now()),
+            leader_deadline: Deadline::default(),
             staging_partition_info: Mutex::new(None),
             hook,
         }
@@ -2375,7 +2305,6 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         }
@@ -2997,7 +2926,6 @@ mod tests {
             last_schedule_compaction_millis: Default::default(),
             time_provider: Arc::new(StdTimeProvider),
             topic_latest_entry_id: Default::default(),
-            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: ManifestStats::default(),
         };
