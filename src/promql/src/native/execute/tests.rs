@@ -10817,28 +10817,38 @@ fn run_to_end(tree: &NativeTree, inputs: &[EvaluatedChunk]) -> Vec<EvaluatedChun
     out
 }
 
-/// A merge the insertion pass put above a per-series tree answers the rows the tree answered without
-/// it.
+/// A merge above a per-series tree answers the rows the tree answered without it.
 ///
-/// The tree is the one the route compiles for `abs(x)` and the merge is the pass's own output, not a
-/// node placed by the fixture, so what runs here is the shape a production tree gains. Two streams
-/// are checked: a label set arriving whole, and one arriving as two fragments, which is what one
-/// scan partition hands over when the series is split across chunks.
+/// The tree is the one the route compiles for `abs(x)`. The insertion pass is consumer-driven and
+/// leaves a bare root alone - a caller of a native tree reads chunks and asks for the pieces, so
+/// canonicalizing the root would only hold the answer back - which is why the merge run here is
+/// built by hand over that very tree. The pass's own decision is pinned by
+/// `canonicalize::tests::the_root_is_not_canonicalized_by_default`; what this test is about is the
+/// merge's rows, and building the node itself is what keeps the two questions apart. Two streams are
+/// checked: a label set arriving whole, and one arriving as two fragments, which is what one scan
+/// partition hands over when the series is split across chunks.
 #[test]
 fn an_inserted_merge_answers_the_rows_the_unmerged_tree_answered() {
     let grid = grid(0, 60_000, 4);
     let schema = evaluated_schema(Arc::clone(&grid));
     let unmerged = NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]))
         .expect("a map over an evaluated input is a legal tree");
-    let merged =
+    // The pass is asked first, because what it decides about this root is what makes the merge
+    // below a hand-built one: a bare root is not a consumer that needs one series per key.
+    let inserted =
         insert_native_merge_inside_current_fused(&unmerged, &[NativeProperties::source_pieces()])
             .expect("the pass keeps the tree legal");
-    // What is executed below is the pass's insertion: the pass put the merge at the root.
     assert!(
-        matches!(merged.root().expr, NativeExpr::Merge { .. }),
-        "{merged}"
+        !matches!(inserted.root().expr, NativeExpr::Merge { .. }),
+        "the root was canonicalized:\n{inserted}"
     );
-    assert_eq!(1, merged.to_string().matches("Merge").count(), "{merged}");
+    assert_eq!(
+        0,
+        inserted.to_string().matches("Merge").count(),
+        "{inserted}"
+    );
+    let merged = NativeTree::try_new(merge(unmerged.root().clone()))
+        .expect("a merge over an evaluated vector is a legal tree");
 
     let metric = named_metric("some_metric", "x");
     let cases: [(&str, Vec<EvaluatedChunk>); 2] = [

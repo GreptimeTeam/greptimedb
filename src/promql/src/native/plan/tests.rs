@@ -627,6 +627,12 @@ pub(crate) fn source_pieces() -> NativeProperties {
 /// This is where the RFC's simplified rule ("a pure numeric map inherits grouping") had to be
 /// corrected: none of the three map operations leaves a label set as it is, so a map is one of the
 /// nodes that lose grouping rather than pass it on.
+///
+/// The facts are two questions and a node may answer them apart, which is why this test asks both of
+/// every shape below: *grouping* is whether the output holds at most one series per canonical label
+/// set, and *ownership* is how much of each of those label sets this execution holds. A finished
+/// fold and a two-vector match derive their own grouping and neither side's ownership, so an
+/// expectation that reads one answer as the other is the mistake this test exists to catch.
 #[test]
 fn properties_follow_what_each_node_does_to_a_label_set() {
     let shared = grid(0, 60_000, 4);
@@ -714,35 +720,44 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         rewritten
     );
 
-    // An aggregate folds a group and a vector operation decides whole series against each other, so
-    // neither can claim the label sets of the series it read.
+    // An aggregate answers the two questions apart, and a finished fold answers the grouping one
+    // with a proof of its own: `FloatAggregator::finish` builds one series per group, so the output
+    // already holds at most one series per canonical label set however the input's pieces arrived,
+    // and nothing above it has an alias left to collect.
     let folded = complete_aggregate(input_on(Arc::clone(&shared)));
     assert_eq!(
         folded.properties(&[complete]).grouping,
-        CanonicalGrouping::SourcePiecesOnly
+        CanonicalGrouping::CanonicalComplete
     );
     // A group's identity is the group key, so an ownership per input key says nothing about it: two
-    // input label sets placed in different executions can fold into one group.
+    // input label sets placed in different executions can fold into one group, which is why the
+    // ownership is re-derived while the grouping above is the fold's own.
     assert_eq!(
         folded.properties(&[complete]).owner,
         CanonicalOwner::Unknown
     );
+    // A `sort` hands back the series it was given with their labels unchanged, so it inherits both
+    // of its input's answers: what it reorders it answers under the same label sets, and a grouping
+    // a complete child proved still holds for the order it wrote.
     let ordered = sorted(input_on(Arc::clone(&shared)));
     assert_eq!(
         ordered.properties(&[complete]).grouping,
-        CanonicalGrouping::SourcePiecesOnly
+        CanonicalGrouping::CanonicalComplete
     );
 
-    // Two vectors are matched by label, which is the operation's own decision about what label set a
-    // sample ends under, so neither side's grouping is the output's. The two sides are two sources,
-    // so each reads its own entry of the boundary.
+    // Two vectors are matched by label, and the two questions are answered apart here too. The
+    // kernel files its rows by the *result* label set (`Results` is keyed by the label set a
+    // pairing's sample ends under) and refuses two values of a field at one point, so it hands over
+    // one series per canonical label set however the operands arrived: the grouping is the match's
+    // own proof, not either side's. The ownership is the other question, and it is not. The two
+    // sides are two sources, so each reads its own entry of the boundary.
     let sum = sum_of(
         input_on_at(0, Arc::clone(&shared)),
         input_on_at(1, Arc::clone(&shared)),
     );
     assert_eq!(
         sum.properties(&[complete, complete]).grouping,
-        CanonicalGrouping::SourcePiecesOnly
+        CanonicalGrouping::CanonicalComplete
     );
     // Its output holds series from both sides, so its ownership is only what both agree on - and
     // then only if it survives the match, whose output identity is its modifiers and not the keys it
@@ -756,11 +771,13 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         CanonicalOwner::Unknown
     );
     // The per-source indexing is visible here: a boundary that states facts for source 0 only leaves
-    // source 1 unproved.
+    // source 1 unproved, which costs the ownership - the two sides then agree on nothing they were
+    // asked - and not the grouping, which the match establishes for its own output whatever its
+    // sides proved.
     assert_eq!(sum.properties(&[complete]).owner, CanonicalOwner::Unknown);
     assert_eq!(
         sum.properties(&[complete]).grouping,
-        CanonicalGrouping::SourcePiecesOnly
+        CanonicalGrouping::CanonicalComplete
     );
 
     // A merge is the node that establishes that fact, and the placement of what it read is the
@@ -874,6 +891,10 @@ fn two_constants_hold_no_label_set() {
 /// agree on, and the match re-derives it for the label sets its modifiers name: `label_sets_of_its_own` keeps
 /// a one-execution ownership and downgrades one per canonical key, because the keys it read are not
 /// the label sets it writes.
+///
+/// The grouping is the match's own and is complete however its sides arrived: the kernel files rows
+/// by *result* label set. What the two sides' proofs can change is therefore the ownership alone,
+/// which is the only answer that differs between the three cases below.
 #[test]
 fn a_two_vector_match_still_rederives_its_ownership() {
     let shared = grid(0, 60_000, 4);
@@ -884,10 +905,13 @@ fn a_two_vector_match_still_rederives_its_ownership() {
             input_on_at(1, Arc::clone(&shared)),
         )
     };
-    // What a match proves whatever it read: the grouping is the modifiers' decision.
+    // What a match proves whatever it read: a match is complete in grouping - `Results` files the
+    // paired samples by the label set each one ends under and refuses two values of a field at one
+    // point, so what it hands over is one series per canonical label set - while its ownership is
+    // its modifiers' decision and the two sides' proofs only bound it.
     let whole_vector = |owner: CanonicalOwner| NativeProperties {
         owner,
-        grouping: CanonicalGrouping::SourcePiecesOnly,
+        grouping: CanonicalGrouping::CanonicalComplete,
     };
 
     // Both sides placed by canonical key agree on that ownership, and the match still downgrades it.
