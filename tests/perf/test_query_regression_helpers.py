@@ -15,6 +15,7 @@
 
 """Checks for helper image extraction and unchanged source-build defaults."""
 
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -83,31 +84,44 @@ class HelpersTest(unittest.TestCase):
                 helpers.extract(IMAGE, Path(tmp))
             self.assertEqual(run.call_count, 2)
 
-    def test_publish_retries_same_tag_and_stops_after_three_failures(self):
-        import os
-        script = (ROOT / ".github/scripts/publish-query-regression-helpers.sh").read_text()
-        retry = script.split("for attempt in 1 2 3; do", 1)[1].split('image="', 1)[0]
-        retry = "set -euo pipefail\ntag=registry/helpers:revision\nfor attempt in 1 2 3; do" + retry
-        for failures in (0, 1, 3):
-            with self.subTest(failures=failures), tempfile.TemporaryDirectory() as tmp:
+    def test_published_checksums_and_mismatch_cleanup(self):
+        for valid in (True, False):
+            with self.subTest(valid=valid), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                docker = root / "docker"
-                docker.write_text("""#!/bin/sh
-printf '%s\\n' "$*" >> "$PUSH_LOG"
-attempt=$(wc -l < "$PUSH_LOG")
-[ "$attempt" -gt "$FAILURES" ]
-""")
-                docker.chmod(0o755)
-                sleep = root / "sleep"
-                sleep.write_text("#!/bin/sh\nexit 0\n")
-                sleep.chmod(0o755)
-                log = root / "pushes"
-                env = dict(os.environ, PATH=tmp + os.pathsep + os.environ["PATH"],
-                           PUSH_LOG=str(log), FAILURES=str(failures))
-                result = subprocess.run(["bash", "-c", retry], env=env, capture_output=True)
-                self.assertEqual(result.returncode, 1 if failures == 3 else 0)
-                self.assertEqual(log.read_text().splitlines(),
-                                 ["push registry/helpers:revision"] * min(failures + 1, 3))
+                checksum = hashlib.sha256(b"binary" if valid else b"wrong").hexdigest()
+                checksums = root / "SHA256SUMS"
+                checksums.write_text("".join(f"{checksum}  {name}\n" for name in helpers.BINARIES))
+                calls = []
+
+                def run(*args):
+                    calls.append(args)
+                    if args[:3] == ("docker", "image", "inspect"):
+                        return json.dumps([{"Id": "sha256:image", "Config": {"Labels": {
+                            "org.opencontainers.image.revision": REVISION}}}])
+                    if args[:2] == ("docker", "create"):
+                        return "container"
+                    if args[:2] == ("docker", "cp"):
+                        Path(args[-1]).write_bytes(b"binary")
+                    return ""
+
+                with patch.object(helpers, "run", side_effect=run):
+                    if valid:
+                        helpers.extract(IMAGE, root / "bins", checksums)
+                    else:
+                        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                            helpers.extract(IMAGE, root / "bins", checksums)
+                        self.assertFalse((root / "bins/helpers-image.json").exists())
+                self.assertTrue(all(call[0] == "docker" for call in calls))
+                self.assertEqual(calls[-1], ("docker", "rm", "--force", "--volumes", "container"))
+
+    def test_checksum_manifest_requires_both_helpers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checksums = root / "SHA256SUMS"
+            checksums.write_text("0" * 64 + "  query_perf_fixture\n")
+            with patch.object(helpers, "run") as run, self.assertRaises(ValueError):
+                helpers.extract(IMAGE, root, checksums)
+            run.assert_not_called()
 
     def test_candidate_build_matrix(self):
         # Execute the actual workflow shell with recorder commands. Changing

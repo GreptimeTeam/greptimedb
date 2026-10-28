@@ -644,3 +644,12 @@ for the first time (the initial pin is deliberately empty). No mutable `latest`
 tag is consumed and publication alone does not change the version used by runs.
 The existing **Release builder images** workflow can also invoke publication via
 `release_query_regression_helpers_image`, including for initial branch testing.
+
+Helper publication separates the ECS build from the hosted registry upload.
+The ECS job smoke-tests the packaged binaries and compares fixture plans twice,
+then retains the image archive and binary checksums as `helpers-image` for seven
+days. The hosted job uses Skopeo (as in builder-image publishing), reads back the
+published digest, and checks both binaries against those checksums. If upload
+fails, rerun failed jobs to reuse the completed build artifact without compiling
+again. Runtime compatibility is checked on ECS; the hosted publishing job only
+compares bytes because its system libraries can differ.

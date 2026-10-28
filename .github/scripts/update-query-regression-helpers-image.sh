@@ -29,7 +29,7 @@ ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 ## What's changed and what's your intention?
 
 Update the query-regression helper image to \`$HELPERS_IMAGE\`, built from \`$GITHUB_SHA\`.
-The publishing job extracted both binaries from the published digest, ran their help commands, and checked that they matched the build outputs.
+The ECS build smoke-tested both packaged binaries and compared fixture plans. The publishing job extracted both binaries from the published digest and verified their SHA-256 checksums against those build outputs.
 Runs opting into \`helpers_image: pinned\` use this version after merge. Source-build defaults are unchanged.
 
 ## PR Checklist

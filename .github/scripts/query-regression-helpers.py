@@ -16,6 +16,7 @@
 """Extract digest-pinned query regression tools from an artifact image."""
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -37,7 +38,13 @@ def run(*args):
     return subprocess.check_output(args, text=True).strip()
 
 
-def extract(image, destination):
+def extract(image, destination, checksums=None):
+    expected = None
+    if checksums is not None:
+        entries = [line.split() for line in checksums.read_text().splitlines()]
+        expected = {name: digest for digest, name in entries}
+        if set(expected) != set(BINARIES) or len(entries) != len(BINARIES):
+            raise ValueError("Checksums must contain exactly the two helper binaries")
     image = resolve_image(image)
     destination.mkdir(parents=True, exist_ok=True)
     run("docker", "pull", image)
@@ -51,7 +58,13 @@ def extract(image, destination):
             target = destination / binary
             run("docker", "cp", f"{container}:/{binary}", str(target))
             target.chmod(0o755)
-            run(str(target.resolve()), "--help")
+            if expected is None:
+                run(str(target.resolve()), "--help")
+            else:
+                with target.open("rb") as file:
+                    actual = hashlib.file_digest(file, "sha256").hexdigest()
+                if actual != expected[binary]:
+                    raise ValueError(f"Published helper checksum mismatch: {binary}")
     finally:
         run("docker", "rm", "--force", "--volumes", container)
     provenance = {"image": image, "image_id": metadata["Id"], "source_revision": revision}
@@ -64,5 +77,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image")
     parser.add_argument("destination", type=Path)
+    parser.add_argument("--checksums", type=Path, help="Verify build checksums instead of executing on this host")
     args = parser.parse_args()
-    extract(args.image, args.destination)
+    extract(args.image, args.destination, args.checksums)
