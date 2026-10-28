@@ -722,10 +722,20 @@ impl RangeBase {
         tag_decode_state: &mut TagDecodeState,
     ) -> Result<Option<BooleanBuffer>> {
         let metadata = self.read_format.metadata();
-        // A pruned column rejects the batch without decoding any tag payloads.
-        if self
-            .filters
-            .iter()
+        // Honor skip_fields/skip_tags before inspecting MaybeFilter::Pruned: a predicate
+        // marked Pruned is still skipped if it must not run before merge/dedup.
+        // For example, after adding nullable JSON2 column j to a last_non_null table,
+        // an old SST may contain (key=a, ts=1, f=10) without j, while a newer row has
+        // (key=a, ts=1, f=NULL, j={"a":1}). WHERE j IS NOT NULL is Pruned for the old
+        // SST, but discarding that row here would lose f=10 needed for backfill.
+        // Keep it for merge/dedup and evaluate the field predicate on the merged row.
+        // This also applies to added non-JSON2 fields, not only JSON2 columns.
+        let filters = self.filters.iter().filter(|ctx| {
+            !(skip_fields && ctx.semantic_type() == SemanticType::Field
+                || skip_tags && ctx.semantic_type() == SemanticType::Tag)
+        });
+        if filters
+            .clone()
             .any(|ctx| matches!(ctx.filter(), MaybeFilter::Pruned))
         {
             return Ok(None);
@@ -757,7 +767,7 @@ impl RangeBase {
         let mut mask = BooleanBuffer::new_set(input.num_rows());
 
         // Run filter one by one and combine them result
-        for filter_ctx in &self.filters {
+        for filter_ctx in filters {
             let filter = match filter_ctx.filter() {
                 MaybeFilter::Filter(f) => f,
                 // Column matches.
@@ -765,14 +775,6 @@ impl RangeBase {
                 // Column doesn't match, filter the entire batch.
                 MaybeFilter::Pruned => return Ok(None),
             };
-
-            // Skip field filters if skip_fields is true
-            if skip_fields && filter_ctx.semantic_type() == SemanticType::Field {
-                continue;
-            }
-            if skip_tags && filter_ctx.semantic_type() == SemanticType::Tag {
-                continue;
-            }
 
             // Get the column directly by its projected index.
             // If the column is missing and it's not a tag/time column, this filter is skipped.
@@ -998,6 +1000,14 @@ impl RangeBase {
 mod tests {
     use std::sync::Arc;
 
+    use super::*;
+    use crate::read::read_columns::ReadColumns;
+    use crate::sst::parquet::flat_format::FlatReadFormat;
+    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util::sst_util::{
+        new_record_batch_with_custom_sequence, sst_region_metadata,
+        sst_region_metadata_with_encoding,
+    };
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
         BinaryDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt64Array,
@@ -1009,15 +1019,7 @@ mod tests {
     use mito_codec::row_converter::SparsePrimaryKeyCodec;
     use parquet::arrow::arrow_reader::RowSelector;
     use partition::expr::col as partition_col;
-
-    use super::*;
-    use crate::read::read_columns::ReadColumns;
-    use crate::sst::parquet::flat_format::FlatReadFormat;
-    use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
-    use crate::test_util::sst_util::{
-        new_record_batch_with_custom_sequence, sst_region_metadata,
-        sst_region_metadata_with_encoding,
-    };
+    use store_api::metadata::RegionMetadataBuilder;
 
     fn new_test_range_base(filters: Vec<SimpleFilterContext>) -> RangeBase {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
@@ -1332,5 +1334,32 @@ mod tests {
             RowSelector::select(1),
         ]);
         assert_eq!(actual, expected);
+    }
+    #[test]
+    fn test_pruned_missing_field_respects_skip_fields()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let metadata = Arc::new(sst_region_metadata());
+        let mut builder = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+        builder.push_column_metadata(store_api::metadata::ColumnMetadata {
+            column_schema: ColumnSchema::new("added", ConcreteDataType::float64_datatype(), true),
+            semantic_type: SemanticType::Field,
+            column_id: 100,
+        });
+        let expected = builder.build()?;
+        let filter =
+            SimpleFilterContext::new_opt(&metadata, Some(&expected), &col("added").is_not_null())
+                .ok_or("expected a missing-column filter")?;
+        assert!(matches!(filter.filter(), MaybeFilter::Pruned));
+        let base = new_test_range_base(vec![filter]);
+        let batch = new_record_batch_with_custom_sequence(&["b", "x"], 0, 4, 1);
+        assert!(
+            base.compute_filter_mask_flat(&batch, false, false, &mut TagDecodeState::new())?
+                .is_none()
+        );
+        let mask = base
+            .compute_filter_mask_flat(&batch, true, false, &mut TagDecodeState::new())?
+            .ok_or("skipped field filter must preserve backfill rows")?;
+        assert_eq!(batch.num_rows(), mask.count_set_bits());
+        Ok(())
     }
 }

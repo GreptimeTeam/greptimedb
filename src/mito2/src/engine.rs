@@ -74,6 +74,8 @@ mod scan_corrupt;
 #[cfg(test)]
 mod scan_test;
 #[cfg(test)]
+mod sequence_test;
+#[cfg(test)]
 mod set_role_state_test;
 #[cfg(test)]
 mod skip_wal_test;
@@ -1616,15 +1618,21 @@ impl RegionEngine for MitoEngine {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
-    ) -> Result<(), BoxedError> {
+    ) -> Result<bool, BoxedError> {
         let region = self.inner.find_region(region_id).map_err(BoxedError::new)?;
         // Before the role, and even if the role leaves the region's state unchanged.
         if role.writable() {
-            region.leader_deadline.extend(deadline);
+            region.manifest_ctx.leader_deadline.extend(deadline);
+        }
+        if role == RegionRole::Leader {
+            return Ok(region
+                .manifest_ctx
+                .promote_unless_downgrade_started_after(sent_at, region_id));
         }
         region.set_role(role);
-        Ok(())
+        Ok(true)
     }
 
     async fn set_region_role_state_gracefully(

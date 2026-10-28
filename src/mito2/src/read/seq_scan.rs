@@ -42,14 +42,12 @@ use crate::read::flat_merge::FlatMergeReader;
 use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
-use crate::read::range_cache::{
-    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
-};
+use crate::read::range_cache::{CachedRangeReader, build_range_cache_key};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
     BATCH_SIZE_THRESHOLD, MIN_COMPACTION_SPLIT_ROWS, PartitionMetrics, PartitionMetricsList,
-    SplitRecordBatchStream, compute_parallel_channel_size, scan_flat_file_ranges,
-    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
+    SplitRecordBatchStream, compute_parallel_channel_size, prepare_flat_mem_stream,
+    scan_flat_file_ranges, scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::stream::{ConvertBatchStream, ScanBatch, ScanBatchStream};
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics, scan_util};
@@ -307,15 +305,39 @@ impl SeqScan {
                 key
             }
         });
-
-        if let Some(key) = cache_key.as_ref() {
-            if let Some(value) = stream_ctx.input.cache_strategy.get_range_result(key) {
-                part_metrics.inc_range_cache_hit();
-                return Ok((cached_flat_range_stream(value), DEFAULT_READ_BATCH_SIZE));
-            }
-            part_metrics.inc_range_cache_miss();
+        let ctx = stream_ctx.clone();
+        let range = *part_range;
+        let metrics = part_metrics.clone();
+        CachedRangeReader {
+            stream_ctx,
+            part_range,
+            key: cache_key,
+            metrics: part_metrics,
         }
+        .build(move || async move {
+            Self::build_uncached_partition_range(
+                &ctx,
+                &range,
+                read_mode,
+                &metrics,
+                partition_pruner,
+                file_scan_semaphore,
+                merge_semaphore,
+            )
+            .await
+        })
+        .await
+    }
 
+    async fn build_uncached_partition_range(
+        stream_ctx: &Arc<StreamContext>,
+        part_range: &PartitionRange,
+        read_mode: FlatReadMode,
+        part_metrics: &PartitionMetrics,
+        partition_pruner: Arc<PartitionPruner>,
+        file_scan_semaphore: Option<Arc<Semaphore>>,
+        merge_semaphore: Option<Arc<Semaphore>>,
+    ) -> Result<(BoxedRecordBatchStream, usize)> {
         let mut sources = Vec::new();
         let split_batch_size = build_flat_sources(
             stream_ctx,
@@ -338,16 +360,6 @@ impl SeqScan {
             channel_size,
         )
         .await?;
-
-        let stream = match cache_key {
-            Some(key) => cache_flat_range_stream(
-                stream,
-                stream_ctx.input.cache_strategy.clone(),
-                key,
-                part_metrics.clone(),
-            ),
-            None => stream,
-        };
 
         Ok((stream, estimated_rows_per_batch))
     }
@@ -713,7 +725,7 @@ pub(crate) async fn build_flat_sources(
                 *index,
                 range_meta.time_range,
             );
-            ordered_sources[position] = Some(Box::pin(stream) as _);
+            ordered_sources[position] = Some(prepare_flat_mem_stream(stream_ctx.clone(), stream));
         } else if stream_ctx.is_file_range_index(*index) {
             // Common manifest-level fast-skip shared by SeqScan and UnorderedScan.
             // Compaction should keep reading its selected input ranges completely.

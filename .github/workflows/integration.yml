@@ -42,6 +42,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which jobs this gate skips, and why: .github/ci/README.md.
+  scope:
+    name: CI Scope
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # ubuntu-slim ships python3, git and curl; this job only classifies.
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # `/pulls/{n}` and `/pulls/{n}/files`. An explicit block sets every
+      # unlisted permission to none, and a 403 here would silently widen every
+      # gate instead of classifying.
+      pull-requests: read
+    outputs:
+      any_fuzz: ${{ steps.classify.outputs.any_fuzz }}
+      build_ci_needed: ${{ steps.classify.outputs.build_ci_needed }}
+      fuzz_standalone: ${{ steps.classify.outputs.fuzz_standalone }}
+      fuzz_distributed: ${{ steps.classify.outputs.fuzz_distributed }}
+      fuzz_chaos: ${{ steps.classify.outputs.fuzz_chaos }}
+      fuzz_unstable: ${{ steps.classify.outputs.fuzz_unstable }}
+      export_import_v2: ${{ steps.classify.outputs.export_import_v2 }}
+      sqlness_kvbackend: ${{ steps.classify.outputs.sqlness_kvbackend }}
+    steps:
+      # Rules come from the pull request base (the queue base on merge_group),
+      # so a pull request cannot weaken its own gate. If this job or the Classify
+      # step fails, the outputs stay empty and every gate below treats an absent
+      # value as "run", which keeps CI fail-open.
+      - uses: actions/checkout@v4
+        # A checkout failure leaves the outputs empty, which every gate treats
+        # as "run"; letting the step fail would skip the gates instead.
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
+          persist-credentials: false
+      - name: Classify
+        id: classify
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CI_SCOPE_FORCE_ALL: ${{ vars.CI_SCOPE_FORCE_ALL || 'false' }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --event "$GITHUB_EVENT_NAME"
+                --github-output "$GITHUB_OUTPUT"
+                --summary "$GITHUB_STEP_SUMMARY")
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            args+=(--pr "${{ github.event.pull_request.number }}"
+                   --head-sha "${{ github.event.pull_request.head.sha }}"
+                   --base-sha "${{ github.event.pull_request.base.sha }}")
+          fi
+          python3 .github/ci/ci_scope.py "${args[@]}"
+
   build:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Build GreptimeDB binaries
@@ -116,28 +167,12 @@ jobs:
           - name: "Basic"
             opts: ""
             kafka: false
-            postgres: false
-            mysql: false
           - name: "Remote WAL"
             opts: "-w kafka -k 127.0.0.1:9092"
             kafka: true
-            postgres: false
-            mysql: false
-          - name: "PostgreSQL KvBackend"
-            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
-            kafka: false
-            postgres: true
-            mysql: false
-          - name: "MySQL KvBackend"
-            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
-            kafka: false
-            postgres: false
-            mysql: true
           - name: "Flat format"
             opts: "--enable-flat-format"
             kafka: false
-            postgres: false
-            mysql: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -148,16 +183,6 @@ jobs:
         name: Setup Kafka
         working-directory: tests-integration/fixtures
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait kafka
-
-      - if: matrix.mode.postgres
-        name: Setup PostgreSQL
-        working-directory: tests-integration/fixtures
-        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
-
-      - if: matrix.mode.mysql
-        name: Setup MySQL
-        working-directory: tests-integration/fixtures
-        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
 
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
@@ -183,10 +208,68 @@ jobs:
             /tmp/sqlness*
           retention-days: 3
 
+  sqlness-kvbackend:
+    # The two foreign KV backends are the only sqlness legs that are not
+    # required checks, so they are the only ones this gate may skip. They run
+    # the same cases as the `Basic` leg, so the diff only matters when it can
+    # reach the backend itself; the merge queue runs them regardless.
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) && needs.build.result == 'success' && needs.scope.outputs.sqlness_kvbackend != 'false' }}
+    name: Sqlness Test (${{ matrix.mode.name }})
+    needs: [scope, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest ]
+        mode:
+          - name: "Metasrv on PostgreSQL"
+            id: "metasrv-postgres"
+            opts: "--setup-pg postgresql://greptimedb:admin@127.0.0.1:5432/postgres"
+            postgres: true
+            mysql: false
+          - name: "Metasrv on MySQL"
+            id: "metasrv-mysql"
+            opts: "--setup-mysql mysql://greptimedb:admin@127.0.0.1:3306/mysql"
+            postgres: false
+            mysql: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - if: matrix.mode.postgres
+        name: Setup PostgreSQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait postgres
+
+      - if: matrix.mode.mysql
+        name: Setup MySQL
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait mysql
+
+      - name: Download pre-built binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: bins
+          path: .
+      - name: Unzip binaries
+        run: tar -xvf ./bins.tar.gz
+      - name: Run sqlness
+        run: RUST_BACKTRACE=1 ./bins/sqlness-runner bare ${{ matrix.mode.opts }} -c ./tests/cases --bins-dir ./bins --preserve-state
+      - name: Upload sqlness logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sqlness-logs-${{ matrix.mode.name }}
+          path: |
+            /tmp/sqlness*
+          retention-days: 3
+
   export-import-v2-e2e:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) && needs.build.result == 'success' && needs.scope.outputs.export_import_v2 != 'false' }}
     name: Export/Import V2 E2E Test
-    needs: build
+    needs: [scope, build]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -319,8 +402,9 @@ jobs:
           retention-days: 3
 
   prepare-fuzz-targets:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command) || github.event_name == 'merge_group') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || inputs.fuzz_profile != 'none') && needs.scope.outputs.any_fuzz != 'false' }}
     name: Prepare Fuzz Targets
+    needs: [scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -433,9 +517,9 @@ jobs:
           if-no-files-found: error
 
   fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command) || github.event_name == 'merge_group') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') && needs.build.result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_standalone != 'false' }}
     name: Fuzz Test (Standalone, ${{ matrix.group.name }})
-    needs: [build, prepare-fuzz-targets]
+    needs: [build, prepare-fuzz-targets, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -514,9 +598,9 @@ jobs:
           artifact-name: fuzz-standalone-${{ matrix.group.id }}
 
   unstable-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command) || github.event_name == 'merge_group') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_unstable != 'false' }}
     name: Unstable Fuzz Test
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [build-greptime-ci, prepare-fuzz-targets, scope]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -574,8 +658,9 @@ jobs:
           artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none') || github.event_name == 'merge_group') && needs.scope.outputs.build_ci_needed != 'false' }}
     name: Build GreptimeDB binary (profile-CI)
+    needs: [scope]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -634,10 +719,10 @@ jobs:
           version: current
 
   distributed-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command) || github.event_name == 'merge_group') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all') && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_distributed != 'false' }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [build-greptime-ci, prepare-fuzz-targets, scope]
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -873,10 +958,10 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-chaos:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all') }}
+    if: ${{ !cancelled() && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command) || github.event_name == 'merge_group') && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all') && needs['build-greptime-ci'].result == 'success' && needs['prepare-fuzz-targets'].result == 'success' && needs.scope.outputs.fuzz_chaos != 'false' }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
-    needs: [build-greptime-ci, prepare-fuzz-targets]
+    needs: [build-greptime-ci, prepare-fuzz-targets, scope]
     timeout-minutes: 60
     strategy:
       fail-fast: false
