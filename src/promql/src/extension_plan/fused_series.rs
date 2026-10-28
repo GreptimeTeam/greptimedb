@@ -84,10 +84,12 @@ use store_api::region_engine::RawLabelSource;
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
 use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
+use crate::extension_plan::series_repartition::SeriesRepartitionExec;
+use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
-    needs_single_execution, reads_across_series,
+    AggregateKind, BoundAggregate, CanonicalOwner, Grouping, NativeExpr, NativeNode,
+    NativeProperties, NativeTree, NativeType, needs_single_execution_in, reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
@@ -741,6 +743,51 @@ fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
     Ok(schemas)
 }
 
+/// What each input proves about the pieces of a label set it hands over, indexed by source.
+///
+/// This is the boundary [`NativeNode::properties`] takes, so it is read by the merge and by every
+/// node above it that follows the ownership. The one fact this node can establish is which node
+/// produced a partition: an output of [`SeriesRepartitionExec`] holds every piece of the label sets
+/// it names and no other output holds a fragment of one of them
+/// ([`CanonicalOwner::ByCanonicalKey`]), because that node routes each chunk by the canonical label
+/// set of the series it carries. Every other child proves nothing - a scan partitions by storage
+/// `read_key`, and a node that reorders without claiming a relation says nothing about which series
+/// share a label set - so it is [`CanonicalOwner::Unknown`] and a merge above it keeps one
+/// execution.
+///
+/// The declared partitioning is not the proof, and this is the point to be exact about.
+/// `UnknownPartitioning(M)` is precisely "this node promises nothing about where a key lives": it is
+/// what a `UnionExec`, a coalesce and every reordering node declare too, because the key here is
+/// decoded from the rows rather than computed by an Arrow expression DataFusion could compare. So
+/// the declaration is read as `Unknown` in general, and the ownership is taken as proved only for
+/// this one child: [`SeriesRepartitionExec`]'s own contract is to route every chunk by the canonical
+/// label set of the series it carries, so its output partition does hold every piece of the label
+/// sets it names and no other output holds a fragment of one of them.
+///
+/// That is a fact trusted by node identity ([`ExecutionPlan::downcast_ref`]) and not by anything the
+/// child declares, and it stops being true the moment something reshuffles between the two: a
+/// round-robin exchange, a coalesce or a union above the repartition spreads the pieces again while
+/// leaving the ownership claim in place. Those nodes are not between the two here - the planner puts
+/// the repartition directly below the merge it serves - and this function looks at the immediate
+/// child and nothing below it, so a plan that ever interposes one has to reconsider this. It is
+/// written as a match on the child's type for that reason: a node added to this condition is a claim
+/// about that node's routing that has to be justified the same way.
+fn input_boundary(
+    inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
+) -> Vec<NativeProperties> {
+    inputs
+        .iter()
+        .map(|(input, _, ordering)| NativeProperties {
+            owner: if input.downcast_ref::<SeriesRepartitionExec>().is_some() {
+                CanonicalOwner::ByCanonicalKey
+            } else {
+                CanonicalOwner::Unknown
+            },
+            ..NativeProperties::source_pieces(*ordering)
+        })
+        .collect()
+}
+
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OutputColumn {
@@ -977,16 +1024,21 @@ impl FusedSeriesExec {
         )
     }
 
-    /// Whether a tree over `source_count` sources has to be evaluated once over every input
+    /// Whether `inputs`' sources, read through `tree`, have to be evaluated once over every input
     /// partition instead of once per partition.
     ///
     /// More than one source is one execution: its operands are matched against each other, so a
     /// partition-by-partition run would pair each side's series with only its own partition's. A
-    /// single-source tree is one execution only when the tree itself reads the whole vector
-    /// ([`needs_single_execution`]); otherwise every series is an independent answer and one execution
-    /// per scan partition is the parallelism that keeps those answers cheap.
-    fn requires_single_execution(source_count: usize, tree: &NativeTree) -> bool {
-        source_count > 1 || needs_single_execution(tree.root())
+    /// single-source tree is asked what it reads ([`needs_single_execution_in`]) with the facts
+    /// [`input_boundary`] reads off the child: a whole-vector operator is one execution, and a merge
+    /// is one only when the child does not already hand every piece of a label set over in the
+    /// partition it names. Otherwise every series is an independent answer and one execution per scan
+    /// partition is the parallelism that keeps those answers cheap.
+    fn requires_single_execution(
+        inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
+        tree: &NativeTree,
+    ) -> bool {
+        inputs.len() > 1 || needs_single_execution_in(tree.root(), &input_boundary(inputs))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1099,19 +1151,21 @@ impl FusedSeriesExec {
             }
         }
         // One evaluated source at a time is what this node reads: a raw source is gathered across
-        // its partitions by series, because one of its series may span them, while an evaluated
-        // source is read partition after partition, because each frame is contiguous by
-        // declaration. Combining the two, or evaluating more than one source, would need a routing
-        // this node does not have, so it is refused instead of run with one side read wrongly.
+        // its partitions by series, because one of its series may span them, and an evaluated one
+        // the same way, because each frame is contiguous within a partition and not across them.
+        // Combining the two, or evaluating more than one source, would need a routing this node does
+        // not have - which label set of one source belongs beside which of another - so it is
+        // refused instead of run with one side read wrongly.
         if evaluated_sources > 1 || (evaluated_sources == 1 && inputs.len() > 1) {
             return Err(DataFusionError::Plan(
                 "FusedSeries reads one evaluated source alone, not beside another source".into(),
             ));
         }
         // One execution over every input partition, rather than one execution per partition: a tree
-        // that reads the whole vector has to see every series at once, and more than one source is
-        // one execution because its operands are matched against each other.
-        let single_execution = Self::requires_single_execution(inputs.len(), &tree);
+        // that reads the whole vector has to see every series at once, more than one source is one
+        // execution because its operands are matched against each other, and otherwise what the child
+        // proves about the pieces of a label set decides.
+        let single_execution = Self::requires_single_execution(&inputs, &tree);
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
             Partitioning::UnknownPartitioning(if single_execution { 1 } else { partition_count }),
@@ -1263,9 +1317,9 @@ impl ExecutionPlan for FusedSeriesExec {
         state.register_metrics(&self.metric, partition);
         // One execution reads every partition of its input, so an output partition does not name one
         // of them here; a per-partition execution does, and must name one the input has.
-        let single_execution = Self::requires_single_execution(self.inputs.len(), &self.tree);
+        let single_execution = Self::requires_single_execution(&self.inputs, &self.tree);
         let mut streams = Vec::new();
-        let mut evaluated: Option<(usize, VecDeque<SendableEvaluatedSeriesStream>)> = None;
+        let mut evaluated: Option<(usize, Vec<SendableEvaluatedSeriesStream>)> = None;
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if !single_execution && partition >= count {
@@ -1293,9 +1347,9 @@ impl ExecutionPlan for FusedSeriesExec {
                         Some(Arc::clone(&self.series_schemas[source])),
                     )?;
                     evaluated
-                        .get_or_insert_with(|| (source, VecDeque::new()))
+                        .get_or_insert_with(|| (source, Vec::new()))
                         .1
-                        .push_back(stream);
+                        .push(stream);
                 } else {
                     let raw =
                         unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
@@ -1331,9 +1385,16 @@ impl ExecutionPlan for FusedSeriesExec {
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
         let inputs = if let Some((source, partitions)) = evaluated {
-            // One evaluated source, read partition after partition: its frames are contiguous by
-            // declaration, so the order its partitions arrive in is the only order there is.
-            Some(FusedInputs::Evaluated { source, partitions })
+            // One evaluated source, its partitions read through one gather: its frames are
+            // contiguous per partition by declaration, and the gather is what keeps a chain whole
+            // while none of the partitions waits on another.
+            let reservation = MemoryConsumer::new(format!("FusedSeriesEvaluated[{partition}]"))
+                .register(&context.runtime_env().memory_pool);
+            Some(FusedInputs::Evaluated(EvaluatedGather::new(
+                source,
+                partitions,
+                reservation,
+            )))
         } else if streams.is_empty() {
             executor.end_of_input()?;
             None
@@ -1482,18 +1543,17 @@ struct FusedFeed {
 }
 
 /// The input of one execution: its raw partitions gathered together, or one evaluated source's
-/// partitions read in order.
+/// partitions read at once.
 ///
 /// [`SeriesGather`] interleaves the partitions of one raw source while keeping every series
-/// contiguous, because a series read from storage may span them. An evaluated frame is contiguous
-/// by declaration and only one evaluated source is read at a time, so its partitions are read one
-/// after another: the series of one are its own, and nothing has to route them to keep one whole.
+/// contiguous, because a series read from storage may span them. An evaluated source is gathered
+/// the same way and for the same reason: its frames are contiguous within a partition by
+/// declaration, and reading one partition to its end before the next would stall against an upstream
+/// that routes by series into bounded queues, since the partition being read cannot end while the
+/// read feeding it waits on a partition nobody reads.
 enum FusedInputs {
     Raw(SeriesGather),
-    Evaluated {
-        source: usize,
-        partitions: VecDeque<SendableEvaluatedSeriesStream>,
-    },
+    Evaluated(EvaluatedGather),
 }
 
 impl Stream for FusedInputs {
@@ -1510,25 +1570,203 @@ impl Stream for FusedInputs {
                     chunk: FusedChunk::Raw(chunk),
                 }))),
             },
-            Self::Evaluated { source, partitions } => loop {
-                let Some(stream) = partitions.front_mut() else {
-                    return Poll::Ready(None);
+            Self::Evaluated(gather) => Pin::new(gather).poll_next(cx),
+        }
+    }
+}
+
+/// Reads the partitions of one evaluated source at once without splitting a chain.
+///
+/// A series arrives whole: its chunks are contiguous, its runs increase and its identity does not
+/// change before the chunk closing it. That holds for the chunks of one partition and not across
+/// them - two partitions can hold two pieces of one label set, and a chunk of the other handed over
+/// between them would break the contract the runtime checks - so exactly one chain is handed over at
+/// a time. Every partition is polled, because an upstream that routes into bounded queues only makes
+/// progress while its outputs are drained, and what a partition reads while another one's chain is
+/// open is held back and handed over after it closes, one chain at a time.
+///
+/// Holding is bounded at one chain per partition, the same bound [`SeriesGather`] keeps: a partition
+/// whose held chain ended stops being polled until that chain is handed over. Every held chunk is
+/// charged to `reservation` until it leaves the gather.
+struct EvaluatedGather {
+    /// The source every partition of this gather belongs to: [`FusedSeriesExec::build`] refuses a
+    /// second evaluated source and an evaluated source beside a raw one.
+    source: usize,
+    partitions: Vec<EvaluatedPartition>,
+    /// The partition whose open chain is being handed over, if any. Until it closes, what the other
+    /// partitions read is held rather than handed over.
+    open: Option<usize>,
+    /// Chunks cleared for hand-over, in the order they must reach the runtime, with the bytes each
+    /// is still charged.
+    ready: VecDeque<(EvaluatedChunk, usize)>,
+    /// The partition polled first on the next sweep, so every partition is reached even while one of
+    /// them stays ready: the read behind a partition only starts once it is polled.
+    next: usize,
+    reservation: MemoryReservation,
+}
+
+/// One evaluated partition's stream and what it read while another partition's chain was open.
+struct EvaluatedPartition {
+    /// `None` once the stream ended.
+    stream: Option<SendableEvaluatedSeriesStream>,
+    /// Chunks of this stream's current chain, read while another partition's chain was open.
+    held: Vec<(EvaluatedChunk, usize)>,
+    /// Whether `held` ends with the chunk closing its chain.
+    held_closed: bool,
+}
+
+impl EvaluatedGather {
+    fn new(
+        source: usize,
+        partitions: Vec<SendableEvaluatedSeriesStream>,
+        reservation: MemoryReservation,
+    ) -> Self {
+        Self {
+            source,
+            partitions: partitions
+                .into_iter()
+                .map(|stream| EvaluatedPartition {
+                    stream: Some(stream),
+                    held: Vec::new(),
+                    held_closed: false,
+                })
+                .collect(),
+            open: None,
+            ready: VecDeque::new(),
+            next: 0,
+            reservation,
+        }
+    }
+
+    /// Takes one chunk read from the partition at `index`: hands it over, or holds it back when a
+    /// chain of another partition is open.
+    fn take(&mut self, index: usize, chunk: EvaluatedChunk) -> Result<(), BoxedError> {
+        match self.open {
+            // Another partition's chain is open, so this chunk cannot be handed over yet: a chunk of
+            // any other identity between two chunks of that chain is what the runtime refuses.
+            Some(open) if open != index => {
+                let bytes = series_bytes(&chunk.series);
+                self.reservation
+                    .try_grow(bytes)
+                    .map_err(|error| BoxedError::new(common_query::error::Error::from(error)))?;
+                let partition = &mut self.partitions[index];
+                partition.held_closed = chunk.is_last;
+                partition.held.push((chunk, bytes));
+            }
+            // Either nothing is open, or this chain is the open one and the chunk continues it.
+            _ => {
+                self.open = (!chunk.is_last).then_some(index);
+                self.ready.push_back((chunk, 0));
+                if self.open.is_none() {
+                    self.release();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears held chains for hand-over, one chain at a time, while no chain is open.
+    ///
+    /// A chain leaves as whole as it was read: the chunks of one partition's held chain are cleared
+    /// together, and a chain still open at the end of them becomes the open one, so the rest of it is
+    /// then read from that partition alone.
+    fn release(&mut self) {
+        while self.open.is_none() {
+            let Some(index) = self
+                .partitions
+                .iter()
+                .position(|partition| !partition.held.is_empty())
+            else {
+                return;
+            };
+            let partition = &mut self.partitions[index];
+            self.ready.extend(partition.held.drain(..));
+            if !std::mem::take(&mut partition.held_closed) {
+                self.open = Some(index);
+            }
+        }
+    }
+
+    fn fail(&mut self) {
+        self.partitions.clear();
+        self.ready.clear();
+        self.reservation.free();
+    }
+}
+
+impl Stream for EvaluatedGather {
+    type Item = Result<FusedFeed, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            // A held chain waits for nothing once no chain is open, so it is cleared before another
+            // partition is polled and handed over one chunk per poll below.
+            this.release();
+            if let Some((chunk, bytes)) = this.ready.pop_front() {
+                this.reservation.shrink(bytes);
+                return Poll::Ready(Some(Ok(FusedFeed {
+                    source: this.source,
+                    chunk: FusedChunk::Evaluated(chunk),
+                })));
+            }
+            let count = this.partitions.len();
+            let mut live = false;
+            let mut routed = false;
+            for offset in 0..count {
+                let index = (this.next + offset) % count;
+                let partition = &mut this.partitions[index];
+                // A partition whose held chain ended holds a whole series already: what it would
+                // read next belongs after that chain and must not be read ahead of it.
+                if partition.held_closed {
+                    live = true;
+                    continue;
+                }
+                let Some(stream) = partition.stream.as_mut() else {
+                    continue;
                 };
                 match stream.as_mut().poll_next(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    // A partition that ended is one series set fewer, not the end of the source.
+                    Poll::Pending => live = true,
                     Poll::Ready(None) => {
-                        partitions.pop_front();
+                        partition.stream = None;
+                        let open_here = this.open == Some(index);
+                        let holding = !partition.held.is_empty();
+                        // The decoder below refuses a stream that ends with its series open, so this
+                        // is a producer that bypassed it; left alone it would hold every other
+                        // partition back forever.
+                        if open_here || holding {
+                            this.fail();
+                            return Poll::Ready(Some(Err(BoxedError::new(
+                                common_query::error::Error::from(DataFusionError::Execution(
+                                    "evaluated series stream ended with its series open"
+                                        .to_string(),
+                                )),
+                            ))));
+                        }
                     }
-                    Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                    Poll::Ready(Some(Err(error))) => {
+                        this.fail();
+                        return Poll::Ready(Some(Err(error)));
+                    }
                     Poll::Ready(Some(Ok((series, is_last)))) => {
-                        return Poll::Ready(Some(Ok(FusedFeed {
-                            source: *source,
-                            chunk: FusedChunk::Evaluated(EvaluatedChunk { series, is_last }),
-                        })));
+                        if let Err(error) = this.take(index, EvaluatedChunk { series, is_last }) {
+                            this.fail();
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                        this.next = (index + 1) % count;
+                        routed = true;
+                        break;
                     }
                 }
-            },
+            }
+            if routed {
+                continue;
+            }
+            return if live {
+                Poll::Pending
+            } else {
+                Poll::Ready(None)
+            };
         }
     }
 }
