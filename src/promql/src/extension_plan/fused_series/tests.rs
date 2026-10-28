@@ -100,7 +100,7 @@ use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    NativeTree, NativeType, output_has_metric_name,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{
@@ -7072,6 +7072,30 @@ async fn a_match_over_two_canonical_owners_is_refused_instead_of_answered_locall
 /// way round answer the negation of every value - and the values themselves are the caller's, so a
 /// chunk read as the other source's data shows up as a wrong value instead of a plausible one.
 fn evaluated_binary_tree(op: BinaryOp, left_source: usize, right_source: usize) -> NativeTree {
+    evaluated_match_tree(
+        BinaryMatching {
+            op,
+            return_bool: false,
+            labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+            cardinality: Cardinality::OneToOne,
+            fill: FillValues::default(),
+        },
+        left_source,
+        right_source,
+    )
+}
+
+/// A binary operation between the evaluated sources `left_source` and `right_source`, with `matching`
+/// as its modifiers.
+///
+/// The modifiers are the caller's because they are what decides which matches a per-partition
+/// execution can answer ([`match_is_co_partitioned`]): a test that needs the proven shape and a test
+/// that needs the unproven one differ in this argument and in nothing else.
+fn evaluated_match_tree(
+    matching: BinaryMatching,
+    left_source: usize,
+    right_source: usize,
+) -> NativeTree {
     let left = evaluated_input_of(left_source);
     let right = evaluated_input_of(right_source);
     let output = crate::vector_match::binary_output_schema(
@@ -7083,13 +7107,7 @@ fn evaluated_binary_tree(op: BinaryOp, left_source: usize, right_source: usize) 
         expr: NativeExpr::Binary {
             left: Box::new(left),
             right: Box::new(right),
-            matching: BinaryMatching {
-                op,
-                return_bool: false,
-                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
-                cardinality: Cardinality::OneToOne,
-                fill: FillValues::default(),
-            },
+            matching,
         },
         output: NativeType::Samples(output),
     })
@@ -7528,5 +7546,438 @@ async fn an_always_ready_evaluated_source_does_not_starve_a_second_source() {
         ],
         hosts,
         "each chunk is handed over under the source it was read from"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The co-partitioned pair: what makes a two-source match run once per routing output.
+// ---------------------------------------------------------------------------
+
+/// The default one-to-one `ignoring()` match: its key is every label but `__name__`.
+///
+/// That is the one modifier shape [`match_is_co_partitioned`] covers, and the shape a routed pair
+/// exists for: the routing groups by the canonical label set, which is this key exactly when the
+/// series carry no metric name. The operator is arithmetic because a match has to answer a value
+/// under that key - a filtering comparison keeps the many side's labels instead.
+fn co_partitioned_matching() -> BinaryMatching {
+    BinaryMatching {
+        op: BinaryOp::Div,
+        return_bool: false,
+        labels: MatchingLabels::Ignoring(Vec::new()),
+        cardinality: Cardinality::OneToOne,
+        fill: FillValues::default(),
+    }
+}
+
+/// A real frame-exporting `FusedSeriesExec` running `tree` over `input`: one producer of a two-source
+/// match, whose output is the evaluated frame the node above it reads.
+fn frame_producer(tree: &NativeTree, input: Arc<dyn ExecutionPlan>) -> Arc<dyn ExecutionPlan> {
+    plan_of(formatted(tree, FusedOutputFormat::SeriesFrame), input)
+        .expect("the producer exports the evaluated frame its tree answers")
+}
+
+/// `producer` routed into `outputs` partitions: one `R` of a two-source match.
+fn routed_into(producer: Arc<dyn ExecutionPlan>, outputs: usize) -> Arc<dyn ExecutionPlan> {
+    Arc::new(
+        SeriesRepartitionExec::try_new(producer, outputs)
+            .expect("the routing is built over a producer's evaluated frame"),
+    )
+}
+
+/// A producer whose output carries no metric name: `abs(x)` over an evaluated source, which drops
+/// `__name__` the way every arithmetic map does.
+///
+/// Every grid point holds `value`, and the caller names it so a match's answer is a number this test
+/// can state: a division of two of these answers a quotient that only holds if the two sides were
+/// paired, so a match that read the wrong source answers a different number rather than a plausible
+/// one.
+fn name_free_producer(host: &str, value: f64) -> Arc<dyn ExecutionPlan> {
+    let values = vec![Some(value); GRID_LEN as usize];
+    let chunks = vec![evaluated_chunk_with(
+        &metric(&[(HOST, host)], None),
+        0,
+        values,
+        true,
+    )];
+    frame_producer(
+        &abs_over_evaluated_input_tree(),
+        ScriptedEvaluated::plan(vec![chunks]),
+    )
+}
+
+/// A producer whose output keeps its metric name: an instant selection over raw samples answers the
+/// label set it read, `__name__` included.
+fn named_producer(host: &str) -> Arc<dyn ExecutionPlan> {
+    let tree = NativeTree::try_new(instant_of(0, &grid()))
+        .expect("an instant selection over raw samples is a legal tree");
+    frame_producer(
+        &tree,
+        memory_exec(frames(&[series_chunk(host, &series_samples(1.0), true)])),
+    )
+}
+
+/// A producer whose output *cannot be decided*: its tree is the evaluated input itself, so the labels
+/// are the ones another execution built and [`output_has_metric_name`] answers `None` for them.
+///
+/// This is the "not provable" case, and it is what tells `Some(false)` apart from `!= Some(true)`: a
+/// producer answered like that would read `None` as "no name", which is the guess that makes a named
+/// match look name-free.
+fn unprovable_producer(host: &str) -> Arc<dyn ExecutionPlan> {
+    let tree =
+        NativeTree::try_new(evaluated_input()).expect("a bare evaluated input is a legal tree");
+    assert_eq!(
+        None,
+        output_has_metric_name(tree.root()),
+        "this producer is the not-provable case, which is the point of it"
+    );
+    frame_producer(
+        &tree,
+        ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+            &metric(&[(HOST, host)], Some(METRIC)),
+            0,
+            vec![Some(4.0); GRID_LEN as usize],
+            true,
+        )]]),
+    )
+}
+
+/// A co-partitioned pair of routed, name-free producers keeps the routing's output count, and each
+/// output runs its own match.
+///
+/// This is the test the `inputs.len() > 1` short-circuit fails: that shortcut made every multi-source
+/// tree one execution, so the wiring looked parallel while never running in parallel. What decides
+/// the count here is the proof, not the source count.
+#[tokio::test]
+async fn a_co_partitioned_pair_keeps_the_routings_partitions_instead_of_one_execution() {
+    let tree = evaluated_match_tree(co_partitioned_matching(), 0, 1);
+    let exec = evaluated_two_source_plan(
+        &tree,
+        binary_output_schema(),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    )
+    .expect("two routed name-free producers are the shape the proof covers");
+    assert_eq!(
+        3,
+        exec.properties().partitioning.partition_count(),
+        "the pair is routed identically and both producers are name-free, so the match runs once \
+         per output of that routing instead of collapsing into one execution"
+    );
+
+    // Which partition answers is the routing's decision, not this test's: what is asked here is that
+    // the one label set reaches the *same* output of both routings - which is the fact the pair
+    // states - and that the match on it pairs the two sides. Each side is a constant, so the answer
+    // is their quotient at every grid point in the one partition holding both, and nothing at all in
+    // the others: a match that ran per partition over partners that were elsewhere would answer
+    // nowhere, and one that paired the wrong sources would answer another number.
+    let context = SessionContext::default().task_ctx();
+    let reads = (0..exec.properties().partitioning.partition_count())
+        .map(|partition| {
+            let stream = exec
+                .execute(partition, Arc::clone(&context))
+                .expect("the partition executes");
+            stream.try_collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let per_partition = futures::future::try_join_all(reads)
+        .await
+        .expect("every output of the match is read");
+    let answered = per_partition
+        .iter()
+        .map(|batches| binary_rows(batches))
+        .collect::<Vec<_>>();
+    let answering = answered.iter().filter(|rows| !rows.is_empty()).count();
+    assert_eq!(
+        1, answering,
+        "one label set names one owner, so exactly one partition holds both partners: {answered:?}"
+    );
+    let owner = answered
+        .iter()
+        .find(|rows| !rows.is_empty())
+        .expect("one partition answered");
+    assert_eq!(
+        grid_timestamps()
+            .into_iter()
+            .map(|time| (time, Some(3.0), Some("web-1".to_string())))
+            .collect::<Vec<_>>(),
+        *owner,
+        "the owner pairs the two sides it holds and answers 12/4 at every grid point"
+    );
+}
+
+/// A rebuilt node derives the pair from the children it was handed, so a swap that no longer routes
+/// the two sides identically takes the proof away.
+///
+/// The failure this catches is a cached or inherited proof: the old children proved the pair, and a
+/// node that kept that answer would run the match per partition with its partners somewhere else -
+/// answering nothing, silently.
+#[tokio::test]
+async fn rebuilding_over_an_unrouted_child_drops_the_pair_proof() {
+    let tree = evaluated_match_tree(co_partitioned_matching(), 0, 1);
+    let exec = evaluated_two_source_plan(
+        &tree,
+        binary_output_schema(),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    )
+    .expect("the proven pair is accepted");
+    assert_eq!(
+        3,
+        exec.properties().partitioning.partition_count(),
+        "the proof holds for the children the node was built over"
+    );
+
+    // One side is no longer a routing at all: nothing says its series reach the partition the other
+    // side's do, so the match is one execution again.
+    let rebuilt = |children: Vec<Arc<dyn ExecutionPlan>>| {
+        Arc::clone(&exec).replace_children(
+            children,
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+    };
+    let unrouted = rebuilt(vec![
+        name_free_producer("web-1", 12.0),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    ])
+    .expect("an unrouted producer is still a legal child");
+    assert_eq!(
+        1,
+        unrouted.properties().partitioning.partition_count(),
+        "a child that is not a routing proves no pair, so the rebuilt node falls back to one \
+         execution"
+    );
+
+    // Both sides are routings again, but into a different number of outputs: neither is in the
+    // partition the other's partner is in, so the pair is not the fact the match needs either.
+    let mismatched = rebuilt(vec![
+        routed_into(name_free_producer("web-1", 12.0), 2),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    ])
+    .expect("two routings of different widths are legal children");
+    assert_eq!(
+        1,
+        mismatched.properties().partitioning.partition_count(),
+        "routings that split into different output counts cannot be read in step, so the rebuilt \
+         node falls back to one execution"
+    );
+
+    // And the proof is derived, not spent: rebuilt over two equal-width routings it holds again.
+    let restored = rebuilt(vec![
+        routed_into(name_free_producer("web-1", 12.0), 2),
+        routed_into(name_free_producer("web-1", 4.0), 2),
+    ])
+    .expect("two routings of one width are the proven shape");
+    assert_eq!(
+        2,
+        restored.properties().partitioning.partition_count(),
+        "the pair is read off the children on every build, so a rebuild that routes both sides \
+         identically proves it again"
+    );
+}
+
+/// A match the co-partitioned proof does not cover falls back to one execution.
+///
+/// `on(host)` pairs by a label set the routing did not group by - two series that agree on `host`
+/// can differ in every other label and so sit under two canonical keys - and `group_left` copies the
+/// one side's labels into each result, so a result's identity is not the many side's either. Both are
+/// shapes the pair says nothing about, and reading the pair as a proof for them is how a match
+/// answers nothing per partition.
+#[tokio::test]
+async fn an_unproven_match_modifier_falls_back_to_one_execution() {
+    let on_host = evaluated_match_tree(
+        BinaryMatching {
+            labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+            ..co_partitioned_matching()
+        },
+        0,
+        1,
+    );
+    let exec = evaluated_two_source_plan(
+        &on_host,
+        binary_output_schema(),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    )
+    .expect("the routed pair is still a legal child set");
+    assert_eq!(
+        1,
+        exec.properties().partitioning.partition_count(),
+        "`on(host)` pairs by a key the canonical routing did not group by, so the match needs one \
+         execution"
+    );
+
+    let group_left = evaluated_match_tree(
+        BinaryMatching {
+            cardinality: Cardinality::ManyToOne(vec![Arc::from(ZONE)]),
+            ..co_partitioned_matching()
+        },
+        0,
+        1,
+    );
+    let exec = evaluated_two_source_plan(
+        &group_left,
+        binary_output_schema(),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    )
+    .expect("`group_left` over two routed producers is a legal tree");
+    assert_eq!(
+        1,
+        exec.properties().partitioning.partition_count(),
+        "`group_left` answers under the one side's labels, which is not the many side's routed key, \
+         so the match needs one execution"
+    );
+}
+
+/// A producer whose output keeps its metric name breaks the pair, even with both sides routed.
+///
+/// The routing groups by the canonical label set, which holds `__name__` whenever a series has one;
+/// the match pairs by every label but `__name__`. Only a name-free producer makes those one key, so
+/// one named side is enough - and `None` from [`output_has_metric_name`] is "not provable", never
+/// "no name": reading it as no name is exactly the guess that lets a named match run per partition
+/// and answer nothing.
+#[tokio::test]
+async fn a_producer_that_keeps_its_metric_name_falls_back_to_one_execution() {
+    let tree = evaluated_match_tree(co_partitioned_matching(), 0, 1);
+    let both_named = evaluated_two_source_plan(
+        &tree,
+        binary_output_schema(),
+        routed_into(named_producer("web-1"), 3),
+        routed_into(named_producer("web-2"), 3),
+    )
+    .expect("two routed named producers are legal children");
+    assert_eq!(
+        1,
+        both_named.properties().partitioning.partition_count(),
+        "a producer whose series keep their metric name is routed by a key the match does not pair \
+         by, so the match needs one execution"
+    );
+
+    let one_named = evaluated_two_source_plan(
+        &tree,
+        binary_output_schema(),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(named_producer("web-2"), 3),
+    )
+    .expect("a named side beside a name-free one is a legal child set");
+    assert_eq!(
+        1,
+        one_named.properties().partitioning.partition_count(),
+        "the name-free fact is joint: one named side already makes the two keys differ, so the \
+         match needs one execution"
+    );
+
+    // And a producer the fact cannot be decided for is not read as "no name" either. This is the
+    // case that `!= Some(true)` gets wrong: `None` is neither answer, and treating it as name-free
+    // is what lets a named match run per partition and answer nothing.
+    let unprovable = evaluated_two_source_plan(
+        &tree,
+        binary_output_schema(),
+        routed_into(unprovable_producer("web-1"), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
+    )
+    .expect("a producer whose labels another execution built is a legal child");
+    assert_eq!(
+        1,
+        unprovable.properties().partitioning.partition_count(),
+        "a producer whose metric name cannot be proved absent is not proved name-free, so the \
+         match needs one execution"
+    );
+}
+
+/// The logical node of `tree` over its two evaluated sources, for the planner tests below.
+fn two_source_logical_node(tree: &NativeTree) -> FusedSeries {
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(tree),
+        vec![input_plan(evaluated_frame_schema()); 2],
+        binary_output_schema()
+            .to_dfschema_ref()
+            .expect("the output schema is a logical schema"),
+    )
+    .expect("two evaluated children match the tree's two sources")
+}
+
+/// `plan_fused_series` inserts the routing for the shape the pair proves.
+///
+/// The node itself cannot add a routing above a producer: it is handed the plan it was given, and
+/// `FusedSeriesExec::benefits_from_input_partitioning` returns `false` precisely so no optimizer
+/// inserts an exchange there. This planner is the layer that holds the physical children, so it is
+/// the only one that can put the routing between the two producers and the match - and the proof it
+/// rests on reads the children's own trees, never a flag passed in from elsewhere.
+#[test]
+fn plan_fused_series_routes_a_co_partitioned_pair_of_frame_producers() {
+    let tree = evaluated_match_tree(co_partitioned_matching(), 0, 1);
+    let node = two_source_logical_node(&tree);
+    let plan = crate::extension_plan::planner::plan_fused_series(
+        &node,
+        &[
+            name_free_producer("web-1", 12.0),
+            name_free_producer("web-1", 4.0),
+        ],
+        2,
+    )
+    .expect("the planner accepts two frame producers")
+    .expect("the proven shape is planned here");
+    let children = plan.children();
+    assert_eq!(
+        2,
+        children.len(),
+        "the node above the routing reads one child per source"
+    );
+    for child in children {
+        let routed = child
+            .downcast_ref::<SeriesRepartitionExec>()
+            .unwrap_or_else(|| {
+                panic!(
+                    "the planner inserted no routing above the producer: {}",
+                    child.name()
+                )
+            });
+        assert_eq!(
+            2,
+            routed.outputs(),
+            "both routings split into the session's target partitions, which is the one count the \
+             proof rests on"
+        );
+    }
+    assert_eq!(
+        2,
+        plan.properties().partitioning.partition_count(),
+        "with the routing in place the match runs per routing output instead of over all of them"
+    );
+}
+
+/// The planner leaves a match the pair does not prove on the route it already had.
+///
+/// `Ok(None)` is that route: the logical plan is already fixed and DataFusion reports an unplanned
+/// extension node normally. What this test rules out is the other two answers - a routing inserted
+/// on a guess, which would answer nothing per partition, or an error, which would turn a shape this
+/// layer cannot plan into a failed query.
+#[test]
+fn plan_fused_series_inserts_no_routing_for_an_unproven_match() {
+    let tree = evaluated_match_tree(
+        BinaryMatching {
+            labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+            ..co_partitioned_matching()
+        },
+        0,
+        1,
+    );
+    let node = two_source_logical_node(&tree);
+    let plan = crate::extension_plan::planner::plan_fused_series(
+        &node,
+        &[
+            name_free_producer("web-1", 12.0),
+            name_free_producer("web-1", 4.0),
+        ],
+        2,
+    )
+    .expect("an unproven match is not an error");
+    assert!(
+        plan.is_none(),
+        "`on(host)` over two producers is not the proven shape, so this layer plans it exactly as \
+         it did before and leaves the node to its own route"
     );
 }

@@ -88,9 +88,9 @@ use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, BoundAggregate, CanonicalOwner, Grouping, NativeExpr, NativeNode,
-    NativeProperties, NativeTree, NativeType, merges_are_placeable_in, needs_single_execution_in,
-    reads_across_series,
+    AggregateKind, BoundAggregate, CanonicalOwner, CoPartitionedPair, Grouping, NativeExpr,
+    NativeNode, NativeProperties, NativeTree, NativeType, merges_are_placeable_in,
+    needs_single_execution_in_co, output_has_metric_name, reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
@@ -802,6 +802,72 @@ fn input_boundary(
         .collect()
 }
 
+/// What this node can prove about pairs of its children being read in step, as the match proof reads
+/// it ([`CoPartitionedPair`]).
+///
+/// This is the *joint* half of [`match_is_co_partitioned`] and cannot be derived inside the tree: the
+/// operands of the shape it serves are [`NativeExpr::Input`] nodes over evaluated samples, whose label
+/// sets another execution built, so the tree answers `None` for them and states nothing either way.
+/// This function asks the producers themselves instead, where the answer is a function of the tree
+/// standing in front of each one.
+///
+/// Every fact is read off the children **on every build**: nothing is cached, stored on the node or
+/// passed in by a caller. That is what makes a child swap safe - `with_new_children` hands the new
+/// children back through [`FusedSeriesExec::build`], which asks these same questions again, so a
+/// replacement that is not a routing, splits into a different number of outputs, or keeps a metric
+/// name simply does not produce the pair and takes the proof away with it.
+fn co_partitioned_pairs(
+    inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
+) -> Vec<CoPartitionedPair> {
+    let mut pairs = Vec::new();
+    for (left_index, (left, _, _)) in inputs.iter().enumerate() {
+        let Some(left) = left.downcast_ref::<SeriesRepartitionExec>() else {
+            continue;
+        };
+        for (right_index, (right, _, _)) in inputs.iter().enumerate().skip(left_index + 1) {
+            let Some(right) = right.downcast_ref::<SeriesRepartitionExec>() else {
+                continue;
+            };
+            // Two routings are one routing only when they split into the same number of outputs. A
+            // partner routed into three outputs is not in the partition its two-output counterpart
+            // is, so its half of the match would be missing here while it exists elsewhere, and the
+            // pair is not the fact the match needs.
+            if left.outputs() != right.outputs() {
+                continue;
+            }
+            pairs.push(CoPartitionedPair {
+                left: left_index,
+                right: right_index,
+                // A pair whose producer half fails proves nothing: [`match_is_co_partitioned`]
+                // answers `pair.name_free`, so stating the pair with the failing half named is what
+                // makes one named side break it. Dropping the pair instead would hide which
+                // conjunct decided the fallback.
+                name_free: producer_is_name_free(left) && producer_is_name_free(right),
+            });
+        }
+    }
+    pairs
+}
+
+/// Whether `repartition`'s producer answers series that carry no metric name.
+///
+/// The producer has to be a [`FusedSeriesExec`] - the only node whose output labels are decided by a
+/// tree, and hence the only one this layer can ask - and the answer is [`output_has_metric_name`] on
+/// its root, read strictly: only `Some(false)` is a proof. `None` means "not provable here", and
+/// taking it as "no name" is exactly the guess that makes a named match look name-free: the match
+/// then runs per partition, pairs by a key no partition holds whole, finds no partner and answers
+/// nothing where the whole match answers a value.
+fn producer_is_name_free(repartition: &SeriesRepartitionExec) -> bool {
+    let children = repartition.children();
+    let [producer] = children.as_slice() else {
+        return false;
+    };
+    let Some(producer) = producer.downcast_ref::<FusedSeriesExec>() else {
+        return false;
+    };
+    output_has_metric_name(producer.tree().root()) == Some(false)
+}
+
 /// Where one output column of [`FusedSeriesExec`] comes from.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum OutputColumn {
@@ -1038,21 +1104,37 @@ impl FusedSeriesExec {
         )
     }
 
+    /// The tree this node runs, which is what decides the label sets it answers under.
+    ///
+    /// A producer above this node reads this to answer what it cannot see in its own tree: whether
+    /// the series handed over still carry a metric name
+    /// ([`output_has_metric_name`]).
+    pub(crate) fn tree(&self) -> &NativeTree {
+        &self.tree
+    }
+
     /// Whether `inputs`' sources, read through `tree`, have to be evaluated once over every input
     /// partition instead of once per partition.
     ///
-    /// More than one source is one execution: its operands are matched against each other, so a
-    /// partition-by-partition run would pair each side's series with only its own partition's. A
-    /// single-source tree is asked what it reads ([`needs_single_execution_in`]) with the facts
-    /// [`input_boundary`] reads off the child: a whole-vector operator is one execution. A merge is
-    /// not asked for one - what it needs is its input's, because whether a merge can be placed at
-    /// all is a question about the execution, not a reason to shrink the execution to one. That
-    /// question is [`merges_are_placeable_in`], asked by [`Self::reject_unplaceable_merges`] below.
+    /// The tree is asked what it reads ([`needs_single_execution_in_co`]) with the two things this
+    /// node can observe: the facts [`input_boundary`] reads off each child, and the pairs of children
+    /// that were routed identically ([`co_partitioned_pairs`]). A tree that matches two sources
+    /// answers one execution unless a pair proves the match pairs by the key the routing used, so a
+    /// multi-source match is one execution exactly when that proof is absent - which is what keeps
+    /// the fallback, and not a source count, deciding it. A single-source tree has no pair and is
+    /// decided as it always was. A merge is not asked for one execution either way: what it needs is
+    /// its input's, because whether a merge can be placed at all is a question about the execution,
+    /// not a reason to shrink the execution to one. That question is [`merges_are_placeable_in`],
+    /// asked by [`Self::reject_unplaceable_merges`] below.
     fn requires_single_execution(
         inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
         tree: &NativeTree,
     ) -> bool {
-        inputs.len() > 1 || needs_single_execution_in(tree.root(), &input_boundary(inputs))
+        needs_single_execution_in_co(
+            tree.root(),
+            &input_boundary(inputs),
+            &co_partitioned_pairs(inputs),
+        )
     }
 
     /// Refuses a tree whose merges the execution this node is about to run cannot answer.

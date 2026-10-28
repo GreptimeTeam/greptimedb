@@ -28,10 +28,15 @@ use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclarat
 use store_api::region_engine::RawLabelSource;
 use table::table::scan::{RegionScanExec, SeriesScanExec};
 
+use crate::extension_plan::fused_series::FusedSeriesExec;
+use crate::extension_plan::series_repartition::SeriesRepartitionExec;
 use crate::extension_plan::{
     Absent, AggregateFinalize, EmptyMetric, FusedSeries, HistogramFold, InstantManipulate,
     RangeManipulate, RawSeriesSource, ScalarCalculate, SeriesDivide, SeriesNormalize,
     UnionDistinctOn,
+};
+use crate::native::plan::{
+    CoPartitionedPair, NativeExpr, match_is_co_partitioned, output_has_metric_name,
 };
 
 pub struct PromExtensionPlanner;
@@ -110,12 +115,22 @@ const METRIC_NAME: &str = "__name__";
 /// Anything else in between - a filter, a projection that drops the frame, an exchange - produces a
 /// different frame, or no frame at all, and this layer cannot look under it.
 ///
+/// A two-source match is the one shape planned here without a raw frame below it: when the tree is
+/// the one [`match_is_co_partitioned`] proves and both children are fused producers whose outputs
+/// carry no metric name, [`co_partitioned_series_inputs`] inserts the routing between them and the
+/// node runs once per output of that routing. That is why this function is the place for it: it is
+/// the only layer that holds the physical children, so a routing that is not already in the logical
+/// plan can only be added here.
+///
 /// `Ok(None)` is therefore the answer for children that are neither: the logical plan is already
 /// fixed and DataFusion reports an unplanned extension node normally. A region scan that is found
 /// but refuses the raw path is a different case — the logical route chose this node for this scan
 /// and nothing here can undo that choice, because the logical plan is not available — so it is
 /// reported as an error that names the reason instead of silently producing no plan.
-fn plan_fused_series(
+///
+/// Crate-visible so the node's own tests can drive it with the physical children they already build;
+/// a session is only needed to reach it through the [`ExtensionPlanner`] above.
+pub(crate) fn plan_fused_series(
     fused: &FusedSeries,
     physical_inputs: &[Arc<dyn ExecutionPlan>],
     target_partitions: usize,
@@ -136,6 +151,16 @@ fn plan_fused_series(
         })
         .collect::<Option<Vec<_>>>()
     {
+        return fused.to_execution_plan(inputs).map(Some);
+    }
+    if let Some(routed) = co_partitioned_series_inputs(fused, physical_inputs, target_partitions)? {
+        // A routed child hands over the evaluated frame its producer wrote, with the labels the
+        // frame carries: `Explicit` is what such a frame declares, and a computed frame is
+        // contiguous per series (a `KeyThenTime` claim is refused where the frame is decoded).
+        let inputs = routed
+            .into_iter()
+            .map(|child| (child, RawLabelSource::Explicit, SeriesOrdering::Contiguous))
+            .collect();
         return fused.to_execution_plan(inputs).map(Some);
     }
     if physical_inputs
@@ -178,6 +203,89 @@ fn plan_fused_series(
         ));
     }
     fused.to_execution_plan(series_inputs).map(Some)
+}
+
+/// The physically routed sources of a two-source match whose two producers are name-free, or `None`
+/// when the tree is another shape.
+///
+/// The shape is the one [`match_is_co_partitioned`] proves: both operands are the routed inputs
+/// themselves, the match is the default `ignoring()` one-to-one form, and both producers' outputs
+/// carry no metric name. Then the key the routing groups by and the key the match pairs by are one
+/// key, so an execution that reads one output of that routing holds the partners of every series it
+/// holds - which is what lets the node above it run once per output instead of once over all of
+/// them. Neither half can be had from the tree alone: the operands are [`NativeExpr::Input`] nodes
+/// over evaluated samples, so [`output_has_metric_name`] answers `None` for them and each producer's
+/// own root is where the answer lives.
+///
+/// The routing is *inserted* here rather than expected from below, because the logical route this
+/// node came from does not place one: a two-source `FusedSeries` is planned with one producer per
+/// selector, and nothing under it knows the two were matched. Every fact is read off the children
+/// this call was handed, so a child the plan replaces is asked again on the rebuild that follows.
+///
+/// Nothing unproven is an error: an input that is not a name-free fused producer, a tree whose match
+/// this proof does not cover, or anything else answers `None`, and the caller goes on to plan the
+/// shape as it always did.
+fn co_partitioned_series_inputs(
+    fused: &FusedSeries,
+    physical_inputs: &[Arc<dyn ExecutionPlan>],
+    target_partitions: usize,
+) -> DfResult<Option<Vec<Arc<dyn ExecutionPlan>>>> {
+    let [left, right] = physical_inputs else {
+        return Ok(None);
+    };
+    let NativeExpr::Binary {
+        left: left_operand,
+        right: right_operand,
+        matching,
+    } = &fused.tree().root().expr
+    else {
+        return Ok(None);
+    };
+    let name_free = |input: &Arc<dyn ExecutionPlan>| {
+        let Some(producer) = input.downcast_ref::<FusedSeriesExec>() else {
+            return false;
+        };
+        produces_evaluated_frame(input)
+            && output_has_metric_name(producer.tree().root()) == Some(false)
+    };
+    // The pair names the two sources the match's operands read, which is what
+    // [`match_is_co_partitioned`] looks a pair up by. Both are read off the tree rather than assumed
+    // to be `0` and `1`: a tree whose operands read some other sources is not this shape and is left
+    // to the route it already had.
+    let (NativeExpr::Input(left_source), NativeExpr::Input(right_source)) =
+        (&left_operand.expr, &right_operand.expr)
+    else {
+        return Ok(None);
+    };
+    let pair = CoPartitionedPair {
+        left: left_source.source_index,
+        right: right_source.source_index,
+        name_free: name_free(left) && name_free(right),
+    };
+    if !match_is_co_partitioned(left_operand, right_operand, matching, &[pair]) {
+        return Ok(None);
+    }
+    // One count for both sides, bound once: the proof rests on the two routings splitting the same
+    // way, so this layer does not give itself a way to make them differ. Taking the count here also
+    // keeps both children on the session's target partitions, which is what the plan above them was
+    // counted for.
+    let outputs = target_partitions.max(1);
+    let routed = physical_inputs
+        .iter()
+        .map(|input| {
+            let routed: Arc<dyn ExecutionPlan> =
+                Arc::new(SeriesRepartitionExec::try_new(Arc::clone(input), outputs)?);
+            Ok(routed)
+        })
+        .collect::<DfResult<Vec<_>>>()?;
+    Ok(Some(routed))
+}
+
+/// Whether `input` produces evaluated series frames, which is what a [`SeriesRepartitionExec`]
+/// redistributes and what the operands of a two-source match were compiled against.
+fn produces_evaluated_frame(input: &Arc<dyn ExecutionPlan>) -> bool {
+    SeriesFrameDeclaration::parse(input.schema().as_ref())
+        .is_ok_and(|declaration| declaration.content() == FrameContent::Evaluated)
 }
 
 /// Builds the region half of a [`RawSeriesSource`]: the region's raw-series leaf for its binding.

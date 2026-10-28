@@ -289,7 +289,7 @@ impl SeriesRepartitionExec {
     }
 
     /// How many output partitions this node has.
-    fn outputs(&self) -> usize {
+    pub(crate) fn outputs(&self) -> usize {
         self.properties.partitioning.partition_count()
     }
 }
