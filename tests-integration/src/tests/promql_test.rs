@@ -5096,3 +5096,208 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
         "{stage}: same rows on both routes"
     );
 }
+
+/// One row of a native or legacy answer as (time, host, value): the host is empty for an unlabelled
+/// series, and the value is rendered so a NaN compares equal to a NaN.
+async fn dynamic_scalar_rows(output: Output) -> Vec<(i64, String, String)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let schema = batch.df_record_batch().schema();
+        let column = |accept: &dyn Fn(&DataType) -> bool| {
+            schema
+                .fields()
+                .iter()
+                .position(|field| accept(field.data_type()))
+                .map(|index| batch.column(index).clone())
+        };
+        let timestamps = column(&|ty| matches!(ty, DataType::Timestamp(_, _))).unwrap();
+        let timestamps = timestamps
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = column(&|ty| ty == &DataType::Float64).unwrap();
+        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+        let hosts = batch
+            .column_by_name("host")
+            .map(|hosts| cast(hosts.as_ref(), &DataType::Utf8).unwrap());
+        for row in 0..batch.num_rows() {
+            let host = hosts
+                .as_ref()
+                .map(|hosts| {
+                    let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+                    hosts.value(row).to_string()
+                })
+                .unwrap_or_default();
+            let value = if values.is_null(row) {
+                "null".to_string()
+            } else {
+                format!("{:?}", values.value(row))
+            };
+            rows.push((timestamps.value(row), host, value));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn expected_rows(rows: &[(i64, &str, f64)]) -> Vec<(i64, String, String)> {
+    let mut rows = rows
+        .iter()
+        .map(|(ts, host, value)| (*ts, host.to_string(), format!("{value:?}")))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+/// Dynamic scalars run natively and answer what Prometheus answers: a varying scalar is broadcast
+/// over a vector, and `time()` needs no scan. The existing planner refuses `vector(time())` and a
+/// date function without an argument.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_scalar_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dyn_scalar (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO dyn_scalar (host, ts, val) VALUES \
+         ('a', 0, 1), ('a', 10000, 2), ('a', 20000, 3), ('b', 20000, 10), ('b', 30000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // (query, Prometheus answer, scan children, whether the existing planner agrees, or `None`
+    // where it refuses the query)
+    type Case = (
+        &'static str,
+        Vec<(i64, &'static str, f64)>,
+        usize,
+        Option<bool>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "TQL EVAL (0, 40, '10s', '5s') time() - timestamp(dyn_scalar)",
+            vec![
+                (0, "a", 0.0),
+                (10_000, "a", 0.0),
+                (20_000, "a", 0.0),
+                (20_000, "b", 0.0),
+                (30_000, "b", 0.0),
+            ],
+            1,
+            Some(true),
+        ),
+        (
+            "TQL EVAL (0, 20, '10s') time() * 2",
+            vec![(0, "", 0.0), (10_000, "", 20.0), (20_000, "", 40.0)],
+            0,
+            Some(true),
+        ),
+        (
+            "TQL EVAL (0, 20, '10s') vector(time())",
+            vec![(0, "", 0.0), (10_000, "", 10.0), (20_000, "", 20.0)],
+            0,
+            None,
+        ),
+        (
+            "TQL EVAL (3590, 3610, '10s') hour()",
+            vec![
+                (3_590_000, "", 0.0),
+                (3_600_000, "", 1.0),
+                (3_610_000, "", 1.0),
+            ],
+            0,
+            None,
+        ),
+    ];
+    for (sql, expected, children, legacy_agrees) in cases {
+        observer.clear();
+        let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{sql}");
+        assert_eq!(plan.children().len(), children, "{sql}");
+        assert_eq!(native, expected_rows(&expected), "{sql}");
+        let Some(legacy_agrees) = legacy_agrees else {
+            continue;
+        };
+        let legacy = dynamic_scalar_rows(native_tql_output(&instance, sql, false).await).await;
+        assert_eq!(
+            native == legacy,
+            legacy_agrees,
+            "{sql}: legacy answered {legacy:?}"
+        );
+    }
+
+    // `count_values` names a label no scan carries, so the statement keeps a plan that reports it.
+    let sql = "TQL EVAL (0, 0, '1s') count_values(\"bucket\", vector(1))";
+    let pretty = |output: Output| async {
+        match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        }
+        .pretty_print()
+        .unwrap()
+    };
+    let native = pretty(native_tql_output(&instance, sql, true).await).await;
+    let legacy = pretty(native_tql_output(&instance, sql, false).await).await;
+    assert!(native.contains("bucket"), "{native}");
+    assert_eq!(native, legacy);
+}
+
+/// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
+/// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
+/// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
+/// has no answer to compare.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_map_with_varying_parameters_matches_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_varying_parameter_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dyn_param (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO dyn_param (host, ts, val) VALUES \
+         ('a', 0, 1), ('a', 10000, 2), ('a', 20000, 3), ('b', 20000, 10), ('b', 30000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The nearest is 1, 2, 4 and 8 at the four steps that hold samples.
+    let sql = "TQL EVAL (0, 40, '10s', '5s') round(dyn_param, 2 ^ (time() / 10))";
+    observer.clear();
+    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 1);
+    assert_eq!(plan.output_partitioning().partition_count(), 4);
+    assert_eq!(
+        native,
+        expected_rows(&[
+            (0, "a", 1.0),
+            (10_000, "a", 2.0),
+            (20_000, "a", 4.0),
+            (20_000, "b", 12.0),
+            (30_000, "b", 24.0),
+        ])
+    );
+}

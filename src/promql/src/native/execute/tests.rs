@@ -43,7 +43,7 @@ fn is_resources_exhausted(error: &DataFusionError) -> bool {
 use super::{
     BinaryRuntime, Emitted, InputId, InputSlot, NativeChunk, NativeExecutionState, NativeExecutor,
     NodeState, PairKernel, RuntimeNode, RuntimeOp, absorb_rebuilds, evaluated_bytes, grid_end_ms,
-    map_chunk, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
+    map_chunk, map_workspace_bytes, operand_chunk_bytes, raw_bytes, vector_workspace_bytes,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::grid_series::merge_same_labelset;
@@ -52,11 +52,12 @@ use crate::info::InfoSelector;
 use crate::instant_eval::select_instants;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
+use crate::map_time::DateFunction;
 use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -904,6 +905,271 @@ fn scalar_root_preserves_nan_negative_zero_and_infinity() {
     }
 }
 
+fn eval_time(date: Option<DateFunction>, grid: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::EvalTime { date },
+        output: NativeType::Scalar(grid),
+    }
+}
+
+fn vector_of(input: NativeNode) -> NativeNode {
+    let grid = input
+        .output
+        .grid()
+        .cloned()
+        .expect("vector() reads a scalar");
+    NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(input),
+        },
+        output: evaluated(grid),
+    }
+}
+
+/// A binary node with at least one scalar side, typed as the compiler types it.
+fn scalar_binary(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let output = match (&left.output, &right.output) {
+        (NativeType::Samples(_), _) => left.output.clone(),
+        _ => right.output.clone(),
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output,
+    }
+}
+
+/// `time()` reports the evaluation time in seconds, fractions included, and a date function without
+/// an argument reads that time truncated to whole seconds, as Prometheus `dateWrapper` does.
+#[test]
+fn eval_time_reports_seconds_and_dates_of_the_grid() {
+    let grid = grid(3_598_500, 1_000, 3);
+    let tree = NativeTree::try_new(eval_time(None, Arc::clone(&grid))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(3598.5), Some(3599.5), Some(3600.5)]
+    );
+
+    let tree = NativeTree::try_new(vector_of(eval_time(Some(DateFunction::Hour), grid))).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        sample_values(&chunks[0]),
+        vec![Some(0.0), Some(0.0), Some(1.0)]
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// `vector(c)` hands the constant on as one unlabelled series over the whole grid.
+#[test]
+fn vector_of_a_constant_is_one_unlabelled_series() {
+    let tree = NativeTree::try_new(vector_of(scalar(4.0, grid(0, 10, 3)))).unwrap();
+    let mut execution = executor(&tree, pool());
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert!(chunks[0].series.metric.name().is_none());
+    assert!(chunks[0].series.metric.tags().is_empty());
+    assert_eq!(sample_values(&chunks[0]), vec![Some(4.0); 3]);
+}
+
+/// A varying scalar is broadcast point by point, on the side it was written.
+#[test]
+fn a_varying_scalar_is_broadcast_on_its_side() {
+    let grid = grid(1_000, 1_000, 3);
+    let schema = evaluated_schema(Arc::clone(&grid));
+    let vector = || evaluated_input(Arc::clone(&grid));
+    let time = || eval_time(None, Arc::clone(&grid));
+    let gt_bool = BinaryMatching {
+        return_bool: true,
+        ..binary_matching(BinaryOp::Gt)
+    };
+    let cases = [
+        (
+            scalar_binary(vector(), time(), binary_matching(BinaryOp::Sub)),
+            vec![Some(9.0), Some(18.0), Some(27.0)],
+        ),
+        (
+            scalar_binary(time(), vector(), binary_matching(BinaryOp::Sub)),
+            vec![Some(-9.0), Some(-18.0), Some(-27.0)],
+        ),
+        (
+            scalar_binary(vector(), time(), gt_bool),
+            vec![Some(1.0), Some(1.0), Some(1.0)],
+        ),
+    ];
+    for (root, expected) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        let pool = pool();
+        let mut execution = executor(&tree, Arc::clone(&pool));
+        let input = execution.state().input_ids(0).next().unwrap();
+        execution
+            .push_evaluated(
+                input,
+                evaluated_chunk_of(
+                    &schema,
+                    named_metric("x", "a"),
+                    0,
+                    vec![Some(10.0), Some(20.0), Some(30.0)],
+                    true,
+                ),
+            )
+            .unwrap();
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].series.metric.name(), None, "the name is dropped");
+        assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
+        assert_eq!(sample_values(&chunks[0]), expected);
+        assert_eq!(pool.reserved(), 0);
+    }
+}
+
+/// An operation between scalars where one varies is a scalar, computed point by point with each
+/// side where it was written.
+#[test]
+fn scalars_combine_point_by_point_when_one_varies() {
+    let grid = grid(10_000, 10_000, 2);
+    let time = || eval_time(None, Arc::clone(&grid));
+    let sixty = || scalar(60.0, Arc::clone(&grid));
+    let cases = [
+        (time(), sixty(), vec![Some(-50.0), Some(-40.0)]),
+        (sixty(), time(), vec![Some(50.0), Some(40.0)]),
+        (time(), time(), vec![Some(0.0), Some(0.0)]),
+    ];
+    for (left, right, expected) in cases {
+        let tree = NativeTree::try_new(scalar_binary(left, right, binary_matching(BinaryOp::Sub)))
+            .unwrap();
+        assert!(matches!(tree.root().output, NativeType::Scalar(_)));
+        let mut execution = executor(&tree, pool());
+        let chunks = run(&mut execution);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(sample_values(&chunks[0]), expected);
+    }
+}
+
+fn parameterized(
+    input: NativeNode,
+    op: ParameterizedOp,
+    parameters: Vec<NativeNode>,
+) -> NativeNode {
+    let output = input.output.clone();
+    NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }
+}
+
+/// Runs `root` over one vector series `x{job="a"}` and returns the one answer.
+fn run_parameterized(root: NativeNode, vector: Vec<Option<f64>>) -> EvaluatedChunk {
+    let schema = evaluated_schema(root.output.grid().cloned().unwrap());
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = pool();
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    let input = execution.state().input_ids(0).next().unwrap();
+    execution
+        .push_evaluated(
+            input,
+            evaluated_chunk_of(&schema, named_metric("x", "a"), 0, vector, true),
+        )
+        .unwrap();
+    let mut chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(pool.reserved(), 0);
+    chunks.remove(0)
+}
+
+/// A constant parameter beside a varying one, as in `clamp(vector(1), 0, time())`, is reserved
+/// before its values are built: on a grid whose values could never be allocated, the pool refuses
+/// it instead of the allocation failing.
+#[test]
+fn a_constant_parameter_is_reserved_before_it_is_built() {
+    let grid = Arc::new(EvalGrid::try_deferred(GridSpec::try_new(0, 1, 1 << 60).unwrap()).unwrap());
+    let root = parameterized(
+        vector_of(scalar(1.0, Arc::clone(&grid))),
+        ParameterizedOp::Clamp,
+        vec![scalar(0.0, Arc::clone(&grid)), eval_time(None, grid)],
+    );
+    let tree = NativeTree::try_new(root).unwrap();
+    let pool = bounded_pool(1 << 20);
+    let mut execution = executor(&tree, Arc::clone(&pool));
+    execution.end_of_input().unwrap();
+    let error = execution.next_chunk().unwrap_err();
+    assert!(
+        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+        "{error}"
+    );
+    assert_eq!(pool.reserved(), 0);
+}
+
+/// A parameter is read at each point, as Prometheus reads it at each step: `round` rounds every
+/// point to its own nearest.
+#[test]
+fn a_map_reads_its_scalar_parameter_at_each_point() {
+    let grid = grid(1_000, 9_000, 2);
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Round,
+        vec![eval_time(None, grid)],
+    );
+    let chunk = run_parameterized(root, vec![Some(12.4), Some(17.0)]);
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+    assert_eq!(sample_values(&chunk), vec![Some(12.0), Some(20.0)]);
+}
+
+/// `clamp` with a maximum below its minimum at a point has no value there, which is Prometheus'
+/// empty vector for that step; a constant parameter beside a varying one is read as the constant.
+#[test]
+fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
+    let grid = grid(0, 1_000, 3);
+    // `time() - 1` is -1, 0 and 1.
+    let max = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(1.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Sub),
+    );
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Clamp,
+        vec![scalar(0.0, grid), max],
+    );
+    let chunk = run_parameterized(root, vec![Some(7.0), Some(3.0), Some(5.0)]);
+    assert_eq!(
+        decided(std::slice::from_ref(&chunk)),
+        vec![(1, Some(0.0)), (2, Some(1.0))]
+    );
+}
+
+/// A closing chunk whose every point has `clamp`'s maximum below its minimum keeps no value, and is
+/// still handed over, empty, under the labels the map produces: a consumer tells "nothing more here"
+/// from "no more input" by that chunk alone.
+#[test]
+fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
+    let grid = grid(0, 1_000, 2);
+    let root = parameterized(
+        evaluated_input(Arc::clone(&grid)),
+        ParameterizedOp::Clamp,
+        vec![scalar(5.0, Arc::clone(&grid)), eval_time(None, grid)],
+    );
+    let chunk = run_parameterized(root, vec![Some(5.0), Some(6.0)]);
+    assert!(chunk.is_last);
+    assert_eq!(chunk.series.time.len(), 0);
+    assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
+    assert_eq!(chunk.series.metric.get("job"), Some("a"));
+}
+
 fn sample_values(chunk: &EvaluatedChunk) -> Vec<Option<f64>> {
     field_values(chunk, 0)
 }
@@ -1009,17 +1275,26 @@ fn node_metrics(execution: &NativeExecutor) -> Vec<Weak<NodeMetrics>> {
     fn walk(node: &RuntimeNode, out: &mut Vec<Weak<NodeMetrics>>) {
         out.push(Arc::downgrade(&node.metrics));
         match &node.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Merge { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => walk(input, out),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => walk(input, out),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 walk(left, out);
                 walk(right, out);
+            }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                walk(input, out);
+                for parameter in parameters {
+                    walk(parameter, out);
+                }
             }
         }
     }
@@ -2800,9 +3075,10 @@ fn a_pool_that_cannot_admit_a_collected_fragment_releases_what_it_held() {
 /// The fragments are admitted one by one as they arrive, so their charge is not what fails here:
 /// what fails is the workspace the merge needs, taken in `finish` before the helper runs. The first
 /// run measures what the collected input holds where the pool admits it; the second is given that
-/// much and a little over -- enough for every fragment, not for the workspace, which charges at
-/// least one `(position, member, row)` triple and one position per row. The failure releases the
-/// fragments, the evaluators and the queues while the executor is still alive.
+/// much, the map's transient charge for one chunk and a little over -- enough for every fragment,
+/// not for the workspace, which charges at least one `(position, member, row)` triple and one
+/// position per row. The failure releases the fragments, the evaluators and the queues while the
+/// executor is still alive.
 #[test]
 fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     let inner_grid = grid(0, 60_000, 2);
@@ -2842,8 +3118,19 @@ fn a_pool_that_cannot_admit_the_merge_workspace_releases_what_it_held() {
     assert!(measured > 0, "the collected input is not charged for");
     drop(reference);
 
-    // Room for exactly what the collected input holds, and not for the merge's workspace.
-    let pool = bounded_pool(measured + 64);
+    // Room for what the collected input holds and for the map to hold one chunk with the workspace
+    // its kernel writes in, which it gives back before the next chunk; not for the merge's
+    // workspace.
+    let one_chunk = evaluated_chunk_of(
+        &schema,
+        named_metric("a", "x"),
+        0,
+        vec![Some(-1.0), None],
+        true,
+    );
+    let mapping = evaluated_bytes(&one_chunk)
+        + map_workspace_bytes(&[MapOp::Math(MathOp::Abs)], &one_chunk.series).unwrap();
+    let pool = bounded_pool(measured + mapping + 64);
     let mut execution = executor(&tree(), Arc::clone(&pool));
     push_both(&mut execution);
     assert!(
@@ -10792,4 +11079,80 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
+}
+
+/// A point-wise node reserves the series its kernel builds before the kernel runs.
+///
+/// Every case reads one dense series over a grid of `1 << 20` points, or -- for the window -- one
+/// raw sample whose window reaches every point, so the kernel writes a row per point. The first
+/// budget admits what the node is handed (the vector, the varying scalar, the grid's timestamps)
+/// and not the series it writes, which only the reservation taken before the kernel can refuse:
+/// nothing after it rejects a dense result of one run. The second admits both.
+#[test]
+fn point_wise_nodes_reserve_the_series_their_kernel_builds() {
+    const MIB: usize = 1 << 20;
+    let grid = grid(1_000, 1_000, 1 << 20);
+    let one = || vector_of(scalar(1.0, Arc::clone(&grid)));
+    let time = || eval_time(None, Arc::clone(&grid));
+    let timestamp = NativeNode {
+        output: one().output,
+        expr: NativeExpr::Timestamp {
+            input: Box::new(one()),
+        },
+    };
+    let window = window_with(
+        input(),
+        RangeFunction::LastOverTime,
+        1 << 31,
+        None,
+        Arc::clone(&grid),
+    );
+    let cases = [
+        ("map", map(one(), vec![MathOp::Abs]), 9 * MIB),
+        (
+            "constant broadcast",
+            broadcast_right(one(), 1.0, BinaryOp::Add, false),
+            9 * MIB,
+        ),
+        ("timestamp", timestamp, 17 * MIB),
+        ("window", window, MIB),
+        (
+            "parameterized map",
+            parameterized(one(), ParameterizedOp::Round, vec![time()]),
+            17 * MIB,
+        ),
+        (
+            "dynamic broadcast",
+            scalar_binary(one(), time(), binary_matching(BinaryOp::Add)),
+            17 * MIB,
+        ),
+    ];
+    for (node, root, inputs) in cases {
+        let tree = NativeTree::try_new(root).unwrap();
+        for (budget, fits) in [(inputs, false), (128 * MIB, true)] {
+            let pool = bounded_pool(budget);
+            let mut execution = executor(&tree, Arc::clone(&pool));
+            let source = execution.state().input_ids(0).next();
+            if let Some(input) = source {
+                execution
+                    .push_raw(input, raw_chunk(&raw_schema(), &[1_000], &[1.0], true))
+                    .unwrap();
+            }
+            match execution.finish() {
+                Ok(chunks) => {
+                    assert!(fits, "{node}: the kernel ran without its series reserved");
+                    let rows: usize = chunks.iter().map(|chunk| chunk.series.time.len()).sum();
+                    assert_eq!(rows, 1 << 20, "{node}");
+                }
+                Err(error) => {
+                    assert!(!fits, "{node}: {error}");
+                    assert!(
+                        matches!(error.find_root(), DataFusionError::ResourcesExhausted(_)),
+                        "{node}: {error}"
+                    );
+                }
+            }
+            assert_eq!(pool.reserved(), 0, "{node}");
+        }
+    }
 }

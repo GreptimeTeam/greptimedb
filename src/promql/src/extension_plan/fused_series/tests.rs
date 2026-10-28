@@ -352,14 +352,15 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
                 *seen += 1;
             }
             // A constant reads no source, so it declares no ordering.
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => {
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
             NativeExpr::Binary { left, right, .. }
@@ -371,6 +372,14 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
             } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
+            }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                for parameter in parameters {
+                    *parameter = rewrite(parameter, orderings, seen);
+                }
             }
         }
         NativeNode {

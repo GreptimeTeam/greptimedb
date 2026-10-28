@@ -414,7 +414,7 @@ pub(crate) fn validate_float_series<'a>(
 }
 
 /// Whether every field of `series` holds float samples only.
-fn is_float_series(series: &Series) -> bool {
+pub(crate) fn is_float_series(series: &Series) -> bool {
     series.fields.iter().all(|field| {
         field
             .segments()
