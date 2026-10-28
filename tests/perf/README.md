@@ -536,10 +536,12 @@ python3 .github/scripts/query-regression-run.py \
 ```
 
 Image targets require Linux and a local Docker daemon accessible to the runner
-user; the workflow checks access before building. The ECS image builder and
-manual host bootstrap add the runner to the Docker group. Existing hosts need
-an administrator to provision this access and restart the runner service, or
-a rebuilt ECS image, before selecting image targets.
+user; the workflow checks access before building. For image targets, ECS
+provisioning enables the existing `enable-docker` option: root cloud-init starts
+the image-provided Docker daemon, grants the runner Docker group access, and
+verifies access before starting the runner. Source-only runs keep this option
+disabled. No ECS image rebuild is needed. Manually managed hosts must provision
+Docker access and restart the runner service before selecting image targets.
 Images must expose the GreptimeDB binary at `/greptime/bin/greptime` and support
 the commands and data formats used by the selected cases. Images are pulled
 when absent locally, then pinned to their inspected image ID for the entire

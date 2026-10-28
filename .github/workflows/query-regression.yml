@@ -191,6 +191,7 @@ jobs:
           # Preserve query regression's original resource and janitor budgets.
           system-disk-gib: '80'
           ttl-hours: '4'
+          enable-docker: ${{ inputs.base_image != '' || inputs.candidate_image != '' }}
           resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
           image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
           runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
