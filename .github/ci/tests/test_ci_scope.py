@@ -783,7 +783,9 @@ class GateJobContractTests(unittest.TestCase):
         derived = {"any_fuzz", "build_ci_needed"}
         declared = set(ci_scope_rules.GATE_JOBS)
         for name, block in self.job_blocks().items():
-            for gate in re.findall(r"needs\.scope\.outputs\.([a-z0-9_]+)", block):
+            condition = re.search(r"^    if: (.*)$", block, re.M)
+            expression = condition.group(1) if condition else ""
+            for gate in re.findall(r"needs\.scope\.outputs\.([a-z0-9_]+)", expression):
                 self.assertIn(gate, declared | derived, name)
 
     def test_a_suite_gate_missing_from_the_table_is_rejected(self):
@@ -833,7 +835,11 @@ class WorkflowContractTests(unittest.TestCase):
         )
         always = [ci_scope.glob_to_regex(pattern) for pattern in ALWAYS_RUN]
 
-        gated = [b for b in self.job_blocks().values() if "needs.scope.outputs" in b]
+        # Parallelism outputs do not decide whether a job runs.
+        gated = [
+            b for b in self.job_blocks().values()
+            if re.search(r"^    if: .*needs\.scope\.outputs", b, re.M)
+        ]
         pending = {ref for block in gated for ref in script_ref.findall(block)}
         pending |= {a for block in gated for a in action_use.findall(block)}
         seen = set()
@@ -886,12 +892,32 @@ class WorkflowContractTests(unittest.TestCase):
             seen.add(match.group(1))
         self.assertEqual(seen, declared)
 
+    def test_matrix_throttling_preserves_normal_limits(self):
+        blocks = self.job_blocks()
+        limits = {
+            "sqlness": 256,
+            "sqlness-kvbackend": 256,
+            "fuzztest": 2,
+            "distributed-fuzztest": 4,
+            "distributed-fuzztest-with-chaos": 4,
+        }
+        for name, normal in limits.items():
+            block = blocks[name]
+            self.assertIn(
+                "max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || "
+                + str(normal) + " }}", block, name,
+            )
+            self.assertRegex(block, r"needs: \[.*\bscope\b.*\]", name)
+        actual = {name for name, block in blocks.items() if "max-parallel:" in block}
+        self.assertEqual(actual, set(limits))
+
     def test_gates_override_the_implicit_success_check(self):
         # A condition without a status function carries an implicit success()
         # over `needs`, so a scope job that times out or dies on the runner
         # would skip the gates despite the fail-open output comparison.
         blocks = self.job_blocks()
         for name in (
+            "sqlness",
             "export-import-v2-e2e",
             "prepare-fuzz-targets",
             "fuzztest",

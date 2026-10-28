@@ -166,3 +166,26 @@ should have skipped, or a classifier failure takes CI down with it.
   the pull request's live revisions.** A re-run keeps the original SHAs while
   GitHub serves the *current* file list; without the comparison the new diff
   would be judged against the old tree. With it, a mismatch runs everything.
+
+## PR matrix parallelism
+
+The `scope` job also checks the PR author's open PR count using
+`.github/scripts/pr-open-limit-policy.js`, shared with the open-PR reminder.
+Drafts and PRs with an effective approval are excluded from this count.
+On `pull_request` runs, team members (repository write, maintain or admin
+permission) above `MAX_OPEN_PRS_PER_AUTHOR` (default 5 open, non-draft PRs
+without an effective approval) get `max-parallel: 1`
+for the sqlness and fuzz matrices. Other authors, bots, drafts and non-PR
+runs retain normal parallelism. Permission/count errors or missing outputs
+also retain normal parallelism. The policy is loaded from the PR base.
+
+This serializes each affected matrix, not all jobs in a PR or all PRs by an
+author. Existing limits of 2/4 remain unchanged for normal runs; 256 preserves
+the platform's full matrix capacity where no limit was previously specified.
+Single-leg build matrices and Docs CI's no-op status matrix are unaffected.
+The decision is a snapshot at run start; closing or approving a PR affects
+subsequent runs. An approval remains effective after comments, unresolved
+threads or new commits unless dismissed or superseded by the same reviewer
+requesting changes. Any other reviewer's effective approval still excludes the
+PR, regardless of CI, mergeability or required-review counts. Existing reminder
+comments are snapshots; review events do not rewrite them.

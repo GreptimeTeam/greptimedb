@@ -56,6 +56,7 @@ jobs:
       # gate instead of classifying.
       pull-requests: read
     outputs:
+      throttle_matrix: ${{ steps.pr-limit.outputs.result }}
       any_fuzz: ${{ steps.classify.outputs.any_fuzz }}
       build_ci_needed: ${{ steps.classify.outputs.build_ci_needed }}
       fuzz_standalone: ${{ steps.classify.outputs.fuzz_standalone }}
@@ -76,6 +77,22 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.sha }}
           persist-credentials: false
+      - name: Check PR matrix limit
+        id: pr-limit
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          MAX_OPEN_PRS: ${{ vars.MAX_OPEN_PRS_PER_AUTHOR || 5 }}
+        with:
+          script: |
+            const { pathToFileURL } = require('node:url');
+            const policy = await import(pathToFileURL(`${process.env.GITHUB_WORKSPACE}/.github/scripts/pr-open-limit-policy.js`).href);
+            const throttled = await policy.shouldThrottleMatrix(
+              { repos: github.rest.repos, pulls: github.rest.pulls, paginate: github.paginate },
+              context, process.env.MAX_OPEN_PRS);
+            core.info(`PR matrix throttling: ${throttled}`);
+            return throttled;
       - name: Classify
         id: classify
         continue-on-error: true
@@ -155,11 +172,12 @@ jobs:
           version: current
 
   sqlness:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ !cancelled() && needs.build.result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Sqlness Test (${{ matrix.mode.name }})
-    needs: build
+    needs: [scope, build]
     runs-on: ${{ matrix.os }}
     strategy:
+      max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || 256 }}
       fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
@@ -218,6 +236,7 @@ jobs:
     needs: [scope, build]
     runs-on: ${{ matrix.os }}
     strategy:
+      max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || 256 }}
       fail-fast: false
       matrix:
         os: [ ubuntu-latest ]
@@ -524,7 +543,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || 2 }}
       matrix:
         group:
           - name: "Database and regular table"
@@ -726,7 +745,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || 4 }}
       matrix:
         group:
           - name: "Database and regular table"
@@ -965,7 +984,7 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: ${{ needs.scope.outputs.throttle_matrix == 'true' && 1 || 4 }}
       matrix:
         group:
           - name: "Migration"
