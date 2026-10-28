@@ -42,9 +42,9 @@ use crate::error::{
     NewRecordBatchSnafu, Result, UnexpectedSnafu, UnsupportedOperationSnafu,
 };
 use crate::read::flat_projection::{FlatProjectionMapper, flat_projected_columns};
+use crate::sst::internal_fields;
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, PrimaryKeyArray};
-use crate::sst::{internal_fields, tag_maybe_to_dictionary_field, with_field_id};
 
 /// Returns true if the columns in the `projection_mapper` and `read_format` have same data types
 /// and primary key encodings.
@@ -116,8 +116,12 @@ impl FlatCompatBatch {
             return FlatCompatBatch::try_new_compact_sparse(mapper, actual);
         }
 
-        let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, expect_schema, mapper.metadata())?;
+        let (index_or_defaults, fields) = Self::compute_index_and_fields(
+            &actual_schema,
+            expect_schema,
+            mapper.metadata(),
+            mapper.input_arrow_schema(compaction).fields(),
+        )?;
 
         let compat_pk = FlatCompatPrimaryKey::new(mapper.metadata(), actual)?;
 
@@ -132,6 +136,7 @@ impl FlatCompatBatch {
         actual_schema: &[(ColumnId, ConcreteDataType)],
         expect_schema: &[(ColumnId, ConcreteDataType)],
         expect_metadata: &RegionMetadata,
+        target_fields: &[FieldRef],
     ) -> Result<(Vec<IndexOrDefault>, Vec<FieldRef>)> {
         // Maps column id to the index and data type in the actual schema.
         let actual_schema_index: HashMap<_, _> = actual_schema
@@ -142,29 +147,18 @@ impl FlatCompatBatch {
 
         let mut index_or_defaults = Vec::with_capacity(expect_schema.len());
         let mut fields = Vec::with_capacity(expect_schema.len());
-        for (column_id, expect_data_type) in expect_schema {
+        for (field_index, (column_id, expect_data_type)) in expect_schema.iter().enumerate() {
             // Safety: expect_schema comes from the same mapper.
             let column_index = expect_metadata.column_index_by_id(*column_id).unwrap();
             let expect_column = &expect_metadata.column_metadatas[column_index];
-            let column_field = &expect_metadata.schema.arrow_schema().fields()[column_index];
-            // For tag columns, we need to create a dictionary field.
-            if expect_column.semantic_type == SemanticType::Tag {
-                let field = tag_maybe_to_dictionary_field(
-                    &expect_column.column_schema.data_type,
-                    column_field,
-                );
-                fields.push(Arc::new(with_field_id(
-                    (*field).clone(),
-                    expect_column.column_id,
-                )));
-            } else {
-                let field = with_field_id(
-                    Arc::unwrap_or_clone(column_field.clone()),
-                    expect_column.column_id,
-                )
-                .with_data_type(expect_data_type.as_arrow_type());
-                fields.push(Arc::new(field))
-            };
+            // Query target fields follow mapper.batch_schema(); compaction reads all columns in
+            // PK -> fields -> timestamp order (fields -> timestamp for sparse encoding), before
+            // trailing internal columns. Keep this order consistent with expect_schema.
+            // The mapper already applies string-tag dictionary types and JSON2 compaction layouts,
+            // which can differ from the logical types in expect_schema.
+            let column_field = &target_fields[field_index];
+            debug_assert_eq!(column_field.name(), &expect_column.column_schema.name);
+            fields.push(column_field.clone());
 
             if let Some((index, actual_data_type)) = actual_schema_index.get(column_id) {
                 let mut cast_type = None;
@@ -194,14 +188,13 @@ impl FlatCompatBatch {
                 // Create a default vector with 1 element for that column.
                 let default_vector = if expect_data_type.is_json2() {
                     // JSON2 columns do not support defaults, so missing columns use NULL.
-                    // `expect_data_type` may be a query-concretized JSON2 type,
-                    // while region metadata still carries its unconcretized type.
-                    // The default vector must match the target Arrow field above.
-                    Helper::try_into_vector(new_null_array(&expect_data_type.as_arrow_type(), 1))
-                        .context(CreateDefaultSnafu {
+                    // A logical JSON2 placeholder cannot describe a compaction layout.
+                    Helper::try_into_vector(new_null_array(column_field.data_type(), 1)).context(
+                        CreateDefaultSnafu {
                             region_id: expect_metadata.region_id,
                             column: &expect_column.column_schema.name,
-                        })?
+                        },
+                    )?
                 } else {
                     expect_column
                         .column_schema
@@ -256,8 +249,12 @@ impl FlatCompatBatch {
             .map(|col| (col.column_id, col.column_schema.data_type.clone()))
             .collect();
 
-        let (index_or_defaults, fields) =
-            Self::compute_index_and_fields(&actual_schema, &expect_schema, mapper.metadata())?;
+        let (index_or_defaults, fields) = Self::compute_index_and_fields(
+            &actual_schema,
+            &expect_schema,
+            mapper.metadata(),
+            mapper.input_arrow_schema(true).fields(),
+        )?;
 
         let compat_pk = FlatCompatPrimaryKey::default();
 
@@ -663,10 +660,15 @@ mod tests {
     };
     use datatypes::arrow::datatypes::UInt32Type;
     use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::extension::json::JsonMetadata;
+    use datatypes::json::JsonSettings;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::types::json_type::JsonNativeType;
+    use datatypes::types::parse_string_to_jsonb;
     use datatypes::value::ValueRef;
+    use datatypes::vectors::json::array::JsonArray;
+    use datatypes::vectors::json::json2_physical_data_type;
     use mito_codec::row_converter::{
         DensePrimaryKeyCodec, PrimaryKeyCodecExt, SparsePrimaryKeyCodec,
     };
@@ -678,7 +680,9 @@ mod tests {
     use crate::read::flat_projection::FlatProjectionMapper;
     use crate::read::read_columns::ReadColumns;
     use crate::sst::parquet::flat_format::FlatReadFormat;
+    use crate::sst::parquet::{Json2RewriteTargets, Json2TargetLayout};
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
+    use crate::test_util;
 
     /// Creates a new [RegionMetadata].
     fn new_metadata(
@@ -1483,5 +1487,114 @@ mod tests {
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
+    }
+    #[test]
+    fn test_compaction_json2_uses_target_fields()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (metadata, batch) = test_util::sst_util::new_json2_record_batch()?;
+        let logical_settings = JsonSettings::default();
+        let layout = JsonSettings::try_new(vec![], Some(0))?;
+        let targets: Json2RewriteTargets = Arc::new(BTreeMap::from([(
+            0,
+            Json2TargetLayout {
+                extension_metadata: serde_json::to_string(&JsonMetadata::new(
+                    logical_settings.clone(),
+                ))?,
+                target_layout: layout.clone(),
+            },
+        )]));
+        // Model the existing Rewrite output; the compatibility layer only selects or fills arrays.
+        let json = JsonArray::from(batch.column(0)).rewrite_to_v2(
+            batch.schema_ref().field(0),
+            &logical_settings,
+            &layout,
+        )?;
+        let mut fields = batch.schema_ref().fields().to_vec();
+        fields[0] = Arc::new(
+            fields[0]
+                .as_ref()
+                .clone()
+                .with_data_type(json.data_type().clone()),
+        );
+        let mut columns = batch.columns().to_vec();
+        columns[0] = json;
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+        for encoding in [PrimaryKeyEncoding::Dense, PrimaryKeyEncoding::Sparse] {
+            for missing_json in [false, true] {
+                let source = if missing_json {
+                    new_metadata(
+                        &[(
+                            1,
+                            SemanticType::Timestamp,
+                            ConcreteDataType::timestamp_millisecond_datatype(),
+                        )],
+                        &[],
+                    )
+                } else {
+                    metadata.as_ref().clone()
+                };
+                let mut builder = RegionMetadataBuilder::from_existing(source);
+                builder.primary_key_encoding(encoding);
+                let actual = Arc::new(builder.build()?);
+                let mut builder = RegionMetadataBuilder::from_existing(metadata.as_ref().clone());
+                builder.primary_key_encoding(encoding);
+                builder.push_column_metadata(ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "added",
+                        ConcreteDataType::int64_datatype(),
+                        true,
+                    )
+                    .with_default_constraint(Some(
+                        ColumnDefaultConstraint::Value(Value::Int64(42)),
+                    ))?,
+                    semantic_type: SemanticType::Field,
+                    column_id: 2,
+                });
+                let expected = Arc::new(builder.build()?);
+                let read_columns = ReadColumns::new([0, 1, 2]);
+                let mapper = FlatProjectionMapper::new_with_json2_rewrite_targets(
+                    &expected,
+                    vec![0, 1, 2],
+                    read_columns.clone(),
+                    &targets,
+                )?;
+                let read_format = FlatReadFormat::new(actual, read_columns, None, "test", true)?;
+                let compat = FlatCompatBatch::try_new(&mapper, &read_format, true)?
+                    .ok_or("missing columns require compatibility")?;
+                let input = if missing_json {
+                    batch.project(&[1, 2, 3, 4])?
+                } else {
+                    batch.clone()
+                };
+                let output = compat.compat(input)?;
+                assert_eq!(
+                    output.column(0).data_type(),
+                    &json2_physical_data_type(&layout)
+                );
+                assert_eq!(
+                    output.column(0).null_count(),
+                    if missing_json { 2 } else { 0 }
+                );
+                let defaults = output
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or("expected int64 defaults")?;
+                assert_eq!(defaults.values().as_ref(), &[42, 42]);
+                if !missing_json {
+                    let jsonb = JsonArray::from(output.column(0)).project_to_v2(
+                        output.schema_ref().field(0),
+                        &datatypes::arrow::datatypes::DataType::Binary,
+                    )?;
+                    let jsonb = jsonb
+                        .as_any()
+                        .downcast_ref::<BinaryArray>()
+                        .ok_or("expected JSONB")?;
+                    assert_eq!(jsonb.value(0), parse_string_to_jsonb(r#"{"a":1}"#)?);
+                    assert_eq!(jsonb.value(1), parse_string_to_jsonb(r#"{"a":2}"#)?);
+                }
+            }
+        }
+        Ok(())
     }
 }
