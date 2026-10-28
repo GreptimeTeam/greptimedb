@@ -1508,7 +1508,6 @@ impl ManifestContext {
         let mut committed = source.file_meta.clone();
         committed.available_indexes = updated.available_indexes;
         committed.indexes = updated.indexes;
-        committed.json_path_indexes = updated.json_path_indexes;
         committed.index_file_size = updated.index_file_size;
         committed.index_version = updated.index_version;
 

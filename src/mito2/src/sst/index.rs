@@ -78,8 +78,7 @@ use crate::request::{
 };
 use crate::schedule::scheduler::{Job, SchedulerRef};
 use crate::sst::file::{
-    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, JsonPathIndexMetadata, RegionFileId,
-    RegionIndexId,
+    ColumnIndexMetadata, FileHandle, IndexType, IndexTypes, RegionFileId, RegionIndexId,
 };
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::index::fulltext_index::FULLTEXT_BLOOM_VERSION;
@@ -191,46 +190,9 @@ impl IndexOutput {
         indexes
     }
 
-    /// Returns the indexes created for whole columns.
+    /// Returns the indexes created for whole columns and JSON paths.
     pub fn build_column_indexes(&self) -> Vec<ColumnIndexMetadata> {
-        let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
-
-        if self.inverted_index.is_available() {
-            for col in self.inverted_index.column_ids() {
-                map.entry(col).or_default().push(IndexType::InvertedIndex);
-            }
-        }
-        if self.fulltext_index.is_available() {
-            for col in self.fulltext_index.column_ids() {
-                map.entry(col).or_default().push(IndexType::FulltextIndex);
-            }
-        }
-        if self.bloom_filter.is_available() {
-            for col in self.bloom_filter.column_ids() {
-                map.entry(col)
-                    .or_default()
-                    .push(IndexType::BloomFilterIndex);
-            }
-        }
-
-        map.into_iter()
-            .map(|(column_id, created_indexes)| ColumnIndexMetadata {
-                column_id,
-                fulltext_bloom_version: if self.fulltext_index.is_available()
-                    && self.fulltext_bloom_columns.contains(&column_id)
-                {
-                    FULLTEXT_BLOOM_VERSION
-                } else {
-                    0
-                },
-                created_indexes,
-            })
-            .collect::<Vec<_>>()
-    }
-
-    /// Returns the path indexes successfully written to this index file.
-    pub fn build_json_path_indexes(&self) -> Vec<JsonPathIndexMetadata> {
-        let mut indexes = Vec::new();
+        let mut map: HashMap<(ColumnId, Option<Vec<String>>), IndexTypes> = HashMap::new();
         for (output, index_type) in [
             (&self.inverted_index, IndexType::InvertedIndex),
             (&self.fulltext_index, IndexType::FulltextIndex),
@@ -239,15 +201,32 @@ impl IndexOutput {
             if !output.is_available() {
                 continue;
             }
-            indexes.extend(output.targets.iter().filter_map(|target| match target {
-                IndexTarget::JsonPath(target) => Some(JsonPathIndexMetadata {
-                    target: target.clone(),
-                    index_type,
-                }),
-                IndexTarget::ColumnId(_) => None,
-            }));
+            for target in &output.targets {
+                let key = match target {
+                    IndexTarget::ColumnId(column_id) => (*column_id, None),
+                    IndexTarget::JsonPath(target) => {
+                        (target.column_id(), Some(target.path().to_vec()))
+                    }
+                };
+                map.entry(key).or_default().push(index_type);
+            }
         }
-        indexes
+
+        map.into_iter()
+            .map(|((column_id, path), created_indexes)| ColumnIndexMetadata {
+                column_id,
+                fulltext_bloom_version: if path.is_none()
+                    && self.fulltext_index.is_available()
+                    && self.fulltext_bloom_columns.contains(&column_id)
+                {
+                    FULLTEXT_BLOOM_VERSION
+                } else {
+                    0
+                },
+                path,
+                created_indexes,
+            })
+            .collect::<Vec<_>>()
     }
 }
 
@@ -1149,19 +1128,32 @@ impl IndexBuildTask {
             IndexBuildType::Manual | IndexBuildType::SchemaChange
         );
         let json_targets = if is_rebuild {
-            let indexes = &self.source.file_meta.json_path_indexes;
+            let indexes: Vec<_> = self
+                .source
+                .file_meta
+                .indexes
+                .iter()
+                .filter_map(|index| index.path.as_ref().map(|path| (index, path)))
+                .collect();
             ensure!(
-                indexes
-                    .iter()
-                    .all(|index| index.index_type == IndexType::InvertedIndex),
+                indexes.iter().all(
+                    |(index, _)| index.created_indexes.as_slice() == [IndexType::InvertedIndex]
+                ),
                 PreserveJsonIndexSnafu {
                     reason: "Cannot rebuild a JSON path index type other than inverted"
                 },
             );
             indexes
                 .iter()
-                .map(|index| IndexTarget::JsonPath(index.target.clone()))
-                .collect()
+                .map(|(index, path)| {
+                    IndexTarget::new_json_path(index.column_id, (*path).clone()).map_err(|err| {
+                        PreserveJsonIndexSnafu {
+                            reason: format!("Invalid JSON path index target: {err}"),
+                        }
+                        .build()
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -1407,7 +1399,6 @@ impl IndexBuildTask {
         let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_index_types();
         updated.indexes = output.build_column_indexes();
-        updated.json_path_indexes = output.build_json_path_indexes();
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
         let publication = self
@@ -2103,6 +2094,49 @@ mod tests {
             fulltext_index_config: FulltextIndexConfig::default(),
             bloom_filter_index_config: BloomFilterConfig::default(),
         })
+    }
+
+    #[test]
+    fn test_build_column_indexes_with_json_paths() {
+        let path_a = IndexTarget::new_json_path(1, vec!["a".into()]).unwrap();
+        let path_b = IndexTarget::new_json_path(1, vec!["b".into()]).unwrap();
+        let output = IndexOutput {
+            inverted_index: IndexBaseOutput {
+                index_size: 1,
+                targets: vec![IndexTarget::ColumnId(1), path_a.clone(), path_b],
+                ..Default::default()
+            },
+            bloom_filter: IndexBaseOutput {
+                index_size: 1,
+                targets: vec![IndexTarget::ColumnId(1), path_a],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let indexes = output.build_column_indexes();
+        assert_eq!(indexes.len(), 3);
+        let whole = indexes.iter().find(|index| index.path.is_none()).unwrap();
+        assert_eq!(
+            whole.created_indexes.as_slice(),
+            [IndexType::InvertedIndex, IndexType::BloomFilterIndex]
+        );
+        let path_a = indexes
+            .iter()
+            .find(|index| index.path.as_deref() == Some(&["a".to_string()][..]))
+            .unwrap();
+        assert_eq!(
+            path_a.created_indexes.as_slice(),
+            [IndexType::InvertedIndex, IndexType::BloomFilterIndex]
+        );
+        let path_b = indexes
+            .iter()
+            .find(|index| index.path.as_deref() == Some(&["b".to_string()][..]))
+            .unwrap();
+        assert_eq!(
+            path_b.created_indexes.as_slice(),
+            [IndexType::InvertedIndex]
+        );
     }
 
     #[tokio::test]

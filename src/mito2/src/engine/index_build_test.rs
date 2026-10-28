@@ -177,7 +177,11 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         );
         let before = current_file_metas(&engine, region_id).await;
         assert_eq!(
-            before[0].json_path_indexes.len(),
+            before[0]
+                .indexes
+                .iter()
+                .filter(|index| index.path.is_some())
+                .count(),
             usize::from(had_path_index)
         );
 
@@ -235,7 +239,11 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         let after = current_file_metas(&engine, region_id).await;
         assert_eq!(after.len(), 1);
         assert_eq!(
-            after[0].json_path_indexes.len(),
+            after[0]
+                .indexes
+                .iter()
+                .filter(|index| index.path.is_some())
+                .count(),
             usize::from(had_path_index)
         );
         assert_eq!(after[0].file_id, before[0].file_id);
@@ -303,7 +311,7 @@ async fn test_rebuild_preserves_existing_json_path_indexes() {
         let reopened = current_file_metas(&engine, region_id).await;
         assert_eq!(reopened.len(), 1);
         assert_eq!(reopened[0].index_id(), after[0].index_id());
-        assert_eq!(reopened[0].json_path_indexes, after[0].json_path_indexes);
+        assert_eq!(reopened[0].indexes, after[0].indexes);
     }
 }
 
