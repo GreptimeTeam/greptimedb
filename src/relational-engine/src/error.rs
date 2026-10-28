@@ -54,6 +54,16 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Region already exists with a different definition, region_id: {}",
+        region_id
+    ))]
+    RegionExists {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to check object from path: {}", path))]
     CheckObject {
         path: String,
@@ -136,6 +146,8 @@ impl ErrorExt for Error {
             InvalidMetadata { .. } | MissingRequiredField { .. } => StatusCode::InvalidArguments,
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
+
+            RegionExists { .. } => StatusCode::RegionAlreadyExists,
 
             CheckObject { .. }
             | StoreRegionManifest { .. }

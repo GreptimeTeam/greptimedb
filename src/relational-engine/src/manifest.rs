@@ -20,9 +20,8 @@ use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::{ColumnId, RegionId};
+use table::requests::{RELATIONAL_META_KEY, RelationalOptions};
 
-use crate::RELATIONAL_META_KEY;
-use crate::RelationalOptions;
 use crate::error::{
     CheckObjectSnafu, DecodeJsonSnafu, DeleteRegionManifestSnafu, EncodeJsonSnafu,
     InvalidMetadataSnafu, LoadRegionManifestSnafu, ManifestExistsSnafu, MissingRequiredFieldSnafu,
@@ -60,6 +59,17 @@ impl RelationalRegionManifest {
             })?;
 
         Ok(())
+    }
+
+    /// Checks whether a region manifest has already been persisted under
+    /// `region_dir`. This is the source of truth for region existence and is
+    /// used to make `CREATE EXTERNAL TABLE` idempotent across restarts.
+    pub async fn exists(region_dir: &str, object_store: &ObjectStore) -> Result<bool> {
+        let path = &region_manifest_path(region_dir);
+        object_store
+            .exists(path)
+            .await
+            .context(CheckObjectSnafu { path })
     }
 
     pub async fn load(

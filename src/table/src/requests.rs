@@ -54,9 +54,28 @@ mod semantic;
 pub use semantic::*;
 
 pub const FILE_TABLE_META_KEY: &str = "__private.file_table_meta";
+pub const RELATIONAL_META_KEY: &str = "__private.relational_meta";
 pub const FILE_TABLE_LOCATION_KEY: &str = "location";
 pub const FILE_TABLE_PATTERN_KEY: &str = "pattern";
 pub const FILE_TABLE_FORMAT_KEY: &str = "format";
+
+/// Options captured at `CREATE EXTERNAL TABLE ... ENGINE=relational WITH (...)` time
+/// and persisted in the region manifest.
+///
+/// `connection` is persisted in **plaintext** so the datanode can reconnect to the
+/// remote database when serving queries on the region.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelationalOptions {
+    #[serde(default = "relational_options")]
+    pub version: u8,
+    /// Full DSN, e.g. `mysql://user:password@host:3306/db`.
+    pub connection: String,
+    pub remote_table: String,
+}
+
+fn relational_options() -> u8 {
+    1
+}
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";

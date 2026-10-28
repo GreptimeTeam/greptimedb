@@ -22,9 +22,7 @@ use datatypes::schema::ColumnSchema;
 use object_store::ObjectStore;
 use object_store::services::Fs;
 use store_api::metadata::ColumnMetadata;
-
-use crate::RELATIONAL_META_KEY;
-use crate::RelationalOptions;
+use table::requests::{RELATIONAL_META_KEY, RelationalOptions};
 
 pub(crate) fn new_test_object_store(prefix: &str) -> (TempDir, ObjectStore) {
     let dir = create_temp_dir(prefix);
@@ -61,6 +59,7 @@ pub(crate) fn new_test_options() -> HashMap<String, String> {
     HashMap::from([(
         RELATIONAL_META_KEY.to_string(),
         serde_json::to_string(&RelationalOptions {
+            version: 1,
             connection: "mysql://user:***@127.0.0.1:3306/db".to_string(),
             remote_table: "remote_table".to_string(),
         })

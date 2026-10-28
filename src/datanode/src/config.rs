@@ -29,7 +29,6 @@ use metric_engine::config::EngineConfig as MetricEngineConfig;
 use mito2::config::MitoConfig;
 pub(crate) use object_store::config::ObjectStoreConfig;
 use query::options::QueryOptions;
-use relational_engine::config::EngineConfig as RelationalEngineConfig;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
 use servers::http::HttpOptions;
@@ -198,8 +197,6 @@ pub enum RegionEngineConfig {
     File(FileEngineConfig),
     #[serde(rename = "metric")]
     Metric(MetricEngineConfig),
-    #[serde(rename = "relational")]
-    Relational(RelationalEngineConfig),
 }
 
 #[cfg(test)]

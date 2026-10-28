@@ -23,7 +23,7 @@ use catalog::information_schema::NoopInformationExtension;
 use catalog::kvbackend::KvBackendCatalogManagerBuilder;
 use client::client_manager::NodeClients;
 use common_base::Plugins;
-use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE, RELATIONAL_ENGINE};
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -674,7 +674,6 @@ impl DatanodeBuilder {
         let mut metric_engine_config = metric_engine::config::EngineConfig::default();
         let mut mito_engine_config = MitoConfig::default();
         let mut file_engine_config = file_engine::config::EngineConfig::default();
-        let mut relational_engine_config = relational_engine::config::EngineConfig::default();
 
         for engine in &self.opts.region_engine {
             match engine {
@@ -686,9 +685,6 @@ impl DatanodeBuilder {
                 }
                 RegionEngineConfig::Metric(metric_config) => {
                     metric_engine_config = metric_config.clone();
-                }
-                RegionEngineConfig::Relational(config) => {
-                    relational_engine_config = config.clone();
                 }
             }
         }
@@ -716,7 +712,6 @@ impl DatanodeBuilder {
         );
 
         let relational_engine = RelationalEngine::new(
-            relational_engine_config,
             object_store_manager.default_object_store().clone(),
         );
 
@@ -944,7 +939,6 @@ fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
             RegionEngineConfig::Mito(_) => MITO_ENGINE,
             RegionEngineConfig::File(_) => FILE_ENGINE,
             RegionEngineConfig::Metric(_) => METRIC_ENGINE,
-            RegionEngineConfig::Relational(_) => RELATIONAL_ENGINE,
         };
         if let Some(first_index) = engine_indices.insert(engine, index) {
             return DuplicateRegionEngineConfigSnafu {

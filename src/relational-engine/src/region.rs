@@ -32,6 +32,14 @@ pub struct RelationalRegion {
 pub type RelationalRegionRef = Arc<RelationalRegion>;
 
 impl RelationalRegion {
+    /// Computes the region directory under a table's data home.
+    pub(crate) fn region_dir(table_dir: &str, region_id: RegionId) -> String {
+        object_store::util::join_dir(
+            table_dir,
+            &region_name(region_id.table_id(), region_id.region_sequence()),
+        )
+    }
+
     pub async fn create(
         region_id: RegionId,
         request: RegionCreateRequest,
@@ -44,10 +52,7 @@ impl RelationalRegion {
             options: request.options,
         };
 
-        let region_dir = object_store::util::join_dir(
-            &request.table_dir,
-            &region_name(region_id.table_id(), region_id.region_sequence()),
-        );
+        let region_dir = Self::region_dir(&request.table_dir, region_id);
         // Validate the options carry the relational metadata (connection + remote table)
         // before persisting, so a malformed region fails fast here rather than on open.
         manifest.relational_options()?;
@@ -66,16 +71,32 @@ impl RelationalRegion {
         request: RegionOpenRequest,
         object_store: &ObjectStore,
     ) -> Result<RelationalRegionRef> {
-        let region_dir = object_store::util::join_dir(
-            &request.table_dir,
-            &region_name(region_id.table_id(), region_id.region_sequence()),
-        );
-        let manifest = RelationalRegionManifest::load(region_id, &region_dir, object_store).await?;
+        let region_dir = Self::region_dir(&request.table_dir, region_id);
+        Self::load(region_id, &region_dir, object_store).await
+    }
+
+    /// Loads a region from its persisted manifest. Used both by `open` and to
+    /// recover a region whose manifest already exists (idempotent create).
+    pub(crate) async fn load(
+        region_id: RegionId,
+        region_dir: &str,
+        object_store: &ObjectStore,
+    ) -> Result<RelationalRegionRef> {
+        let manifest = RelationalRegionManifest::load(region_id, region_dir, object_store).await?;
+        Self::from_manifest(region_dir, manifest)
+    }
+
+    /// Builds a region from an already-loaded manifest, validating the
+    /// relational options and rebuilding the region metadata.
+    pub(crate) fn from_manifest(
+        region_dir: &str,
+        manifest: RelationalRegionManifest,
+    ) -> Result<RelationalRegionRef> {
         manifest.relational_options()?;
         let metadata = manifest.metadata()?;
 
         Ok(Arc::new(Self {
-            region_dir,
+            region_dir: region_dir.to_string(),
             metadata,
         }))
     }

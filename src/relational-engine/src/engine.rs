@@ -31,15 +31,16 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, RegionCloseRequest, RegionCreateRequest, RegionDropRequest, RegionOpenRequest,
-    RegionRequest,
+    RegionRequest, RegionRequirements,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::Mutex;
 
-use crate::config::EngineConfig;
 use crate::error::{
-    RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu, UnsupportedSnafu,
+    RegionExistsSnafu, RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu,
+    UnsupportedSnafu,
 };
+use crate::manifest::RelationalRegionManifest;
 use crate::region::{RelationalRegion, RelationalRegionRef};
 
 pub struct RelationalEngine {
@@ -47,7 +48,7 @@ pub struct RelationalEngine {
 }
 
 impl RelationalEngine {
-    pub fn new(_config: EngineConfig, object_store: ObjectStore) -> Self {
+    pub fn new(object_store: ObjectStore) -> Self {
         Self {
             inner: Arc::new(EngineInner::new(object_store)),
         }
@@ -76,7 +77,6 @@ impl RegionEngine for RelationalEngine {
         _region_id: RegionId,
         _request: ScanRequest,
     ) -> Result<RegionScannerRef, BoxedError> {
-        // Scanning is not supported for relational external tables yet (PR 2).
         Err(BoxedError::new(
             UnsupportedSnafu { operation: "scan" }.build(),
         ))
@@ -170,6 +170,24 @@ struct EngineInner {
 
 type EngineInnerRef = Arc<EngineInner>;
 
+fn ensure_region_requirements(
+    requirements: RegionRequirements,
+    object_store: &ObjectStore,
+) -> EngineResult<()> {
+    if !requirements.object_storage {
+        return Ok(());
+    }
+
+    ensure!(
+        object_store::util::is_object_storage(object_store),
+        UnsupportedSnafu {
+            operation: "create or open region with object storage requirement on non-object storage"
+        }
+    );
+
+    Ok(())
+}
+
 impl EngineInner {
     fn new(object_store: ObjectStore) -> Self {
         Self {
@@ -242,6 +260,36 @@ impl EngineInner {
             return Ok(0);
         }
 
+        ensure_region_requirements(request.requirements, &self.object_store)?;
+
+        // The manifest is the source of truth for whether a region already
+        // exists. The in-memory `regions` map only tracks regions opened in
+        // this process, so after a restart it is empty even though the
+        // manifest was already persisted. Recover the region from the manifest
+        // instead of failing with `ManifestExists`, keeping `CREATE EXTERNAL
+        // TABLE` idempotent.
+        let region_dir = RelationalRegion::region_dir(&request.table_dir, region_id);
+        if RelationalRegionManifest::exists(&region_dir, &self.object_store).await? {
+            let manifest =
+                RelationalRegionManifest::load(region_id, &region_dir, &self.object_store).await?;
+            // The persisted definition must match the incoming request, otherwise a
+            // retried CREATE with a different schema would silently reuse the old
+            // manifest. Reject the mismatch instead.
+            ensure!(
+                manifest.column_metadatas == request.column_metadatas
+                    && manifest.primary_key == request.primary_key
+                    && manifest.options == request.options,
+                RegionExistsSnafu { region_id }
+            );
+            let region = RelationalRegion::from_manifest(&region_dir, manifest)?;
+            self.regions.write().unwrap().insert(region_id, region);
+            info!(
+                "Region recovered from existing manifest, region_id: {}",
+                region_id
+            );
+            return Ok(0);
+        }
+
         let res = RelationalRegion::create(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
             error!(
@@ -272,6 +320,8 @@ impl EngineInner {
         if self.exists(region_id).await {
             return Ok(0);
         }
+
+        ensure_region_requirements(request.requirements, &self.object_store)?;
 
         let res = RelationalRegion::open(region_id, request, &self.object_store).await;
         let region = res.inspect_err(|err| {
@@ -307,25 +357,28 @@ impl EngineInner {
         region_id: RegionId,
         _request: RegionDropRequest,
     ) -> EngineResult<AffectedRows> {
-        if !self.exists(region_id).await {
-            return RegionNotFoundSnafu { region_id }.fail();
-        }
-
-        info!("Try to drop region, region_id: {}", region_id);
-
+        // Serialize against create/open/close so the region can't be closed
+        // between the existence check and the manifest deletion. A region that
+        // is no longer in memory (e.g. closed concurrently) is reported as not
+        // found instead of silently returning success with a leaked manifest.
         let _lock = self.region_mutex.lock().await;
 
         let region = self.get_region(region_id).await;
-        if let Some(region) = region {
-            let res = RelationalRegion::drop(&region, &self.object_store).await;
-            res.inspect_err(|err| {
-                error!(
-                    err;
-                    "Failed to drop region, region_id: {}",
-                    region_id
-                );
-            })?;
-        }
+        let Some(region) = region else {
+            return RegionNotFoundSnafu { region_id }.fail();
+        };
+
+        info!("Try to drop region, region_id: {}", region_id);
+
+        let res = RelationalRegion::drop(&region, &self.object_store).await;
+        res.inspect_err(|err| {
+            error!(
+                err;
+                "Failed to drop region, region_id: {}",
+                region_id
+            );
+        })?;
+
         let _ = self.regions.write().unwrap().remove(&region_id);
 
         info!("Region dropped, region_id: {}", region_id);
@@ -338,5 +391,196 @@ impl EngineInner {
 
     async fn exists(&self, region_id: RegionId) -> bool {
         self.regions.read().unwrap().contains_key(&region_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::assert_matches;
+
+    use object_store::ObjectStore;
+    use object_store::services::{Fs, S3};
+    use store_api::region_request::{
+        PathType, RegionCreateRequest, RegionDropRequest, RegionRequirements,
+    };
+    use store_api::storage::RegionId;
+
+    use super::{EngineInner, ensure_region_requirements};
+    use crate::error::Error;
+    use crate::test_util::{new_test_column_metadata, new_test_object_store, new_test_options};
+
+    fn build_fs_object_store() -> ObjectStore {
+        ObjectStore::new(Fs::default().root("/tmp")).unwrap()
+    }
+
+    fn build_s3_object_store() -> ObjectStore {
+        ObjectStore::new(
+            S3::default()
+                .bucket("test-bucket")
+                .region("us-east-1")
+                .disable_ec2_metadata(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_empty_region_requirements_are_supported() {
+        ensure_region_requirements(RegionRequirements::empty(), &build_fs_object_store()).unwrap();
+    }
+
+    #[test]
+    fn test_object_storage_region_requirement_rejects_fs_object_store() {
+        let err = ensure_region_requirements(
+            RegionRequirements::object_storage(),
+            &build_fs_object_store(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, Error::Unsupported { .. }));
+    }
+
+    #[test]
+    fn test_object_storage_region_requirement_accepts_s3_object_store() {
+        ensure_region_requirements(
+            RegionRequirements::object_storage(),
+            &build_s3_object_store(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_drop_returns_not_found_when_region_absent() {
+        let (_dir, object_store) = new_test_object_store("test_drop_absent");
+        let inner = EngineInner::new(object_store);
+
+        let err = inner
+            .handle_drop(
+                RegionId::new(1, 0),
+                RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert_matches!(err, Error::RegionNotFound { .. });
+    }
+
+    #[tokio::test]
+    async fn test_drop_removes_manifest() {
+        let (_dir, object_store) = new_test_object_store("test_drop_removes_manifest");
+        let inner = EngineInner::new(object_store.clone());
+
+        let region_id = RegionId::new(1, 0);
+        let request = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: new_test_options(),
+            table_dir: "drop_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+
+        inner.handle_create(region_id, request).await.unwrap();
+
+        let manifest_path = "drop_dir/1_0000000000/manifest/_relational_manifest";
+        assert!(object_store.exists(manifest_path).await.unwrap());
+
+        inner
+            .handle_drop(
+                region_id,
+                RegionDropRequest {
+                    fast_path: false,
+                    force: false,
+                    partial_drop: false,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(!object_store.exists(manifest_path).await.unwrap());
+        assert!(!inner.exists(region_id).await);
+    }
+
+    #[tokio::test]
+    async fn test_create_is_idempotent_across_engine_rebuild() {
+        let (_dir, object_store) = new_test_object_store("test_create_idempotent");
+        let region_id = RegionId::new(1, 0);
+        let request = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: new_test_options(),
+            table_dir: "idempotent_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+
+        // First create persists the manifest to object storage.
+        {
+            let inner = EngineInner::new(object_store.clone());
+            inner
+                .handle_create(region_id, request.clone())
+                .await
+                .unwrap();
+            assert!(inner.exists(region_id).await);
+        }
+
+        // Rebuild the engine on the same object store: the in-memory region
+        // map is empty, but the manifest is still persisted. Retrying the
+        // same create must recover from the manifest instead of failing.
+        let rebuilt = EngineInner::new(object_store.clone());
+        let affected = rebuilt.handle_create(region_id, request).await.unwrap();
+        assert_eq!(affected, 0);
+        assert!(rebuilt.exists(region_id).await);
+
+        let manifest_path = "idempotent_dir/1_0000000000/manifest/_relational_manifest";
+        assert!(object_store.exists(manifest_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_mismatched_definition() {
+        let (_dir, object_store) = new_test_object_store("test_create_mismatch");
+        let region_id = RegionId::new(1, 0);
+
+        let request = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: new_test_options(),
+            table_dir: "mismatch_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+
+        // First create persists the manifest.
+        let inner = EngineInner::new(object_store.clone());
+        inner.handle_create(region_id, request).await.unwrap();
+
+        // Rebuild the engine and retry the create with a different primary key:
+        // the persisted definition no longer matches, so this must fail instead of
+        // silently reusing the old manifest.
+        let rebuilt = EngineInner::new(object_store.clone());
+        let mismatched = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![2],
+            options: new_test_options(),
+            table_dir: "mismatch_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+        let err = rebuilt
+            .handle_create(region_id, mismatched)
+            .await
+            .unwrap_err();
+        assert_matches!(err, Error::RegionExists { .. });
     }
 }

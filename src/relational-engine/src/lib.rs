@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
-
-pub mod config;
+pub mod connection;
 pub mod engine;
 pub mod error;
 pub(crate) mod manifest;
@@ -22,16 +20,3 @@ pub(crate) mod region;
 
 #[cfg(test)]
 pub(crate) mod test_util;
-
-/// Options captured at `CREATE EXTERNAL TABLE ... ENGINE=relational WITH (...)` time
-/// and persisted in the region manifest. `connection` is stored in its redacted form
-/// (password replaced with `***`), so the manifest never contains plaintext credentials.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RelationalOptions {
-    pub connection: String,
-    pub remote_table: String,
-}
-
-/// Metadata key under which [`RelationalOptions`] is serialized in the table options
-/// map passed down to the region's `create` request.
-pub const RELATIONAL_META_KEY: &str = "__private.relational_meta";
