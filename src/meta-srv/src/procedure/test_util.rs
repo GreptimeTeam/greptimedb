@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(test)]
 use common_procedure::{Context, ContextProvider, ProcedureId, ProcedureState};
+#[cfg(test)]
 use common_procedure_test::MockContextProvider;
 
 use api::v1::meta::mailbox_message::Payload;
@@ -418,6 +421,7 @@ pub async fn update_in_memory_region_flushed_entry_id(
 }
 
 /// Returns a receiver whose initial result is visible to [`common_procedure::watcher::wait`].
+#[cfg(test)]
 pub fn procedure_state_receiver(
     state: ProcedureState,
 ) -> tokio::sync::watch::Receiver<ProcedureState> {
@@ -427,6 +431,7 @@ pub fn procedure_state_receiver(
 }
 
 /// Returns an execution context that resolves child state receivers by procedure id.
+#[cfg(test)]
 pub fn procedure_context_with_receivers(
     receivers: HashMap<ProcedureId, tokio::sync::watch::Receiver<ProcedureState>>,
 ) -> Context {
@@ -440,11 +445,13 @@ pub fn procedure_context_with_receivers(
     }
 }
 
+#[cfg(test)]
 struct ProcedureStateReceiverProvider {
     receivers: HashMap<ProcedureId, tokio::sync::watch::Receiver<ProcedureState>>,
     inner: MockContextProvider,
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl ContextProvider for ProcedureStateReceiverProvider {
     async fn procedure_state(
