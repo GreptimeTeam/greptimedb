@@ -68,6 +68,7 @@ use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
 use crate::memtable::MemtableBuilderProvider;
+use crate::memtable::bulk::CompactDispatcher;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
@@ -204,6 +205,8 @@ impl WorkerGroup {
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
+        let memtable_compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         // We use another scheduler to avoid purge jobs blocking other jobs.
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_purges));
@@ -267,6 +270,7 @@ impl WorkerGroup {
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
+                    memtable_compact_dispatcher: memtable_compact_dispatcher.clone(),
                     listener: WorkerListener::default(),
                     cache_manager: cache_manager.clone(),
                     compaction_memory_manager: compaction_memory_manager.clone(),
@@ -467,6 +471,8 @@ impl WorkerGroup {
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
         let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
+        let memtable_compact_dispatcher =
+            Arc::new(CompactDispatcher::new(config.max_background_compactions));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
         let purge_scheduler = Arc::new(LocalScheduler::new(config.max_background_flushes));
@@ -532,6 +538,7 @@ impl WorkerGroup {
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
+                    memtable_compact_dispatcher: memtable_compact_dispatcher.clone(),
                     listener: WorkerListener::new(listener.clone()),
                     cache_manager: cache_manager.clone(),
                     compaction_memory_manager: compaction_memory_manager.clone(),
@@ -644,6 +651,7 @@ struct WorkerStarter<S> {
     series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
+    memtable_compact_dispatcher: Arc<CompactDispatcher>,
     listener: WorkerListener,
     cache_manager: CacheManagerRef,
     compaction_memory_manager: Arc<CompactionMemoryManager>,
@@ -725,6 +733,7 @@ impl<S: LogStore> WorkerStarter<S> {
             memtable_builder_provider: MemtableBuilderProvider::new(
                 Some(self.write_buffer_manager.clone()),
                 self.config.clone(),
+                self.memtable_compact_dispatcher.clone(),
             ),
             purge_scheduler: self.purge_scheduler.clone(),
             write_buffer_manager: self.write_buffer_manager,
@@ -782,6 +791,8 @@ impl<S: LogStore> WorkerStarter<S> {
             series_index_handle: Mutex::new(series_index_handle),
             series_index_task_state,
             running,
+            #[cfg(test)]
+            memtable_compact_dispatcher: self.memtable_compact_dispatcher.clone(),
         })
     }
 }
@@ -806,6 +817,10 @@ pub(crate) struct RegionWorker {
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Whether to run the worker thread.
     running: Arc<AtomicBool>,
+    #[cfg(test)]
+    /// Dispatcher for bulk memtable compactions, shared by all workers in the group.
+    /// Kept only so tests can check that every worker holds the same one.
+    memtable_compact_dispatcher: Arc<CompactDispatcher>,
 }
 
 impl RegionWorker {
@@ -1875,5 +1890,27 @@ mod tests {
                 .expect("series-index tasks should stop without waiting for their interval")
                 .unwrap();
         }
+    }
+
+    /// Checks that all workers in a group share one bulk memtable compaction dispatcher.
+    #[tokio::test]
+    async fn test_workers_share_memtable_compact_dispatcher() {
+        let env = TestEnv::with_prefix("share-dispatcher").await;
+        let group = env
+            .create_worker_group(MitoConfig {
+                num_workers: 4,
+                ..Default::default()
+            })
+            .await;
+        let first = &group.workers[0].memtable_compact_dispatcher;
+        for (index, worker) in group.workers.iter().enumerate() {
+            let current = &worker.memtable_compact_dispatcher;
+            assert!(
+                Arc::ptr_eq(first, current),
+                "worker {index} has its own memtable compaction dispatcher"
+            );
+        }
+
+        group.stop().await.unwrap();
     }
 }
