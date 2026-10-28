@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use datafusion::execution::memory_pool::{GreedyMemoryPool, UnboundedMemoryPool};
+use datatypes::arrow::compute::concat_batches;
 use datatypes::series::samples::{FieldSpec, SampleRef, Samples, Series, SeriesFields};
 use datatypes::series::time::{EvalGrid, GridRange, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels};
@@ -496,58 +497,78 @@ fn decode_keeps_both_fields_of_one_point_in_one_group() {
 }
 
 #[test]
-fn a_point_going_backwards_within_a_group_is_refused() {
+fn a_batch_of_two_encoders_output_decodes_like_the_two_batches() {
+    // A Flight route concatenates consecutive small batches, so two partitions' state for one group
+    // can reach the decoder as one batch whose second encoder restarts the group at point zero.
+    // Decoding that batch and merging answers what decoding the two batches and merging their
+    // partials does: every point the sum of both encoders' contributions.
     let schema = series_schema(&["a"], 3);
     let tags = tags(&["job"]);
-    let batch = state_batch(
-        &tags,
-        &[
-            Row {
+    let encoder = |first: f64| {
+        state_batch(
+            &tags,
+            &[0, 1, 2].map(|point| Row {
                 name: Some("up"),
                 labels: &[Some("x")],
-                point: 1,
+                point,
                 field: 0,
-                state: Some(state(1.0)),
-            },
-            Row {
-                name: Some("up"),
-                labels: &[Some("x")],
-                point: 0,
-                field: 0,
-                state: Some(state(2.0)),
-            },
-        ],
+                state: Some(state(first + point as f64)),
+            }),
+        )
+    };
+    let (one, two) = (encoder(1.0), encoder(10.0));
+    let concatenated = concat_batches(one.schema_ref(), &[one.clone(), two.clone()]).unwrap();
+    let together = merged(
+        AggregateOp::Sum,
+        &schema,
+        vec![decode(&concatenated, &schema, AggregateOp::Sum, &tags).unwrap()],
     );
-    let error = decode(&batch, &schema, AggregateOp::Sum, &tags)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("before its group's point"), "{error}");
+    // Stated outright as well as compared, so the test does not pass by both paths being wrong in
+    // the same way: every point holds both encoders' contributions added.
+    assert_eq!(together[0].1, vec![vec![(0, 11.0), (1, 13.0), (2, 15.0)]]);
+    assert_eq!(
+        together,
+        merged(
+            AggregateOp::Sum,
+            &schema,
+            vec![
+                decode(&one, &schema, AggregateOp::Sum, &tags).unwrap(),
+                decode(&two, &schema, AggregateOp::Sum, &tags).unwrap(),
+            ]
+        )
+    );
 }
 
 #[test]
 fn decode_admits_the_points_it_appends() {
     // Every appended point and its state vector is admitted before it allocates, so a budget that
-    // runs out part way through the points still refuses the batch instead of overrunning it.
+    // runs out part way through the points still refuses the batch instead of overrunning it. One
+    // point alone fixes the threshold: the points appended after it are the only thing that can
+    // push past that baseline, so removing the append-time charge makes this test fail.
     let schema = series_schema(&["a"], 4);
     let tags = tags(&["job"]);
-    let rows: Vec<Row> = (0..4)
-        .map(|point| Row {
-            name: Some("up"),
-            labels: &[Some("x")],
-            point,
-            field: 0,
-            state: Some(state(1.0)),
-        })
-        .collect();
-    let batch = state_batch(&tags, &rows);
-    let mut tallest = 0usize;
-    decode_state(&batch, &schema, AggregateOp::Sum, &tags, |total| {
-        tallest = tallest.max(total);
-        Ok(())
-    })
+    let row = |point| Row {
+        name: Some("up"),
+        labels: &[Some("x")],
+        point,
+        field: 0,
+        state: Some(state(1.0)),
+    };
+    let mut baseline = 0usize;
+    decode_state(
+        &state_batch(&tags, &[row(0)]),
+        &schema,
+        AggregateOp::Sum,
+        &tags,
+        |total| {
+            baseline = baseline.max(total);
+            Ok(())
+        },
+    )
     .unwrap();
+    let batch = state_batch(&tags, &[row(0), row(1), row(2), row(3)]);
     let refused = decode_state(&batch, &schema, AggregateOp::Sum, &tags, |total| {
-        if total > tallest / 2 {
+        if total > baseline {
             Err(DataFusionError::ResourcesExhausted("budget".into()))
         } else {
             Ok(())
@@ -894,7 +915,7 @@ fn a_null_state_is_rejected_at_the_batch_boundary_and_ungridded_decode_is_refuse
 }
 
 #[test]
-fn decode_refuses_a_point_a_field_or_a_field_twice() {
+fn decode_refuses_a_point_or_a_field_off_the_grid() {
     let schema = series_schema(&["a"], 2);
     let tags = tags(&["job"]);
     let row = |point, field| Row {
@@ -915,16 +936,18 @@ fn decode_refuses_a_point_a_field_or_a_field_twice() {
             Err(DataFusionError::Execution(_))
         ));
     }
-    // Two rows of one point naming one field: the producer contract's one defect.
+    // Two rows naming one point and one field: the point entry they share restarts, which the
+    // merge folds back into that point, so the batch decodes to the one point's sum.
     let repeated = decode(
         &state_batch(&tags, &[row(0, 0), row(0, 0)]),
         &schema,
         AggregateOp::Sum,
         &tags,
-    );
-    assert!(
-        matches!(repeated, Err(DataFusionError::Execution(ref reason)) if reason.contains("repeats field"))
-    );
+    )
+    .expect("a repeated (point, field) pair extends the group");
+    let summed = merged(AggregateOp::Sum, &schema, vec![repeated]);
+    assert_eq!(summed.len(), 1);
+    assert_eq!(summed[0].1, vec![vec![(0, 2.0)]]);
 }
 
 /// Decode admits a figure that covers every container its answer keeps.

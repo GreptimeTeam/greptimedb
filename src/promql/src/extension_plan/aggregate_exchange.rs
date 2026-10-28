@@ -261,9 +261,11 @@ impl PartialFold {
 
 /// Reads one state batch back into the rows a `FloatMerger` merges.
 ///
-/// Rows of one group and point arrive together, so consecutive rows carrying the same labels and
-/// point fill one state vector of the schema's width, and a change of either opens the next one.
-/// Rows of one point split across batches stay separate groups, which the merge folds together.
+/// The encoder writes a group's points in ascending order, one row per (point, field), so a label
+/// change opens the next group and everything else extends the current one: consecutive rows of a
+/// point fill that point's state vector, and a later point is appended to the same group. Rows of
+/// one group split across batches, or concatenated back to back, start a further point entry
+/// instead of failing; the merge addresses points by index, so both entries fold into one slot.
 pub(crate) fn decode_state(
     batch: &RecordBatch,
     schema: &Arc<SeriesSchema>,
@@ -391,18 +393,16 @@ pub(crate) fn decode_state(
         } else {
             // The same group as the row before: this row's point is the one its state belongs to.
             // The encoder emits a group's points in ascending order, so a later point is appended
-            // to the group and a repeated one is that point's next field.
+            // to the group rather than starting a new one.
             let group = groups.last_mut().ok_or_else(|| {
                 DataFusionError::Execution(format!("aggregate state row {row} continued no group"))
             })?;
+            // A batch that holds two encoders' output back to back restarts a group at an earlier
+            // point, and repeats a (point, field) pair. Both are accepted: the merge addresses
+            // points by index, so a second entry for the same point folds into the same slot,
+            // exactly as merging the two batches separately would.
             let opens_point = match group.points.last() {
-                Some((last, _)) if *last == at => false,
-                Some((last, _)) if *last < at => true,
-                Some((last, _)) => {
-                    return Err(DataFusionError::Execution(format!(
-                        "aggregate state row {row} is of point {at}, before its group's point {last}"
-                    )));
-                }
+                Some((last, states)) => *last != at || states[field].is_some(),
                 None => true,
             };
             if opens_point {
@@ -430,11 +430,6 @@ pub(crate) fn decode_state(
         let (_, states) = group.points.last_mut().ok_or_else(|| {
             DataFusionError::Execution(format!("aggregate state row {row} continued no point"))
         })?;
-        if states[field].is_some() {
-            return Err(DataFusionError::Execution(format!(
-                "aggregate state row {row} repeats field {field} of its group's point"
-            )));
-        }
         states[field] = Some(AccumulatorState {
             value: value.value(row),
             mean: mean.value(row),
