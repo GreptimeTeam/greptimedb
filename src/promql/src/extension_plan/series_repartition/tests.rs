@@ -327,23 +327,56 @@ fn unordered(
     sorted
 }
 
-/// Asserts that every chain `chunks` hands over is whole.
+/// Asserts that every chain `chunks` hands over is whole, in the terms the frame validator reads a
+/// chain in.
 ///
-/// A chunk that leaves a series open must be followed by the same series' next chunk: another
-/// series' chunk in between is what a merge downstream cannot repair, since it would have to hold
-/// two open series to read either. Ending with a chain open fails too, because that means the
-/// finality of a chunk was lost on the way.
+/// A chunk that leaves a series open must be followed by the same series' next chunk, at a position
+/// after the last one that chain carried. Another series' chunk in between is what a merge downstream
+/// cannot repair, since it would have to hold two open series to read either; a position that does not
+/// advance is a chunk the merge would have to reorder to read. Ending with a chain open fails too,
+/// because that means the finality of a chunk was lost on the way, and a chunk of no rows fails unless
+/// it is the closing chunk of the chain it belongs to - that being the shape a series ends in when
+/// nothing of it is left.
+///
+/// Identity here is the label set the frame carries and not its rendering: two label sets that print
+/// the same are still two series to a merge - an empty label value is not printed - so comparing the
+/// displayed labels would accept a stream that changed identity mid-chain.
 fn assert_chains_are_whole(chunks: &[(Series, bool)]) {
-    let mut open: Option<String> = None;
+    // What the validator keeps of a chain it has not seen close: the identity it opened with, and the
+    // last position it carried.
+    let mut open: Option<(SeriesLabels, usize)> = None;
     for (series, is_last) in chunks {
-        if let Some(open) = &open {
+        let (Some(first), Some(last)) = (series.time.first_position(), series.time.last_position())
+        else {
+            // No position, so the chunk carries no rows: only a closing chunk is shaped that way, and
+            // it closes the chain it belongs to without advancing it.
+            assert!(
+                *is_last,
+                "{} carries no positions and does not close its series",
+                named(&series.metric)
+            );
+            if let Some((open_labels, _)) = &open {
+                assert_eq!(
+                    open_labels, &series.metric,
+                    "another series' chunk interrupted an open chain"
+                );
+            }
+            open = None;
+            continue;
+        };
+        if let Some((open_labels, previous)) = &open {
             assert_eq!(
-                open,
-                &named(&series.metric),
+                open_labels, &series.metric,
                 "another series' chunk interrupted an open chain"
             );
+            assert!(
+                first > *previous,
+                "the positions of one chain did not advance across its chunks: {} starts at {first} \
+                 after the chain's previous chunk ended at {previous}",
+                named(&series.metric),
+            );
         }
-        open = (!is_last).then(|| named(&series.metric));
+        open = (!*is_last).then(|| (series.metric.clone(), last));
     }
     assert!(open.is_none(), "the output ended with a chain open");
 }

@@ -73,39 +73,60 @@
 //! That is not an optimisation of the routing: an evaluated partition is one stream whose computation
 //! happens inside its `poll_next`, so a task polling every partition in turn runs the child's native
 //! kernels for all of them itself, one chunk at a time, and the partition count the child declared
-//! buys no parallelism at all. It is also what makes progress local, which is what this node needs
+//! buys no parallelism at all. It is also what keeps routing local, which is what this node needs
 //! when two of them are composed:
 //!
 //! - A partial chain never occupies a shared output queue, so no output waits for a continuation: a
 //!   chain is either fully assembled in the input task that read it, or not sent at all.
-//! - An input task can only be parked on (a) its own child, or (b) a full output queue. (b) is
-//!   relieved by the DataFusion contract that every output partition is polled - see the caller
-//!   requirements below - and (a) depends on that input's own upstream progress and nothing else.
-//! - The tasks share no lock while routing and never wait on each other, so no task's progress is a
-//!   precondition of another's.
+//! - A task never waits for another task's routing decision, and the tasks share no lock while
+//!   routing, so where one input's chain goes is not something another input learns or needs.
 //!
-//! A single task routing every input broke all three: it parked on the queue of one output while
-//! holding the reads of every input, so an input that could have answered was not read until that
-//! queue moved, and a composed node whose first input's stream only closes when the reader finishes
-//! stalled outright.
+//! Local routing is not independence, and the difference is what the rest of this section states. The
+//! one sender set is cloned per task in `start`, so every input task holds a sender to **every**
+//! output, and an input parked on a full queue is parked on a queue its siblings route into:
+//!
+//! - **An empty output closes late.** A queue closes when the last of its senders is dropped, and each
+//!   task drops its copy only by returning - so an output that no chain ever reached still ends when
+//!   the last input finished, not when the routing is known to have skipped it. A child that is itself
+//!   a repartition therefore depends on sibling progress for its EOF, and every output above it
+//!   inherits that.
+//! - **A starved output stalls the others.** An input task with a chain for a full queue is parked
+//!   there, so what that input owed the other outputs waits behind it. Sustained starvation of one
+//!   output delays chains destined for the rest: it is not only the starved output that a consumer
+//!   loses. See the caller requirements below - they ask for steady drainage of every output, not one
+//!   poll of each.
+//!
+//! A single task routing every input was worse in both of those directions: it parked on the queue of
+//! one output while holding the reads of every input, so an input that could have answered was not
+//! read until that queue moved, and a composed node whose first input's stream only closes when the
+//! reader finishes stalled outright.
 //!
 //! # Caller requirements
 //!
-//! **Every output partition MUST be polled.**
+//! **Every output partition MUST be polled, and must keep being polled until it ends.**
 //!
 //! Each input task suspends on a full output queue rather than dropping what belongs there, so an
 //! output nobody polls keeps the input tasks whose chains hash to it parked. Concretely:
 //!
-//! - **Poll every partition.** Once an unread output's queue fills, every input task with a chain for
-//!   it stops there, and what those inputs owe the other outputs stops with them. This node does not
-//!   spill and does not drop to make progress.
+//! - **Poll every partition, and keep polling it.** Once an unread output's queue fills, every input
+//!   task with a chain for it stops there, and what those inputs owe the other outputs stops with
+//!   them: this node does not spill and does not drop to make progress. What relieves a full queue is
+//!   a consumer that comes back to it, so one poll of each output is not the contract - an output has
+//!   to keep being read until it ends, all of them at once rather than one to completion. Polling the
+//!   partitions in turn, which is what a DataFusion executor does, is the shape that does this
+//!   because it returns to all of them; they need not be on separate tasks. Starvation of one output
+//!   is therefore not confined to it: the inputs parked on it never return, so the chains they would
+//!   have routed elsewhere stop arriving however steadily those other outputs are read.
 //! - **Do not drain one partition to its end before polling the rest, unless what is routed to the
 //!   others fits their queues.** A consumer that finishes partition 0 before it looks at partition 1
 //!   stalls as soon as partition 1's queue fills: the input tasks holding chains for partition 1 are
 //!   parked on it, and partition 0's remaining chunks are behind them. What an output ends with
 //!   before that point ends nothing else - an output nobody has claimed yet stays claimable and the
-//!   read keeps running for it, since it has not been handed out yet. Polling the partitions in turn
-//!   - which is what a DataFusion executor does - is enough; they need not be on separate tasks.
+//!   read keeps running for it, since it has not been handed out yet.
+//! - **An unread output also holds the other outputs' end.** Every input task holds a sender to every
+//!   output, so an output's queue closes only once the last input task returned; an input parked on
+//!   an output nobody reads never returns. A consumer waiting for one output to end while neglecting
+//!   another is waiting on progress that only its own drainage of the neglected one can release.
 //! - **Dropping an output is not the same as leaving it unread.** An input task stops routing to a
 //!   dropped output instead of suspending on it, because a queue nobody will drain is not worth
 //!   waiting for, and a plan that dropped one of its own outputs is being torn down. If chains read
@@ -885,7 +906,9 @@ impl Inputs {
 ///
 /// This is the whole of that input's routing. Nothing here reads another partition, waits for another
 /// task's decision, or holds a lock another task takes, so the two things it can be parked on are its
-/// own child and a full output queue - and neither can be waiting on another input's progress.
+/// own child and a full output queue. Neither is another task's routing decision - but a queue is
+/// shared with the siblings that route into it, so what they filled it with can delay a chain of this
+/// input, and this task's return is one of the senders every output's close waits for.
 ///
 /// What it saw is recorded before it returns, and returning is what drops its senders: the queues
 /// close only once every task has done that, so the outcome is in place before anything can be woken
@@ -925,8 +948,10 @@ enum Stop {
 /// held for as long as it is being read - and it is charged to the pool as it grows.
 ///
 /// What this function can be parked on is its own child or a full output queue. The queue is drained
-/// by whoever polls that output, which is the DataFusion contract the module documents; the child is
-/// driven by nothing but this task. It never waits on another input's task.
+/// by whoever polls that output, which is the module's caller contract, and it is shared with the
+/// sibling tasks routing into it: what they queued there can stop this task, and what this task queued
+/// there can stop them. The child is driven by nothing but this task, and nothing here waits on
+/// another task's routing decision.
 async fn read_chains(
     stream: &mut SendableEvaluatedSeriesStream,
     routing: &Routing,
