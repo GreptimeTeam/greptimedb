@@ -28,6 +28,11 @@
 //! every series weighing the same -- falls back to the count split, which is exactly what it got
 //! before any weight existed.
 //!
+//! The whole split is computed once, as [`partition_boundaries`], and every partition then reads its
+//! own range out of it in constant time. Deciding the split costs one pass over the weights and the
+//! number of partitions, and no partition repeats it: P partitions would otherwise scan the source's
+//! weights P times just to learn which slice is theirs.
+//!
 //! A series is never split across partitions: each partition reads a contiguous ordinal range, which
 //! is what `read_series` takes, and one series' chunks therefore stay in one partition, as the series
 //! continuity and closing-chunk contracts require. A partition can consequently end up with no
@@ -36,15 +41,18 @@
 
 use std::ops::Range;
 
-/// Returns the range of `costs` the partition `partition` of `partitions` owns.
+/// Returns the boundary of every partition, in ordinal order, ending at the series count.
 ///
-/// `costs` holds one weight per ordinal, in ordinal order, as the source reports them. A caller
-/// obtains them once per source instead of once per partition: the partitions of one scan all divide
-/// the same costs, so a call here would pay for the whole source one time per partition.
+/// `costs` holds one weight per ordinal, in ordinal order, as the source reports them, and the
+/// result holds `partitions + 1` increasing indices: partition `p` owns
+/// `boundaries[p]..boundaries[p+1]`. A caller builds this once per source and every partition reads
+/// its range out of the shared result with [`partition_range`], so a scan pays for the split one time
+/// rather than once per partition.
 ///
-/// A source with no series, or a partition index past the end, reads an empty range. When every
-/// series weighs the same, nothing but the count distinguishes one series from another, so the count
-/// split decides and the assignment is bit for bit what it was before any weight existed.
+/// A source with no series gets all boundaries at zero, and a partition count of zero gets no
+/// boundary at all: nothing to divide and nothing to give out. When every series weighs the same,
+/// nothing but the count distinguishes one series from another, so the count split decides and the
+/// assignment is bit for bit what it was before any weight existed.
 ///
 /// Only a source that reports differing weights takes the split below, where partitions are filled
 /// in ordinal order, each taking the run of series whose total cost is nearest to its share of what
@@ -55,31 +63,44 @@ use std::ops::Range;
 /// Every ordinal belongs to exactly one range and the ranges are contiguous, so no series is cut and
 /// none is read twice. With fewer series than partitions some partitions read nothing: a series
 /// cannot be divided, so the alternative would be reading one twice.
-pub(crate) fn partition_range(
-    costs: &[usize],
-    partition: usize,
-    partitions: usize,
-) -> Range<usize> {
-    let series = costs.len();
-    if partitions == 0 || partition >= partitions || series == 0 {
-        return 0..0;
+pub(crate) fn partition_boundaries(costs: &[usize], partitions: usize) -> Vec<usize> {
+    if partitions == 0 {
+        return Vec::new();
     }
-    if costs.iter().all(|cost| *cost == costs[0]) {
+    let series = costs.len();
+    let uniform = costs
+        .first()
+        .is_none_or(|first| costs.iter().all(|cost| cost == first));
+    if uniform {
         // Uniform weight: the count is the whole of what is known, so keep the count split.
-        return count_range(series, partition, partitions);
+        return (0..=partitions)
+            .map(|partition| count_range(series, partition, partitions).start)
+            .collect();
     }
     if series < partitions {
         // Fewer series than partitions: one series each, in order, and the rest read nothing.
-        let start = partition.min(series);
-        let end = (partition + 1).min(series);
-        return start..end;
+        return (0..=partitions)
+            .map(|partition| partition.min(series))
+            .collect();
     }
-    let bounds = boundaries(costs, partitions);
-    bounds[partition]..bounds[partition + 1]
+    weighted_boundaries(costs, partitions)
 }
 
-/// Returns the boundary of every partition, in ordinal order, ending at the series count.
-fn boundaries(costs: &[usize], partitions: usize) -> Vec<usize> {
+/// Returns the ordinal range the partition `partition` owns, in constant time.
+///
+/// `boundaries` is the result of [`partition_boundaries`] for the source being read, built once and
+/// shared by every partition of the scan. A partition past the end of the split, or a split that
+/// covers no ordinal at all, reads an empty range.
+pub(crate) fn partition_range(boundaries: &[usize], partition: usize) -> Range<usize> {
+    match (boundaries.get(partition), boundaries.get(partition + 1)) {
+        (Some(start), Some(end)) => *start..*end,
+        // No such partition, or the last one: nothing is assigned to it.
+        _ => 0..0,
+    }
+}
+
+/// Returns the boundaries of a weighted split, where partitions take the series nearest their share.
+fn weighted_boundaries(costs: &[usize], partitions: usize) -> Vec<usize> {
     let series = costs.len();
     let mut bounds = Vec::with_capacity(partitions + 1);
     bounds.push(0);
@@ -124,11 +145,19 @@ fn count_range(series: usize, partition: usize, partitions: usize) -> Range<usiz
 mod tests {
     use super::*;
 
+    /// Returns every partition's range, as the scan reads them out of one shared split.
+    fn ranges(costs: &[usize], partitions: usize) -> Vec<Range<usize>> {
+        let boundaries = partition_boundaries(costs, partitions);
+        (0..partitions)
+            .map(|partition| partition_range(&boundaries, partition))
+            .collect()
+    }
+
     /// Returns each partition's range and the cost it carries.
     fn split(costs: &[usize], partitions: usize) -> Vec<(Range<usize>, usize)> {
-        (0..partitions)
-            .map(|partition| {
-                let range = partition_range(costs, partition, partitions);
+        ranges(costs, partitions)
+            .into_iter()
+            .map(|range| {
                 let cost = costs[range.clone()].iter().sum();
                 (range, cost)
             })
@@ -268,8 +297,7 @@ mod tests {
         ] {
             for partitions in 1..=7 {
                 let mut next = 0;
-                for partition in 0..partitions {
-                    let range = partition_range(&costs, partition, partitions);
+                for range in ranges(&costs, partitions) {
                     assert_eq!(
                         range.start, next,
                         "gap or overlap in {costs:?}/{partitions}"
@@ -289,21 +317,26 @@ mod tests {
     #[test]
     fn extra_partitions_read_nothing() {
         let costs = vec![7, 8];
-        assert_eq!(partition_range(&costs, 0, 4), 0..1);
-        assert_eq!(partition_range(&costs, 1, 4), 1..2);
-        assert_eq!(partition_range(&costs, 2, 4), 2..2);
-        assert_eq!(partition_range(&costs, 3, 4), 2..2);
-        assert_eq!(partition_range(&[], 0, 4), 0..0);
-        assert_eq!(partition_range(&costs, 2, 2), 0..0);
-        assert_eq!(partition_range(&costs, 0, 0), 0..0);
+        assert_eq!(ranges(&costs, 4), vec![0..1, 1..2, 2..2, 2..2]);
+        assert_eq!(ranges(&[], 4), vec![0..0, 0..0, 0..0, 0..0]);
+        assert_eq!(ranges(&costs, 2), vec![0..1, 1..2]);
+        assert_eq!(ranges(&costs, 0), Vec::<Range<usize>>::new());
+        // A partition past the end of the split, or a split with no partition, reads nothing.
+        let boundaries = partition_boundaries(&costs, 2);
+        assert_eq!(partition_range(&boundaries, 2), 0..0);
+        assert_eq!(partition_range(&boundaries, 7), 0..0);
+        assert_eq!(partition_range(&[], 0), 0..0);
     }
 
     /// A source with no cost information is split by count, exactly as before.
     #[test]
     fn unknown_costs_fall_back_to_the_count_split() {
         let costs = vec![0; 9];
-        let ranges: Vec<_> = (0..3).map(|p| partition_range(&costs, p, 3)).collect();
-        assert_eq!(ranges, vec![0..3, 3..6, 6..9]);
+        assert_eq!(
+            ranges(&costs, 3),
+            vec![0..3, 3..6, 6..9],
+            "a source without cost information must keep the count split"
+        );
     }
 
     /// A uniformly weighted source keeps exactly the assignment the count split gave it.
@@ -317,14 +350,38 @@ mod tests {
         for series in 0..12 {
             for partitions in 1..=6 {
                 let costs = vec![1; series];
-                for partition in 0..partitions {
+                for (partition, range) in ranges(&costs, partitions).into_iter().enumerate() {
                     assert_eq!(
                         count_range(series, partition, partitions),
-                        partition_range(&costs, partition, partitions),
+                        range,
                         "uniform weight of {series} series over {partitions} partitions moved series"
                     );
                 }
             }
+        }
+    }
+
+    /// The split is decided once, and reading a partition out of it is constant time.
+    ///
+    /// This is what keeps a scan's split cost independent of its partition count: the boundaries are
+    /// built in one pass over the weights, and no partition scans the source's costs again.
+    #[test]
+    fn every_partition_reads_its_range_out_of_the_shared_boundaries() {
+        let costs = [1000, 1, 1, 1, 1, 1, 1, 1];
+        let boundaries = partition_boundaries(&costs, 4);
+        assert_eq!(
+            5,
+            boundaries.len(),
+            "one boundary per partition, plus the end"
+        );
+        assert_eq!(0, boundaries[0]);
+        assert_eq!(costs.len(), *boundaries.last().unwrap());
+        assert!(
+            boundaries.windows(2).all(|pair| pair[0] <= pair[1]),
+            "the boundaries are not increasing: {boundaries:?}"
+        );
+        for (partition, expected) in split(&costs, 4).into_iter().enumerate() {
+            assert_eq!(expected.0, partition_range(&boundaries, partition));
         }
     }
 }

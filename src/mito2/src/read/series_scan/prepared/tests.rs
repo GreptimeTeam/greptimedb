@@ -943,6 +943,7 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         raw: source.raw.clone(),
         candidates: source.candidates.clone(),
         costs: source.costs.clone(),
+        boundaries: source.boundaries.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
         samples: Arc::new(
@@ -1522,13 +1523,11 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
     let binding = labels(scan.metadata());
     // The columnar source, not the ordinary scan, must serve this read: the split below is the
     // prepared path's, and a fallback would silently compare the legacy path with itself.
-    assert!(
-        scan.prepare_series(&ctx, &metrics, &binding)
-            .await
-            .unwrap()
-            .is_some(),
-        "the columnar prepared source must serve the weighted split"
-    );
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the columnar prepared source must serve the weighted split");
     let mut prepared_rows = Vec::new();
     for partition in 0..SKEW_PARTITIONS {
         let stream = scan
@@ -1547,11 +1546,9 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
     assert_eq!(expected, actual);
 
     // (b) The costs the split divides are the rows the index recorded for the written series.
-    let costs = scan
-        .prepared
-        .costs()
-        .expect("the prepared source publishes its costs")
-        .to_vec();
+    let costs = (0..source.num_series())
+        .map(|ordinal| source.series_cost(ordinal))
+        .collect::<Vec<_>>();
     assert_eq!(SKEW_LONG_SERIES + SKEW_SHORT_SERIES, costs.len());
     let mut written = actual.values().map(Vec::len).collect::<Vec<_>>();
     written.sort_unstable();
@@ -1568,10 +1565,22 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
         "the long series are the first ordinals: {costs:?}"
     );
     // Every partition reports the ordinals of the range the split gives it, and every series is
-    // assigned to exactly one partition.
+    // assigned to exactly one partition. The split itself is prepared once with the source, so the
+    // partitions share it instead of dividing the whole source each.
+    let boundaries = scan
+        .prepared
+        .boundaries()
+        .expect("the prepared source publishes its split");
+    assert_eq!(
+        SKEW_PARTITIONS + 1,
+        boundaries.len(),
+        "one boundary per partition, plus the end: {boundaries:?}"
+    );
+    let ranges = (0..SKEW_PARTITIONS)
+        .map(|partition| partition_balance::partition_range(&boundaries, partition))
+        .collect::<Vec<_>>();
     let mut assigned = Vec::with_capacity(SKEW_PARTITIONS);
-    for partition in 0..SKEW_PARTITIONS {
-        let range = partition_balance::partition_range(&costs, partition, SKEW_PARTITIONS);
+    for (partition, range) in ranges.iter().enumerate() {
         let reported = assigned_series(
             &scan
                 .metrics_list
@@ -1591,16 +1600,15 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
     // equal-count split, which is exactly what an unweighted split assigns.
     let total_cost = costs.iter().sum::<usize>();
     let average = total_cost as f64 / SKEW_PARTITIONS as f64;
-    let weighted = (0..SKEW_PARTITIONS)
-        .map(|partition| {
-            let range = partition_balance::partition_range(&costs, partition, SKEW_PARTITIONS);
-            costs[range].iter().sum::<usize>()
-        })
+    let weighted = ranges
+        .iter()
+        .map(|range| costs[range.clone()].iter().sum::<usize>())
         .collect::<Vec<_>>();
     let uniform = vec![1usize; costs.len()];
+    let count_boundaries = partition_balance::partition_boundaries(&uniform, SKEW_PARTITIONS);
     let by_count = (0..SKEW_PARTITIONS)
         .map(|partition| {
-            let range = partition_balance::partition_range(&uniform, partition, SKEW_PARTITIONS);
+            let range = partition_balance::partition_range(&count_boundaries, partition);
             costs[range].iter().sum::<usize>()
         })
         .collect::<Vec<_>>();
@@ -1626,4 +1634,370 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
         worst(&by_count)
     );
     engine.stop().await.unwrap();
+}
+
+/// Partitions the cross-bucket split test divides its series over.
+const CROSS_BUCKET_PARTITIONS: usize = 2;
+/// Series whose rows all fall in the first bucket.
+const CROSS_BUCKET_LONG_SERIES: usize = 1;
+/// Series that carry rows in both buckets.
+const CROSS_BUCKET_SHARED_SERIES: usize = 7;
+/// Rows the series of each kind have in total, spread differently over the two buckets.
+const CROSS_BUCKET_ROWS: usize = 1000;
+/// Rows in the first bucket for every series that also has rows in the second bucket.
+const CROSS_BUCKET_FIRST_ROWS: usize = 1;
+
+/// Event time of the first bucket, and of the second one [`CROSS_BUCKET_BUCKET_WIDTH_SECS`] later.
+const CROSS_BUCKET_FIRST_TS: i64 = 1000;
+const CROSS_BUCKET_SECOND_TS: i64 = 200_000;
+/// The bucket width of [`cross_bucket_fixture`], which separates the two writes.
+const CROSS_BUCKET_BUCKET_WIDTH_SECS: u64 = 100;
+
+/// Creates an empty region whose series indexes are built one per 100 second bucket.
+///
+/// The width is what makes one flush per bucket produce one index artifact per bucket, so a series
+/// written to both of them is discovered once per artifact, each reporting only its own rows.
+async fn cross_bucket_fixture() -> (TestEnv, MitoEngine, MitoRegionRef) {
+    let mut env = TestEnv::with_prefix("prepared-cross-bucket").await;
+    let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    metadata
+        .column_metadatas
+        .iter_mut()
+        .find(|c| c.column_id == 2)
+        .unwrap()
+        .column_schema
+        .data_type = ConcreteDataType::float64_datatype();
+    let (engine, region) = crate::series_index::prepare_region_with_metadata(
+        &mut env,
+        &[],
+        MitoConfig {
+            experimental_enable_series_index: true,
+            experimental_series_index_format: SelectedFormat::Columnar,
+            experimental_series_index_bucket_width: Duration::from_secs(
+                CROSS_BUCKET_BUCKET_WIDTH_SECS,
+            ),
+            experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+        Arc::new(metadata),
+    )
+    .await;
+    (env, engine, region)
+}
+
+/// The costs of a prepared source must add up the buckets a series appears in.
+///
+/// `__series_row_count` is the row count of *one* index artifact, and an artifact covers one time
+/// bucket. A query that spans buckets reads the samples of all of them, so the work of a series is
+/// the sum of the counts its artifacts report, not the first one discovered: keeping only the first
+/// would weigh a series by wherever its rows happen to fall in the bucket order, and the split would
+/// then move series between partitions depending on which artifact was read first.
+///
+/// The source here is the reviewer's counterexample: one series with all of its rows in the first
+/// bucket, and seven series with one row in the first bucket and the rest in the second, so every
+/// series costs the same 1000 rows in total while their per-bucket counts differ wildly.
+#[tokio::test]
+async fn series_cost_adds_every_bucket_the_series_appears_in() {
+    let (_env, engine, region) = cross_bucket_fixture().await;
+    // The fixture predicate keeps only `field_0 > 0`, and every value is a distinct exact binary
+    // fraction, so a mismatch can only come from the wrong series or row. The rows of the bucket a
+    // series does not appear in are simply not written.
+    let value = |series: usize, row: usize| (series * CROSS_BUCKET_ROWS + row + 1) as f64 / 8.0;
+    // Bucket one: the single long series with everything, the shared ones with a single row.
+    for series in 0..CROSS_BUCKET_LONG_SERIES {
+        let points = (0..CROSS_BUCKET_ROWS)
+            .map(|row| (CROSS_BUCKET_FIRST_TS + row as i64, value(series, row)))
+            .collect::<Vec<_>>();
+        write_series(
+            &engine,
+            &region,
+            &format!("series-{series:03}"),
+            series as u64,
+            &points,
+        )
+        .await;
+    }
+    for series in 0..CROSS_BUCKET_SHARED_SERIES {
+        let ordinal = CROSS_BUCKET_LONG_SERIES + series;
+        // The same labels in both buckets: one series, not two, whatever bucket it is written to.
+        write_series(
+            &engine,
+            &region,
+            &format!("series-{ordinal:03}"),
+            ordinal as u64,
+            &[(
+                CROSS_BUCKET_FIRST_TS,
+                value(ordinal, CROSS_BUCKET_FIRST_ROWS - 1),
+            )],
+        )
+        .await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+    // Bucket two: only the shared series, each with the rest of its rows.
+    for series in 0..CROSS_BUCKET_SHARED_SERIES {
+        let ordinal = CROSS_BUCKET_LONG_SERIES + series;
+        let points = (CROSS_BUCKET_FIRST_ROWS..CROSS_BUCKET_ROWS)
+            .map(|row| (CROSS_BUCKET_SECOND_TS + row as i64, value(ordinal, row)))
+            .collect::<Vec<_>>();
+        write_series(
+            &engine,
+            &region,
+            &format!("series-{ordinal:03}"),
+            ordinal as u64,
+            &points,
+        )
+        .await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+    // One build over both flushes: each bucket of the two SSTs becomes its own artifact.
+    build(&engine, &region).await;
+    assert_eq!(
+        2,
+        region.series_index_version().series_indexes.len(),
+        "the two buckets must build two index artifacts"
+    );
+
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    let store = region.series_index_store.clone().unwrap();
+    let projection = (0..region.version().metadata.column_metadatas.len()).collect::<Vec<_>>();
+
+    // The oracle reads the same SSTs through the legacy series-index path in a single partition.
+    let legacy = scanner_with_projection(
+        &region,
+        store.clone(),
+        SelectedFormat::Legacy,
+        projection.clone(),
+    );
+    let legacy_binding = labels(legacy.metadata());
+    let legacy_rows = legacy
+        .scan_series_partition(&ctx, &metrics, 0, &legacy_binding)
+        .unwrap()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+
+    // The prepared path reads the same ranges, spread over the partitions DataFusion would run.
+    let mut scan = scanner_with_projection(&region, store, SelectedFormat::Columnar, projection);
+    let mut ranges = vec![Vec::new(); CROSS_BUCKET_PARTITIONS];
+    for (index, range) in scan.properties().partitions[0].iter().enumerate() {
+        ranges[index % CROSS_BUCKET_PARTITIONS].push(*range);
+    }
+    scan.prepare(PrepareRequest::default().with_ranges(ranges))
+        .unwrap();
+    assert_eq!(CROSS_BUCKET_PARTITIONS, scan.properties().num_partitions());
+    let binding = labels(scan.metadata());
+    let source = scan
+        .prepare_series(&ctx, &metrics, &binding)
+        .await
+        .unwrap()
+        .expect("the columnar prepared source must serve the cross-bucket split");
+
+    // (a) Every series costs the rows of both its buckets, not the rows of the first one found.
+    let series = CROSS_BUCKET_LONG_SERIES + CROSS_BUCKET_SHARED_SERIES;
+    assert_eq!(series, source.num_series());
+    let costs = (0..source.num_series())
+        .map(|ordinal| source.series_cost(ordinal))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![CROSS_BUCKET_ROWS; series],
+        costs,
+        "each series costs the rows of every bucket it appears in"
+    );
+    // The split of eight equal weights over two partitions is four series each, i.e. 4000 rows each.
+    // The first-artifact-only cost would be [1000, 1, 1, 1, 1, 1, 1, 1] or [1000, 999, ...] depending
+    // on which artifact was read first, and the former splits into 1000 rows against 7000.
+    let boundaries = scan
+        .prepared
+        .boundaries()
+        .expect("the prepared source publishes its split");
+    assert_eq!(
+        vec![0, series / 2, series],
+        boundaries.as_ref(),
+        "the split must divide the total cost, not one bucket's"
+    );
+    let ranges = (0..CROSS_BUCKET_PARTITIONS)
+        .map(|partition| partition_balance::partition_range(&boundaries, partition))
+        .collect::<Vec<_>>();
+    let loads = ranges
+        .iter()
+        .map(|range| costs[range.clone()].iter().sum::<usize>())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![CROSS_BUCKET_ROWS * series / CROSS_BUCKET_PARTITIONS; CROSS_BUCKET_PARTITIONS],
+        loads,
+        "both partitions must carry half of the samples: {ranges:?}"
+    );
+
+    // (b) The partitions read the rows of the range the split gives them, and together they read
+    // exactly what the legacy path reads.
+    let mut prepared_rows = Vec::new();
+    for partition in 0..CROSS_BUCKET_PARTITIONS {
+        let stream = scan
+            .scan_series_partition(&ctx, &metrics, partition, &binding)
+            .unwrap()
+            .unwrap();
+        prepared_rows.extend(rows(&stream.try_collect::<Vec<_>>().await.unwrap()));
+    }
+    for (partition, range) in ranges.iter().enumerate() {
+        let reported = assigned_series(
+            &scan
+                .metrics_list
+                .get(partition)
+                .expect("every scanned partition reports metrics"),
+        );
+        assert_eq!(
+            range.len(),
+            reported,
+            "partition {partition} reports the ordinals of {range:?}"
+        );
+    }
+    let expected = by_series(rows(&legacy_rows));
+    assert_eq!(
+        CROSS_BUCKET_ROWS * series,
+        expected.values().map(Vec::len).sum::<usize>()
+    );
+    assert_eq!(series, expected.len());
+    assert_eq!(expected, by_series(prepared_rows));
+
+    engine.stop().await.unwrap();
+}
+
+/// The cost of a series does not depend on the order its index artifacts are read in.
+///
+/// Artifacts come from a hash set, so their order is not stable, and a series may be reported by any
+/// of them first. Accumulating the counts makes the total the same either way, which is what lets
+/// the split be a property of the source rather than of an iteration order.
+#[test]
+fn series_cost_is_independent_of_the_artifact_order() {
+    // The reviewer's counterexample as artifact rows: (table_id, tsid, rows in this artifact).
+    let first = [
+        (1, 0u64, CROSS_BUCKET_ROWS),
+        (1, 1, CROSS_BUCKET_FIRST_ROWS),
+        (1, 2, CROSS_BUCKET_FIRST_ROWS),
+        (1, 3, CROSS_BUCKET_FIRST_ROWS),
+        (1, 4, CROSS_BUCKET_FIRST_ROWS),
+        (1, 5, CROSS_BUCKET_FIRST_ROWS),
+        (1, 6, CROSS_BUCKET_FIRST_ROWS),
+        (1, 7, CROSS_BUCKET_FIRST_ROWS),
+    ];
+    let second = (1..8)
+        .map(|tsid| (1, tsid, CROSS_BUCKET_ROWS - CROSS_BUCKET_FIRST_ROWS))
+        .collect::<Vec<_>>();
+
+    // Costs of the source when the artifacts are read in the order given.
+    let costs = |order: [&[(u32, u64, usize)]; 2]| {
+        let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
+        for (artifact, rows) in order.into_iter().enumerate() {
+            for &(table_id, tsid, cost) in rows {
+                merge_candidate(
+                    &mut candidates,
+                    artifact,
+                    MetricSeriesId { table_id, tsid },
+                    vec![tsid as u8],
+                    HashMap::new(),
+                    cost,
+                )
+                .unwrap();
+            }
+        }
+        let mut costs = candidates
+            .into_values()
+            .map(|candidate| candidate.cost)
+            .collect::<Vec<_>>();
+        costs.sort_unstable();
+        costs
+    };
+
+    // Both orders describe the same source, so they must produce the same weights and the same
+    // assignment.
+    let first_then_second = costs([&first, &second]);
+    let second_then_first = costs([&second, &first]);
+    assert_eq!(
+        vec![CROSS_BUCKET_ROWS; CROSS_BUCKET_LONG_SERIES + CROSS_BUCKET_SHARED_SERIES],
+        first_then_second
+    );
+    assert_eq!(first_then_second, second_then_first);
+    let boundaries =
+        partition_balance::partition_boundaries(&first_then_second, CROSS_BUCKET_PARTITIONS);
+    assert_eq!(vec![0, 4, 8], boundaries);
+    assert_eq!(
+        boundaries,
+        partition_balance::partition_boundaries(&second_then_first, CROSS_BUCKET_PARTITIONS),
+    );
+
+    // Keeping only the artifact that happened to be read first is what the accumulation fixes, and
+    // its assignment depends on that order: the first bucket first weighs the seven short series at
+    // one row each and loads one partition with all 1000 rows while the other reads the rest.
+    let loads = |costs: &[usize]| {
+        let boundaries = partition_balance::partition_boundaries(costs, CROSS_BUCKET_PARTITIONS);
+        (0..CROSS_BUCKET_PARTITIONS)
+            .map(|partition| {
+                let range = partition_balance::partition_range(&boundaries, partition);
+                costs[range].iter().sum::<usize>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        vec![4000, 4000],
+        loads(&first_then_second),
+        "the accumulated cost splits evenly"
+    );
+    assert_eq!(
+        vec![4000, 4000],
+        loads(&second_then_first),
+        "and the same way in either order"
+    );
+    let mut first_only = vec![CROSS_BUCKET_ROWS];
+    first_only.extend(std::iter::repeat_n(
+        CROSS_BUCKET_FIRST_ROWS,
+        CROSS_BUCKET_SHARED_SERIES,
+    ));
+    let mut second_only = vec![CROSS_BUCKET_ROWS];
+    second_only.extend(std::iter::repeat_n(
+        CROSS_BUCKET_ROWS - CROSS_BUCKET_FIRST_ROWS,
+        CROSS_BUCKET_SHARED_SERIES,
+    ));
+    assert_eq!(
+        vec![1000, 7],
+        loads(&first_only),
+        "weighing each series by the first bucket alone loads one partition with all 1000 rows"
+    );
+    assert_eq!(
+        vec![3997, 3996],
+        loads(&second_only),
+        "weighing each series by the second bucket alone happens to be even here"
+    );
+}
+
+/// A row repeated for a series the same artifact already reported is not counted twice.
+///
+/// One artifact reports a series once, but a repeated row would otherwise double its cost and move
+/// it to a partition of its own, so the accumulation is keyed by the artifact it came from.
+#[test]
+fn a_repeated_row_of_one_artifact_adds_nothing() {
+    let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
+    let id = MetricSeriesId {
+        table_id: 1,
+        tsid: 7,
+    };
+    assert!(merge_candidate(&mut candidates, 0, id, vec![7], HashMap::new(), 100).unwrap());
+    assert!(
+        !merge_candidate(&mut candidates, 0, id, vec![7], HashMap::new(), 100).unwrap(),
+        "a repeated row of the same artifact is not a new series"
+    );
+    assert_eq!(100, candidates[&id].cost);
+    // Another artifact reports the rows of its own bucket, so its count is added.
+    assert!(!merge_candidate(&mut candidates, 1, id, vec![7], HashMap::new(), 10).unwrap());
+    assert_eq!(110, candidates[&id].cost);
+    // Neither does a repeat after the artifact changed: the bucket is already accounted for.
+    assert!(!merge_candidate(&mut candidates, 1, id, vec![7], HashMap::new(), 10).unwrap());
+    assert_eq!(110, candidates[&id].cost);
+    // A saturated sum stays at the maximum instead of wrapping around to a tiny cost.
+    let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
+    merge_candidate(&mut candidates, 0, id, vec![7], HashMap::new(), usize::MAX).unwrap();
+    merge_candidate(&mut candidates, 1, id, vec![7], HashMap::new(), 5).unwrap();
+    assert_eq!(usize::MAX, candidates[&id].cost);
 }

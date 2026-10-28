@@ -600,8 +600,12 @@ impl SeriesScan {
                 let series = series?;
                 metrics.scan_cost += fetch_start.elapsed();
                 // The distributor counted the series of the batch it sent, because one batch may
-                // hold several series; counting the batches received would not.
-                part_metrics.add_assigned_series(series.num_series);
+                // hold several series; counting the batches received would not. The count is zero
+                // when detailed metrics are off, and recording it is then skipped: the counter is
+                // only reported by `EXPLAIN VERBOSE`.
+                if series.num_series > 0 {
+                    part_metrics.add_assigned_series(series.num_series);
+                }
                 metrics.num_batches += series.batch.num_batches();
                 metrics.num_rows += series.batch.num_rows();
 
@@ -689,7 +693,8 @@ impl SeriesScan {
             return;
         }
 
-        let (senders, receivers) = new_legacy_channel_list(self.properties.num_partitions());
+        let (senders, receivers) =
+            new_legacy_channel_list(self.properties.num_partitions(), explain_verbose);
         let mut distributor = SeriesDistributor {
             stream_ctx: self.stream_ctx.clone(),
             range_semaphore: Some(Arc::new(Semaphore::new(self.properties.num_partitions()))),
@@ -816,14 +821,21 @@ impl SeriesScan {
     }
 }
 
-fn new_legacy_channel_list(num_partitions: usize) -> (SenderList, LegacyReceiverList) {
+/// Creates the legacy distributor's senders and the partitions' receivers.
+///
+/// `count_series` decides whether the distributor counts the series of every batch it hands over for
+/// the `assigned_series` counter, which only `EXPLAIN VERBOSE` reports.
+fn new_legacy_channel_list(
+    num_partitions: usize,
+    count_series: bool,
+) -> (SenderList, LegacyReceiverList) {
     let (senders, receivers): (Vec<_>, Vec<_>) = (0..num_partitions)
         .map(|_| {
             let (sender, receiver) = mpsc::channel(1);
             (Some(sender), Some(receiver))
         })
         .unzip();
-    (SenderList::new(senders), receivers)
+    (SenderList::new(senders, count_series), receivers)
 }
 
 fn new_candidate_channel_list(
@@ -912,8 +924,9 @@ impl RegionScanner for SeriesScan {
             let future = self.prepare_series(ctx, metrics_set, label_source);
             let schema = preparation.schema;
             let labels = label_source.clone();
-            // The costs the split divides are the same for every partition of this scan, so read the
-            // copy prepared once with the source instead of rebuilding the whole source per partition.
+            // The split of the source's ordinals over the partitions is decided once, while the
+            // source is prepared, and is the same for every partition of this scan: read that copy
+            // instead of dividing the whole source per partition.
             let state = self.prepared.clone();
             // The columnar branch returns before the partition metrics below are created, so
             // reuse (or register) the metrics for this partition to report its series split.
@@ -928,13 +941,21 @@ impl RegionScanner for SeriesScan {
             });
             let stream = async_stream::try_stream! {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
-                let costs = state.costs().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series costs missing after preparation" }.build()))?;
-                debug_assert_eq!(costs.len(), source.num_series(), "a source reports one cost per ordinal");
+                let boundaries = state.boundaries().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series split missing after preparation" }.build()))?;
+                debug_assert_eq!(boundaries.len(), partitions + 1, "the split has one boundary per partition plus the end");
+                debug_assert_eq!(boundaries.last().copied().unwrap_or(0), source.num_series(), "the split covers every ordinal");
+                // The split is built for the same partition count this scan validates, so a mismatch
+                // means the source and the scan disagree and every partition would read the wrong
+                // series. Report it rather than hand out an empty or a foreign range.
+                if boundaries.len() != partitions + 1 || boundaries.last().copied().unwrap_or(0) != source.num_series() {
+                    Err(BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series split does not match the scan's partitions" }.build()))?;
+                }
                 // Split by estimated work rather than blindly by ordinal: each series is weighed by
-                // the row count its index records, so a partition's share is a share of the samples
+                // the row count its indexes record, so a partition's share is a share of the samples
                 // rather than of the series. Every ordinal still belongs to exactly one partition,
-                // so the chunks of one series stay together.
-                let range = partition_balance::partition_range(&costs, partition, partitions);
+                // so the chunks of one series stay together. The range is a constant-time read of
+                // the split prepared with the source.
+                let range = partition_balance::partition_range(&boundaries, partition);
                 part_metrics.add_assigned_series(range.len());
                 let mut reader = source.read_series(range)?;
                 while let Some(chunk) = reader.try_next().await? { yield chunk; }
@@ -995,6 +1016,9 @@ impl RegionScanner for SeriesScan {
             .flatten()
             .copied()
             .collect();
+        // The split the source prepares is the one its partitions read, so it is decided for the
+        // same partition count `scan_series_partition` validates against.
+        let partitions = self.properties.num_partitions().max(1);
         let labels = label_source.clone();
         // Reuse the metrics already registered for partition 0 instead of replacing them, so a
         // later partition's preparation does not evict the object partition 0 reports into.
@@ -1016,7 +1040,7 @@ impl RegionScanner for SeriesScan {
                 return Ok(None);
             }
             state
-                .prepare(stream_ctx, ranges, labels, preparation, metrics)
+                .prepare(stream_ctx, ranges, partitions, labels, preparation, metrics)
                 .await
                 .map(Some)
         })
@@ -1435,8 +1459,9 @@ impl SeriesBatch {
     /// A [`FlatSeriesBatch`] may hold rows of more than one series and one series may span more than
     /// one record batch, so this counts series rather than batches. Series rows stay contiguous, so a
     /// series is a run of equal primary keys and two runs are the same series when their primary keys
-    /// are equal across a record batch boundary. The count costs one comparison of primary key bytes
-    /// per row, on the distributor, and allocates nothing.
+    /// are equal across a record batch boundary. Counting therefore costs a lookup of every row's
+    /// primary key, which is why the distributor only does it for the `assigned_series` counter that
+    /// `EXPLAIN VERBOSE` reports: a scan that does not collect detailed metrics never calls this.
     pub fn num_series(&self) -> usize {
         match self {
             SeriesBatch::Flat(flat_batch) => num_series_in(&flat_batch.batches),
@@ -1484,15 +1509,25 @@ fn primary_key_runs(batch: &RecordBatch) -> Option<(usize, &[u8], &[u8])> {
         .unwrap();
 
     // Keys are compared by their bytes, not by their dictionary indices: two indices of one array
-    // may hold the same key, and equal bytes are what make two rows the same series.
+    // may hold the same key, and equal bytes are what make two rows the same series. A repeated
+    // index, however, *is* the same entry and therefore the same key, so it needs no byte
+    // comparison at all: only a changed index compares bytes. A long series in one dictionary then
+    // costs one integer comparison per row instead of a comparison over the whole primary key,
+    // which for a sparse key of long labels is the bulk of the work.
+    let keys = pk_array.keys();
     let mut runs = 1;
-    let mut previous_key = pk_values.value(pk_array.keys().value(0) as usize);
-    for &key in pk_array.keys().values().iter().skip(1) {
-        let current_key = pk_values.value(key as usize);
+    let mut previous_index = keys.value(0);
+    let mut previous_key = pk_values.value(previous_index as usize);
+    for &index in keys.values().iter().skip(1) {
+        if index == previous_index {
+            continue;
+        }
+        let current_key = pk_values.value(index as usize);
         if current_key != previous_key {
             runs += 1;
-            previous_key = current_key;
         }
+        previous_index = index;
+        previous_key = current_key;
     }
 
     Some((
@@ -1515,13 +1550,18 @@ pub struct FlatSeriesBatch {
 /// cannot recover the number of series it was assigned by counting the batches it receives.
 struct DistributedBatch {
     batch: SeriesBatch,
-    /// Number of series in `batch`.
+    /// Number of series in `batch`, or zero when the scan does not collect the counter.
     num_series: usize,
 }
 
 impl DistributedBatch {
-    fn new(batch: SeriesBatch) -> Self {
-        let num_series = batch.num_series();
+    /// Wraps `batch`, counting its series only if `count_series` is set.
+    ///
+    /// The count feeds the `assigned_series` counter that `EXPLAIN VERBOSE` reports, and it costs a
+    /// primary key lookup per row. A scan that does not collect detailed metrics records a zero
+    /// count instead, so the ordinary path pays nothing per batch for a metric nobody reads.
+    fn new(batch: SeriesBatch, count_series: bool) -> Self {
+        let num_series = if count_series { batch.num_series() } else { 0 };
         Self { batch, num_series }
     }
 
@@ -1550,10 +1590,15 @@ struct SenderList {
     /// count to one partition. It stays accurate to within those boundary batches, which is enough
     /// for choosing a partition: every row is still sent to exactly one partition and read once.
     sent_rows: Vec<usize>,
+    /// Whether to count the series of every batch for the `assigned_series` counter.
+    ///
+    /// Only the detailed metrics of `EXPLAIN VERBOSE` report that counter, so the distributor counts
+    /// only then and leaves the ordinary path one primary key lookup per row cheaper.
+    count_series: bool,
 }
 
 impl SenderList {
-    fn new(senders: Vec<Option<Sender<Result<DistributedBatch>>>>) -> Self {
+    fn new(senders: Vec<Option<Sender<Result<DistributedBatch>>>>, count_series: bool) -> Self {
         let num_nones = senders.iter().filter(|sender| sender.is_none()).count();
         let partitions = senders.len();
         Self {
@@ -1561,6 +1606,7 @@ impl SenderList {
             num_nones,
             num_full: 0,
             sent_rows: vec![0; partitions],
+            count_series,
         }
     }
 
@@ -1610,8 +1656,9 @@ impl SenderList {
 
     /// Finds a partition and sends the batch to the partition.
     async fn send_batch(&mut self, batch: SeriesBatch) -> Result<()> {
-        // Counts the series of the batch here, once, so the partition records the count it receives.
-        let batch = DistributedBatch::new(batch);
+        // Counts the series of the batch here, once, so the partition records the count it receives,
+        // and only when the detailed metrics that report it are being collected.
+        let batch = DistributedBatch::new(batch, self.count_series);
         let rows = batch.num_rows();
         let Some(batch) = self.try_send_batch(batch)? else {
             return Ok(());
@@ -1793,8 +1840,8 @@ mod tests {
 
     use api::v1::OpType;
     use datatypes::arrow::array::{
-        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringDictionaryBuilder,
-        TimestampMillisecondArray, UInt8Array, UInt64Array,
+        ArrayRef, BinaryArray, BinaryDictionaryBuilder, DictionaryArray, Int64Array,
+        StringDictionaryBuilder, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
@@ -1849,7 +1896,7 @@ mod tests {
     #[tokio::test]
     async fn distributor_does_not_stall_on_partitions_read_one_after_another() {
         const NUM_BATCHES: usize = 2000;
-        let (mut senders, receivers) = new_legacy_channel_list(16);
+        let (mut senders, receivers) = new_legacy_channel_list(16, false);
         let producer = tokio::spawn(async move {
             for _ in 0..NUM_BATCHES {
                 senders
@@ -1916,12 +1963,12 @@ mod tests {
                 (Some(sender), receiver)
             })
             .unzip();
-        let mut senders = SenderList::new(senders);
+        let mut senders = SenderList::new(senders, false);
         for (tag, rows) in SKEWED_BATCHES.iter().enumerate() {
             let batch = tagged_flat_series_batch(rows, tag as u64);
             assert!(
                 senders
-                    .try_send_batch(DistributedBatch::new(SeriesBatch::Flat(batch)))
+                    .try_send_batch(DistributedBatch::new(SeriesBatch::Flat(batch), false))
                     .unwrap()
                     .is_none(),
                 "the distributor could not place batch {tag}"
@@ -2070,7 +2117,9 @@ mod tests {
 
         // Installing the receivers first keeps the distributor from starting: the partition reads the
         // batch sent below, which is what a distributor hands a partition.
-        let (mut senders, receivers) = new_legacy_channel_list(scan.properties.num_partitions());
+        // The counter this test pins is the one `EXPLAIN VERBOSE` reports, so count it here.
+        let (mut senders, receivers) =
+            new_legacy_channel_list(scan.properties.num_partitions(), true);
         *scan.legacy_receivers.lock().unwrap() = receivers;
         senders.send_batch(series_batch).await.unwrap();
         drop(senders);
@@ -2110,6 +2159,94 @@ mod tests {
             "3", assigned,
             "the partition must report the three series it was assigned, not the two batches: {debug}"
         );
+    }
+
+    /// A series is counted by the rows it spans, not by the dictionary entries they refer to.
+    ///
+    /// The primary key column is a dictionary, and counting runs of equal keys is what the counter
+    /// needs. A dictionary may hold the same key under two indices, so the count cannot trust the
+    /// indices alone and compares bytes when an index changes; a repeated index, however, is the same
+    /// entry and therefore the same key, so a long series refreshes its key once per distinct index
+    /// instead of comparing the whole key at every row.
+    #[test]
+    fn repeated_rows_of_one_series_are_counted_once_per_dictionary_index() {
+        // One series in three rows that share a dictionary index, then a second series.
+        let batch = new_test_record_batch(
+            &[b"series-a", b"series-a", b"series-a", b"series-b"],
+            &[1000, 2000, 3000, 4000],
+            &[1, 2, 3, 4],
+            &[OpType::Put, OpType::Put, OpType::Put, OpType::Put],
+            &[10, 20, 30, 40],
+        );
+        let mut batches = SmallVec::<[RecordBatch; 4]>::new();
+        batches.push(batch);
+        assert_eq!(
+            2,
+            num_series_in(&batches),
+            "three rows of one series and one of another are two series"
+        );
+
+        // Two indices that hold equal bytes are still one series: the bytes decide, not the index.
+        let pk_values = BinaryArray::from_iter_values([
+            b"series-a".as_slice(),
+            b"series-c".as_slice(),
+            b"series-a".as_slice(),
+        ]);
+        let keys = UInt32Array::from(vec![0u32, 2, 1]);
+        let pk_column =
+            Arc::new(DictionaryArray::<UInt32Type>::try_new(keys, Arc::new(pk_values)).unwrap());
+        let mut columns = new_test_record_batch(
+            &[b"series-a", b"series-c", b"series-a"],
+            &[1000, 2000, 3000],
+            &[1, 2, 3],
+            &[OpType::Put, OpType::Put, OpType::Put],
+            &[10, 20, 30],
+        )
+        .columns()
+        .to_vec();
+        let pk_index = primary_key_column_index(columns.len());
+        columns[pk_index] = pk_column;
+        let batch = RecordBatch::try_new(build_test_flat_schema(), columns).unwrap();
+        let mut batches = SmallVec::<[RecordBatch; 4]>::new();
+        batches.push(batch);
+        assert_eq!(
+            2,
+            num_series_in(&batches),
+            "rows one and three are the same series through different dictionary indices"
+        );
+    }
+
+    /// Counting the series of a batch is the only part of handing it over that costs per row.
+    ///
+    /// The count feeds the `assigned_series` counter of `EXPLAIN VERBOSE` and nothing else: the
+    /// distributor balances partitions by rows. So a scan that does not collect detailed metrics
+    /// leaves the count at zero and pays no primary key lookup per row at all.
+    #[tokio::test]
+    async fn a_batch_handed_over_without_detailed_metrics_is_not_counted() {
+        let rows = 1000;
+        // Detailed metrics on: the count travels with the batch and is the series, not the batches.
+        let (mut senders, receivers) = new_legacy_channel_list(1, true);
+        senders
+            .send_batch(SeriesBatch::Flat(tagged_flat_series_batch(&[600, 400], 0)))
+            .await
+            .unwrap();
+        drop(senders);
+        let mut receiver = receivers.into_iter().next().unwrap().unwrap();
+        let counted = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(1, counted.num_series, "one series in two record batches");
+        assert_eq!(rows, counted.num_rows(), "the row count is unaffected");
+
+        // Detailed metrics off: no series count is made, and the row count is all that is read.
+        let (mut senders, receivers) = new_legacy_channel_list(1, false);
+        senders
+            .send_batch(SeriesBatch::Flat(tagged_flat_series_batch(&[600, 400], 0)))
+            .await
+            .unwrap();
+        drop(senders);
+        let mut receiver = receivers.into_iter().next().unwrap().unwrap();
+        let uncounted = receiver.recv().await.unwrap().unwrap();
+        assert_eq!(0, uncounted.num_series, "no per-row work without metrics");
+        assert_eq!(rows, uncounted.num_rows());
     }
 
     /// Builds a [FlatSeriesBatch] of one series, one record batch per entry in `rows`, tagged in

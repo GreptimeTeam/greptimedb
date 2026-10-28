@@ -55,7 +55,7 @@ use crate::read::BoxedRecordBatchStream;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_scan::{RawScanPreparation, raw};
+use crate::read::series_scan::{RawScanPreparation, partition_balance, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::ColumnarSeriesFormat;
@@ -80,10 +80,12 @@ pub(crate) struct Preparation {
 }
 
 impl Preparation {
+    /// Prepares the source and, with it, the split of its ordinals over `partitions` partitions.
     pub(crate) async fn prepare(
         &self,
         context: Arc<StreamContext>,
         ranges: Vec<PartitionRange>,
+        partitions: usize,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
@@ -92,7 +94,7 @@ impl Preparation {
         let result = self
             .source
             .get_or_init(|| async {
-                ColumnarPreparedSource::prepare(context, ranges, labels, raw, metrics)
+                ColumnarPreparedSource::prepare(context, ranges, partitions, labels, raw, metrics)
                     .await
                     .map(Arc::new)
                     .map_err(Arc::new)
@@ -109,13 +111,15 @@ impl Preparation {
         Ok(source.clone())
     }
 
-    /// Returns the prepared source's per-ordinal costs, or `None` before preparation succeeds.
+    /// Returns the boundaries of the ordinal split, or `None` before preparation succeeds.
     ///
-    /// The costs are built with the source and shared by every partition, so a partition that has
-    /// already awaited [`Self::prepare`] reads them here instead of rebuilding them.
-    pub(crate) fn costs(&self) -> Option<Arc<[usize]>> {
+    /// The split is built with the source and shared by every partition, so a partition that has
+    /// already awaited [`Self::prepare`] reads its range out of it instead of dividing the whole
+    /// source again. The result holds `partitions + 1` indices; see
+    /// [`partition_balance::partition_range`].
+    pub(crate) fn boundaries(&self) -> Option<Arc<[usize]>> {
         match self.source.get() {
-            Some(Ok(source)) => Some(source.costs()),
+            Some(Ok(source)) => Some(source.boundaries()),
             _ => None,
         }
     }
@@ -258,12 +262,19 @@ struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
     tags: HashMap<u32, Option<String>>,
-    /// How many samples the series index records for this series.
+    /// How many samples every series index artifact seen so far records for this series.
     ///
     /// It is the work estimate the partition split weighs ordinals by: the column is already in the
     /// batch the candidate is built from, so it costs no extra read, and it is the one per-series
     /// size the index carries.
     cost: usize,
+    /// Which artifact contributed [`Self::cost`] last.
+    ///
+    /// One artifact covers one time bucket, so a series that spans several buckets is discovered
+    /// once per bucket and each of them reports only its own rows. The counts add up across
+    /// artifacts, but a second row for the same series from the *same* artifact would describe rows
+    /// the count already covers, so this identifies a repeat instead of adding it twice.
+    costed_by: usize,
 }
 
 struct ColumnarPreparedSource {
@@ -277,6 +288,13 @@ struct ColumnarPreparedSource {
     /// this slice instead of each rebuilding the whole source's costs. See
     /// [`PreparedSeriesSource::series_cost`].
     costs: Arc<[usize]>,
+    /// The boundaries of the split of those ordinals over the scan's partitions.
+    ///
+    /// Built once here for the same reason as [`Self::costs`]: the split is a property of the source
+    /// and the partition count, not of one partition, so P partitions read their own range out of one
+    /// shared result instead of each dividing the whole source. See
+    /// [`partition_balance::partition_range`].
+    boundaries: Arc<[usize]>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
     // Readers retain this reservation with the candidate set.
@@ -284,17 +302,18 @@ struct ColumnarPreparedSource {
 }
 
 impl ColumnarPreparedSource {
-    /// Returns the work estimate of every ordinal, in ordinal order.
+    /// Returns the boundaries of the ordinal split, in ordinal order.
     ///
-    /// One copy is built while preparing, so a caller that divides the ordinals shares it instead of
-    /// paying for one [`PreparedSeriesSource::series_cost`] call per ordinal and per partition.
-    fn costs(&self) -> Arc<[usize]> {
-        self.costs.clone()
+    /// One copy is built while preparing, so a partition shares it instead of dividing the whole
+    /// source again; see [`partition_balance::partition_range`].
+    fn boundaries(&self) -> Arc<[usize]> {
+        self.boundaries.clone()
     }
 
     async fn prepare(
         context: Arc<StreamContext>,
         ranges: Vec<PartitionRange>,
+        partitions: usize,
         labels: RawLabelSource,
         raw: RawScanPreparation,
         metrics: PartitionMetrics,
@@ -324,7 +343,22 @@ impl ColumnarPreparedSource {
         let reservation =
             MemoryConsumer::new("ColumnarPreparedSource").register(&input.scan_memory_pool);
         let mut candidates = BTreeMap::<MetricSeriesId, Candidate>::new();
-        for id in indexes {
+        // Read in bucket order, so the result does not depend on how the hash set happens to be
+        // laid out: the costs add up to the same total in any order, but a stable one keeps the
+        // preparation reproducible and the reads of adjacent buckets adjacent.
+        let mut indexes = indexes
+            .into_iter()
+            .map(|id| (index.version.series_indexes[&id].entry().bucket_start, id))
+            .collect::<Vec<_>>();
+        indexes.sort_unstable_by(|(a_start, a_id), (b_start, b_id)| {
+            a_start
+                .cmp(b_start)
+                .then_with(|| a_id.as_bytes().cmp(b_id.as_bytes()))
+        });
+        // The artifacts are one per time bucket, and a series that spans several of them is seen
+        // once per bucket. The position identifies them, so a repeated row from one artifact is not
+        // counted twice while the rows of another artifact are added.
+        for (artifact, (_, id)) in indexes.into_iter().enumerate() {
             let reader = ColumnarSeriesFormat::default()
                 .reader(
                     index.store.clone(),
@@ -428,31 +462,32 @@ impl ColumnarPreparedSource {
                             &mut key,
                         )
                         .map_err(|e| invalid(e.to_string()))?;
-                    if let Some(previous) = candidates.get(&id) {
-                        if previous.key.as_slice() != key.as_slice() {
-                            return Err(invalid(
-                                "conflicting labels for the same table ID and TSID",
-                            ));
-                        }
-                        continue;
-                    }
-                    let bytes = key.len()
-                        + values.values().flatten().map(String::len).sum::<usize>()
-                        + values.capacity() * (std::mem::size_of::<(u32, Option<String>)>() + 16)
-                        + std::mem::size_of::<Candidate>()
-                        + 64;
-                    reservation
-                        .try_grow(bytes)
-                        .map_err(|e| invalid(e.to_string()))?;
-                    candidates.insert(
+                    let is_new = merge_candidate(
+                        &mut candidates,
+                        artifact,
                         id,
-                        Candidate {
-                            id,
-                            key: Buffer::from(key),
-                            tags: values,
-                            cost: costs.value(row).min(usize::MAX as u64) as usize,
-                        },
-                    );
+                        key,
+                        values,
+                        costs.value(row).min(usize::MAX as u64) as usize,
+                    )?;
+                    if is_new {
+                        // Account for the row just kept, including the map's own overhead.
+                        let candidate = &candidates[&id];
+                        let bytes = candidate.key.len()
+                            + candidate
+                                .tags
+                                .values()
+                                .flatten()
+                                .map(String::len)
+                                .sum::<usize>()
+                            + candidate.tags.capacity()
+                                * (std::mem::size_of::<(u32, Option<String>)>() + 16)
+                            + std::mem::size_of::<Candidate>()
+                            + 64;
+                        reservation
+                            .try_grow(bytes)
+                            .map_err(|e| invalid(e.to_string()))?;
+                    }
                 }
             }
         }
@@ -461,17 +496,65 @@ impl ColumnarPreparedSource {
         // Built once here, with the ordinals the source exposes from now on, so no partition pays
         // for the whole source again when it asks how to split them.
         let costs: Arc<[usize]> = candidates.iter().map(|candidate| candidate.cost).collect();
+        // Decided here for the same reason: the split and the uniform-weight test are properties of
+        // the source and the partition count, so the partitions share one result instead of each
+        // dividing the whole source.
+        let boundaries: Arc<[usize]> =
+            partition_balance::partition_boundaries(&costs, partitions).into();
         Ok(Self {
             context,
             labels,
             raw: Arc::new(raw),
             candidates: Arc::new(candidates),
             costs,
+            boundaries,
             samples: Arc::new(samples),
             metrics,
             reservation: Arc::new(reservation),
         })
     }
+}
+
+/// Adds one series row of one series index artifact to `candidates`.
+///
+/// `artifact` identifies the artifact the row came from, and `cost` is the row count that artifact
+/// records for the series. An artifact covers one time bucket, so it reports only the rows of that
+/// bucket: a series that a query reads from several buckets costs the rows of all of them, and the
+/// counts therefore add up instead of the first artifact's count standing for the whole series. A
+/// row repeated for a series the same artifact already reported is not added again, because its row
+/// count already covers those rows.
+///
+/// Returns whether the row added a series, which the caller sizes its reservation for.
+fn merge_candidate(
+    candidates: &mut BTreeMap<MetricSeriesId, Candidate>,
+    artifact: usize,
+    id: MetricSeriesId,
+    key: Vec<u8>,
+    tags: HashMap<u32, Option<String>>,
+    cost: usize,
+) -> Result<bool> {
+    if let Some(previous) = candidates.get_mut(&id) {
+        if previous.key.as_slice() != key.as_slice() {
+            return Err(invalid("conflicting labels for the same table ID and TSID"));
+        }
+        if previous.costed_by != artifact {
+            // Same series, another bucket: the query reads both, so it costs both row counts.
+            previous.cost = previous.cost.saturating_add(cost);
+            previous.costed_by = artifact;
+        }
+        return Ok(false);
+    }
+    candidates.insert(
+        id,
+        Candidate {
+            id,
+            key: Buffer::from(key),
+            tags,
+            cost,
+            costed_by: artifact,
+        },
+    );
+    Ok(true)
 }
 
 impl PreparedSeriesSource for ColumnarPreparedSource {
