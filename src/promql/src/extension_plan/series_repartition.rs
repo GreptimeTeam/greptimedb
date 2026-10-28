@@ -75,16 +75,19 @@
 //! - **Poll every partition.** A plan that consumes some output partitions and never touches the
 //!   others will not finish: once an unread output's queue fills, the read suspends and every other
 //!   output stops receiving too. This node does not spill and does not drop to make progress.
-//! - **Do not drain one partition to its end before polling the rest.** A consumer that finishes
-//!   partition 0 before it looks at partition 1 deadlocks: partition 0 cannot reach its end until the
-//!   read finishes, and the read cannot finish while partition 1's queue is full and unread. Polling
-//!   the partitions in turn - which is what a DataFusion executor does - is enough; they need not be
-//!   on separate tasks.
-//! - **Dropping an output is not the same as leaving it unread.** A dropped output stops the read
-//!   instead of suspending it, because a queue nobody will drain is not worth waiting for, and a plan
-//!   that dropped one of its own outputs is being torn down. The outputs that are still being read
-//!   end with an error saying so rather than with an end: chunks read for the dropped output were
-//!   never delivered, so the read did not finish.
+//! - **Do not drain one partition to its end before polling the rest, unless what is routed to the
+//!   others fits their queues.** A consumer that finishes partition 0 before it looks at partition 1
+//!   deadlocks as soon as partition 1's queue fills: partition 0 cannot reach its end until the read
+//!   finishes, and the read cannot finish while it is parked on a queue nobody drains. What an output
+//!   ends with before that point ends nothing else - an output nobody has claimed yet stays claimable
+//!   and the read keeps running for it, since it has not been handed out yet. Polling the partitions
+//!   in turn - which is what a DataFusion executor does - is enough; they need not be on separate
+//!   tasks.
+//! - **Dropping an output is not the same as leaving it unread.** The read stops routing to a dropped
+//!   output instead of suspending on it, because a queue nobody will drain is not worth waiting for,
+//!   and a plan that dropped one of its own outputs is being torn down. If chunks read for it were
+//!   never delivered, the outputs that are still being read end with an error saying so rather than
+//!   with an end: the read did not finish.
 //!
 //! # Memory, backpressure and end of stream
 //!
@@ -107,14 +110,16 @@
 //!
 //! An output stream owns the read, not the plan it was executed from: DataFusion's
 //! `execute_stream_partitioned` takes the plan by value and keeps only the streams, so a read tied to
-//! the plan would be stopped while its streams are still being consumed. The read lives as long as
-//! any of its outputs does, and the last output to go away - or the plan, when no output was ever
-//! handed out - stops it and releases everything it held.
+//! the plan would be stopped while its streams are still being consumed. The read therefore lives as
+//! long as any of its outputs does, and stops only when there is nothing left it could deliver to:
+//! every output was handed out and every one of them is gone. An output that ends - normally, or by
+//! being dropped - while another partition was never executed stops nothing by itself, because that
+//! partition can still claim its queue; the execution going away as a whole, which no later `execute`
+//! can reach, is the other point at which everything is released.
 
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -353,14 +358,14 @@ impl ExecutionPlan for SeriesRepartitionExec {
             }
             Arc::clone(state.as_ref().expect("the execution was just started"))
         };
-        let receiver = shared.take_output(partition).ok_or_else(|| {
+        let (receiver, lease) = SharedExecution::claim(&shared, partition).ok_or_else(|| {
             DataFusionError::Execution(format!(
                 "SeriesRepartition output partition {partition} was executed twice"
             ))
         })?;
-        // The lease is taken after the queue is, so an output that is refused does not count as one
-        // the read is still running for.
-        let lease = SharedExecution::lease(&shared);
+        // The queue and the claim on the read are taken in one step, so an output that is refused -
+        // or one that is handed out after every other output already finished - is counted for
+        // exactly what it is.
         pack_evaluated_series(
             Box::pin(RepartitionStream {
                 receiver,
@@ -375,19 +380,13 @@ impl ExecutionPlan for SeriesRepartitionExec {
 /// One execution's state: the child read once, and the outputs it is being distributed into.
 ///
 /// The plan that started it holds this, and so does every output stream it hands out. The read it
-/// owns lives while any of them does - which is what makes it survive the plan, and what stops it
-/// when the last output goes away.
+/// owns lives while any of them does - which is what makes it survive the plan - and what stops it is
+/// [`Running::claimed`] and [`Running::remaining`] both reaching zero, or the state itself going away.
 struct SharedExecution {
-    /// The queues and the task filling them.
+    /// The queues, the task filling them, and how many of the execution's outputs the read still has.
     running: Mutex<Running>,
     /// How the read ended, for an output whose queue has closed to read.
     ending: Arc<Mutex<Ending>>,
-    /// How many output streams were handed out and not yet dropped.
-    ///
-    /// Counted rather than derived from a reference count, because the plan holds this state too and
-    /// is not an output: what has to reach zero for the read to be stopped is the number of streams,
-    /// not the number of owners.
-    outputs: AtomicUsize,
 }
 
 /// What one execution holds that has to be stopped together.
@@ -397,6 +396,35 @@ struct Running {
     receivers: Vec<Option<mpsc::Receiver<Queued>>>,
     /// The task routing the child's partitions into those queues.
     producer: common_runtime::JoinHandle<()>,
+    /// How many output streams were handed out and are not yet released.
+    ///
+    /// Counted rather than derived from a reference count, because the plan holds this state too and
+    /// is not an output: what has to reach zero for the read to be over is the number of streams, not
+    /// the number of owners.
+    claimed: usize,
+    /// How many outputs were never handed out, and can still be.
+    ///
+    /// Kept apart from [`claimed`](Self::claimed) because the two say different things: an output that
+    /// is claimed is one somebody is reading, and one that is only `remaining` is one nobody has asked
+    /// for yet. A claimed count that reaches zero with outputs left in this count has not lost its
+    /// consumers - it is waiting for them - and the queues of those outputs are exactly what a later
+    /// `execute` comes for, so they must outlive the read of every output that was claimed.
+    remaining: usize,
+}
+
+impl Running {
+    /// Stops the read: every queue nobody took is dropped and the task filling them is aborted.
+    ///
+    /// Idempotent - the queues are already gone on a second call, and aborting a finished or already
+    /// aborted task is a no-op. Dropping the queues of outputs that were never handed out is part of
+    /// it: what was queued for them is read-ahead nobody will take, and holding it until the process
+    /// ends would keep both the memory and the child's scans alive for nothing.
+    fn stop(&mut self) {
+        self.receivers.clear();
+        // Aborting a read that has not recorded an outcome is what the outputs still open have to
+        // see: nothing was recorded, so the end they read is "the producer stopped unexpectedly".
+        self.producer.abort();
+    }
 }
 
 impl SharedExecution {
@@ -435,32 +463,61 @@ impl SharedExecution {
             running: Mutex::new(Running {
                 receivers,
                 producer,
+                // No output is handed out yet: every one of them is still to be claimed.
+                claimed: 0,
+                remaining: routing.outputs,
             }),
             ending,
-            outputs: AtomicUsize::new(0),
         }))
     }
 
-    /// A lease on this execution, for one more output partition.
-    fn lease(shared: &Arc<Self>) -> OutputLease {
-        shared.outputs.fetch_add(1, Ordering::SeqCst);
-        OutputLease {
-            shared: Arc::clone(shared),
-        }
+    /// The queue of `partition` and the lease on this read that reading it takes.
+    ///
+    /// The queue and the claim are taken under one lock, and that is what keeps the counts honest: an
+    /// output stops being one nobody asked for and becomes one the read is running for in the same
+    /// step, so a release on another task cannot see "nothing left" in between and stop a read that
+    /// is being handed out. `None` means that output was claimed before - its queue is gone and this
+    /// call does not count as one the read is running for.
+    fn claim(
+        shared: &Arc<Self>,
+        partition: usize,
+    ) -> Option<(mpsc::Receiver<Queued>, OutputLease)> {
+        let mut running = shared
+            .running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let receiver = running
+            .receivers
+            .get_mut(partition)
+            .and_then(Option::take)?;
+        running.remaining -= 1;
+        running.claimed += 1;
+        Some((
+            receiver,
+            OutputLease {
+                shared: Arc::clone(shared),
+            },
+        ))
     }
 
-    /// Gives up one lease, and reports how many are left.
-    fn release(&self) -> usize {
-        self.outputs.fetch_sub(1, Ordering::SeqCst) - 1
-    }
-
-    /// The receiver of `partition`, if that output was not executed before.
-    fn take_output(&self, partition: usize) -> Option<mpsc::Receiver<Queued>> {
+    /// Gives up one claim, and stops the read once there is nothing left it could deliver to.
+    ///
+    /// This is the one decision the lifecycle turns on, and it is not "the last output went away": an
+    /// output that is released is one that finished being read, and the outputs nobody has claimed
+    /// yet are ones a later `execute` will still claim. The read may stop only when both are
+    /// impossible - no output is being read ([`claimed`](Running::claimed) is zero) and none is left
+    /// to hand out ([`remaining`](Running::remaining) is zero) - so a producer parked on the queue of
+    /// an output that has not been claimed yet keeps waiting: that is backpressure on a consumer that
+    /// is still coming, not a read with nowhere to go.
+    fn release_output(&self) {
         let mut running = self
             .running
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        running.receivers.get_mut(partition).and_then(Option::take)
+        running.claimed -= 1;
+        if running.claimed == 0 && running.remaining == 0 {
+            running.stop();
+        }
     }
 
     /// How the read ended, as an output whose queue has closed has to report it.
@@ -473,19 +530,17 @@ impl SharedExecution {
 
     /// Stops the read and releases everything it holds.
     ///
-    /// Called by the last output to go away and by this state's own drop, so it has to be
-    /// idempotent. Dropping the queues of outputs that were never handed out is part of it: what was
-    /// queued for them is read-ahead nobody will take, and holding it until the plan itself goes away
-    /// would keep both the memory and the child's scans alive for nothing.
+    /// Called when the execution itself goes away - the plan and every output are gone, so no later
+    /// `execute` can claim an output that was never handed out - and by
+    /// [`release_output`](Self::release_output) when the last claim is given up on an execution that
+    /// has nothing left to hand out. Idempotent, because both can happen and because the state's own
+    /// drop runs it once more.
     fn stop(&self) {
         let mut running = self
             .running
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        running.receivers.clear();
-        // Aborting twice is a no-op, and what a stopped read left behind is never recorded - which
-        // is exactly what the outputs that are still open have to see.
-        running.producer.abort();
+        running.stop();
     }
 }
 
@@ -577,8 +632,10 @@ struct InputReader {
 /// DataFusion's `execute_stream_partitioned` takes the plan by value and keeps only the streams, so
 /// the state that started the read is dropped before the first chunk is read: a read stopped there
 /// would end every output early, and an end is not something a consumer can tell from a complete
-/// answer. The lease is what keeps it running instead; and because only streams hold one, the last of
-/// them to go away is the point at which no chunk can be taken any more.
+/// answer. The lease is what keeps it running instead; and because only streams hold one, a lease
+/// going away is the point at which that one output can no longer take a chunk - which
+/// [`SharedExecution::release_output`] turns into the end of the read only when no output is left that
+/// could.
 struct OutputLease {
     shared: Arc<SharedExecution>,
 }
@@ -606,12 +663,11 @@ impl OutputLease {
 
 impl Drop for OutputLease {
     fn drop(&mut self) {
-        // The outputs are what the read is for: when the last of them goes away, nothing can take
-        // another chunk, so the read and the child it is reading stop here even if the plan is still
-        // alive somewhere.
-        if self.shared.release() == 0 {
-            self.shared.stop();
-        }
+        // An output that is done is not by itself the end of the read: the outputs that were never
+        // claimed are still to come, and what is queued for them is what they will read. Giving up
+        // the claim therefore only says that this one output will take nothing more - whether the
+        // read can go on is decided from every output, claimed and unclaimed alike.
+        self.shared.release_output();
     }
 }
 

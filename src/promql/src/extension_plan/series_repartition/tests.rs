@@ -1346,3 +1346,189 @@ async fn an_aborted_producer_is_not_reported_as_a_clean_end() {
         "the output ended with {error}"
     );
 }
+
+/// T-C1: an output that ends takes nothing else down with it when another output was never executed.
+///
+/// This is DataFusion's ordinary order rather than an unusual one: `CoalescePartitionsExec` executes
+/// and consumes one partition per task, and nothing makes every stream exist before the first one is
+/// read. The input here is empty, so the read finishes while partition 0 alone is handed out, and
+/// reading that partition to its end releases its lease - which is exactly the moment the read must
+/// not be taken as over: partition 1 has not been asked for yet, and its queue is what a later
+/// `execute` comes for. A read that stopped there would answer `execute(1)` with "executed twice" for
+/// a partition that was never executed.
+#[tokio::test]
+async fn an_output_that_ends_does_not_close_the_queue_of_an_unclaimed_output() {
+    let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(vec![Vec::new()]), 2);
+    let context = SessionContext::default().task_ctx();
+
+    let first = output(&plan, 0, &context);
+    let first_chunks = tokio::time::timeout(Duration::from_secs(10), first.try_collect::<Vec<_>>())
+        .await
+        .expect("an empty input still ends the first output")
+        .expect("the first output ends without a failure");
+    assert!(
+        first_chunks.is_empty(),
+        "an empty input routed nothing, so the first output has nothing to hand over"
+    );
+
+    let second = unpack_evaluated_series(
+        plan.execute(1, Arc::clone(&context))
+            .unwrap_or_else(|error| panic!("the second output is still claimable: {error}")),
+        None,
+    )
+    .expect("the second output declares an evaluated frame");
+    let second_chunks =
+        tokio::time::timeout(Duration::from_secs(10), second.try_collect::<Vec<_>>())
+            .await
+            .expect("the second output is executed after the first one ended")
+            .expect("the second output ends without a failure");
+    assert!(
+        second_chunks.is_empty(),
+        "an empty input routed nothing, so the second output has nothing to hand over"
+    );
+}
+
+/// T-C2: the output claimed last still receives its whole share after a claimed sibling ended.
+///
+/// Both outputs' shares fit one queue, so the read ends on its own instead of suspending on anything:
+/// what is asserted is what a late claim gets, not the backpressure. Partition 0 is read to its end
+/// before partition 1 is even executed, which releases partition 0's lease; a read that treated that
+/// as the end would drop partition 1's queue and the chunks queued there - the answer would be
+/// truncated rather than late, and nothing on partition 1 would arrive at all.
+#[tokio::test]
+async fn an_unclaimed_output_delivers_its_whole_share_after_a_sibling_ended() {
+    let routing = Routing::new(2);
+    let shared = labels("web-1");
+    let other = labels_elsewhere(&routing, &shared);
+    let ended_first = routing.output(&shared);
+    let claimed_later = routing.output(&other);
+    assert_ne!(
+        ended_first, claimed_later,
+        "the two label sets have to land apart for this test to mean anything"
+    );
+    // One chain per label set, in a row, both of them closed: what reaches each output is a run of
+    // complete chains, so nothing here depends on how the read interleaves two open ones.
+    let chains = OUTPUT_CAPACITY - 1;
+    let steps = (0..chains)
+        .map(|index| Step::chunk(chunk(shared.clone(), index, 1, true)))
+        .chain((0..chains).map(|index| Step::chunk(chunk(other.clone(), index, 1, true))))
+        .collect::<Vec<_>>();
+    let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(vec![steps]), 2);
+    let context = SessionContext::default().task_ctx();
+
+    let first = output(&plan, ended_first, &context);
+    let first_chunks = tokio::time::timeout(Duration::from_secs(10), first.try_collect::<Vec<_>>())
+        .await
+        .expect("the first output reaches its end before the other is executed")
+        .expect("the first output ends without a failure");
+    assert_eq!(
+        (0..chains)
+            .map(|index| (named(&shared), Some(index), 1, true))
+            .collect::<Vec<_>>(),
+        summaries(&first_chunks),
+        "the output executed first hands over every chain of its label set"
+    );
+
+    let second = unpack_evaluated_series(
+        plan.execute(claimed_later, Arc::clone(&context))
+            .unwrap_or_else(|error| panic!("the other output is still claimable: {error}")),
+        None,
+    )
+    .expect("the other output declares an evaluated frame");
+    let second_chunks =
+        tokio::time::timeout(Duration::from_secs(10), second.try_collect::<Vec<_>>())
+            .await
+            .expect("the output executed last reaches its end")
+            .expect("the output executed last ends without a failure");
+    assert_eq!(
+        (0..chains)
+            .map(|index| (named(&other), Some(index), 1, true))
+            .collect::<Vec<_>>(),
+        summaries(&second_chunks),
+        "the output executed last still receives every chain of its label set, in order"
+    );
+}
+
+/// T-C3: an output nobody claimed keeps the read running, not merely claimable.
+///
+/// More chains than one queue holds are routed to the output nobody has asked for, so the read cannot
+/// finish: it is parked on that output's queue. The claimed output delivered everything routed to it
+/// and is then dropped, which gives up every lease the read has - and that must not be taken for
+/// "nothing can take a chunk any more", because the output that has never been claimed is exactly the
+/// one that will. A read that stopped here would abort a producer that is correctly waiting, and the
+/// chunks it holds would be lost; the last part of the test is that it is not merely alive but that
+/// every chunk it queued arrives once the output is claimed.
+#[tokio::test]
+async fn an_unclaimed_output_keeps_the_producer_of_a_claimed_one_running() {
+    let routing = Routing::new(2);
+    let shared = labels("web-1");
+    let other = labels_elsewhere(&routing, &shared);
+    let read_first = routing.output(&shared);
+    let claimed_later = routing.output(&other);
+    assert_ne!(
+        read_first, claimed_later,
+        "the two label sets have to land apart for this test to mean anything"
+    );
+    let chains = OUTPUT_CAPACITY + 2;
+    let steps = std::iter::once(Step::chunk(chunk(shared.clone(), 0, 1, true)))
+        .chain((0..chains).map(|index| Step::chunk(chunk(other.clone(), index, 1, true))))
+        .collect::<Vec<_>>();
+    let plan = node(Scripted::plan(vec![steps]), 2);
+    let context = SessionContext::default().task_ctx();
+    let mut first = unpack_evaluated_series(
+        plan.execute(read_first, Arc::clone(&context))
+            .expect("the output that is read first executes"),
+        None,
+    )
+    .expect("the output declares an evaluated frame");
+    let execution = execution(&plan);
+
+    let chunk_read = tokio::time::timeout(Duration::from_secs(10), first.next())
+        .await
+        .expect("the first chunk of the read arrives")
+        .expect("the output hands over a chunk")
+        .expect("the chunk decodes");
+    assert_eq!(
+        (named(&shared), Some(0), 1, true),
+        summary(&chunk_read),
+        "the chain routed to the output that is read first"
+    );
+    assert!(
+        !producer_stopped(&execution),
+        "the read finished although nothing could have delivered the chains it never routed"
+    );
+
+    // Everything routed to this output was handed over, so the output is done being read - and the
+    // only output that was ever claimed is gone with it.
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !producer_stopped(&execution),
+        "the producer was aborted although one of its outputs had never been claimed: the chunks \
+         queued for that output are what a later execute still comes for"
+    );
+
+    // And the read was not merely alive: claiming the output nobody had asked for gets all of it.
+    let second = unpack_evaluated_series(
+        plan.execute(claimed_later, Arc::clone(&context))
+            .unwrap_or_else(|error| panic!("the unclaimed output is claimable: {error}")),
+        None,
+    )
+    .expect("the unclaimed output declares an evaluated frame");
+    let second_chunks =
+        tokio::time::timeout(Duration::from_secs(10), second.try_collect::<Vec<_>>())
+            .await
+            .expect("claiming the output unblocks the read it was parked on")
+            .expect("the output executed last ends without a failure");
+    assert_eq!(
+        (0..chains)
+            .map(|index| (named(&other), Some(index), 1, true))
+            .collect::<Vec<_>>(),
+        summaries(&second_chunks),
+        "every chain the parked read had queued arrives once the output is claimed"
+    );
+    wait_until("the read that was parked finishes", || {
+        producer_stopped(&execution)
+    })
+    .await;
+}
