@@ -29,11 +29,31 @@ export async function isTeamMember(octokit, owner, repo, username, onError = tru
   }
 }
 
-export async function listAuthorOpenPrs(octokit, owner, repo, author) {
+// REST returns reviews in chronological order. Comments and unsubmitted
+// reviews do not replace a reviewer's last approval/change-request decision.
+export function hasEffectiveApproval(reviews) {
+  const decisions = new Map();
+  for (const review of reviews) {
+    if (review.user && ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state)) {
+      decisions.set(review.user.id, review.state);
+    }
+  }
+  return [...decisions.values()].includes("APPROVED");
+}
+
+export async function listAuthorPendingPrs(octokit, owner, repo, author) {
   const prs = await octokit.paginate(octokit.pulls.list, {
     owner, repo, state: "open", sort: "created", direction: "asc", per_page: 100,
   });
-  return prs.filter((pr) => pr.user?.login === author && !pr.draft);
+  const pending = [];
+  for (const pr of prs) {
+    if (pr.user?.login !== author || pr.draft) continue;
+    const reviews = await octokit.paginate(octokit.pulls.listReviews, {
+      owner, repo, pull_number: pr.number, per_page: 100,
+    });
+    if (!hasEffectiveApproval(reviews)) pending.push(pr);
+  }
+  return pending;
 }
 
 // Called with the read-only github-script client. Only a positive decision
@@ -49,10 +69,10 @@ export async function shouldThrottleMatrix(octokit, context, rawLimit) {
     if (!(await isTeamMember(octokit, owner, repo, pr.user.login, false))) {
       return false;
     }
-    const prs = await listAuthorOpenPrs(octokit, owner, repo, pr.user.login);
+    const prs = await listAuthorPendingPrs(octokit, owner, repo, pr.user.login);
     return prs.length > openPrLimit(rawLimit);
   } catch (error) {
-    console.log(`Cannot count open pull requests (HTTP ${error.status}); preserving matrix parallelism.`);
+    console.log(`Cannot count pending pull requests (HTTP ${error.status}); preserving matrix parallelism.`);
     return false;
   }
 }
