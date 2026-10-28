@@ -34,7 +34,7 @@ use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, ExecutionPlanProperties, PlanProperties,
-    SendableRecordBatchStream,
+    SendableRecordBatchStream, replace_children_if_necessary,
 };
 use datatypes::arrow::array::{
     Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
@@ -1982,7 +1982,7 @@ fn gate_native_fused(
         return (plan, false);
     }
     (
-        plan.with_new_children(rewritten)
+        replace_children_if_necessary(plan, rewritten)
             .expect("test gate rebuilds plan above fused node"),
         true,
     )
