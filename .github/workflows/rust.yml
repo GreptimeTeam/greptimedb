@@ -106,7 +106,8 @@ jobs:
         run: make check-udeps
 
   check-riscv64:
-    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # Keep platform coverage on the weekday schedule and allow manual checks.
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [github-script-tests]
     name: Check riscv64 build
     runs-on: ubuntu-latest
@@ -133,7 +134,8 @@ jobs:
         run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
   check-windows:
-    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # Keep platform coverage on the weekday schedule and allow manual checks.
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [github-script-tests]
     name: Check Windows build
     runs-on: windows-2022
