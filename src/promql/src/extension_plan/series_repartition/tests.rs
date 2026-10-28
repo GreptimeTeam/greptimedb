@@ -38,7 +38,7 @@ use std::task::Waker;
 use std::time::Duration;
 
 use datafusion::arrow::array::Float64Array;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::physical_plan::execution_plan::Boundedness;
 use datafusion::prelude::SessionContext;
@@ -310,6 +310,20 @@ fn summaries(chunks: &[(Series, bool)]) -> Vec<(String, Option<usize>, usize, bo
     chunks.iter().map(summary).collect()
 }
 
+/// The summaries of an output, in an order the input tasks do not decide.
+///
+/// Every input is read by a task of its own, so which of two inputs delivers a chain first is not
+/// fixed - and no test may depend on it. What a test still states is that each chain arrives whole and
+/// in order ([`assert_chains_are_whole`]), and that the set of chunks is exactly the set it expects;
+/// this is the comparison for a chunk list that came from more than one source.
+fn unordered(
+    summaries: &[(String, Option<usize>, usize, bool)],
+) -> Vec<(String, Option<usize>, usize, bool)> {
+    let mut sorted = summaries.to_vec();
+    sorted.sort();
+    sorted
+}
+
 /// Asserts that every chain `chunks` hands over is whole.
 ///
 /// A chunk that leaves a series open must be followed by the same series' next chunk: another
@@ -403,12 +417,12 @@ async fn pieces_of_one_label_set_meet_on_one_output() {
     let other_piece = named(&other);
     let shared_output = routing.output(&shared);
     assert_eq!(
-        vec![
+        unordered(&[
             (piece.clone(), Some(0), 2, false),
             (piece.clone(), None, 0, true),
             (piece.clone(), Some(8), 2, true),
-        ],
-        outputs[shared_output],
+        ]),
+        unordered(&outputs[shared_output]),
         "both pieces of one label set, and the closing chunk between them, land on one output"
     );
     assert_eq!(
@@ -463,28 +477,28 @@ async fn chains_cross_the_node_whole_and_a_closing_chunk_survives() {
 
     let piece = named(&shared);
     assert_eq!(
-        vec![
+        unordered(&[
             (piece.clone(), Some(0), 2, false),
             (piece.clone(), Some(2), 2, true),
             (piece.clone(), Some(8), 2, false),
             // The closing chunk of the second chain carries no position of its own.
             (piece, None, 0, true),
-        ],
-        summaries(&chunks),
-        "the first chain is handed over before the second one starts, and the empty closing chunk \
-         is still a chunk"
+        ]),
+        unordered(&summaries(&chunks)),
+        "both chains reach the one output whole, and the empty closing chunk is still a chunk"
     );
 }
 
-/// T3, first half: an output nobody reads suspends the producer once its queue is full, and the
-/// chunks it already read are neither lost nor delivered twice once that output is drained.
+/// T3, first half: an output nobody reads suspends the input task once its queue is full, and the
+/// chains it already routed are neither lost nor delivered twice once that output is drained.
 ///
-/// What happens, explicitly: the producer queues [`OUTPUT_CAPACITY`] chunks to the stalled output and
-/// then waits on that output's send. Every other output stops receiving at that point - the read is
-/// one task, and it does not run ahead of the slowest output - so this node has head-of-line
-/// blocking by design and no scheduler to route around it. It is not a deadlock: the task is
-/// suspended on a channel, the rest of the query continues, and draining the stalled output lets the
-/// read go on.
+/// What happens, explicitly: the input's task queues [`OUTPUT_CAPACITY`] chains to the stalled output
+/// and then waits on that output's send. Every other output stops receiving from that input at that
+/// point - one task reads this one input, and it does not run ahead of the slowest output - so an
+/// input has head-of-line blocking behind its own chains, and no scheduler to route around it. What it
+/// does not have is a share of that wait with another input: each one waits on its own. It is not a
+/// deadlock: the task is suspended on a channel, the rest of the query continues, and draining the
+/// stalled output lets the read go on.
 #[tokio::test]
 async fn a_stalled_output_suspends_the_producer_without_losing_chunks() {
     let routing = Routing::new(2);
@@ -649,15 +663,15 @@ async fn one_output_keeps_every_chunk_and_its_chains_whole() {
     // partition 0, so the next chain read is partition 1's, and partition 0's remaining chain comes
     // after it. Both label sets still reach the one output, whole.
     assert_eq!(
-        vec![
+        unordered(&[
             (named(&shared), Some(0), 2, false),
             (named(&shared), Some(2), 2, true),
             (named(&shared), Some(8), 2, true),
             (named(&other), Some(0), 1, false),
             (named(&other), None, 0, true),
-        ],
-        summaries(&chunks),
-        "every chunk of both label sets arrives, in the order the read reached them"
+        ]),
+        unordered(&summaries(&chunks)),
+        "every chunk of both label sets arrives, each chain in one piece"
     );
 }
 
@@ -1012,9 +1026,12 @@ fn execution(plan: &Arc<SeriesRepartitionExec>) -> Arc<SharedExecution> {
     Arc::clone(state.as_ref().expect("the read was started by execute"))
 }
 
-/// Whether the task routing the child has stopped.
+/// Whether every input task of the read has stopped.
+///
+/// There is one task per input partition and no single producer, so "the read stopped" is what has to
+/// be read off the tasks themselves: none of them is still running.
 fn producer_stopped(execution: &SharedExecution) -> bool {
-    execution.running.lock().unwrap().producer.is_finished()
+    execution.running.lock().unwrap().inputs.live() == 0
 }
 
 /// The error `stream` reports after the batches it delivers before it, or `None` if it ends.
@@ -1272,12 +1289,12 @@ async fn a_child_failure_is_terminal_on_every_output() {
 
 /// T-B4: a read that stops without finishing is not reported as the end of the answer.
 ///
-/// The read is aborted through its own task handle, which is reachable from this module because the
-/// tests are a child of the module that defines it - so this needs no hook in the production code. The
-/// child hands over one chunk and then waits on a switch nothing opens, so the read cannot have
-/// finished and recorded an outcome when it is aborted: what an output sees after that is a queue
-/// closing on a read with no recorded ending, which must be reported as the read stopping
-/// unexpectedly rather than as the end of the series.
+/// The read is aborted through the tasks it runs on, which are reachable from this module because the
+/// tests are a child of the module that defines it - so this needs no hook in the production code, and
+/// the stop is the one the read stops itself with. The child hands over one chunk and then waits on a
+/// switch nothing opens, so the read cannot have finished and recorded an outcome when it is aborted:
+/// what an output sees after that is a queue closing on a read with no recorded ending, which must be
+/// reported as the read stopping unexpectedly rather than as the end of the series.
 #[tokio::test]
 async fn an_aborted_producer_is_not_reported_as_a_clean_end() {
     let switch = Arc::new(Switch::default());
@@ -1313,8 +1330,9 @@ async fn an_aborted_producer_is_not_reported_as_a_clean_end() {
 
     let execution = execution(&plan);
     // Aborted directly, while its outputs are still being read: what an output does after that is
-    // the whole point of this test.
-    execution.running.lock().unwrap().producer.abort();
+    // the whole point of this test. This aborts every input task and records nothing, which is what a
+    // read stopped from outside looks like.
+    execution.running.lock().unwrap().inputs.stop();
 
     let tail = tokio::time::timeout(Duration::from_secs(10), stream.try_collect::<Vec<_>>())
         .await
@@ -1513,4 +1531,803 @@ async fn an_unclaimed_output_keeps_the_producer_of_a_claimed_one_running() {
         producer_stopped(&execution)
     })
     .await;
+}
+
+/// A task context whose memory pool never refuses a reservation.
+///
+/// The composition below reads further ahead than a bounded pool would allow, and a read that failed
+/// on memory would end with an error instead of showing whether it finishes at all - which is the one
+/// thing this test is about.
+fn unbounded_context() -> Arc<TaskContext> {
+    let runtime = RuntimeEnvBuilder::new()
+        .with_memory_pool(Arc::new(UnboundedMemoryPool::default()) as Arc<dyn MemoryPool>)
+        .build()
+        .expect("the runtime environment builds");
+    Arc::new(TaskContext::default().with_runtime(Arc::new(runtime)))
+}
+
+/// `count` label sets of distinct series that a two-output node routes to `output`.
+///
+/// Found with the node's own [`Routing`] over candidate labels rather than assumed: which output a
+/// label set belongs on is a hash of it, and a label set hard-coded from watching one run would stop
+/// being a label set of `output` the moment the key or the seed changed, leaving the test about
+/// something else. Reading it off the same function the node reduces with is what keeps the premise
+/// - every chunk lands on `output` - true by construction.
+fn labels_routed_to(output: usize, count: usize) -> Vec<SeriesLabels> {
+    let routing = Routing::new(2);
+    let found = (0..)
+        .filter_map(|index| {
+            let candidate = labels(&format!("many-{index}"));
+            (routing.output(&candidate) == output).then_some(candidate)
+        })
+        .take(count)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        count,
+        found.len(),
+        "two outputs split the candidates between them, so {count} of each are found"
+    );
+    found
+}
+
+/// T-D1: two of these nodes composed do not deadlock while every output of the outer one is drained.
+///
+/// The child produces `SERIES` single-point chains, each with a label set of its own, every one of
+/// them hashing to output 1 of a two-output node - so the inner node's output 0 is empty and output 1
+/// carries all of them. Composed as `outer(inner(child))`, the outer node's input 0 is the inner
+/// node's empty output, and what the read does with that is what this test states.
+///
+/// The volume is chosen against the buffers in the path, not at random. Each output holds
+/// [`OUTPUT_CAPACITY`] chains and each input task holds the one chain it is assembling, so the whole
+/// composition absorbs a handful of chunks: measured against the router this test was written for,
+/// ten was what that path took and eleven already stopped. `SERIES` is two orders of magnitude above
+/// that, so no amount of buffering makes this test pass by swallowing the child whole, and a read that
+/// is merely slow is not what a failure here would be.
+///
+/// Both outputs of the outer node are read at once and each is drained to its end, so nothing here
+/// can be blamed on an output nobody drained - which is the one requirement this node states of its
+/// caller. The count that comes out is asserted against the count that went in, so a passing run is a
+/// run that lost nothing.
+///
+/// What it caught is why the router is per input now: with one task routing every input, the outer
+/// read parked on its input 0 - the inner node's empty output, which does not close until the inner
+/// read finishes - so it routed nothing at all and both outputs stayed empty, while the inner read
+/// filled the outer node's input 1 after about ten chunks and parked on its output 1. Measured: 0 of
+/// 4096 series delivered, both outputs empty, timeout at 10 s. Giving the outer node's input 0 a
+/// single series of its own changed nothing, which is what says the wait was the problem rather than
+/// the volume; giving output 0 thousands of series of its own instead finished the same composition in
+/// under a second. With one task per input there is no such wait: the outer node's task 0 is parked on
+/// the inner node's empty output by itself, and its task 1 keeps routing everything the inner node
+/// sends on output 1, which is what lets the inner node finish and close output 0.
+#[tokio::test]
+async fn composing_two_nodes_does_not_deadlock_when_the_inner_output_is_empty() {
+    const SERIES: usize = 4096;
+    let routed = labels_routed_to(1, SERIES);
+    let source = || {
+        Scripted::plan(vec![
+            routed
+                .iter()
+                .map(|metric| Step::chunk(chunk(metric.clone(), 0, 1, true)))
+                .collect::<Vec<_>>(),
+        ])
+    };
+    let context = unbounded_context();
+
+    // The same child over one node finishes, and finishes with everything on output 1: what stalls
+    // below is the composition, not the child and not the volume.
+    let alone: Arc<dyn ExecutionPlan> = node(source(), 2);
+    let alone_outputs = tokio::time::timeout(Duration::from_secs(10), drain(&alone, &context))
+        .await
+        .expect("one node over this child finishes");
+    assert!(
+        alone_outputs[0]
+            .as_ref()
+            .expect("the first output decodes")
+            .is_empty(),
+        "every label set of this test hashes to output 1, so output 0 has nothing to carry"
+    );
+    assert_eq!(
+        SERIES,
+        alone_outputs[1]
+            .as_ref()
+            .expect("the second output decodes")
+            .len(),
+        "one node delivers every series it was given"
+    );
+
+    let inner: Arc<dyn ExecutionPlan> = node(source(), 2);
+    let plan: Arc<dyn ExecutionPlan> = node(inner, 2);
+
+    // Both outputs at once, each to its end, and each chunk counted where it arrives: the count is
+    // what a failure has to say when the read never gets to the assertion below.
+    let delivered = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let reads = (0..2)
+        .map(|partition| {
+            let plan = Arc::clone(&plan);
+            let context = Arc::clone(&context);
+            let delivered = Arc::clone(&delivered);
+            async move {
+                let mut stream = output(&plan, partition, &context);
+                let mut chunks = Vec::new();
+                while let Some(chunk) = stream.try_next().await? {
+                    delivered[partition].fetch_add(1, Ordering::Relaxed);
+                    chunks.push(chunk);
+                }
+                Ok::<_, BoxedError>(chunks)
+            }
+        })
+        .collect::<Vec<_>>();
+    let outputs = tokio::time::timeout(Duration::from_secs(10), futures::future::join_all(reads))
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "two composed nodes never finished although both outputs of the outer one were \
+                 drained: {} of {SERIES} series arrived on output 0 and {} on output 1",
+                delivered[0].load(Ordering::Relaxed),
+                delivered[1].load(Ordering::Relaxed),
+            )
+        })
+        .into_iter()
+        .map(|chunks| chunks.expect("both outputs decode"))
+        .collect::<Vec<_>>();
+
+    assert!(
+        outputs[0].is_empty(),
+        "the same label sets hash to output 1 of the outer node as of the inner one"
+    );
+    for chunks in &outputs {
+        assert_chains_are_whole(chunks);
+    }
+    let mut names = outputs
+        .iter()
+        .flatten()
+        .map(|(series, is_last)| {
+            assert!(*is_last, "every chain of this test closes on its own");
+            named(&series.metric)
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    assert_eq!(
+        SERIES,
+        names.len(),
+        "every series that went in comes out exactly once, none twice and none truncated"
+    );
+    assert_eq!(
+        SERIES,
+        outputs.iter().map(Vec::len).sum::<usize>(),
+        "the composition delivers as many chunks as the child handed over"
+    );
+}
+
+/// T-E1: two sources whose chains belong on one output land there whole, never inside one another.
+///
+/// Both label sets hash to the same output and both sources have a chain for it. One of the chains is
+/// held open across a gate, so the other source's chain is the only thing that can be delivered; what
+/// must not happen is that the held chain's first chunk sits on the output ahead of the other source's
+/// chain, because two sources' chunks inside one open series is exactly what a downstream frame reader
+/// refuses. What does happen is that the closed chain arrives first, whole, and the held one follows.
+#[tokio::test]
+async fn two_sources_keep_their_chains_whole_on_one_output() {
+    let on_one = labels_routed_to(0, 2);
+    let (held, closed) = (on_one[0].clone(), on_one[1].clone());
+    assert_eq!(
+        Routing::new(2).output(&held),
+        Routing::new(2).output(&closed),
+        "two label sets of one output, found rather than assumed"
+    );
+    let switch = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            // The chain that stays open across the gate: its first chunk is handed over at once and
+            // the chunk that closes it only after the switch opens.
+            GatedPartition {
+                before: vec![Step::chunk(chunk(held.clone(), 0, 2, false))],
+                after: vec![Step::chunk(chunk(held.clone(), 2, 2, true))],
+            },
+            // The other source's whole chain, handed over as soon as it is polled.
+            GatedPartition::open(vec![
+                Step::chunk(chunk(closed.clone(), 0, 2, false)),
+                Step::chunk(chunk(closed.clone(), 2, 2, true)),
+            ]),
+        ],
+        Arc::clone(&switch),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+    let context = SessionContext::default().task_ctx();
+    let mut routed = output(&plan, 0, &context);
+    let other = output(&plan, 1, &context);
+
+    // The chain of the source that closed arrives while the other source is still open - and in one
+    // piece, since a partial chain is never put on an output in the first place.
+    let mut chunks = Vec::new();
+    while chunks.len() < 2 {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), routed.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the closed chain of one source did not arrive while the other source's chain \
+                     was still open: {} chunks arrived",
+                    chunks.len()
+                )
+            })
+            .expect("the output is not over while a source is still reading")
+            .expect("the chunk decodes");
+        chunks.push(chunk);
+    }
+    assert_chains_are_whole(&chunks);
+    assert_eq!(
+        vec![
+            (named(&closed), Some(0), 2, false),
+            (named(&closed), Some(2), 2, true),
+        ],
+        summaries(&chunks),
+        "the source whose chain closed is on the output whole, before the open chain's first chunk"
+    );
+
+    // Opening the gate closes the held chain: it follows on the same output, and everything the
+    // output carried over the test is a run of whole chains.
+    switch.open();
+    chunks.extend(
+        tokio::time::timeout(Duration::from_secs(10), routed.try_collect::<Vec<_>>())
+            .await
+            .expect("the held chain arrives once the gate opens")
+            .expect("the output decodes"),
+    );
+    assert_chains_are_whole(&chunks);
+    assert_eq!(
+        vec![
+            (named(&closed), Some(0), 2, false),
+            (named(&closed), Some(2), 2, true),
+            (named(&held), Some(0), 2, false),
+            (named(&held), Some(2), 2, true),
+        ],
+        summaries(&chunks),
+        "both sources' chains are on one output, each of them in one piece"
+    );
+    let empty = tokio::time::timeout(Duration::from_secs(10), other.try_collect::<Vec<_>>())
+        .await
+        .expect("the other output ends")
+        .expect("the other output decodes");
+    assert!(
+        empty.is_empty(),
+        "neither label set hashes to the other output"
+    );
+}
+
+/// T-E2: a closing chunk that carries no rows is delivered, and is not mistaken for the end of the
+/// stream.
+///
+/// A series can close with nothing left of it, and that chunk carries the finality and no position. It
+/// is a chunk of its own on the way out - it is how a consumer closes the series - and a stream that is
+/// still going must not be ended by it: the chunk after it is what says the empty one was a chunk and
+/// not the end.
+#[tokio::test]
+async fn an_empty_closing_chunk_is_a_chunk_and_not_the_end() {
+    let routing = Routing::new(2);
+    let shared = labels("web-1");
+    let other = labels_elsewhere(&routing, &shared);
+    let child = Scripted::plan(vec![
+        // One source closes a series with nothing left of it, and keeps going afterwards.
+        vec![
+            Step::chunk(chunk(other.clone(), 0, 0, true)),
+            Step::chunk(chunk(other.clone(), 0, 1, true)),
+        ],
+        // The other source hands over a chain with positions, and closes it with an empty chunk.
+        vec![
+            Step::chunk(chunk(shared.clone(), 0, 0, true)),
+            Step::chunk(chunk(shared.clone(), 4, 2, false)),
+            Step::chunk(chunk(shared.clone(), 6, 0, true)),
+        ],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        drain(&plan, &SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("an input that only closes empty chains still ends")
+    .into_iter()
+    .map(|output| output.expect("no output ends with an error"))
+    .collect::<Vec<_>>();
+    for chunks in &outputs {
+        assert_chains_are_whole(chunks);
+    }
+
+    assert_eq!(
+        vec![
+            // The chunk with no rows of its own, then the chunk of the stream that is still going.
+            (named(&shared), None, 0, true),
+            (named(&shared), Some(4), 2, false),
+            (named(&shared), None, 0, true),
+        ],
+        summaries(&outputs[routing.output(&shared)]),
+        "an empty closing chunk is handed over, and the chunk after it is not swallowed"
+    );
+    assert_eq!(
+        vec![
+            (named(&other), None, 0, true),
+            (named(&other), Some(0), 1, true),
+        ],
+        summaries(&outputs[routing.output(&other)]),
+        "the same holds for a source whose whole first chain is one empty closing chunk"
+    );
+}
+
+/// T-E3: while one owner's chain is still open, the other owner's output still delivers.
+///
+/// Two label sets on two outputs, one long chain each, and the first one is held open across a gate.
+/// The other output has to deliver its whole chain in that time: the wait on the gated source belongs
+/// to the task reading that source, and no other source's chunks wait with it. What this rules out is
+/// the shape this node used to have - one reader for every input, parked on the gated source and
+/// delivering nothing at all until the chain closed.
+#[tokio::test]
+async fn an_open_chain_on_one_output_does_not_hold_the_other_output_back() {
+    let routing = Routing::new(2);
+    let held = labels("web-1");
+    let free = labels_elsewhere(&routing, &held);
+    let held_output = routing.output(&held);
+    let free_output = routing.output(&free);
+    assert_ne!(
+        held_output, free_output,
+        "the two label sets have to land apart for this test to mean anything"
+    );
+    let switch = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            // A long chain, gated after its first chunk.
+            GatedPartition {
+                before: vec![Step::chunk(chunk(held.clone(), 0, 2, false))],
+                after: vec![
+                    Step::chunk(chunk(held.clone(), 2, 2, false)),
+                    Step::chunk(chunk(held.clone(), 4, 2, false)),
+                    Step::chunk(chunk(held.clone(), 6, 2, true)),
+                ],
+            },
+            // A chain of its own, handed over as soon as it is polled.
+            GatedPartition::open(vec![
+                Step::chunk(chunk(free.clone(), 0, 2, false)),
+                Step::chunk(chunk(free.clone(), 2, 2, true)),
+            ]),
+        ],
+        Arc::clone(&switch),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+    let context = SessionContext::default().task_ctx();
+    let mut held_stream = output(&plan, held_output, &context);
+    let mut free_stream = output(&plan, free_output, &context);
+
+    // The other owner's output delivers while the gated chain is still open, and what it delivers is
+    // its whole chain.
+    let mut delivered = Vec::new();
+    while delivered.len() < 2 {
+        let chunk = tokio::time::timeout(Duration::from_secs(10), free_stream.next())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "the other owner's output delivered {} of its 2 chunks while one chain was open",
+                    delivered.len()
+                )
+            })
+            .expect("the other output is not over")
+            .expect("the chunk decodes");
+        delivered.push(chunk);
+    }
+    assert_chains_are_whole(&delivered);
+    assert_eq!(
+        vec![
+            (named(&free), Some(0), 2, false),
+            (named(&free), Some(2), 2, true),
+        ],
+        summaries(&delivered),
+        "the free chain is delivered in full while the other owner's chain is still open"
+    );
+
+    // The open chain is still waiting for its own source, so nothing of it has been delivered: a
+    // partial chain does not sit on an output waiting to be completed.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), held_stream.next())
+            .await
+            .is_err(),
+        "the held chain was delivered while its source was still open"
+    );
+
+    switch.open();
+    let held_chunks =
+        tokio::time::timeout(Duration::from_secs(10), held_stream.try_collect::<Vec<_>>())
+            .await
+            .expect("the held chain arrives once the gate opens")
+            .expect("the held output decodes");
+    assert_chains_are_whole(&held_chunks);
+    assert_eq!(
+        vec![
+            (named(&held), Some(0), 2, false),
+            (named(&held), Some(2), 2, false),
+            (named(&held), Some(4), 2, false),
+            (named(&held), Some(6), 2, true),
+        ],
+        summaries(&held_chunks),
+        "the long chain arrives whole and in order once its source closes it"
+    );
+    let rest = tokio::time::timeout(Duration::from_secs(10), free_stream.try_collect::<Vec<_>>())
+        .await
+        .expect("the other output ends")
+        .expect("the other output decodes");
+    assert!(
+        rest.is_empty(),
+        "the other output carried its whole chain already"
+    );
+}
+
+/// T-E4: a partition that fails mid-stream ends every output with that error, none of them cleanly.
+///
+/// One of the two input partitions fails after handing over a chunk and the other ends normally, so
+/// one output has data and an end of its own that the failure has to replace. Three outputs make sure
+/// the error is not merely the fate of the output the failed partition was routing to: an output that
+/// ended cleanly would report the series that never arrived as series that do not exist.
+#[tokio::test]
+async fn a_child_partition_that_fails_mid_stream_ends_every_output_with_its_error() {
+    let shared = labels("web-1");
+    let other = labels("elsewhere");
+    let child = Scripted::plan(vec![
+        // This partition fails with its series open.
+        vec![Step::chunk(chunk(shared.clone(), 0, 2, false)), Step::Error],
+        // This one ends normally.
+        vec![Step::chunk(chunk(other.clone(), 0, 1, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 3);
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        drain(&plan, &SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("a failed read still ends every output");
+    assert_eq!(3, outputs.len());
+    for (partition, output) in outputs.iter().enumerate() {
+        let error = output
+            .as_ref()
+            .err()
+            .unwrap_or_else(|| panic!("output partition {partition} reported a clean end"));
+        assert!(
+            error.to_string().contains("scripted child failure"),
+            "output partition {partition} ended with {error}"
+        );
+    }
+}
+
+/// T-E5: with two input partitions, each is read on a task of its own, and neither on the consumer's.
+///
+/// The mirror of [`every_input_partition_is_read_on_a_task_of_its_own`] over a node with two outputs -
+/// the shape the per-input router is for, where each partition's chains are routed by the task that
+/// read them. What the child records is the task that first polled each of its partitions, so one id
+/// for both, or the consumer's own, is the shape a node with a reader shared by all its inputs has.
+#[tokio::test]
+async fn both_input_partitions_are_read_on_tasks_of_their_own_and_route_their_own_chunks() {
+    let routing = Routing::new(2);
+    let shared = labels("web-1");
+    let other = labels_elsewhere(&routing, &shared);
+    let (child, polled) = Recording::plan(vec![
+        vec![Step::chunk(chunk(shared.clone(), 0, 1, true))],
+        vec![Step::chunk(chunk(other.clone(), 4, 1, true))],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+    // Taken before anything is read: the task that asks for an output is the one a partition must
+    // not be read on.
+    let consumer = tokio::task::try_id();
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        drain(&plan, &SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("both partitions of the child answer, so every output ends");
+
+    let recorded = polled
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(
+        2,
+        recorded.len(),
+        "the child holds one partition per scripted list"
+    );
+    let tasks = recorded
+        .iter()
+        .map(|task| task.unwrap_or_else(|| panic!("a child partition was never polled")))
+        .collect::<Vec<_>>();
+    assert_ne!(
+        tasks[0], tasks[1],
+        "the two partitions were polled by two different tasks, so each input was read - and routed - \
+         on a task of its own: {tasks:?}"
+    );
+    assert!(
+        tasks.iter().all(|task| Some(*task) != consumer),
+        "neither partition ran on the consumer's task: {tasks:?} against {consumer:?}"
+    );
+
+    assert_eq!(
+        vec![(named(&shared), Some(0), 1, true)],
+        summaries(
+            outputs[routing.output(&shared)]
+                .as_ref()
+                .expect("the output of the first label set decodes")
+        ),
+        "the first input's chain lands on the output its labels hash to"
+    );
+    assert_eq!(
+        vec![(named(&other), Some(4), 1, true)],
+        summaries(
+            outputs[routing.output(&other)]
+                .as_ref()
+                .expect("the output of the second label set decodes")
+        ),
+        "and the second input's chain on its own"
+    );
+}
+
+/// T-E6: two inputs make their own routing decisions, and neither waits for the other to make one.
+///
+/// The child will not hand over a second chunk of a partition until every partition has handed over a
+/// first, so nothing gets past the first chunk of either source unless both are being read at the same
+/// time: a read that took one input's chain to its end before it looked at the other waits forever
+/// there for a chunk that only the other input's own progress can release. Each source's chain is two
+/// chunks long, so that wait lands in the middle of an open chain - the point at which a
+/// chain-continuous reader that drove the inputs itself would have to stop.
+///
+/// The two label sets hash to two different outputs, so what each task does here is a routing decision
+/// of its own: one hash over one chain, sent to one owner. Two outputs means each of them has a
+/// different decision to make and no decision of the other's to wait for, which is the property this
+/// test states; a node with a single output is [`one_output_keeps_every_chunk_and_its_chains_whole`],
+/// where there is nothing to decide and every chunk still arrives.
+///
+/// The gate is this child and not a stopwatch: nothing here depends on two cores happening to run at
+/// the same instant, only on the two inputs being driven, and routed, independently of each other.
+#[tokio::test]
+async fn two_inputs_are_routed_without_waiting_for_each_other() {
+    let routing = Routing::new(2);
+    let first = labels("web-1");
+    let second = labels_elsewhere(&routing, &first);
+    assert_ne!(
+        routing.output(&first),
+        routing.output(&second),
+        "the two label sets have to land apart for this test to mean anything"
+    );
+    let child = Together::plan(vec![
+        vec![
+            Step::chunk(chunk(first.clone(), 0, 1, false)),
+            Step::chunk(chunk(first.clone(), 1, 1, true)),
+        ],
+        vec![
+            Step::chunk(chunk(second.clone(), 0, 1, false)),
+            Step::chunk(chunk(second.clone(), 1, 1, true)),
+        ],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 2);
+
+    let outputs = tokio::time::timeout(
+        Duration::from_secs(10),
+        drain(&plan, &SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("both inputs are read at once, so the rendezvous between them opens")
+    .into_iter()
+    .map(|output| output.expect("no output ends with an error"))
+    .collect::<Vec<_>>();
+    assert_eq!(2, outputs.len());
+    for chunks in &outputs {
+        assert_chains_are_whole(chunks);
+    }
+    assert_eq!(
+        vec![
+            (named(&first), Some(0), 1, false),
+            (named(&first), Some(1), 1, true),
+        ],
+        summaries(&outputs[routing.output(&first)]),
+        "the first input's chain is routed, whole and in order, to the output its own labels name"
+    );
+    assert_eq!(
+        vec![
+            (named(&second), Some(0), 1, false),
+            (named(&second), Some(1), 1, true),
+        ],
+        summaries(&outputs[routing.output(&second)]),
+        "and the second input's chain to its own output, neither decision waiting on the other"
+    );
+}
+
+/// The chunks each partition of a [`Together`] child has handed over so far.
+#[derive(Default)]
+struct FirstChunks {
+    /// Whether each partition handed over its first chunk, by partition.
+    handed: Mutex<Vec<bool>>,
+    /// The streams parked until the partitions that have not handed theirs over do.
+    wakers: Mutex<Vec<Waker>>,
+}
+
+impl FirstChunks {
+    fn new(partitions: usize) -> Arc<Self> {
+        Arc::new(Self {
+            handed: Mutex::new(vec![false; partitions]),
+            wakers: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Records that `partition` handed over its first chunk, and wakes what waited for it.
+    fn handed(&self, partition: usize) {
+        self.handed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())[partition] = true;
+        for waker in std::mem::take(
+            &mut *self
+                .wakers
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        ) {
+            waker.wake();
+        }
+    }
+
+    /// Whether every partition handed over its first chunk.
+    fn all(&self) -> bool {
+        self.handed
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .all(|handed| *handed)
+    }
+
+    /// Parks `cx` until every partition has, unless they already have.
+    fn wait(&self, cx: &Context<'_>) {
+        if self.all() {
+            return;
+        }
+        self.wakers
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(cx.waker().clone());
+        if self.all() {
+            // The last partition handed its chunk over between the two reads, so its wake did not
+            // find this waker.
+            cx.waker().wake_by_ref();
+        }
+    }
+}
+
+/// A child each of whose partitions hands over a second chunk only once every partition handed over a
+/// first.
+///
+/// This is the gate T-E6 is built on: progress through one partition's chain requires the other
+/// partition to have progressed too, which is only possible if both are read at the same time. It is a
+/// rendezvous between inputs, not a stopwatch: nothing about it depends on two threads running at
+/// once.
+struct Together {
+    steps: Vec<Vec<Step>>,
+    chunks: Arc<FirstChunks>,
+    series_schema: Arc<SeriesSchema>,
+    properties: Arc<PlanProperties>,
+}
+
+impl Together {
+    /// The child over `steps`, one partition per list.
+    fn plan(steps: Vec<Vec<Step>>) -> Arc<dyn ExecutionPlan> {
+        let series_schema = schema();
+        let frame = pack_evaluated_series(
+            Box::pin(futures::stream::empty()),
+            Arc::clone(&series_schema),
+        )
+        .expect("an evaluated schema declares a frame")
+        .schema();
+        let properties = Arc::new(PlanProperties::new(
+            EquivalenceProperties::new(frame),
+            Partitioning::UnknownPartitioning(steps.len()),
+            EmissionType::Incremental,
+            Boundedness::Bounded,
+        ));
+        Arc::new(Self {
+            chunks: FirstChunks::new(steps.len()),
+            steps,
+            series_schema,
+            properties,
+        })
+    }
+}
+
+impl fmt::Debug for Together {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Together")
+            .field("partitions", &self.steps.len())
+            .finish()
+    }
+}
+
+impl DisplayAs for Together {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+        write!(f, "Together: partitions={}", self.steps.len())
+    }
+}
+
+impl ExecutionPlan for Together {
+    fn name(&self) -> &str {
+        "Together"
+    }
+
+    fn properties(&self) -> &Arc<PlanProperties> {
+        &self.properties
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+        Vec::new()
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn ExecutionPlan>>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        assert!(children.is_empty(), "a together child has no children");
+        Ok(self)
+    }
+
+    fn execute(
+        &self,
+        partition: usize,
+        _context: Arc<TaskContext>,
+    ) -> DataFusionResult<SendableRecordBatchStream> {
+        let steps = self.steps.get(partition).cloned().ok_or_else(|| {
+            DataFusionError::Execution(format!("together child has no partition {partition}"))
+        })?;
+        pack_evaluated_series(
+            Box::pin(TogetherScript {
+                partition,
+                steps: steps.into_iter(),
+                chunks: Arc::clone(&self.chunks),
+                handed: false,
+            }),
+            Arc::clone(&self.series_schema),
+        )
+    }
+}
+
+/// One partition of a [`Together`] child.
+struct TogetherScript {
+    partition: usize,
+    steps: std::vec::IntoIter<Step>,
+    chunks: Arc<FirstChunks>,
+    /// Whether this partition handed over its first chunk already.
+    handed: bool,
+}
+
+impl Stream for TogetherScript {
+    type Item = Result<(Series, bool), BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = &mut *self;
+        if this.handed {
+            // Everything after the first chunk waits for the other partitions to have handed theirs
+            // over, so this stream cannot be read past its first chunk on its own.
+            this.chunks.wait(cx);
+            if !this.chunks.all() {
+                return Poll::Pending;
+            }
+        }
+        match this.steps.next() {
+            Some(step) => {
+                if !this.handed {
+                    this.handed = true;
+                    this.chunks.handed(this.partition);
+                }
+                Poll::Ready(Some(step_answer(step)))
+            }
+            None => Poll::Ready(None),
+        }
+    }
 }

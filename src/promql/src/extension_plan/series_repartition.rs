@@ -45,62 +45,91 @@
 //! one label set, each valid on its own, violate that if their chunks interleave on one output: the
 //! merge would refuse the stream, or a coarser reader would sort two series into a plausible answer.
 //!
-//! So the node only changes which input partition it reads at a chain boundary: once a chain is open
-//! the chunk that closes it is read from the same input first, and every chunk of that chain goes to
-//! the one output its label set hashes to before any other chain's chunk is emitted there. Only the
-//! routing makes that choice, and it makes it over chunks that are already computed.
+//! So a chain is the unit of routing, not a chunk: an input task reads its child until the chunk that
+//! closes the chain it is assembling - or until its stream ends - and hands the whole chain to the one
+//! output its label set hashes to, in one step. Two sources' chains may reach one output in either
+//! order, but never inside one another, so an output is still a run of whole chains. That is what the
+//! node handed downstream when one routing task served every input and only switched input at a chain
+//! boundary, and it is what a downstream merge relies on.
+//!
+//! What that costs is stated rather than hidden. Nothing of a chain is handed over before the chain
+//! closes, so the first chunk of a series reaches its output later than a chunk-at-a-time design would
+//! deliver it, and a long chain occupies memory for as long as it is being read. Those bytes are
+//! charged to a [`MemoryConsumer`] as the chain grows, so a pool under pressure ends the read with an
+//! error instead of letting a chain grow without bound: the node refuses, it does not spin and it does
+//! not buffer past the pool's limit.
+//!
+//! The alternative - routing one chunk at a time - would need a channel per (input, output) pair to
+//! keep two sources' partial chains from interleaving on one shared output queue, which is N x M
+//! channels plus a reader for each of them. That complexity is deliberately not taken here: a whole
+//! chain per handover gets every output the same order with one queue per output.
 //!
 //! # Where the reads run
 //!
-//! Every child partition is read on a task of its own - see [`Forwarders`] - and the routing task
-//! only moves what those tasks have already computed. That is not an optimisation of the routing: an
-//! evaluated partition is one stream whose computation happens inside its `poll_next`, so a single
-//! task polling every partition in turn runs the child's native kernels for all of them itself, one
-//! chunk at a time, and the partition count the child declared buys no parallelism at all. One reader
-//! per partition is what keeps that computation where DataFusion put it; the routing task waits on
-//! one partition's queue at a time, and the partitions it is not reading compute ahead into their own
-//! queues meanwhile.
+//! One task per child partition, and no task above them: each input's task reads its own child,
+//! assembles that input's chains and sends them to their owners itself. No task makes a routing
+//! decision for another input, and nothing rotates over the inputs.
 //!
-//! The chain rule above lives in the routing task and nowhere else: a partition's reader knows
-//! nothing about chains, and the routing task never interleaves two open chains into one output.
+//! That is not an optimisation of the routing: an evaluated partition is one stream whose computation
+//! happens inside its `poll_next`, so a task polling every partition in turn runs the child's native
+//! kernels for all of them itself, one chunk at a time, and the partition count the child declared
+//! buys no parallelism at all. It is also what makes progress local, which is what this node needs
+//! when two of them are composed:
+//!
+//! - A partial chain never occupies a shared output queue, so no output waits for a continuation: a
+//!   chain is either fully assembled in the input task that read it, or not sent at all.
+//! - An input task can only be parked on (a) its own child, or (b) a full output queue. (b) is
+//!   relieved by the DataFusion contract that every output partition is polled - see the caller
+//!   requirements below - and (a) depends on that input's own upstream progress and nothing else.
+//! - The tasks share no lock while routing and never wait on each other, so no task's progress is a
+//!   precondition of another's.
+//!
+//! A single task routing every input broke all three: it parked on the queue of one output while
+//! holding the reads of every input, so an input that could have answered was not read until that
+//! queue moved, and a composed node whose first input's stream only closes when the reader finishes
+//! stalled outright.
 //!
 //! # Caller requirements
 //!
-//! **Every output partition MUST be polled, and they must be polled concurrently enough that one
-//! slow output cannot hold all the others indefinitely.**
+//! **Every output partition MUST be polled.**
 //!
-//! One routing task serves all outputs. There is no scheduler behind it and it does not reorder work
-//! around a slow output, so the read stops at the slowest one. Concretely:
+//! Each input task suspends on a full output queue rather than dropping what belongs there, so an
+//! output nobody polls keeps the input tasks whose chains hash to it parked. Concretely:
 //!
-//! - **Poll every partition.** A plan that consumes some output partitions and never touches the
-//!   others will not finish: once an unread output's queue fills, the read suspends and every other
-//!   output stops receiving too. This node does not spill and does not drop to make progress.
+//! - **Poll every partition.** Once an unread output's queue fills, every input task with a chain for
+//!   it stops there, and what those inputs owe the other outputs stops with them. This node does not
+//!   spill and does not drop to make progress.
 //! - **Do not drain one partition to its end before polling the rest, unless what is routed to the
 //!   others fits their queues.** A consumer that finishes partition 0 before it looks at partition 1
-//!   deadlocks as soon as partition 1's queue fills: partition 0 cannot reach its end until the read
-//!   finishes, and the read cannot finish while it is parked on a queue nobody drains. What an output
-//!   ends with before that point ends nothing else - an output nobody has claimed yet stays claimable
-//!   and the read keeps running for it, since it has not been handed out yet. Polling the partitions
-//!   in turn - which is what a DataFusion executor does - is enough; they need not be on separate
-//!   tasks.
-//! - **Dropping an output is not the same as leaving it unread.** The read stops routing to a dropped
-//!   output instead of suspending on it, because a queue nobody will drain is not worth waiting for,
-//!   and a plan that dropped one of its own outputs is being torn down. If chunks read for it were
-//!   never delivered, the outputs that are still being read end with an error saying so rather than
-//!   with an end: the read did not finish.
+//!   stalls as soon as partition 1's queue fills: the input tasks holding chains for partition 1 are
+//!   parked on it, and partition 0's remaining chunks are behind them. What an output ends with
+//!   before that point ends nothing else - an output nobody has claimed yet stays claimable and the
+//!   read keeps running for it, since it has not been handed out yet. Polling the partitions in turn
+//!   - which is what a DataFusion executor does - is enough; they need not be on separate tasks.
+//! - **Dropping an output is not the same as leaving it unread.** An input task stops routing to a
+//!   dropped output instead of suspending on it, because a queue nobody will drain is not worth
+//!   waiting for, and a plan that dropped one of its own outputs is being torn down. If chains read
+//!   for it were never delivered, the outputs that are still being read end with an error saying so
+//!   rather than with an end: the read did not finish.
 //!
 //! # Memory, backpressure and end of stream
 //!
-//! Each output has a bounded channel of [`OUTPUT_CAPACITY`] **chunks** - a bound on how far the read
-//! may run ahead of a consumer, not a bound on bytes. Every queued chunk is charged to a
-//! [`MemoryConsumer`] on the task context's pool, the charge travels with the chunk and is released
-//! when a consumer takes it or drops it, so bytes are bounded by the pool refusing to grow rather
-//! than by the queue length.
+//! Each output has a bounded channel of [`OUTPUT_CAPACITY`] **chains** - a bound on how far the read
+//! may run ahead of a consumer, not a bound on bytes - and each input task holds at most the one chain
+//! it is assembling. Every queued chain is charged to a [`MemoryConsumer`] on the task context's pool,
+//! the charge travels with the chain and is released when a consumer takes it or drops it, so bytes
+//! are bounded by the pool refusing to grow rather than by the queue length. A pool that refuses a
+//! chain ends the read with that error, because waiting for memory that will not come is not progress.
 //!
-//! An output ends only when every input partition finished and every chunk routed to it was handed
-//! over; a chain that closed locally is not the end of anything. If the child errors, every output
-//! receives that error as its terminal item rather than a clean end, because an end would report the
-//! series that never arrived as series that do not exist.
+//! An output ends only when every input partition finished and every chain routed to it was handed
+//! over; a chain that closed locally is not the end of anything. With one task per input there is no
+//! longer a single place that sees every input finish, so the tasks count themselves down: the one
+//! that counts the last of the others off records that the read finished, and returning is what drops
+//! the last sender and closes the queues - so an output woken by the close reads the outcome instead
+//! of finding nothing there. If the child errors, every output receives that error as its terminal
+//! item rather than a clean end, because an end would report the series that never arrived as series
+//! that do not exist; the failing task records the failure before it hands the error over, and the
+//! remaining input tasks are aborted rather than read to an end nobody asked for.
 //!
 //! A queue closing is not by itself that end: it also closes when the read is stopped - aborted, or
 //! panicked - and a stopped read is missing exactly what it did not route. The read therefore records
@@ -130,7 +159,7 @@ use common_query::series_frame::{
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::EmissionType;
 use datafusion::physical_plan::{
@@ -149,21 +178,14 @@ use crate::grid_series::{label_set, series_bytes};
 #[cfg(test)]
 mod tests;
 
-/// How many chunks one output partition queues before the producer suspends on it.
+/// How many whole chains one output partition queues before an input task suspends on it.
 ///
-/// This bounds read-ahead, NOT memory: the chunks are already-decoded evaluated slices, so four of
+/// This bounds read-ahead, NOT memory: the chains are already-decoded evaluated slices, so four of
 /// them can still be large, and what actually bounds the bytes is the [`MemoryConsumer`] on the
 /// task context's pool refusing to grow. Small and fixed because queue depth buys little here and
 /// the sooner a slow consumer stops the read, the sooner the memory it would have taken is not
 /// taken.
 const OUTPUT_CAPACITY: usize = 4;
-
-/// How many chunks one input partition queues ahead of the routing task.
-///
-/// With the one its task holds while the queue is full, a partition reads at most this many plus one
-/// chunks ahead: small, so that a chatty partition cannot pull a whole scan into memory while the
-/// routing task is parked on an output nobody is draining.
-const INPUT_CAPACITY: usize = 2;
 
 /// The seed behind every routing decision.
 ///
@@ -369,6 +391,8 @@ impl ExecutionPlan for SeriesRepartitionExec {
         pack_evaluated_series(
             Box::pin(RepartitionStream {
                 receiver,
+                // Nothing of a chain is read from the queue yet.
+                chain: Vec::new().into_iter(),
                 lease,
                 reported: false,
             }),
@@ -383,19 +407,20 @@ impl ExecutionPlan for SeriesRepartitionExec {
 /// owns lives while any of them does - which is what makes it survive the plan - and what stops it is
 /// [`Running::claimed`] and [`Running::remaining`] both reaching zero, or the state itself going away.
 struct SharedExecution {
-    /// The queues, the task filling them, and how many of the execution's outputs the read still has.
+    /// The queues, the tasks filling them, and how many of the execution's outputs the read still has.
     running: Mutex<Running>,
     /// How the read ended, for an output whose queue has closed to read.
     ending: Arc<Mutex<Ending>>,
 }
 
-/// What one execution holds that has to be stopped together.
+/// What one execution's state holds that has to be stopped together.
 struct Running {
     /// One receiver per output partition, taken by the `execute` call of that partition. A receiver
-    /// that is never taken stays here, which is what makes its queue fill and the read suspend.
+    /// that is never taken stays here, which is what makes its queue fill and the input tasks whose
+    /// chains belong there suspend.
     receivers: Vec<Option<mpsc::Receiver<Queued>>>,
-    /// The task routing the child's partitions into those queues.
-    producer: common_runtime::JoinHandle<()>,
+    /// The tasks reading the child's partitions into those queues, and how many of them are left.
+    inputs: Arc<Inputs>,
     /// How many output streams were handed out and are not yet released.
     ///
     /// Counted rather than derived from a reference count, because the plan holds this state too and
@@ -413,7 +438,7 @@ struct Running {
 }
 
 impl Running {
-    /// Stops the read: every queue nobody took is dropped and the task filling them is aborted.
+    /// Stops the read: every queue nobody took is dropped and every input task is aborted.
     ///
     /// Idempotent - the queues are already gone on a second call, and aborting a finished or already
     /// aborted task is a no-op. Dropping the queues of outputs that were never handed out is part of
@@ -423,20 +448,25 @@ impl Running {
         self.receivers.clear();
         // Aborting a read that has not recorded an outcome is what the outputs still open have to
         // see: nothing was recorded, so the end they read is "the producer stopped unexpectedly".
-        self.producer.abort();
+        self.inputs.stop();
     }
 }
 
 impl SharedExecution {
     /// Starts reading every partition of `input` into `routing`'s outputs on `context`'s pool.
+    ///
+    /// One task per child partition, started here: the child's computation happens inside its own
+    /// `poll_next`, so a partition read on a task of another partition would run there, and the
+    /// partition count the child declared would buy no parallelism at all.
     fn start(
         input: &Arc<dyn ExecutionPlan>,
         routing: Routing,
         series_schema: Arc<SeriesSchema>,
         context: &Arc<TaskContext>,
     ) -> DataFusionResult<Arc<Self>> {
-        let mut streams = Vec::with_capacity(input.properties().partitioning.partition_count());
-        for child_partition in 0..input.properties().partitioning.partition_count() {
+        let partitions = input.properties().partitioning.partition_count();
+        let mut streams = Vec::with_capacity(partitions);
+        for child_partition in 0..partitions {
             let frames = input.execute(child_partition, Arc::clone(context))?;
             // The expected schema is a check and never an input: the decoder reads the frame's own
             // declaration, and a partition declaring another frame is refused here rather than
@@ -446,9 +476,6 @@ impl SharedExecution {
                 Some(Arc::clone(&series_schema)),
             )?);
         }
-        // From here on each partition is read on its own task, so what the routing task moves has
-        // already been computed where the child's own partitioning put it.
-        let forwarders = Forwarders::start(streams, &context.runtime_env().memory_pool);
         let mut senders = Vec::with_capacity(routing.outputs);
         let mut receivers = Vec::with_capacity(routing.outputs);
         for _ in 0..routing.outputs {
@@ -457,12 +484,35 @@ impl SharedExecution {
             receivers.push(Some(receiver));
         }
         let ending = Arc::new(Mutex::new(Ending::Unrecorded));
-        let producer =
-            common_runtime::spawn_query(produce(forwarders, senders, routing, Arc::clone(&ending)));
+        let inputs = Inputs::new(Arc::clone(&ending), partitions);
+        // A child with no partitions has nothing to read, so the read finished before it started: the
+        // count that the last input task would bring to zero is already there.
+        if partitions == 0 {
+            inputs.record(Ending::Finished);
+        }
+        let pool = Arc::clone(&context.runtime_env().memory_pool);
+        for (partition, stream) in streams.into_iter().enumerate() {
+            // Each task is handed its own copy of the senders rather than a lock over one copy: a
+            // send is then a send of its own, and the queues close when the last task returns instead
+            // of when some shared lock says so.
+            let task = common_runtime::spawn_query(route_partition(
+                stream,
+                partition,
+                routing,
+                senders.clone(),
+                // What this partition reads ahead is charged to its own consumer, so the read-ahead
+                // of one partition is attributable to the task that did it.
+                MemoryConsumer::new("SeriesRepartitionInput").register(&pool),
+                Arc::clone(&inputs),
+            ));
+            inputs.attach(partition, task);
+        }
+        // This copy is dropped before any output exists, so it is no part of when the queues close.
+        drop(senders);
         Ok(Arc::new(Self {
             running: Mutex::new(Running {
                 receivers,
-                producer,
+                inputs,
                 // No output is handed out yet: every one of them is still to be claimed.
                 claimed: 0,
                 remaining: routing.outputs,
@@ -506,9 +556,9 @@ impl SharedExecution {
     /// output that is released is one that finished being read, and the outputs nobody has claimed
     /// yet are ones a later `execute` will still claim. The read may stop only when both are
     /// impossible - no output is being read ([`claimed`](Running::claimed) is zero) and none is left
-    /// to hand out ([`remaining`](Running::remaining) is zero) - so a producer parked on the queue of
-    /// an output that has not been claimed yet keeps waiting: that is backpressure on a consumer that
-    /// is still coming, not a read with nowhere to go.
+    /// to hand out ([`remaining`](Running::remaining) is zero) - so an input task parked on the queue
+    /// of an output that has not been claimed yet keeps waiting: that is backpressure on a consumer
+    /// that is still coming, not a read with nowhere to go.
     fn release_output(&self) {
         let mut running = self
             .running
@@ -552,79 +602,275 @@ impl Drop for SharedExecution {
     }
 }
 
-/// The tasks that read one child partition each, and the queues they fill.
+/// The input tasks of one read: what is left of them, and what the last of them records.
 ///
-/// A partition's computation happens inside its own `poll_next`, so polling two partitions from one
-/// task runs their kernels one after another on that task, whatever the child declared about its
-/// partition count. Each partition is therefore driven on a task of its own - the way
-/// `series_gather::spawn_partitions` drives the streams of its input - and the routing task only
-/// moves chunks that are already computed.
-struct Forwarders {
-    /// The queue of each partition, in partition order.
-    readers: Vec<InputReader>,
-    /// The task of each partition, taken when its queue has closed and the task was accounted for.
-    tasks: Vec<Option<common_runtime::JoinHandle<()>>>,
+/// There is one task per child partition and no task above them, so there is no longer one place that
+/// sees every input finish and no producer whose return closes the queues. This is that place
+/// instead: the tasks count themselves down, and the task that counts the last of the others off
+/// records that the read finished and then returns - returning is what drops its senders, so the
+/// record is made before the queues close, and an output woken by their closing reads the outcome
+/// instead of finding nothing there.
+struct Inputs {
+    /// The tasks themselves, and the count of those that have not stopped.
+    state: Mutex<InputState>,
+    /// How the read ended, for an output whose queue has closed to read.
+    ending: Arc<Mutex<Ending>>,
 }
 
-impl Drop for Forwarders {
-    fn drop(&mut self) {
-        // A reader parked on a queue nobody will drain, or on a scan, must not outlive the read that
-        // asked for it. Dropping this guard is what cancels the upstream child.
-        for task in self.tasks.iter().flatten() {
-            task.abort();
+/// What [`Inputs`] guards.
+struct InputState {
+    /// The task of each input partition, by partition, `None` once it stopped.
+    ///
+    /// Kept rather than dropped so that the read can be stopped as a whole, and so that the first task
+    /// to fail can abort the rest: a partition whose peer already failed has nothing left to route
+    /// that an output would still take.
+    tasks: Vec<Option<common_runtime::JoinHandle<()>>>,
+    /// How many of those tasks have not stopped yet.
+    live: usize,
+    /// Whether the read was stopped from outside - every output is gone, or the plan's state went
+    /// away. It is the one thing that keeps the last task from recording that the read finished: a
+    /// stopped read never finished, and the outputs that wake on the close of their queues must say
+    /// so rather than report a complete answer.
+    stopped: bool,
+}
+
+impl Inputs {
+    /// The bookkeeping of a read over `partitions` input partitions.
+    fn new(ending: Arc<Mutex<Ending>>, partitions: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(InputState {
+                tasks: (0..partitions).map(|_| None).collect(),
+                live: partitions,
+                stopped: false,
+            }),
+            ending,
+        })
+    }
+
+    /// Gives `task` the slot of `partition`, so that the read can still abort it.
+    ///
+    /// Stored even if the task has already stopped - a partition that answers at once can return
+    /// before its handle is stored - because the slot is only consulted to stop what is still running,
+    /// and aborting a finished task is a no-op.
+    fn attach(&self, partition: usize, task: common_runtime::JoinHandle<()>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.tasks[partition] = Some(task);
+    }
+
+    /// Records that `partition` ended, and that the read finished if it was the last one running.
+    ///
+    /// Nothing is recorded when the read was stopped from outside: its tasks do not reach this point,
+    /// and one that gets here anyway must not turn a stopped read into a finished one.
+    fn ended(&self, partition: usize) {
+        if self.count_out(partition) {
+            self.record(Ending::Finished);
         }
+    }
+
+    /// Records that the chain this partition was routing had no output left to be delivered to.
+    ///
+    /// Nothing is recorded as finished here, whatever the other partitions go on to do: the read lost
+    /// the chains that output would have carried, so it did not finish.
+    fn abandoned(&self, partition: usize) {
+        self.record(Ending::Abandoned);
+        self.count_out(partition);
+    }
+
+    /// Records that `partition` failed, hands the failure to every output, and stops the rest.
+    ///
+    /// The failure is recorded first: the queues close when the last task returns, and an output
+    /// woken by that has to read that the read failed rather than read nothing. Every output then
+    /// receives the error as a terminal item, so an output that was still being read cannot mistake
+    /// the failure for an end - and the other input tasks are aborted, because what they would still
+    /// route belongs to a read that has already failed.
+    async fn failed(
+        &self,
+        partition: usize,
+        error: &Arc<DataFusionError>,
+        senders: &[mpsc::Sender<Queued>],
+    ) {
+        self.record(Ending::Failed);
+        self.abort_others(partition);
+        for sender in senders {
+            // Ignored: an output that is gone has nobody left to tell, and one whose queue is full
+            // is drained by the consumer that owns it.
+            let _ = sender.send(Err(Arc::clone(error))).await;
+        }
+        self.count_out(partition);
+    }
+
+    /// Counts `partition` off the read, and says whether it was the last task still running.
+    fn count_out(&self, partition: usize) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        // Taken and dropped: this task is the one stopping, and holding its own handle would leave the
+        // read waiting for a task that has already finished. Saturating because a task that was
+        // stopped from outside may still reach this after [`stop`](Self::stop) counted it off.
+        state.tasks[partition] = None;
+        state.live = state.live.saturating_sub(1);
+        state.live == 0 && !state.stopped
+    }
+
+    /// Aborts every input task but `partition`'s own.
+    fn abort_others(&self, partition: usize) {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        for (index, task) in state.tasks.iter().enumerate() {
+            // Aborting a task that already stopped is a no-op, so the finished ones cost nothing
+            // here.
+            if index != partition
+                && let Some(task) = task
+            {
+                task.abort();
+            }
+        }
+    }
+
+    /// Stops every input task that has not stopped yet, and counts the read as stopped.
+    ///
+    /// The count is set rather than left to the tasks: an aborted task does not run its own
+    /// bookkeeping, and a read whose tasks were aborted never reached an end of its own.
+    fn stop(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.stopped = true;
+        state.live = 0;
+        for task in state.tasks.iter_mut() {
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+    }
+
+    /// Records `outcome` as how the read ended, unless an outcome that outranks it is already there.
+    ///
+    /// A failure outranks everything: it is the only ending whose error is handed to every output, and
+    /// nothing may replace it. Nothing outranks a recorded ending either, so the first task to record
+    /// `Abandoned` or `Finished` is the one reported - a read that lost chains to a dropped output did
+    /// not finish, whatever the other partitions went on to do.
+    fn record(&self, outcome: Ending) {
+        let mut ending = self
+            .ending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match outcome {
+            Ending::Failed => *ending = Ending::Failed,
+            _ if matches!(*ending, Ending::Unrecorded) => *ending = outcome,
+            _ => {}
+        }
+    }
+
+    /// How many input tasks have not stopped, which is what a test sees the read stop by.
+    #[cfg(test)]
+    fn live(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .live
     }
 }
 
-impl Forwarders {
-    /// Starts one task per child partition.
-    ///
-    /// One partition gets a task of its own as well, unlike `series_gather::spawn_partitions`: the
-    /// routing task must never run the child's computation, and a single partition read there would
-    /// be exactly that.
-    fn start(streams: Vec<SendableEvaluatedSeriesStream>, pool: &Arc<dyn MemoryPool>) -> Self {
-        let mut readers = Vec::with_capacity(streams.len());
-        let mut tasks = Vec::with_capacity(streams.len());
-        for mut stream in streams {
-            // What this partition read ahead is charged to this partition's own consumer, so the
-            // read-ahead of one partition is attributable to the task that did it.
-            let reservation = MemoryConsumer::new("SeriesRepartitionInput").register(pool);
-            let (sender, receiver) = mpsc::channel(INPUT_CAPACITY);
-            let task = common_runtime::spawn_query(async move {
-                while let Some(item) = stream.next().await {
-                    let item = item
-                        .map_err(|error| Arc::new(DataFusionError::External(Box::new(error))))
-                        .and_then(|(series, is_last)| {
-                            let charge = reservation.new_empty();
-                            charge
-                                .try_grow(series_bytes(&series))
-                                .map_err(Arc::new)
-                                .map(|()| (series, is_last, charge))
-                        });
-                    // A partition that failed has said everything it will: the error is the last
-                    // item it hands over.
-                    let failed = item.is_err();
-                    if sender.send(item).await.is_err() || failed {
-                        return;
+/// One input partition's task: reads its own child, one whole chain at a time, and hands each chain
+/// to the output its canonical label set hashes to.
+///
+/// This is the whole of that input's routing. Nothing here reads another partition, waits for another
+/// task's decision, or holds a lock another task takes, so the two things it can be parked on are its
+/// own child and a full output queue - and neither can be waiting on another input's progress.
+///
+/// What it saw is recorded before it returns, and returning is what drops its senders: the queues
+/// close only once every task has done that, so the outcome is in place before anything can be woken
+/// by a close.
+async fn route_partition(
+    mut stream: SendableEvaluatedSeriesStream,
+    partition: usize,
+    routing: Routing,
+    senders: Vec<mpsc::Sender<Queued>>,
+    read_ahead: MemoryReservation,
+    inputs: Arc<Inputs>,
+) {
+    let stop = read_chains(&mut stream, &routing, &senders, &read_ahead).await;
+    match &stop {
+        Stop::Ended => inputs.ended(partition),
+        Stop::Abandoned => inputs.abandoned(partition),
+        Stop::Failed(error) => inputs.failed(partition, error, &senders).await,
+    }
+}
+
+/// Why one input task stopped reading its partition.
+enum Stop {
+    /// The partition ended: every chunk it had was read and handed to the output it belongs on.
+    Ended,
+    /// The output that should have taken a chain was gone, so the chain was never delivered.
+    Abandoned,
+    /// The partition failed, or a chain could not be buffered: every output has to learn that.
+    Failed(Arc<DataFusionError>),
+}
+
+/// Reads one input partition to its end, one whole chain at a time, routing each chain as it closes.
+///
+/// A chain is assembled here and handed over as one unit, which is what keeps a shared output queue
+/// from holding half of one series while another source's chain is open on it: the queue carries whole
+/// chains, so two inputs can order them differently but never interleave them. The price is paid on
+/// this side of the queue - nothing of a chain is sent before the chain closes, and a long chain is
+/// held for as long as it is being read - and it is charged to the pool as it grows.
+///
+/// What this function can be parked on is its own child or a full output queue. The queue is drained
+/// by whoever polls that output, which is the DataFusion contract the module documents; the child is
+/// driven by nothing but this task. It never waits on another input's task.
+async fn read_chains(
+    stream: &mut SendableEvaluatedSeriesStream,
+    routing: &Routing,
+    senders: &[mpsc::Sender<Queued>],
+    read_ahead: &MemoryReservation,
+) -> Stop {
+    loop {
+        // One whole chain, assembled here: the chunk that closes the series ends it, and so does a
+        // stream that ends between two chains.
+        let mut chain: Chain = Vec::new();
+        let mut ended = false;
+        loop {
+            match stream.next().await {
+                Some(Ok((series, is_last))) => {
+                    // Charged as the chain grows, so a chain that does not fit the pool is refused
+                    // here rather than after it has been held.
+                    let charge = read_ahead.new_empty();
+                    if let Err(error) = charge.try_grow(series_bytes(&series)) {
+                        return Stop::Failed(Arc::new(error));
+                    }
+                    chain.push((series, is_last, charge));
+                    if is_last {
+                        break;
                     }
                 }
-            });
-            readers.push(InputReader {
-                receiver,
-                ended: false,
-            });
-            tasks.push(Some(task));
+                Some(Err(error)) => {
+                    // The error is the last thing this partition says: it is handed to every output
+                    // rather than ending this one task quietly.
+                    return Stop::Failed(Arc::new(DataFusionError::External(Box::new(error))));
+                }
+                None => {
+                    ended = true;
+                    break;
+                }
+            }
         }
-        Self { readers, tasks }
+        if ended {
+            // A partition that ends is a partition with nothing left to route - unless it ended
+            // inside a chain, which no later chunk can close. The decoders refuse that, so this is a
+            // producer that bypassed them, and its output would hold a series no chunk can close.
+            return if chain.is_empty() {
+                Stop::Ended
+            } else {
+                Stop::Failed(Arc::new(DataFusionError::Execution(
+                    "series repartition input ended with its series open".to_string(),
+                )))
+            };
+        }
+        // One hash per chain, over the labels of its first chunk: the chunks of a chain are one
+        // series, so the first of them names the output for all of them.
+        let output = routing.output(&chain[0].0.metric);
+        if senders[output].send(Ok(chain)).await.is_err() {
+            // The output was dropped, so nothing it would have received is wanted: this task stops
+            // instead of waiting on a queue nobody will drain.
+            return Stop::Abandoned;
+        }
     }
-}
-
-/// One input partition's queue, as the routing task reads it.
-struct InputReader {
-    /// What the partition's task has read and not yet handed over.
-    receiver: mpsc::Receiver<Queued>,
-    /// Whether the partition ended, which its queue closing is the sign of.
-    ended: bool,
 }
 
 /// What one output stream holds so that the read belongs to the streams rather than to the plan.
@@ -685,145 +931,30 @@ enum Ending {
     Failed,
 }
 
-/// Reads every child partition, one chain at a time, and routes each chunk it reads.
+/// One whole chain of one series: its chunks from the one that opened it to the one that closed it,
+/// each with the bytes it is charged.
 ///
-/// The input being read only changes at a chain boundary: once a chunk leaves a series open, the
-/// same input is read until the chunk that closes it, and every chunk of that chain therefore
-/// reaches one output before another chain's chunk reaches it. Which input a boundary hands the read
-/// to is the next partition that has not ended, so a chatty input cannot starve a quiet one.
+/// This is what an output queue carries, and that is deliberate. A downstream frame reader needs one
+/// series' chunks contiguous, so a queue of chunks would let two sources' partial chains interleave on
+/// one output; a queue of chains cannot, whatever order the sources happen to send in.
+type Chain = Vec<(Series, bool, MemoryReservation)>;
+
+/// What one output queue carries: a whole chain, charged for the bytes it holds, or the error that
+/// ended one input partition's read.
 ///
-/// The chunks are taken from per-partition queues, never from the child itself: what this task does
-/// is routing, and the child's computation stays on the tasks [`Forwarders`] started.
-async fn produce(
-    mut forwarders: Forwarders,
-    senders: Vec<mpsc::Sender<Queued>>,
-    routing: Routing,
-    ending: Arc<Mutex<Ending>>,
-) {
-    let read = read_all(&mut forwarders, &senders, routing).await;
-    let outcome = match &read {
-        Ok(Read::Whole) => Ending::Finished,
-        Ok(Read::Abandoned) => Ending::Abandoned,
-        Err(error) => {
-            // Every output has to learn that the child failed: an end of stream would report the
-            // series that never arrived as series that do not exist, which is the one answer a merge
-            // cannot tell from a real one.
-            for sender in &senders {
-                let _ = sender.send(Err(Arc::clone(error))).await;
-            }
-            Ending::Failed
-        }
-    };
-    // The outcome is recorded before the queues are dropped, so an output woken by their closing
-    // reads how the read ended instead of finding nothing there.
-    *ending.lock().unwrap_or_else(|error| error.into_inner()) = outcome;
-    drop(senders);
-    // Whatever partition was still being read is not wanted either, and dropping this is what
-    // cancels it.
-    drop(forwarders);
-}
+/// The charge a partition's task took is handed on with the chain it is for, so what one output has
+/// queued is exactly what the pool has reserved for it.
+type Queued = Result<Chain, Arc<DataFusionError>>;
 
-/// Why [`read_all`] stopped, when it stopped without failing.
-enum Read {
-    /// Every input partition ended and every chunk it routed was handed over.
-    Whole,
-    /// An output went away, so chunks read for it were never delivered and the read stops instead of
-    /// waiting on a queue nobody will drain.
-    Abandoned,
-}
-
-/// The read [`produce`] runs, and how it reports a child that failed or produced an illegal frame.
-///
-/// This is the same rotation it always was - the input being read only changes at a chain boundary -
-/// over chunks that the partitions' own tasks have already computed. Which partition is read next is
-/// decided here and only here, so the order chunks reach an output is a function of the child's own
-/// order and nothing else.
-async fn read_all(
-    forwarders: &mut Forwarders,
-    senders: &[mpsc::Sender<Queued>],
-    routing: Routing,
-) -> Result<Read, Arc<DataFusionError>> {
-    let Forwarders { readers, tasks } = forwarders;
-    let mut live = readers.len();
-    let mut index = 0;
-    // Whether the input being read has a series open, which only an input that ends inside one can
-    // make a problem.
-    let mut open = false;
-    while live > 0 {
-        if readers[index].ended {
-            index = next_live(index, readers);
-            continue;
-        }
-        // Waiting here is waiting on one partition's queue: the partition itself is being read on
-        // its own task, and the ones behind it keep computing into their queues while this read
-        // waits.
-        match readers[index].receiver.recv().await {
-            Some(Ok((series, is_last, charge))) => {
-                let output = routing.output(&series.metric);
-                if senders[output]
-                    .send(Ok((series, is_last, charge)))
-                    .await
-                    .is_err()
-                {
-                    // The output was dropped, so nothing it would have received is wanted: the read
-                    // stops instead of waiting on a queue nobody will drain.
-                    return Ok(Read::Abandoned);
-                }
-                if is_last {
-                    open = false;
-                    index = next_live(index, readers);
-                } else {
-                    open = true;
-                }
-            }
-            Some(Err(error)) => {
-                return Err(error);
-            }
-            None => {
-                // A closed queue is also how a task that stopped - panicked, or was aborted - is
-                // seen, and that must not read as a partition that ended: what it never handed over
-                // would be missing from an answer that claims to be complete.
-                if let Some(task) = tasks[index].take() {
-                    let joined = task.await;
-                    if let Err(error) = joined {
-                        return Err(Arc::new(DataFusionError::ExecutionJoin(Box::new(error))));
-                    }
-                }
-                // The decoders refuse a stream that ends with its series open, so this is a producer
-                // that bypassed them; its output would hold a series no later chunk can close.
-                if open {
-                    return Err(Arc::new(DataFusionError::Execution(
-                        "series repartition input ended with its series open".to_string(),
-                    )));
-                }
-                readers[index].ended = true;
-                live -= 1;
-                index = next_live(index, readers);
-            }
-        }
-    }
-    Ok(Read::Whole)
-}
-
-/// The first input after `index` that has not ended.
-fn next_live(index: usize, readers: &[InputReader]) -> usize {
-    let count = readers.len();
-    (1..=count)
-        .map(|step| (index + step) % count)
-        .find(|candidate| !readers[*candidate].ended)
-        .unwrap_or(index)
-}
-
-/// What one queue carries: a chunk with the bytes it is charged, or the error that ended the child.
-///
-/// The same item type travels on both hops - a partition's task to the routing task, and the routing
-/// task to an output - because the charge a partition took is handed on with the chunk it is for, so
-/// what one partition has queued, or one output has queued, is exactly what the pool has reserved.
-type Queued = Result<(Series, bool, MemoryReservation), Arc<DataFusionError>>;
-
-/// One output partition's stream: what the producer routed here, in the order it was routed.
+/// One output partition's stream: the chains routed here, handed over a chunk at a time.
 struct RepartitionStream {
     receiver: mpsc::Receiver<Queued>,
+    /// The chain being handed over, and how far into it this stream is.
+    ///
+    /// Taken off the queue as one unit and published one chunk per batch, so a consumer sees the same
+    /// chunks it always saw while what the queue held was a whole chain: the interleaving a chunk-wise
+    /// queue would allow has no way to happen after the fact.
+    chain: std::vec::IntoIter<(Series, bool, MemoryReservation)>,
     /// The read this stream is an output of.
     lease: OutputLease,
     /// Whether the end of the queue was already reported, so a poll after it is the end and not the
@@ -836,28 +967,31 @@ impl Stream for RepartitionStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        if this.reported {
-            return Poll::Ready(None);
-        }
-        match this.receiver.poll_recv(cx) {
-            Poll::Ready(Some(Ok((series, is_last, charge)))) => {
+        loop {
+            if let Some((series, is_last, charge)) = this.chain.next() {
                 // The chunk is no longer the node's to hold: whoever reads it owns it from here.
                 drop(charge);
-                Poll::Ready(Some(Ok((series, is_last))))
+                return Poll::Ready(Some(Ok((series, is_last))));
             }
-            // The error is shared rather than rebuilt, so every output reports the one failure the
-            // child answered with instead of M copies of its text.
-            Poll::Ready(Some(Err(error))) => {
-                Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))))
+            if this.reported {
+                return Poll::Ready(None);
             }
-            // The queue closing is not the end of the read on its own: aborting the read closes it
-            // too, and calling that an end would report every chunk it never routed as a chunk that
-            // does not exist. What the read recorded says which of the two this is.
-            Poll::Ready(None) => {
-                this.reported = true;
-                Poll::Ready(this.lease.ending())
+            match this.receiver.poll_recv(cx) {
+                Poll::Ready(Some(Ok(chain))) => this.chain = chain.into_iter(),
+                // The error is shared rather than rebuilt, so every output reports the one failure the
+                // child answered with instead of M copies of its text.
+                Poll::Ready(Some(Err(error))) => {
+                    return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
+                }
+                // The queue closing is not the end of the read on its own: aborting the read closes it
+                // too, and calling that an end would report every chunk it never routed as a chunk
+                // that does not exist. What the read recorded says which of the two this is.
+                Poll::Ready(None) => {
+                    this.reported = true;
+                    return Poll::Ready(this.lease.ending());
+                }
+                Poll::Pending => return Poll::Pending,
             }
-            Poll::Pending => Poll::Pending,
         }
     }
 }
