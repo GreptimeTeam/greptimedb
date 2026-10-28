@@ -345,7 +345,7 @@ async fn load_metadata_page(
     let (path, size) = object;
     metadata_cache::load(
         cache,
-        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}/{names:?}"),
+        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
         Page::retained_size,
         async {
             if reference.payload.encoding != 1 {

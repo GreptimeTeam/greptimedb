@@ -199,7 +199,23 @@ pub(super) struct Block {
     pub rows: u32,
     pub columns: Vec<Column>,
 }
+/// The ordering boundary retained between pages, without their column descriptors.
+#[derive(Clone, Copy)]
+pub(crate) struct BlockOrder {
+    id: MetricSeriesId,
+    max: i64,
+    ordinal: u64,
+}
+
 impl Block {
+    pub(crate) fn order(&self) -> BlockOrder {
+        BlockOrder {
+            id: self.id,
+            max: self.max,
+            ordinal: self.ordinal,
+        }
+    }
+
     pub fn bounds(&self) -> Bounds {
         Bounds {
             first: self.id,
@@ -308,7 +324,7 @@ impl Block {
             columns,
         })
     }
-    pub fn follows(&self, previous: &Self, adjacent: bool) -> Result<()> {
+    pub fn follows(&self, previous: &BlockOrder, adjacent: bool) -> Result<()> {
         require(previous.id <= self.id, "unordered sample identifiers")?;
         if self.id == previous.id {
             require(
@@ -403,7 +419,7 @@ impl Page {
                 for _ in 0..count {
                     let block = Block::decode(&mut c, manifest, payload_end, &mut end)?;
                     if let Some(previous) = blocks.last() {
-                        block.follows(previous, true)?;
+                        block.follows(&previous.order(), true)?;
                     }
                     blocks.push(block);
                 }

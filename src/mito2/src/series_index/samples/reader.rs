@@ -33,7 +33,7 @@ use crate::series_index::artifact::{ArtifactFormat, SamplesFileHandle};
 use crate::series_index::format::{SamplesFormatReader, SamplesReadRequest};
 use crate::series_index::samples::codec;
 use crate::series_index::samples::metadata::{
-    self, Block, Bounds, Column, Page, PageReference, Trailer,
+    self, Block, BlockOrder, Bounds, Column, Page, PageReference, Trailer,
 };
 use crate::series_index::samples::{
     MANIFEST_LIMIT, Manifest, MetricSeriesId, TimestampUnit, VERSION, invalid, require, unsupported,
@@ -211,7 +211,7 @@ impl SamplesFormatReader for SamplesReader {
         Ok(Box::pin(async_stream::try_stream! {
             let _handle = handle;
             if empty { return; }
-            let mut previous: Option<Block> = None;
+            let mut previous: Option<BlockOrder> = None;
             let mut adjacent = true;
             for part in &manifest.files {
                 let bounds = Bounds { first: part.first, last: part.last, min: part.min_timestamp, max: part.max_timestamp };
@@ -250,7 +250,7 @@ impl SamplesFormatReader for SamplesReader {
                             read_block(&store, &path, block, &manifest, &request, &projection, projected.clone()).await?
                         } else { None };
                         if let Some(batch) = batch { yield batch; }
-                        previous = Some(block.clone()); adjacent = true;
+                        previous = Some(block.order()); adjacent = true;
                     }
                 }
                 if complete { require(row_count == part.num_rows && block_count == part.num_blocks, "sample part totals mismatch")?; }
@@ -306,7 +306,7 @@ async fn load_metadata_page(
     let (path, size) = object;
     metadata_cache::load(
         cache,
-        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}/{manifest:?}"),
+        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
         Page::retained_size,
         async {
             if reference.payload.encoding != 1 {

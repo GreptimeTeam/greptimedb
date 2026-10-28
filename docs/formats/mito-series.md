@@ -554,10 +554,11 @@ bypass admission; entries larger than the decoded reservation are not retained.
 Weights include collection capacities, strings, keys, schema fields, and conservative
 BTree node overhead. Cached values own neither artifact pins nor live file readers.
 
-Keys include a process-local storage namespace tied to the loaded region, generation
-paths, object lengths, representation, and page reference/checksum/codec/validation
-context. Bounded async lock striping coalesces loads; failed or canceled loads do not
-populate the cache. Current handle and schema compatibility remains checked. Maintenance
+Keys include a process-local storage namespace tied to the engine's series store
+(stable across region reopen), generation paths, object lengths, representation,
+and page reference/checksum/codec/validation context. Generation paths already identify the manifest/schema, so page keys do
+not repeat their field names or part descriptors. Bounded async lock striping
+coalesces loads; failed or canceled loads do not populate the cache. Current handle and schema compatibility remains checked. Maintenance
 uses uncached readers so repair checks still observe missing or corrupt objects.
 `columnar_metadata` labels expose cache bytes, hits, misses, loads, and evictions.
 Column payloads remain uncached.
