@@ -71,8 +71,10 @@ use datatypes::series::frame::{
     raw_series_frame_schema, series_frame_schema,
 };
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
-use datatypes::series::samples::{FieldSpec, Samples, Series, SeriesFields, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpan, GridSpec, TimeAxis};
+use datatypes::series::samples::{
+    FieldSpec, SampleRef, Samples, Series, SeriesFields, SeriesSchema,
+};
+use datatypes::series::time::{EvalGrid, GridRange, GridSpan, GridSpec, TimeAxis};
 use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
 use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
@@ -85,11 +87,13 @@ use super::{
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
+use crate::info::InfoSelector;
 use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -446,6 +450,29 @@ fn quantile_aggregate_tree() -> NativeTree {
             },
         },
         output: root.output.clone(),
+    })
+    .expect("the bound tree is legal")
+}
+
+/// The `rate(x[5m])` tree with a `topk(k, ...)` over it.
+///
+/// A vector operation over the whole vector: `k` ranks a group's series against each other, so the
+/// operator over part of the metric keeps each part's `k` instead of the `k` of the whole.
+fn topk_tree(k: f64) -> NativeTree {
+    let window = rate_tree().root().clone();
+    let output = window.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window),
+            op: BoundVectorOp::TopK {
+                k,
+                top: true,
+                // No grouping, so every series is one group and the kept series are the largest of
+                // the whole vector.
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output,
     })
     .expect("the bound tree is legal")
 }
@@ -2814,9 +2841,98 @@ async fn every_partition_evaluates_its_own_series() {
     }
 }
 
-/// A single repeated source feeds both operands once in each of four independent partitions.
+/// The rows of the series `host` rates `rate` at, in time order.
+fn one_series(rows: &[Row], rate: f64, host: &str) -> Vec<Row> {
+    let mut series = rows
+        .iter()
+        .filter(|row| row.2.as_deref() == Some(host))
+        .filter(|row| row.1.is_some_and(|value| (value - rate).abs() < 1e-9))
+        .cloned()
+        .collect::<Vec<_>>();
+    series.sort_by_key(|row| row.0);
+    series
+}
+
+/// A tree that reads the whole vector runs once over every scan partition, and that one execution
+/// sees the series of both.
+///
+/// `topk(k, rate(x[5m]))` ranks series against each other, which is a decision over the whole
+/// vector: run per partition it keeps each partition's `k`, so `topk(1, ...)` would answer `web-0`
+/// as well. The two series live in different partitions and are told apart by their rate, so
+/// `topk(1, ...)` names the series only partition 1 holds, and `topk(2, ...)` names both.
 #[tokio::test]
-async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
+async fn a_whole_vector_tree_runs_once_over_every_partition() {
+    let partitions = [1.0, 5.0]
+        .into_iter()
+        .enumerate()
+        .map(|(index, scale)| {
+            vec![frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(scale),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+
+    // The same split, read by a per-series tree, keeps one execution per partition.
+    let per_series = plan(rate_tree(), memory_exec_partitioned(partitions.clone()))
+        .expect("the runtime executes a rate tree");
+    assert_eq!(
+        2,
+        per_series
+            .properties()
+            .output_partitioning()
+            .partition_count(),
+        "a per-series tree answers each partition's series on its own"
+    );
+
+    // `topk(2, ...)` keeps both series, which are each in a partition of their own: the one
+    // execution the node reports is the only thing that could have gathered them together, since a
+    // per-partition run would answer one series per partition in two partitions.
+    let both = plan(topk_tree(2.0), memory_exec_partitioned(partitions.clone()))
+        .expect("the runtime executes a topk tree");
+    assert_eq!(
+        1,
+        both.properties().output_partitioning().partition_count(),
+        "topk reads every series, so one execution answers it"
+    );
+    let batches = collect(both, SessionContext::default().task_ctx())
+        .await
+        .expect("the single execution runs");
+    let gathered = rows(&batches);
+    // The rates are distinct, so the two series are told apart by value and not only by name.
+    assert_series_rates(&one_series(&gathered, 1.0, "web-0"), &[(1.0, "web-0")]);
+    assert_series_rates(&one_series(&gathered, 5.0, "web-1"), &[(5.0, "web-1")]);
+
+    // `topk(1, ...)` keeps the larger of the two, which lives in partition 1: answering `web-1`
+    // means the comparison saw partition 0's `web-0` and rejected it.
+    let top = plan(topk_tree(1.0), memory_exec_partitioned(partitions))
+        .expect("the runtime executes a topk tree");
+    let batches = collect(top, SessionContext::default().task_ctx())
+        .await
+        .expect("the single execution runs");
+    let rows = rows(&batches);
+    assert_eq!(
+        GRID_LEN as usize,
+        rows.len(),
+        "one kept series over the whole grid: {rows:?}"
+    );
+    assert_series_rates(&rows, &[(5.0, "web-1")]);
+}
+/// One repeated source, read once inside one execution, still applies its operands in order.
+///
+/// Both leaves of the tree bind the same source and the outer node is an `on(host)` one-to-one
+/// match, so the node is placed in a single execution that reads all four scan partitions (the
+/// reason is pinned by `a_one_to_one_match_over_one_repeated_source_runs_in_one_execution` below).
+/// The source is nevertheless read once and not once per recipient: the runtime decodes each child
+/// partition's frames once and hands them to both operands, so every child partition is executed
+/// exactly once, by the one execution that reads them all.
+///
+/// The arithmetic is what proves the operands kept their order: this tree answers `x - 2 * x`, which
+/// is `-x` and not `+x`. The fixture gives each series distinct values, so no row of another series
+/// can pass for one of these.
+#[tokio::test]
+async fn a_repeated_source_runs_once_and_keeps_its_operand_order() {
     let partitions = (0..4)
         .map(|partition| {
             let samples = (0..GRID_LEN as i64)
@@ -2840,84 +2956,153 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
     });
     let exec = plan(subtracted_scaled_tree(), counted)
         .expect("the repeated source tree runs over one physical child");
-    assert_eq!(4, exec.properties().output_partitioning().partition_count());
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the match over the repeated source reads every series in one execution"
+    );
     assert_eq!(1, exec.children().len());
 
+    // The one execution, which has to read all four child partitions.
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
+    let mut stream = exec
+        .execute(0, context)
+        .expect("the single execution exists");
+    let batches = stream
+        .as_mut()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the execution completes without errors");
+    // Each row's timestamp, value and host, in the order the execution emitted them.
+    let actual = batches
+        .iter()
+        .flat_map(|batch| {
+            let time = batch
+                .column_by_name(TIME)
+                .expect("binary output has time")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("time output is millisecond timestamp");
+            let value = batch
+                .column_by_name(VALUE)
+                .expect("binary output has value")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("value output is Float64");
+            let host = batch
+                .column_by_name(HOST)
+                .expect("binary output retains host")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("host output is Utf8");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        time.value(row),
+                        value.is_valid(row).then(|| value.value(row)),
+                        host.is_valid(row).then(|| host.value(row).to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        4 * GRID_LEN as usize,
+        actual.len(),
+        "every partition's series comes back over the whole grid: {actual:?}"
+    );
+
+    // The four series keep their own hosts: a collapse that dropped or duplicated a partition's
+    // series would not answer all four.
+    let mut hosts = actual
+        .iter()
+        .filter_map(|row| row.2.clone())
+        .collect::<Vec<_>>();
+    hosts.sort();
+    hosts.dedup();
+    assert_eq!(
+        vec!["web-0", "web-1", "web-2", "web-3"],
+        hosts,
+        "the four series keep their own hosts"
+    );
+
     let expected_times = grid_timestamps();
-    let mut total_rows = 0;
-    for partition in 0..4 {
-        let mut stream = exec
-            .execute(partition, Arc::clone(&context))
-            .expect("each requested partition exists");
-        let batches = stream
-            .as_mut()
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("the partition completes without errors");
-        let actual = batches
-            .iter()
-            .flat_map(|batch| {
-                let time = batch
-                    .column_by_name(TIME)
-                    .expect("binary output has time")
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .expect("time output is millisecond timestamp");
-                let value = batch
-                    .column_by_name(VALUE)
-                    .expect("binary output has value")
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("value output is Float64");
-                let host = batch
-                    .column_by_name(HOST)
-                    .expect("binary output retains host")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("host output is Utf8");
-                (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            time.value(row),
-                            value.is_valid(row).then(|| value.value(row)),
-                            host.is_valid(row).then(|| host.value(row).to_string()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        total_rows += actual.len();
+    for partition in 0..4usize {
         let host = format!("web-{partition}");
-        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
+        // This series' rows in emission order: one series' rows come out in grid order.
+        let series = actual
+            .iter()
+            .filter(|row| row.2.as_deref() == Some(host.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(GRID_LEN as usize, series.len(), "{host}: {series:?}");
         assert_eq!(
             expected_times,
-            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
+            series.iter().map(|row| row.0).collect::<Vec<_>>(),
             "{host} timestamps preserve grid order"
         );
-        assert!(
-            actual
-                .iter()
-                .all(|row| row.2.as_deref() == Some(host.as_str()))
-        );
+        // `x - 2 * x` is `-x`. Read the other way round the same operands answer `+x`, so a swapped
+        // operand shows up here as the wrong sign and nowhere else.
         let expected_values = (0..GRID_LEN as usize)
             .map(|index| Some(-((partition * 10 + index + 1) as f64)))
             .collect::<Vec<_>>();
         assert_eq!(
             expected_values,
-            actual.iter().map(|row| row.1).collect::<Vec<_>>()
+            series.iter().map(|row| row.1).collect::<Vec<_>>(),
+            "{host} answers x - 2 * x"
         );
-        assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
-    assert_eq!(4 * GRID_LEN as usize, total_rows);
+
+    // The repeated source is read once, not once per recipient: every child partition was executed
+    // exactly once, and the single execution above is what executed them.
     assert_eq!(
         vec![1, 1, 1, 1],
         calls_by_partition
             .iter()
             .map(|call| call.load(Ordering::SeqCst))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "the repeated source is read once per child partition"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the execution released reservations at EOF"
+    );
+}
+
+/// A one-to-one match over one repeated source is placed in one execution, and this is why.
+///
+/// Both leaves of [`subtracted_scaled_tree`] bind the same source and the outer node is an
+/// `on(host)` one-to-one match. Canonical-key co-location - a whole partition, or one owner per
+/// canonical label set - proves a *merge*'s input whole, and proves nothing about a match's label
+/// set: `on(host)` can group two series that differ in every other label and so sit under two
+/// canonical keys in two partitions. Each partition would then pair only its own series against its
+/// own and never report the duplicate label set a whole one-to-one match owes.
+///
+/// So the node reports one partition, which is what makes its single execution see every series the
+/// match could pair. The four-partition child here is the shape that would expose a per-partition
+/// placement, so a reader who "fixes" this count back to four reopens exactly that hole.
+#[test]
+fn a_one_to_one_match_over_one_repeated_source_runs_in_one_execution() {
+    let partitions = (0..4)
+        .map(|partition| {
+            vec![frame(&series_chunk(
+                &format!("web-{partition}"),
+                &series_samples(1.0),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let exec = plan(
+        subtracted_scaled_tree(),
+        memory_exec_partitioned(partitions),
+    )
+    .expect("the repeated source tree runs over one physical child");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "a per-partition placement would pair each partition's series only against its own and \
+         never report the duplicate label set a whole one-to-one match owes"
     );
 }
 
@@ -4604,4 +4789,287 @@ async fn two_chains_that_close_on_one_label_set_each_keep_their_frame() {
             "each chain preserves every exact grid position and value",
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The merge placement: what this node will and will not run.
+// ---------------------------------------------------------------------------
+
+/// A canonical merge over an instant selection, laid out as the selection is.
+///
+/// The selection reports the samples themselves, so nothing rewrites the label sets between the
+/// input and the merge: the merge is the only operator in the tree, which is what makes the
+/// placement question below about the boundary alone.
+fn merged_selection_tree() -> NativeTree {
+    let grid = grid();
+    let inner = instant_of(0, &grid);
+    let output = inner.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    })
+    .expect("a merge over an evaluated selection is a legal tree")
+}
+
+/// A merge over a child whose boundary proves nothing is not placed in one partition.
+///
+/// The scan partitions by storage `read_key` and not by canonical key, so nothing says the pieces of
+/// one canonical label set are in one partition: a merge answered per partition would hand one
+/// partition's fragments over as a canonical series. The node refuses that shape instead of reading
+/// every child partition in a single execution, which is what it used to do - taking the caller's
+/// parallelism away to serve a tree nobody proved was placeable.
+#[tokio::test]
+async fn a_merge_over_an_unknown_partitioning_child_is_not_placed() {
+    let frames_of_partition = |index: usize| {
+        vec![frame(&series_chunk(
+            &format!("web-{index}"),
+            &series_samples(1.0),
+            true,
+        ))]
+    };
+    let partitions = (0..3).map(frames_of_partition).collect::<Vec<_>>();
+    let error = plan(merged_selection_tree(), memory_exec_partitioned(partitions))
+        .expect_err("nothing proves the pieces of a label set are co-located");
+    let message = error.to_string();
+    assert!(
+        message.contains("canonical merge") && message.contains("co-located"),
+        "refused for another reason than the missing co-location proof: {message}"
+    );
+
+    // The refusal is about the proof and not about merges: the same tree over an input of one
+    // partition is built, because that one partition is every partition and it holds every piece.
+    let exec = plan(
+        merged_selection_tree(),
+        memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)])),
+    )
+    .expect("a one-partition input proves the pieces arrive together by being one partition");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the input's one partition is the node's"
+    );
+}
+
+/// A rebuilt node asks the placement question again over the children it was handed.
+///
+/// A child that placed the pieces of a label set by canonical key can be swapped for one that does
+/// not - a plain multi-partition source, a coalesce, a union - and the merge above it would then
+/// collect one partition's fragments. The rebuilt node therefore re-derives the answer from the new
+/// children instead of inheriting the one the old children gave.
+#[tokio::test]
+async fn with_new_children_revalidates_the_merge_placement() {
+    let single = || memory_exec(frames(&[series_chunk("web-0", &series_samples(1.0), true)]));
+    let exec =
+        plan(merged_selection_tree(), single()).expect("a one-partition input places the merge");
+    // Rebuilt over the child it already had: the same answer, because the same boundary.
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![single()],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("one partition still holds every piece");
+    assert_eq!(
+        1,
+        rebuilt.properties().output_partitioning().partition_count()
+    );
+
+    // The same node over a child of three partitions: the old proof is gone and the node says so.
+    let partitions = (0..3)
+        .map(|index| {
+            vec![frame(&series_chunk(
+                &format!("web-{index}"),
+                &series_samples(1.0),
+                true,
+            ))]
+        })
+        .collect::<Vec<_>>();
+    let error = Arc::clone(&exec)
+        .replace_children(
+            vec![memory_exec_partitioned(partitions)],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect_err("the rebuilt node cannot inherit the old child's proof");
+    let message = error.to_string();
+    assert!(
+        message.contains("canonical merge") && message.contains("co-located"),
+        "the rebuilt node refused for another reason: {message}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `info`, driven through `NativeExecutor`: what its canonical merge must not change.
+// ---------------------------------------------------------------------------
+
+/// `info(base, {})` over an evaluated base at source 0 and the raw info series at source 1, with the
+/// info side selected the way the compiler selects it: reporting each selected sample's own time.
+fn info_tree_of(grid: &Arc<EvalGrid>, lookback_ms: i64, selector: InfoSelector) -> NativeTree {
+    let base_type = evaluated_of(&raw_schema(), grid);
+    let base = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: base_type.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: base_type.clone(),
+    };
+    let mut info = instant_of(1, grid);
+    let NativeExpr::Instant { op, .. } = &mut info.expr else {
+        unreachable!("`instant_of` builds an instant selection");
+    };
+    op.value = InstantValue::InfoTimestamp;
+    op.lookback_ms = lookback_ms;
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Info {
+            base: Box::new(base),
+            info: Box::new(info),
+            selector,
+        },
+        output: base_type,
+    })
+    .expect("`info` over a sample-time selection is a legal tree")
+}
+
+/// `metric` as `__name__=up,instance=a,version=v1`, the way the runtime files a series.
+fn label_set_of(metric: &SeriesLabels) -> String {
+    metric
+        .name()
+        .into_iter()
+        .map(|name| format!("__name__={name}"))
+        .chain(
+            metric
+                .tags()
+                .iter()
+                .map(|tag| format!("{}={}", tag.name, tag.value)),
+        )
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// One answered series: its label set, and the grid positions it holds with the value at each.
+type AnsweredSeries = (String, Vec<(usize, Option<f64>)>);
+
+/// Every series `tree` answers from `pushes`, by label set, as the positions it holds and the values
+/// there. The executor is drained the way its consumer drains it: until it settles, then closed.
+fn info_answer(
+    tree: &NativeTree,
+    base: EvaluatedChunk,
+    info: Vec<RawSeriesChunk>,
+) -> Vec<AnsweredSeries> {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let state = NativeExecutionState::try_new(tree, pool).expect("the tree's state builds");
+    let mut execution = NativeExecutor::new(state);
+    let base_id = execution.state().input_ids(0).next().unwrap();
+    let info_id = execution.state().input_ids(1).next().unwrap();
+    execution.push_evaluated(base_id, base).unwrap();
+    for chunk in info {
+        execution.push_raw(info_id, chunk).unwrap();
+    }
+    // Pulled the way a consumer pulls it: what has settled first, then the ending stages.
+    let mut chunks = Vec::new();
+    while let Some(chunk) = execution.next_chunk().unwrap() {
+        chunks.push(chunk);
+    }
+    chunks.extend(execution.finish().unwrap());
+
+    let mut answer: Vec<AnsweredSeries> = Vec::new();
+    for chunk in chunks {
+        let values = chunk
+            .series
+            .fields
+            .as_slice()
+            .first()
+            .map(|field| {
+                field
+                    .iter()
+                    .map(|sample| match sample {
+                        SampleRef::Float(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let rows = chunk
+            .series
+            .time
+            .positions()
+            .map(|(position, row)| (position, values.get(row).copied().flatten()))
+            .collect::<Vec<_>>();
+        let labels = label_set_of(&chunk.series.metric);
+        match answer.iter_mut().find(|(seen, _)| *seen == labels) {
+            Some((_, held)) => held.extend(rows),
+            None => answer.push((labels, rows)),
+        }
+    }
+    answer.sort_by(|a, b| a.0.cmp(&b.0));
+    answer
+}
+
+/// A base series takes the data labels of the newest info series sharing its identifying labels at
+/// each point, which only the sample times its info side reports can decide.
+///
+/// `version="v1"` is sampled at 0s and 10s and `version="v2"` at 15s and 30s, read within 15s: the
+/// points at 0s and 10s see only `v1`, the point at 20s sees both and keeps the newer `v2`, and the
+/// point at 30s sees `v2` alone. A canonical merge over the info side collects those pieces into one
+/// series per label set and hands the times on unchanged, so the sample time still decides - which
+/// is the runtime contract the merge above `info` must not break.
+#[test]
+fn an_info_tree_still_answers_the_newer_info_series() {
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(0, 10_000, 4).unwrap()).unwrap());
+    let tree = info_tree_of(
+        &grid,
+        15_000,
+        InfoSelector {
+            name_matchers: Vec::new(),
+            data_labels: Vec::new(),
+            keep_unmatched: true,
+        },
+    );
+    let base = {
+        let samples = Samples::from_float(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]));
+        let range = GridRange::try_new(Arc::clone(&grid), 0, samples.len()).unwrap();
+        EvaluatedChunk::try_new(
+            Series {
+                metric: metric(&[("instance", "a"), ("job", "j")], Some("up")),
+                time: TimeAxis::Grid(range),
+                fields: SeriesFields::try_from_vec(vec![samples]).unwrap(),
+            },
+            true,
+        )
+        .expect("the chunk is addressed on the grid")
+    };
+    let info = [
+        ("info-v1", "v1", [0i64, 10_000]),
+        ("info-v2", "v2", [15_000, 30_000]),
+    ]
+    .into_iter()
+    .map(|(key, version, times)| {
+        chunk_of(
+            &raw_schema(),
+            key,
+            metric(
+                &[("instance", "a"), ("job", "j"), ("version", version)],
+                Some("target_info"),
+            ),
+            &times,
+            vec![vec![Some(1.0), Some(1.0)]],
+            true,
+        )
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        vec![
+            (
+                "__name__=up,instance=a,job=j,version=v1".to_string(),
+                vec![(0, Some(1.0)), (1, Some(2.0))]
+            ),
+            (
+                "__name__=up,instance=a,job=j,version=v2".to_string(),
+                vec![(2, Some(3.0)), (3, Some(4.0))]
+            ),
+        ],
+        info_answer(&tree, base, info)
+    );
 }

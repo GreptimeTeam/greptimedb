@@ -55,7 +55,7 @@ use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
 use crate::native::plan::{
     BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    NativeExpr, NativeNode, NativeTree, NativeType, unifies_its_own_contributions,
 };
 #[cfg(test)]
 pub(crate) use crate::native::runs::absorb_rebuilds;
@@ -2274,6 +2274,18 @@ impl NodeState {
 }
 
 impl RuntimeNode {
+    /// Builds the runtime node for `node` and answers whether it reports its own fragments.
+    ///
+    /// The second half of the answer is `shared`: whether a consumer above this node has to collect
+    /// what it emits. It is [`unifies_its_own_contributions`]'s answer, asked once here and nowhere
+    /// else, so the runtime and the tree rewrite cannot disagree about a node:
+    ///
+    /// - `Some(true)` - one series per canonical label set, established by the node - is not shared;
+    /// - `Some(false)` - several, and the node says so - is shared, and a consumer that needs one
+    ///   series collects them through [`MergeInput`];
+    /// - `None` - several, and the node says nothing (a boundary) - is not shared either, because
+    ///   there is nothing a `MergeInput` can be placed over at a leaf. `None` is also not a proof,
+    ///   which is why the insertion pass collects these itself.
     fn build(
         node: &NativeNode,
         pool: &Arc<dyn MemoryPool>,
@@ -2281,7 +2293,8 @@ impl RuntimeNode {
         location: String,
     ) -> Result<(Self, bool)> {
         let metrics = Arc::new(NodeMetrics::default());
-        let (op, shared) = match &node.expr {
+        let shared = matches!(unifies_its_own_contributions(node), Some(false));
+        let op = match &node.expr {
             NativeExpr::Input(bound) => {
                 if bound.ordering == SeriesOrdering::Interleaved {
                     return Err(DataFusionError::NotImplemented(format!(
@@ -2306,35 +2319,31 @@ impl RuntimeNode {
                         pool,
                     ),
                 });
-                (RuntimeOp::Input(id), false)
+                RuntimeOp::Input(id)
             }
-            NativeExpr::Scalar(_) => (RuntimeOp::Scalar, false),
+            NativeExpr::Scalar(_) => RuntimeOp::Scalar,
             NativeExpr::Instant { input, op } => {
-                let (child, shared) =
-                    Self::build(input, pool, inputs, format!("{location}.input"))?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution(
                         "instant selection consumes non-sample input".to_string(),
                     )
                 })?;
-                (
-                    RuntimeOp::Instant {
-                        input: Box::new(child),
-                        instant: Some(InstantRuntime::try_new(&input_schema, op)?),
-                        state: {
-                            let mut state = NodeState::new(
-                                format!("native.instant at {location}"),
-                                Arc::clone(&metrics),
-                                pool,
-                            );
-                            if op.value == InstantValue::Timestamp {
-                                state.emitted = Some(Emitted::default());
-                            }
-                            state
-                        },
+                RuntimeOp::Instant {
+                    input: Box::new(child),
+                    instant: Some(InstantRuntime::try_new(&input_schema, op)?),
+                    state: {
+                        let mut state = NodeState::new(
+                            format!("native.instant at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        );
+                        if op.value == InstantValue::Timestamp {
+                            state.emitted = Some(Emitted::default());
+                        }
+                        state
                     },
-                    shared || op.value == InstantValue::Timestamp,
-                )
+                }
             }
             NativeExpr::Merge { input } => {
                 let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
@@ -2346,43 +2355,39 @@ impl RuntimeNode {
                     Arc::clone(&metrics),
                     pool,
                 );
-                (
-                    RuntimeOp::Merge {
-                        input: Box::new(child),
-                        merge: Some(MergeInput::new(schema)),
-                        state,
-                    },
-                    false,
-                )
+                RuntimeOp::Merge {
+                    input: Box::new(child),
+                    merge: Some(MergeInput::new(schema)),
+                    state,
+                }
             }
             NativeExpr::Window { input, op } => {
-                let (child, child_shared) =
-                    Self::build(input, pool, inputs, format!("{location}.input"))?;
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let input_schema = input.output.samples().cloned().ok_or_else(|| {
                     DataFusionError::Execution("window consumes non-sample input".to_string())
                 })?;
-                let merge = child_shared.then(|| MergeInput::new(Arc::clone(&input_schema)));
-                let shared = op.function.drops_metric_name() || !child_shared;
+                // Only a child that reports its fragments is collected here; a child that proves it
+                // hands over one series per label set needs none, and one that reports nothing (a
+                // boundary) is where the insertion pass puts the merge instead.
+                let merge = matches!(unifies_its_own_contributions(input), Some(false))
+                    .then(|| MergeInput::new(Arc::clone(&input_schema)));
                 let mut state = NodeState::new(
                     format!("native.window at {location}"),
                     Arc::clone(&metrics),
                     pool,
                 );
                 state.emitted = Some(Emitted::default());
-                (
-                    RuntimeOp::Window {
-                        input: Box::new(child),
-                        window: Some(RangeEvaluator::try_new(
-                            &input_schema,
-                            Arc::clone(&op.output_grid),
-                            op.window,
-                            op.function,
-                        )?),
-                        merge,
-                        state,
-                    },
-                    shared,
-                )
+                RuntimeOp::Window {
+                    input: Box::new(child),
+                    window: Some(RangeEvaluator::try_new(
+                        &input_schema,
+                        Arc::clone(&op.output_grid),
+                        op.window,
+                        op.function,
+                    )?),
+                    merge,
+                    state,
+                }
             }
             NativeExpr::Map { input, op } => {
                 let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
@@ -2395,17 +2400,14 @@ impl RuntimeNode {
                     pool,
                 );
                 state.emitted = Some(Emitted::default());
-                (
-                    RuntimeOp::Map {
-                        input: Box::new(child),
-                        map: Some(MapRuntime {
-                            ops: Arc::clone(&op.ops),
-                            schema,
-                        }),
-                        state,
-                    },
-                    true,
-                )
+                RuntimeOp::Map {
+                    input: Box::new(child),
+                    map: Some(MapRuntime {
+                        ops: Arc::clone(&op.ops),
+                        schema,
+                    }),
+                    state,
+                }
             }
             NativeExpr::Timestamp { input } => {
                 let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
@@ -2418,14 +2420,11 @@ impl RuntimeNode {
                     pool,
                 );
                 state.emitted = Some(Emitted::default());
-                (
-                    RuntimeOp::Timestamp {
-                        input: Box::new(child),
-                        schema: Some(schema),
-                        state,
-                    },
-                    true,
-                )
+                RuntimeOp::Timestamp {
+                    input: Box::new(child),
+                    schema: Some(schema),
+                    state,
+                }
             }
             NativeExpr::Binary {
                 left,
@@ -2448,31 +2447,21 @@ impl RuntimeNode {
                     }
                     _ => (None, Some(broadcast_runtime(left, right, matching)?)),
                 };
-                let (left_node, left_shared) =
-                    Self::build(left, pool, inputs, format!("{location}.left"))?;
-                let (right_node, right_shared) =
+                let (left_node, _) = Self::build(left, pool, inputs, format!("{location}.left"))?;
+                let (right_node, _) =
                     Self::build(right, pool, inputs, format!("{location}.right"))?;
                 match (binary, broadcast) {
-                    (Some(binary), None) => (
-                        RuntimeOp::Binary {
-                            left: Box::new(left_node),
-                            right: Box::new(right_node),
-                            binary: Some(binary),
-                            state: NodeState::new(
-                                format!("native.binary at {location}"),
-                                Arc::clone(&metrics),
-                                pool,
-                            ),
-                        },
-                        false,
-                    ),
+                    (Some(binary), None) => RuntimeOp::Binary {
+                        left: Box::new(left_node),
+                        right: Box::new(right_node),
+                        binary: Some(binary),
+                        state: NodeState::new(
+                            format!("native.binary at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
                     (None, Some(broadcast)) => {
-                        let shared = broadcast.drops_labels()
-                            || if left_schema.is_some() {
-                                left_shared
-                            } else {
-                                right_shared
-                            };
                         let mut state = NodeState::new(
                             format!("native.binary at {location}"),
                             Arc::clone(&metrics),
@@ -2481,15 +2470,12 @@ impl RuntimeNode {
                         if broadcast.drops_labels() {
                             state.emitted = Some(Emitted::default());
                         }
-                        (
-                            RuntimeOp::Broadcast {
-                                left: Box::new(left_node),
-                                right: Box::new(right_node),
-                                broadcast: Some(broadcast),
-                                state,
-                            },
-                            shared,
-                        )
+                        RuntimeOp::Broadcast {
+                            left: Box::new(left_node),
+                            right: Box::new(right_node),
+                            broadcast: Some(broadcast),
+                            state,
+                        }
                     }
                     _ => {
                         return Err(DataFusionError::Internal(
@@ -2514,19 +2500,16 @@ impl RuntimeNode {
                 let (right_node, _) =
                     Self::build(right, pool, inputs, format!("{location}.right"))?;
                 // The kernel files one series per label set, so its output shares none.
-                (
-                    RuntimeOp::Binary {
-                        left: Box::new(left_node),
-                        right: Box::new(right_node),
-                        binary: Some(set),
-                        state: NodeState::new(
-                            format!("native.set at {location}"),
-                            Arc::clone(&metrics),
-                            pool,
-                        ),
-                    },
-                    false,
-                )
+                RuntimeOp::Binary {
+                    left: Box::new(left_node),
+                    right: Box::new(right_node),
+                    binary: Some(set),
+                    state: NodeState::new(
+                        format!("native.set at {location}"),
+                        Arc::clone(&metrics),
+                        pool,
+                    ),
+                }
             }
             NativeExpr::Info {
                 base,
@@ -2547,19 +2530,16 @@ impl RuntimeNode {
                 let (base_node, _) = Self::build(base, pool, inputs, format!("{location}.base"))?;
                 let (info_node, _) = Self::build(info, pool, inputs, format!("{location}.info"))?;
                 // The kernel merges the results that share a label set, so its output shares none.
-                (
-                    RuntimeOp::Binary {
-                        left: Box::new(base_node),
-                        right: Box::new(info_node),
-                        binary: Some(runtime),
-                        state: NodeState::new(
-                            format!("native.info at {location}"),
-                            Arc::clone(&metrics),
-                            pool,
-                        ),
-                    },
-                    false,
-                )
+                RuntimeOp::Binary {
+                    left: Box::new(base_node),
+                    right: Box::new(info_node),
+                    binary: Some(runtime),
+                    state: NodeState::new(
+                        format!("native.info at {location}"),
+                        Arc::clone(&metrics),
+                        pool,
+                    ),
+                }
             }
             NativeExpr::Aggregate { input, op } => {
                 let schema = node
@@ -2581,14 +2561,11 @@ impl RuntimeNode {
                     &mut state.buffer,
                 )?);
                 let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
-                (
-                    RuntimeOp::Aggregate {
-                        input: Box::new(child),
-                        aggregate,
-                        state,
-                    },
-                    false,
-                )
+                RuntimeOp::Aggregate {
+                    input: Box::new(child),
+                    aggregate,
+                    state,
+                }
             }
             NativeExpr::Vector { input, op } => {
                 let schema = node.output.samples().cloned().ok_or_else(|| {
@@ -2609,31 +2586,23 @@ impl RuntimeNode {
                     ));
                 }
                 let mut vector = VectorRuntime::new(op.clone(), schema);
-                let (child, child_shared) =
-                    Self::build(input, pool, inputs, format!("{location}.input"))?;
-                let limitk = matches!(op, BoundVectorOp::LimitK { .. });
-                if limitk && child_shared {
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
+                // `limitk` counts series in input order, so an input that reports its fragments has
+                // to be collected before it is counted.
+                if matches!(op, BoundVectorOp::LimitK { .. })
+                    && matches!(unifies_its_own_contributions(input), Some(false))
+                {
                     vector.merge_input = true;
                 }
-                let whole = limitk
-                    || matches!(
-                        op,
-                        BoundVectorOp::Absent { .. }
-                            | BoundVectorOp::Histogram(_)
-                            | BoundVectorOp::CountValues { .. }
-                    );
-                (
-                    RuntimeOp::Vector {
-                        input: Box::new(child),
-                        vector: Some(vector),
-                        state: NodeState::new(
-                            format!("native.vector at {location}"),
-                            Arc::clone(&metrics),
-                            pool,
-                        ),
-                    },
-                    child_shared && !whole,
-                )
+                RuntimeOp::Vector {
+                    input: Box::new(child),
+                    vector: Some(vector),
+                    state: NodeState::new(
+                        format!("native.vector at {location}"),
+                        Arc::clone(&metrics),
+                        pool,
+                    ),
+                }
             }
         };
         Ok((Self { metrics, op }, shared))
