@@ -4736,14 +4736,10 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
                 "{query}: label {label} is a column on both routes"
             );
         }
-        println!("{query}: native columns {native_columns:?}");
-        println!("{query}: legacy columns {legacy_columns:?}");
-        println!("{query}: rows {native_rows:?}");
-        println!(
-            "{query}: native plan\n{}",
-            datafusion::physical_plan::displayable(observer.root_plan().as_ref())
-                .indent(true)
-                .to_string()
+        common_telemetry::info!(
+            "{query}: native columns {native_columns:?}, legacy columns {legacy_columns:?}, rows \
+             {native_rows:?}, native plan:\n{}",
+            datafusion::physical_plan::displayable(observer.root_plan().as_ref()).indent(true)
         );
     }
 }
