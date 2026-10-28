@@ -105,21 +105,40 @@ impl State for Dispatch {
                     );
                     ctx.forget_leader_region(region_id);
                 }
-                Err(e) => match ctx.persistent_ctx.strategy {
-                    // Nothing is committed yet, so the batch can be retried as a whole.
-                    DrainDatanodeStrategy::FailFast => return Err(e),
-                    DrainDatanodeStrategy::TryAll => {
-                        METRIC_META_REGION_MIGRATION_FAIL.inc();
-                        error!(
-                            e;
-                            "Gave up draining region {} off datanode {}",
-                            region_id,
-                            node_id
+                Err(e) => {
+                    // Another migration may finish between target selection and the
+                    // migration manager's route check, releasing its tracker guard.
+                    if matches!(
+                        e,
+                        error::Error::RegionMigrated { .. }
+                            | error::Error::LeaderPeerChanged { .. }
+                    ) && !utils::leads_region(&ctx.table_metadata_manager, node_id, region_id)
+                        .await?
+                    {
+                        info!(
+                            "Skipping region {}, it is no longer led by datanode {}",
+                            region_id, node_id
                         );
                         ctx.forget_leader_region(region_id);
-                        ctx.volatile_ctx.failed_regions.push(region_id);
+                        continue;
                     }
-                },
+
+                    match ctx.persistent_ctx.strategy {
+                        // Nothing is committed yet, so the batch can be retried as a whole.
+                        DrainDatanodeStrategy::FailFast => return Err(e),
+                        DrainDatanodeStrategy::TryAll => {
+                            METRIC_META_REGION_MIGRATION_FAIL.inc();
+                            error!(
+                                e;
+                                "Gave up draining region {} off datanode {}",
+                                region_id,
+                                node_id
+                            );
+                            ctx.forget_leader_region(region_id);
+                            ctx.volatile_ctx.failed_regions.push(region_id);
+                        }
+                    }
+                }
             }
         }
         ctx.volatile_ctx.inflight_subprocedures = inflight;
@@ -159,10 +178,15 @@ impl State for Dispatch {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::procedure::test_util::{procedure_context_with_receivers, procedure_state_receiver};
-    use common_meta::peer::Peer;
+    use api::v1::meta::heartbeat_request::NodeWorkloads;
+    use common_meta::cluster::NodeInfo;
+    use common_meta::error::Result as MetaResult;
+    use common_meta::key::TableMetadataManagerRef;
+    use common_meta::peer::{Peer, PeerDiscovery, PeerDiscoveryRef};
     use common_procedure::{ProcedureId, ProcedureState, Status};
     use store_api::storage::RegionId;
 
@@ -262,6 +286,77 @@ mod tests {
         assert!(next.as_any().downcast_ref::<Dispatch>().is_some());
         assert!(leader_regions(&ctx).is_empty());
         assert!(ctx.volatile_ctx.inflight_subprocedures.is_empty());
+    }
+
+    /// Moves the leader after the drain's first route read, during target discovery.
+    struct MoveLeaderDuringDiscovery {
+        inner: PeerDiscoveryRef,
+        metadata: TableMetadataManagerRef,
+        region_id: RegionId,
+        leader_id: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerDiscovery for MoveLeaderDuringDiscovery {
+        async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
+            self.inner.active_frontends().await
+        }
+
+        async fn active_datanodes(
+            &self,
+            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            let storage = self.metadata.table_route_manager().table_route_storage();
+            let table_id = self.region_id.table_id();
+            let current = storage.get_with_raw_bytes(table_id).await?.unwrap();
+            let updated = current.update(vec![leader_region(self.region_id, self.leader_id)])?;
+            let (txn, _) = storage.build_update_txn(table_id, &current, &updated)?;
+            assert!(self.metadata.kv_backend().txn(txn).await?.succeeded);
+            self.inner.active_datanodes(filter).await
+        }
+
+        async fn active_flownodes(
+            &self,
+            filter: Option<for<'a> fn(&'a NodeWorkloads) -> bool>,
+        ) -> MetaResult<Vec<NodeInfo>> {
+            self.inner.active_flownodes(filter).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_dispatch_skips_region_moved_during_discovery() {
+        for strategy in [
+            DrainDatanodeStrategy::FailFast,
+            DrainDatanodeStrategy::TryAll,
+        ] {
+            // Target 2 yields RegionMigrated; another leader yields LeaderPeerChanged.
+            for leader_id in [2, 3] {
+                let env = TestEnv::new().await;
+                let region_id = RegionId::new(1024, 1);
+                env.create_table(vec![leader_region(region_id, 1)]).await;
+                let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+                ctx.selector_ctx.peer_discovery = Arc::new(MoveLeaderDuringDiscovery {
+                    inner: ctx.selector_ctx.peer_discovery.clone(),
+                    metadata: env.table_metadata_manager.clone(),
+                    region_id,
+                    leader_id,
+                });
+                seed_plan(&mut ctx, vec![region_id]);
+
+                let (next, status) = Dispatch
+                    .next(&mut ctx, &TestingEnv::procedure_context())
+                    .await
+                    .unwrap();
+
+                assert!(next.as_any().is::<Dispatch>());
+                assert!(matches!(status, Status::Executing { persist: false, .. }));
+                assert!(leader_regions(&ctx).is_empty());
+                assert!(ctx.volatile_ctx.failed_regions.is_empty());
+                assert!(ctx.volatile_ctx.inflight_subprocedures.is_empty());
+                assert_eq!(0, ctx.volatile_ctx.migrated);
+                assert!(!env.region_migration_manager.tracker().contains(region_id));
+            }
+        }
     }
 
     #[tokio::test]
