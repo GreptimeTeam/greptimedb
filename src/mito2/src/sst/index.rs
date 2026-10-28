@@ -191,7 +191,7 @@ impl IndexOutput {
     }
 
     /// Returns the indexes created for whole columns and JSON paths.
-    pub fn build_column_indexes(&self) -> Vec<ColumnIndexMetadata> {
+    pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
         let mut map: HashMap<(ColumnId, Option<Vec<String>>), IndexTypes> = HashMap::new();
         for (output, index_type) in [
             (&self.inverted_index, IndexType::InvertedIndex),
@@ -242,15 +242,6 @@ pub struct IndexBaseOutput {
 }
 
 impl IndexBaseOutput {
-    /// Whole-column indexes for the legacy column-level manifest metadata.
-    /// A path index must never advertise its root as a whole-column index.
-    pub fn column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.targets.iter().filter_map(|target| match target {
-            IndexTarget::ColumnId(id) => Some(*id),
-            IndexTarget::JsonPath(_) => None,
-        })
-    }
-
     pub fn is_available(&self) -> bool {
         self.index_size > 0
     }
@@ -1398,7 +1389,7 @@ impl IndexBuildTask {
     ) -> Result<IndexPublication> {
         let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_index_types();
-        updated.indexes = output.build_column_indexes();
+        updated.indexes = output.build_indexes();
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
         let publication = self
@@ -2097,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_column_indexes_with_json_paths() {
+    fn test_build_indexes_with_json_paths() {
         let path_a = IndexTarget::new_json_path(1, vec!["a".into()]).unwrap();
         let path_b = IndexTarget::new_json_path(1, vec!["b".into()]).unwrap();
         let output = IndexOutput {
@@ -2114,7 +2105,7 @@ mod tests {
             ..Default::default()
         };
 
-        let indexes = output.build_column_indexes();
+        let indexes = output.build_indexes();
         assert_eq!(indexes.len(), 3);
         let whole = indexes.iter().find(|index| index.path.is_none()).unwrap();
         assert_eq!(

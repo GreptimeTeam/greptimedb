@@ -837,7 +837,7 @@ impl RegionFlushTask {
             file_size: sst_info.file_size,
             max_row_group_uncompressed_size: sst_info.max_row_group_uncompressed_size,
             available_indexes: sst_info.index_metadata.build_available_index_types(),
-            indexes: sst_info.index_metadata.build_column_indexes(),
+            indexes: sst_info.index_metadata.build_indexes(),
             index_file_size: sst_info.index_metadata.file_size,
             index_version: 0,
             num_rows: sst_info.num_rows as u64,
