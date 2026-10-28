@@ -185,6 +185,12 @@ impl<W: AsyncFileWriter> SstArrowWriter<W> {
             SstArrowWriter::Parallel(writer) => writer.close().await,
         }
     }
+
+    async fn abort(self) {
+        if let SstArrowWriter::Parallel(writer) = self {
+            writer.abort().await;
+        }
+    }
 }
 
 /// Parquet SST writer.
@@ -407,10 +413,7 @@ where
         );
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
-            let file_id = self.current_file;
-            if let Some(cleaner) = &self.file_cleaner {
-                cleaner.clean_by_file_id(file_id).await;
-            }
+            self.abort_current_file().await;
         }
         res
     }
@@ -435,10 +438,7 @@ where
         };
         let res = self.write_all_flat_inner(source, &converter, opts).await;
         if res.is_err() {
-            let file_id = self.current_file;
-            if let Some(cleaner) = &self.file_cleaner {
-                cleaner.clean_by_file_id(file_id).await;
-            }
+            self.abort_current_file().await;
         }
         res
     }
@@ -551,6 +551,16 @@ where
     fn exceeds_max_file_size(&self, opts: &WriteOptions) -> bool {
         opts.max_file_size
             .is_some_and(|max_size| self.bytes_written.load(Ordering::Relaxed) >= max_size)
+    }
+
+    /// Joins encoders before dropping the writer and deleting its failed output.
+    async fn abort_current_file(&mut self) {
+        if let Some(writer) = self.writer.take() {
+            writer.abort().await;
+        }
+        if let Some(cleaner) = &self.file_cleaner {
+            cleaner.clean_by_file_id(self.current_file).await;
+        }
     }
 
     async fn abort_current_indexer(&mut self) {
@@ -780,5 +790,147 @@ where
         cx: &mut Context<'_>,
     ) -> Poll<std::result::Result<(), std::io::Error>> {
         Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use parquet::arrow::ArrowWriter;
+    use parquet::errors::ParquetError;
+    use store_api::region_request::PathType;
+    use tokio::sync::oneshot;
+    use tokio::time::timeout;
+
+    use super::*;
+    use crate::access_layer::{RegionFilePathFactory, WriteType};
+    use crate::compaction::memory_manager::new_compaction_memory_manager;
+    use crate::error::Error;
+    use crate::sst::FormatType;
+    use crate::sst::parquet::tests::NoopIndexBuilder;
+    use crate::test_util::TestEnv;
+    use crate::test_util::sst_util::{new_record_batch_by_range, sst_region_metadata};
+
+    #[rstest::rstest]
+    #[case::flat(FormatType::Flat)]
+    #[case::primary_key(FormatType::PrimaryKey)]
+    #[tokio::test]
+    async fn test_source_error_waits_for_encoding_cleanup(#[case] format: FormatType) {
+        let mut env = TestEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata());
+        let mut metrics = Metrics::new(WriteType::Compaction);
+        let mut writer = ParquetWriter::new_with_object_store(
+            env.init_object_store_manager(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            RegionFilePathFactory::new("".to_string(), PathType::Bare),
+            &mut metrics,
+        )
+        .await;
+        let opts = WriteOptions {
+            row_group_size: 8,
+            encode_parallelism: 2,
+            ..Default::default()
+        };
+        let batch = new_record_batch_by_range(&["a", "b"], 0, 4);
+        let retained_field = Arc::downgrade(batch.column(2));
+        let converter = match format {
+            FormatType::Flat => FlatBatchConverter::Flat(FlatWriteFormat::new(
+                metadata.clone(),
+                &FlatSchemaOptions::default(),
+            )),
+            FormatType::PrimaryKey => FlatBatchConverter::PrimaryKey {
+                format: PrimaryKeyWriteFormat::new(metadata.clone()),
+                num_fields: metadata.field_columns().count(),
+            },
+        };
+        let encoding_batch = converter.convert_batch(&batch).unwrap();
+        let encoding_schema = encoding_batch.schema();
+        let (_, factory) = ArrowWriter::try_new(Vec::new(), encoding_schema.clone(), None)
+            .unwrap()
+            .into_serialized_writer()
+            .unwrap();
+        let columns = factory.create_column_writers(0).unwrap();
+        let runtime: common_runtime::Runtime = common_runtime::Builder::default()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let queued_batch = encoding_batch.clone();
+        let running = runtime.spawn_blocking(move || {
+            started_tx.send(()).unwrap();
+            release_rx.blocking_recv().unwrap();
+            drop((encoding_batch, columns));
+            Err(ParquetError::General(
+                "cleanup encoding failure".to_string(),
+            ))
+        });
+        timeout(Duration::from_secs(10), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let queued_started = Arc::new(AtomicBool::new(false));
+        let queued_started_task = queued_started.clone();
+        let queued = runtime.spawn_blocking(move || {
+            queued_started_task.store(true, Ordering::SeqCst);
+            drop(queued_batch);
+            Ok((Vec::new(), Vec::new()))
+        });
+        let SstArrowWriter::Parallel(parallel) = writer
+            .maybe_init_writer(&encoding_schema, &opts)
+            .await
+            .unwrap()
+        else {
+            panic!("expected parallel encoding");
+        };
+        // Controlled real tasks represent the previous row group in flight.
+        parallel.set_encoding_tasks_for_test(vec![running, queued]);
+        let source = FlatSource::new_stream(
+            batch.schema(),
+            Box::pin(futures::stream::iter(vec![
+                Ok(batch),
+                InvalidRecordBatchSnafu {
+                    reason: "source read failed",
+                }
+                .fail(),
+            ])),
+        );
+        let memory = new_compaction_memory_manager(1024 * 1024);
+        let budget = memory.try_acquire(memory.limit_bytes()).unwrap();
+        let mut write = Box::pin(async {
+            let _budget = budget;
+            match format {
+                FormatType::Flat => writer.write_all_flat(source, None, &opts).await,
+                FormatType::PrimaryKey => {
+                    writer
+                        .write_all_flat_as_primary_key(source, None, &opts)
+                        .await
+                }
+            }
+        });
+        // The next row group is buffered, then the source fails. No codec timing
+        // or I/O wait can make the old indexer-only cleanup pass this assertion.
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_none());
+        assert!(retained_field.upgrade().is_some());
+        release_tx.send(()).unwrap();
+        let error = timeout(Duration::from_secs(10), write)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::InvalidRecordBatch { reason, .. } if reason == "source read failed")
+        );
+        assert!(!queued_started.load(Ordering::SeqCst));
+        assert!(retained_field.upgrade().is_none());
+        assert!(memory.try_acquire(memory.limit_bytes()).is_some());
+        assert!(writer.writer.is_none());
+        assert_eq!(0, writer.bytes_written.load(Ordering::Relaxed));
     }
 }

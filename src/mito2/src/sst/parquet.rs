@@ -501,7 +501,8 @@ mod tests {
         }
     }
 
-    struct NoopIndexBuilder;
+    /// Builds an indexer with no enabled indexes for SST writer tests.
+    pub(crate) struct NoopIndexBuilder;
 
     #[async_trait::async_trait]
     impl IndexerBuilder for NoopIndexBuilder {

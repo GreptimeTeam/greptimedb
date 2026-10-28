@@ -172,6 +172,22 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
         Ok(metadata)
     }
 
+    /// Discards buffered input and waits for encoders without writing a failed SST.
+    pub(crate) async fn abort(mut self) {
+        self.buffered.clear();
+        abort_encoding_tasks(&mut self.encoding).await;
+    }
+
+    /// Installs controlled tasks to test SST write-error cleanup independently of codec timing.
+    #[cfg(test)]
+    pub(crate) fn set_encoding_tasks_for_test(
+        &mut self,
+        tasks: Vec<JoinHandle<Result<EncodedFields>>>,
+    ) {
+        assert!(self.encoding.is_empty());
+        self.encoding = tasks;
+    }
+
     /// Starts encoding the buffered rows once the previous row group is written.
     async fn encode_buffered(&mut self) -> Result<()> {
         self.finish_encoding().await?;
@@ -215,15 +231,7 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             let (task_chunks, costs) = match encoded {
                 Ok(encoded) => encoded,
                 Err(error) => {
-                    // Abort can stop queued blocking tasks, but running ones must
-                    // be joined before the caller releases its memory budget.
-                    for task in tasks.as_slice() {
-                        task.abort();
-                    }
-                    for task in tasks {
-                        // Cleanup failures must not replace the original error.
-                        let _ = task.await;
-                    }
+                    abort_encoding_tasks(tasks.as_mut_slice()).await;
                     return Err(error);
                 }
             };
@@ -248,6 +256,17 @@ impl<W: AsyncFileWriter> ParallelArrowWriter<W> {
             return Ok(());
         }
         self.async_writer.write(Bytes::from(bytes)).await
+    }
+}
+
+/// Aborts queued blocking work and joins running work before its budget is released.
+async fn abort_encoding_tasks(tasks: &mut [JoinHandle<Result<EncodedFields>>]) {
+    for task in tasks.iter() {
+        task.abort();
+    }
+    for task in tasks {
+        // Cleanup failures must not replace the original encoding or source error.
+        let _ = task.await;
     }
 }
 
