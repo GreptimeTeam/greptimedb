@@ -51,12 +51,10 @@ use datafusion_physical_expr::{
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::compute::SortOptions;
 use futures::{Stream, StreamExt};
-use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::region_engine::{
     PartitionRange, PrepareRequest, QueryScanContext, RegionScannerRef,
 };
-use store_api::storage::consts::ReservedColumnId;
 use store_api::storage::{ScanRequest, TimeSeriesDistribution};
 
 use crate::table::metrics::StreamMetrics;
@@ -120,10 +118,6 @@ impl RegionScanExec {
         }
 
         let metadata = scanner.metadata();
-        let is_ordinary_sparse = metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
-            && !metadata
-                .primary_key
-                .starts_with(&[ReservedColumnId::table_id(), ReservedColumnId::tsid()]);
         // Keep the primary key columns in the order reported by the metadata (for a metric
         // region that is the physical row key order). Reordering them would let a projected
         // logical tag look like a prefix of the row key, which yields ordering and
@@ -132,24 +126,19 @@ impl RegionScanExec {
             .primary_key_columns()
             .map(|col| col.column_schema.name.clone())
             .collect::<Vec<_>>();
-        // A dense or metric region emits rows ordered by its primary key, then its time
-        // index. A primary key column that is not projected is absent from the
+        // A region emits rows ordered by its primary key columns and then by the time
+        // index column. A primary key column that is not projected is absent from the
         // arrow schema, and it also breaks the ordering of every primary key column that
         // follows it (e.g. the physical `__table_id`/`__tsid` prefix of a metric region
         // when reading a logical table). Thus only the longest fully projected prefix of
         // the primary key can describe the output ordering, and that prefix can be empty.
-        let ordered_pk_prefix_len = if is_ordinary_sparse {
-            // Omitting null tags makes sparse key byte order differ from SQL tag order.
-            0
-        } else {
-            pk_names
-                .iter()
-                .position(|name| Column::new_with_schema(name, &arrow_schema).is_err())
-                .unwrap_or(pk_names.len())
-        };
-        // Whether the ordered, projected prefix covers the whole row key.
-        let all_pk_ordered = ordered_pk_prefix_len == pk_names.len();
-        let projected_pk_names = &pk_names[..ordered_pk_prefix_len];
+        let projected_pk_prefix_len = pk_names
+            .iter()
+            .position(|name| Column::new_with_schema(name, &arrow_schema).is_err())
+            .unwrap_or(pk_names.len());
+        // Whether the projected prefix covers the whole row key.
+        let all_pk_projected = projected_pk_prefix_len == pk_names.len();
+        let projected_pk_names = &pk_names[..projected_pk_prefix_len];
         let pk_columns = pk_names
             .iter()
             .filter_map(
@@ -191,7 +180,7 @@ impl RegionScanExec {
                 let mut pk_time_ordering = pk_sort_columns.clone();
                 // The time index column extends the ordering only when the whole row key
                 // precedes it; otherwise rows of different series can interleave.
-                if all_pk_ordered && let Some(ts) = ts_col.clone() {
+                if all_pk_projected && let Some(ts) = ts_col.clone() {
                     pk_time_ordering.push(ts);
                 }
                 orderings.push(pk_time_ordering);
@@ -202,12 +191,10 @@ impl RegionScanExec {
                 //
                 // `pk_time_ordering` and the potential `(__tsid, time index)` ordering are actually
                 // the same thing, thus present in one `OrderingEquivalenceClass`.
-                if !is_ordinary_sparse
-                    && let (Ok(tsid_col), Some(ts)) = (
-                        Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
-                        ts_col.clone(),
-                    )
-                {
+                if let (Ok(tsid_col), Some(ts)) = (
+                    Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema),
+                    ts_col.clone(),
+                ) {
                     orderings.push(vec![
                         PhysicalSortExpr::new(
                             Arc::new(tsid_col) as _,
@@ -238,13 +225,13 @@ impl RegionScanExec {
         let partitioning = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {
                 match Column::new_with_schema(DATA_SCHEMA_TSID_COLUMN_NAME, &arrow_schema) {
-                    Ok(tsid_col) if !is_ordinary_sparse => {
+                    Ok(tsid_col) => {
                         Partitioning::Hash(vec![Arc::new(tsid_col) as _], num_output_partition)
                     }
-                    _ if pk_columns.len() == pk_names.len() => {
+                    Err(_) if pk_columns.len() == pk_names.len() => {
                         Partitioning::Hash(pk_columns.clone(), num_output_partition)
                     }
-                    _ => Partitioning::UnknownPartitioning(num_output_partition),
+                    Err(_) => Partitioning::UnknownPartitioning(num_output_partition),
                 }
             }
             Some(TimeSeriesDistribution::TimeWindowed) | None => {
@@ -723,16 +710,12 @@ mod test {
         ChildFilterPushdownResult, ChildPushdownResult,
     };
     use datafusion::physical_plan::metrics::MetricValue;
-    use datafusion::physical_plan::sorts::sort::SortExec;
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
-    use datafusion_physical_expr::LexOrdering;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
-    use datatypes::vectors::{
-        Int32Vector, StringVector, TimestampMillisecondVector, UInt64Vector, VectorRef,
-    };
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use futures::TryStreamExt;
     use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
@@ -1031,7 +1014,6 @@ mod test {
     /// the metadata. Sorting the names (the removed logical-table workaround) would let a
     /// projected column look like a row key prefix and claim an ordering the scanner does
     /// not produce; the time index only extends a fully projected row key.
-    /// Ordinary sparse keys do not guarantee SQL ordering even with a full projection.
     #[test]
     fn test_per_series_ordering_follows_metadata_pk_order() {
         // Deliberately not alphabetical: sorting these names would give `[a, b, z]`.
@@ -1051,15 +1033,7 @@ mod test {
         let metadata = Arc::new(builder.build().unwrap());
 
         // The claims must not depend on the scanner reporting a logical region.
-        for (encoding, logical_region) in [
-            (PrimaryKeyEncoding::Dense, false),
-            (PrimaryKeyEncoding::Dense, true),
-            (PrimaryKeyEncoding::Sparse, false),
-            (PrimaryKeyEncoding::Sparse, true),
-        ] {
-            let mut metadata = metadata.as_ref().clone();
-            metadata.primary_key_encoding = encoding;
-            let metadata = Arc::new(metadata);
+        for logical_region in [false, true] {
             for (projection, claimed, unclaimed) in [
                 // Missing the first key: neither the remaining keys nor the time index are
                 // ordered.
@@ -1113,11 +1087,10 @@ mod test {
                 .unwrap();
 
                 for ordering in claimed {
-                    assert_eq!(
+                    assert!(
                         claims_ordering(&plan, &ordering),
-                        encoding == PrimaryKeyEncoding::Dense,
-                        "encoding={encoding:?} logical_region={logical_region} \
-                         projection {projection:?} ordering {ordering:?}"
+                        "logical_region={logical_region} projection {projection:?} must claim \
+                         ordering {ordering:?}"
                     );
                 }
                 for ordering in unclaimed {
@@ -1263,130 +1236,6 @@ mod test {
                     "projection {projection:?} must not claim ordering {ordering:?}"
                 );
             }
-        }
-    }
-
-    fn ordinary_sparse_scan(
-        distribution: Option<TimeSeriesDistribution>,
-        append_mode: bool,
-    ) -> RegionScanExec {
-        let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5692));
-        for (index, name) in ["a", "b", DATA_SCHEMA_TSID_COLUMN_NAME, "ts"]
-            .into_iter()
-            .enumerate()
-        {
-            let semantic_type = match name {
-                "ts" => SemanticType::Timestamp,
-                DATA_SCHEMA_TSID_COLUMN_NAME => SemanticType::Field,
-                _ => SemanticType::Tag,
-            };
-            let column_schema = if semantic_type == SemanticType::Tag {
-                column_schema_of(name).with_nullable_set()
-            } else {
-                column_schema_of(name)
-            };
-            builder.push_column_metadata(ColumnMetadata {
-                column_schema,
-                semantic_type,
-                column_id: index as u32 + 1,
-            });
-        }
-        builder
-            .primary_key(vec![1, 2])
-            .primary_key_encoding(PrimaryKeyEncoding::Sparse);
-        let metadata = Arc::new(builder.build().unwrap());
-        let schema = metadata.schema.clone();
-        // Omitting null `a` puts the second row after the first in sparse key order.
-        let batch = RecordBatch::new(
-            schema.clone(),
-            vec![
-                Arc::new(StringVector::from(vec![Some("a"), None])) as VectorRef,
-                Arc::new(StringVector::from(vec![Some("x"), Some("x")])),
-                Arc::new(UInt64Vector::from_slice([2, 1])),
-                Arc::new(TimestampMillisecondVector::from_slice([1, 2])),
-            ],
-        )
-        .unwrap();
-        let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
-        let scanner = Box::new(SinglePartitionScanner::new(
-            batches.as_stream(),
-            append_mode,
-            metadata,
-            None,
-        ));
-        RegionScanExec::new(
-            scanner,
-            ScanRequest {
-                distribution,
-                ..Default::default()
-            },
-            None,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_ordinary_sparse_ordering() {
-        for distribution in [
-            Some(TimeSeriesDistribution::PerSeries),
-            Some(TimeSeriesDistribution::TimeWindowed),
-            None,
-        ] {
-            let plan = ordinary_sparse_scan(distribution, false);
-            for ordering in [
-                vec!["a"],
-                vec!["a", "b", "ts"],
-                vec!["ts", "a"],
-                vec![DATA_SCHEMA_TSID_COLUMN_NAME, "ts"],
-            ] {
-                assert!(
-                    !claims_ordering(&plan, &ordering),
-                    "distribution={distribution:?} must not claim {ordering:?}"
-                );
-            }
-            assert_eq!(
-                claims_ordering(&plan, &["ts"]),
-                distribution == Some(TimeSeriesDistribution::TimeWindowed)
-            );
-            if distribution == Some(TimeSeriesDistribution::PerSeries) {
-                assert_eq!(
-                    plan.properties.output_partitioning(),
-                    &Partitioning::Hash(
-                        vec![Arc::new(Column::new("a", 0)), Arc::new(Column::new("b", 1))],
-                        1,
-                    )
-                );
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_sparse_nulls_first_limit() {
-        for append_mode in [false, true] {
-            let scan = ordinary_sparse_scan(Some(TimeSeriesDistribution::PerSeries), append_mode);
-            let ordering = LexOrdering::new([PhysicalSortExpr::new(
-                Arc::new(Column::new("a", 0)),
-                SortOptions {
-                    descending: false,
-                    nulls_first: true,
-                },
-            )])
-            .unwrap();
-            let mut plan: Arc<dyn ExecutionPlan> =
-                Arc::new(SortExec::new(ordering, Arc::new(scan)).with_fetch(Some(1)));
-            let context = SessionContext::new();
-            let state = context.state();
-            for optimizer in state.physical_optimizers() {
-                plan = optimizer.optimize(plan, state.config_options()).unwrap();
-            }
-            let batches = datafusion::physical_plan::collect(plan, context.task_ctx())
-                .await
-                .unwrap();
-            assert_eq!(
-                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-                1
-            );
-            assert!(batches[0].column(0).is_null(0), "append_mode={append_mode}");
         }
     }
 

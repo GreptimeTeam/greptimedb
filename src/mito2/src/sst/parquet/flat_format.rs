@@ -1355,7 +1355,14 @@ mod tests {
             column_id: col_id,
         });
 
-        let primary_key: Vec<u32> = (0..num_tags as u32).collect();
+        let mut primary_key: Vec<u32> = (0..num_tags as u32).collect();
+        if encoding == PrimaryKeyEncoding::Sparse {
+            let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(encoding);
+            primary_key.splice(0..0, reserved.primary_key.into_iter().take(2));
+            for column in reserved.column_metadatas.into_iter().take(2) {
+                builder.push_column_metadata(column);
+            }
+        }
         builder.primary_key(primary_key);
         builder.primary_key_encoding(encoding);
         builder.build().unwrap()

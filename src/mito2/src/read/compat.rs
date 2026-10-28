@@ -1344,8 +1344,19 @@ mod tests {
             ],
             &[],
         );
+        let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            PrimaryKeyEncoding::Sparse,
+        );
+        actual_metadata.primary_key = reserved.primary_key.into_iter().take(2).collect();
+        actual_metadata
+            .column_metadatas
+            .extend(reserved.column_metadatas.into_iter().take(2));
         actual_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
-        let actual_metadata = Arc::new(actual_metadata);
+        let actual_metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(actual_metadata)
+                .build()
+                .unwrap(),
+        );
 
         let mut expected_metadata = (*actual_metadata).clone();
         for column in expected_metadata.column_metadatas.iter_mut() {
@@ -1373,7 +1384,10 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let sparse_k1 = encode_sparse_key(&[]);
+        let mut sparse_k1 = Vec::new();
+        SparsePrimaryKeyCodec::schemaless()
+            .encode_internal(42, 7, &mut sparse_k1)
+            .unwrap();
         let input_columns: Vec<ArrayRef> = vec![
             Arc::new(Int64Array::from(vec![100, 200])),
             Arc::new(TimestampMillisecondArray::from_iter_values([1000, 2000])),
@@ -1384,8 +1398,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let input_schema =
-            to_flat_sst_arrow_schema(&actual_metadata, &FlatSchemaOptions::default());
+        let input_schema = to_flat_sst_arrow_schema(
+            &actual_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let input_batch = RecordBatch::try_new(input_schema, input_columns).unwrap();
 
         let result = compat_batch.compat(input_batch).unwrap();
@@ -1402,8 +1418,10 @@ mod tests {
                 OpType::Put as u8,
             ])),
         ];
-        let output_schema =
-            to_flat_sst_arrow_schema(&expected_metadata, &FlatSchemaOptions::default());
+        let output_schema = to_flat_sst_arrow_schema(
+            &expected_metadata,
+            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+        );
         let expected_batch = RecordBatch::try_new(output_schema, expected_columns).unwrap();
 
         assert_eq!(expected_batch, result);
