@@ -21,7 +21,7 @@ on:
         default: false
         type: boolean
       fuzz_profile:
-        description: Fuzz profile selected by /ci fuzz
+        description: Fuzz profile for a manual run or /ci fuzz
         required: false
         default: none
         type: choice
@@ -318,8 +318,10 @@ jobs:
           path: /tmp/sqlness-compat*
           retention-days: 3
 
+  # Fuzz runs on opening a ready PR, marking it ready, manual dispatch, and
+  # the scheduled main run. Synchronize events keep the core integration tests.
   prepare-fuzz-targets:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile != 'none'))) }}
     name: Prepare Fuzz Targets
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -433,7 +435,7 @@ jobs:
           if-no-files-found: error
 
   fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all'))) }}
     name: Fuzz Test (Standalone, ${{ matrix.group.name }})
     needs: [build, prepare-fuzz-targets]
     runs-on: ubuntu-latest
@@ -514,7 +516,7 @@ jobs:
           artifact-name: fuzz-standalone-${{ matrix.group.id }}
 
   unstable-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all'))) }}
     name: Unstable Fuzz Test
     needs: [build-greptime-ci, prepare-fuzz-targets]
     runs-on: ubuntu-latest
@@ -574,7 +576,7 @@ jobs:
           artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile != 'none'))) }}
     name: Build GreptimeDB binary (profile-CI)
     runs-on: ${{ matrix.os }}
     strategy:
@@ -634,7 +636,7 @@ jobs:
           version: current
 
   distributed-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all'))) }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs: [build-greptime-ci, prepare-fuzz-targets]
@@ -873,7 +875,7 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-chaos:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || (github.event_name == 'pull_request' && github.event.pull_request.draft == false && (github.event.action == 'opened' || github.event.action == 'ready_for_review')) || (github.event_name == 'workflow_dispatch' && (inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all'))) }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs: [build-greptime-ci, prepare-fuzz-targets]
