@@ -449,22 +449,11 @@ pub enum CanonicalGrouping {
     SourcePiecesOnly,
 }
 
-/// Whether two of the fragments a node hands over can belong to one canonical label set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OverlapStatus {
-    /// Something in the tree decided that two fragments cannot name one label set, which is what a
-    /// [`NativeExpr::Merge`] does on the way out.
-    Checked,
-    /// Nothing has decided, so two fragments may still turn out to hold one label set.
-    Pending,
-}
-
 /// The static facts a node's output answers about canonical series.
 ///
 /// These are what a tree rewrite needs and a runtime does not: whether the output already holds one
-/// series per canonical label set ([`CanonicalGrouping`]), whether two of its fragments can share
-/// one ([`OverlapStatus`]), how much of each label set this execution holds ([`CanonicalOwner`]),
-/// and the stream guarantee it hands over ([`SeriesOrdering`]).
+/// series per canonical label set ([`CanonicalGrouping`]) and how much of each label set this
+/// execution holds ([`CanonicalOwner`]).
 ///
 /// They are derived, never stored on a node: [`NativeNode::properties`] recomputes them from the
 /// tree, so a rewritten tree cannot keep a fact that no longer holds. What a compiler knows about a
@@ -476,83 +465,57 @@ pub struct NativeProperties {
     pub owner: CanonicalOwner,
     /// Whether the output holds at most one series per canonical label set.
     pub grouping: CanonicalGrouping,
-    /// Whether two fragments of the output may belong to one canonical label set.
-    pub overlaps: OverlapStatus,
-    /// The stream guarantee the output hands over.
-    pub ordering: SeriesOrdering,
 }
 
 impl NativeProperties {
     /// What an input's own fragments prove: nothing about which series share a label set.
     ///
-    /// A scan hands over the pieces of a metric that one partition holds, on `ordering`. Nothing
-    /// has grouped them by label set and nothing has checked whether two of them share one, so
-    /// neither fact is claimed; a caller that knows better says so instead.
-    pub fn source_pieces(ordering: SeriesOrdering) -> Self {
+    /// A scan hands over the pieces of a metric that one partition holds. Nothing has grouped them
+    /// by label set, so the fact is not claimed; a caller that knows better says so instead.
+    pub fn source_pieces() -> Self {
         Self {
             owner: CanonicalOwner::Unknown,
             grouping: CanonicalGrouping::SourcePiecesOnly,
-            overlaps: OverlapStatus::Pending,
-            ordering,
         }
     }
 
-    /// What a node the caller said nothing about proves: [`Self::source_pieces`] with the weakest
-    /// ordering, because even the stream shape is then unknown.
+    /// What a node the caller said nothing about proves: the same as [`Self::source_pieces`],
+    /// because a boundary the caller left unstated proves no more than a plain scan.
     pub fn not_known() -> Self {
-        Self::source_pieces(SeriesOrdering::Interleaved)
+        Self::source_pieces()
     }
 
-    /// What a node that rewrites label sets still proves.
+    /// What a node whose output label sets are its own still proves.
     ///
-    /// A rewrite can give two series one label set, so the output is no longer one series per label
-    /// set and nothing has checked whether two of its fragments now share one. A single execution
-    /// still holds every series it produces, but an ownership per canonical key no longer names the
-    /// label sets the rewrite invented.
-    fn labels_rewritten(self) -> Self {
+    /// Two unrelated node families reach this, and the conclusion is the same for both: the label
+    /// sets the output answers under are not the ones the input's keys named, so neither fact about
+    /// the input carries over.
+    ///
+    /// A rewrite can give two series one label set - `rate(x)` and `rate(y)` coincide on `{job="z"}`
+    /// where `x` and `y` did not - so the output is no longer one series per label set, and an
+    /// ownership per canonical key no longer names the label sets the rewrite invented.
+    ///
+    /// An aggregate's output identity is its group key and a match's is its modifiers, so a
+    /// co-location proof about the *input* keys says nothing about the output keys: two input label
+    /// sets this execution holds and one it does not can fold into one group here, and that group is
+    /// then not whole. A single execution survives as the only ownership possible, because it holds
+    /// every series there is rather than a named set of keys.
+    fn label_sets_of_its_own(self) -> Self {
         Self {
             owner: match self.owner {
                 CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
                 other => other,
             },
             grouping: CanonicalGrouping::SourcePiecesOnly,
-            overlaps: OverlapStatus::Pending,
-            ..self
-        }
-    }
-
-    /// What a node that decides a whole series at once proves.
-    ///
-    /// An aggregate, a vector operation, a binary or set operation and a merge each answer whole
-    /// series, so they close each series they answer and nothing above them sees chunks of one
-    /// series interleaved with another's. What label set a sample ends under is the operation's own
-    /// decision (`by(...)`, `on(...)`, `group_left(...)`), which is not a fact the input has, so the
-    /// input's grouping and its overlap status say nothing about the output's.
-    ///
-    /// Ownership is re-derived for the same reason instead of being carried over. An aggregate's
-    /// output identity is its group key and a match's is its modifiers, so a co-location proof about
-    /// the *input* keys says nothing about the output keys: two input label sets the boundary places
-    /// in this execution and one label set it places elsewhere can fold into one group here, and
-    /// that group is then not whole. A single execution is the one ownership that survives, because
-    /// it holds every series there is rather than a named set of keys.
-    fn whole_vector(self) -> Self {
-        Self {
-            owner: match self.owner {
-                CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
-                other => other,
-            },
-            grouping: CanonicalGrouping::SourcePiecesOnly,
-            overlaps: OverlapStatus::Pending,
-            ordering: SeriesOrdering::Contiguous,
         }
     }
 
     /// What a merge proves.
     ///
     /// A merge groups the fragments it received by canonical label set and hands over one series per
-    /// label set, so it is the node that establishes both facts for what it read: what it emits is
-    /// one series per label set among the fragments that arrived, and no two of those fragments hold
-    /// one label set. That is what a consumer folding a series needs of them.
+    /// label set, so it is the node that establishes that fact for what it read: what it emits is
+    /// one series per label set among the fragments that arrived. That is what a consumer folding a
+    /// series needs of them.
     ///
     /// What it read says nothing about what it emits past that, and it cannot collect a fragment that
     /// never arrived: the placement of what it read is still the placement of what it wrote, so the
@@ -562,8 +525,6 @@ impl NativeProperties {
     fn merged(self) -> Self {
         Self {
             grouping: CanonicalGrouping::CanonicalComplete,
-            overlaps: OverlapStatus::Checked,
-            ordering: SeriesOrdering::Contiguous,
             ..self
         }
     }
@@ -604,14 +565,10 @@ impl NativeNode {
     /// representation to keep in step.
     pub fn properties(&self, boundary: &[NativeProperties]) -> NativeProperties {
         match &self.expr {
-            // A leaf *is* the boundary it was bound to. The ordering is read off the binding, which
-            // is where this tree states the stream guarantee it was given.
-            NativeExpr::Input(binding) => NativeProperties {
-                ordering: binding.ordering,
-                ..binding.facts_in(boundary)
-            },
+            // A leaf *is* the boundary it was bound to, and the facts are its own entry's.
+            NativeExpr::Input(binding) => binding.facts_in(boundary),
             // A constant is one value everywhere and holds no label set at all, so it is whole as it
-            // stands: a merge has nothing to canonicalize and nothing can overlap.
+            // stands: a merge has nothing to canonicalize.
             NativeExpr::Scalar(_) => no_label_sets(),
             // A selection answers one series from one series' rows and keeps the label set it read,
             // so the whole series stays one stream under that label set.
@@ -625,7 +582,7 @@ impl NativeNode {
             NativeExpr::Instant { input, op } => {
                 let input = input.properties(boundary);
                 if op.timestamp {
-                    input.labels_rewritten()
+                    input.label_sets_of_its_own()
                 } else {
                     input
                 }
@@ -643,7 +600,7 @@ impl NativeNode {
             NativeExpr::Window { input, op } => {
                 let input = input.properties(boundary);
                 if op.function.drops_metric_name() {
-                    input.labels_rewritten()
+                    input.label_sets_of_its_own()
                 } else {
                     input
                 }
@@ -652,7 +609,7 @@ impl NativeNode {
             // `drop_metric_name`'s (`NativeNode::timestamp` in
             // [`execute`](crate::native::execute)), so the identity it answers under is not the one
             // it read.
-            NativeExpr::Timestamp { input } => input.properties(boundary).labels_rewritten(),
+            NativeExpr::Timestamp { input } => input.properties(boundary).label_sets_of_its_own(),
             // A map is point-wise over one series at a time, so it reads its input as it is: what it
             // does to the label set is a fact about its output.
             NativeExpr::Map { input, op } => {
@@ -660,7 +617,7 @@ impl NativeNode {
                 if op.ops.iter().all(preserves_canonical_identity) {
                     input
                 } else {
-                    input.labels_rewritten()
+                    input.label_sets_of_its_own()
                 }
             }
             // A merge is the canonicalizer: it answers one series per label set whatever pieces it
@@ -669,7 +626,7 @@ impl NativeNode {
             // An aggregate folds a group and a vector operation decides whole series against each
             // other, so the input's label sets are not what their output holds.
             NativeExpr::Aggregate { input, .. } | NativeExpr::Vector { input, .. } => {
-                input.properties(boundary).whole_vector()
+                input.properties(boundary).label_sets_of_its_own()
             }
             NativeExpr::Binary {
                 left,
@@ -688,13 +645,13 @@ impl NativeNode {
                     // label set it read, or under that label set rewritten.
                     //
                     // A `united` of the two sides cannot express that, and answers wrong in both
-                    // directions. It keeps the left side's grouping and overlaps, so with the
-                    // constant on the left the output would claim the constant's `CanonicalComplete`
-                    // and `Checked` for a vector side that is still only source pieces - the alias a
-                    // merge above has to collect would then never be collected. And it keeps an
-                    // ownership only the two sides agree on, so with the constant on the right a
-                    // vector side placed by canonical key would be downgraded to `Unknown`, which
-                    // collapses the owner partitions a merge above it could have stayed within.
+                    // directions. It keeps the left side's grouping, so with the constant on the
+                    // left the output would claim the constant's `CanonicalComplete` for a vector
+                    // side that is still only source pieces - the alias a merge above has to
+                    // collect would then never be collected. And it keeps an ownership only the two
+                    // sides agree on, so with the constant on the right a vector side placed by
+                    // canonical key would be downgraded to `Unknown`, which collapses the owner
+                    // partitions a merge above it could have stayed within.
                     //
                     // The side that holds the samples is therefore the base either way, so `x > 0`
                     // and `0 < x` derive the same facts.
@@ -705,7 +662,7 @@ impl NativeNode {
                     };
                     let vector = vector.properties(boundary);
                     if broadcast_drops_labels(matching) {
-                        vector.labels_rewritten()
+                        vector.label_sets_of_its_own()
                     } else {
                         vector
                     }
@@ -713,16 +670,16 @@ impl NativeNode {
                 // Two vectors are matched by label, and the modifiers decide what label set a
                 // sample ends under, so neither side's grouping is the output's. A match answers
                 // series of both sides, so its ownership is only what both agree on, and
-                // `whole_vector` re-derives it for the output's keys.
+                // `label_sets_of_its_own` re-derives it for the output's keys.
                 (_, _) => left
                     .properties(boundary)
                     .united(right.properties(boundary))
-                    .whole_vector(),
+                    .label_sets_of_its_own(),
             },
             NativeExpr::Set { left, right, .. } => left
                 .properties(boundary)
                 .united(right.properties(boundary))
-                .whole_vector(),
+                .label_sets_of_its_own(),
         }
     }
 }
@@ -1270,14 +1227,11 @@ impl NativeNode {
 /// The properties of a value that holds no label set: a constant, or a binary operation of two of
 /// them.
 ///
-/// There is nothing to canonicalize and nothing can overlap, and a constant is the same value in
-/// every execution.
+/// There is nothing to canonicalize, and a constant is the same value in every execution.
 fn no_label_sets() -> NativeProperties {
     NativeProperties {
         owner: CanonicalOwner::SinglePartition,
         grouping: CanonicalGrouping::CanonicalComplete,
-        overlaps: OverlapStatus::Checked,
-        ordering: SeriesOrdering::Contiguous,
     }
 }
 

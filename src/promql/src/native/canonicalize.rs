@@ -28,7 +28,6 @@ use datafusion::common::Result as DfResult;
 
 use crate::native::plan::{
     CanonicalGrouping, NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
-    OverlapStatus,
 };
 
 /// Rewrites `tree` so that every consumer of a whole canonical series is handed one.
@@ -63,9 +62,8 @@ pub fn insert_native_merge_inside_current_fused(
 /// set.
 ///
 /// A consumer that folds a label set's series into one answer needs the whole series and not the
-/// pieces one partition holds: given pieces it answers pieces. [`CanonicalGrouping`] and
-/// [`OverlapStatus`] are the two facts that say whether it has the whole one, so a node that cannot
-/// prove both is wrapped.
+/// pieces one partition holds: given pieces it answers pieces. [`CanonicalGrouping`] is the fact
+/// that says whether it has the whole one, so a node that cannot prove it is wrapped.
 ///
 /// A node whose output is not an evaluated vector keeps its place: a merge binds samples evaluated on
 /// a grid, so a scalar, raw samples and aggregate state have nothing a merge could take, and no
@@ -77,9 +75,7 @@ pub fn insert_native_merge_inside_current_fused(
 /// ownership it reports stays its input's, unchanged.
 fn canonical(node: NativeNode, boundary: &[NativeProperties]) -> NativeNode {
     let properties = node.properties(boundary);
-    if properties.grouping == CanonicalGrouping::CanonicalComplete
-        && properties.overlaps == OverlapStatus::Checked
-    {
+    if properties.grouping == CanonicalGrouping::CanonicalComplete {
         return node;
     }
     if !matches!(&node.output, NativeType::Samples(schema) if schema.eval_grid.is_some()) {

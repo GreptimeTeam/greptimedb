@@ -22,7 +22,7 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeProperties, NativeTree, NativeType, OverlapStatus, needs_single_execution,
+    NativeNode, NativeProperties, NativeTree, NativeType, needs_single_execution,
     needs_single_execution_in, no_label_sets, preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -585,8 +585,6 @@ fn proven_by_key() -> NativeProperties {
     NativeProperties {
         owner: CanonicalOwner::ByCanonicalKey,
         grouping: CanonicalGrouping::CanonicalComplete,
-        overlaps: OverlapStatus::Checked,
-        ordering: SeriesOrdering::Contiguous,
     }
 }
 
@@ -599,9 +597,9 @@ fn proven_in_one_execution() -> NativeProperties {
 }
 
 /// What a plain raw scan proves: pieces of a metric, placed by the storage `read_key` and not by a
-/// canonical key, with nothing grouped and nothing checked.
+/// canonical key, with nothing grouped.
 fn scan_pieces() -> NativeProperties {
-    NativeProperties::source_pieces(SeriesOrdering::KeyThenTime)
+    NativeProperties::source_pieces()
 }
 
 /// The facts a node reports follow what the node does to a label set.
@@ -613,12 +611,12 @@ fn scan_pieces() -> NativeProperties {
 fn properties_follow_what_each_node_does_to_a_label_set() {
     let shared = grid(0, 60_000, 4);
 
-    // What a caller knows about a scan: this execution holds pieces of a metric, the ordering is the
-    // scan's, and nothing has grouped those pieces by label set.
-    let boundary = NativeProperties::source_pieces(SeriesOrdering::KeyThenTime);
+    // What a caller knows about a scan: this execution holds pieces of a metric and nothing has
+    // grouped those pieces by label set.
+    let boundary = NativeProperties::source_pieces();
 
-    // A bare input is the boundary it was bound to. Its ordering is the one on the binding, which is
-    // where the tree states it, so the fact supplied beside it does not override it.
+    // A bare input is the boundary it was bound to, so it proves exactly the entry supplied beside
+    // it and nothing else.
     let bare = input_on(Arc::clone(&shared));
     let scanned = bare.properties(&[boundary]);
     assert_eq!(
@@ -626,8 +624,6 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         NativeProperties {
             owner: CanonicalOwner::Unknown,
             grouping: CanonicalGrouping::SourcePiecesOnly,
-            overlaps: OverlapStatus::Pending,
-            ordering: SeriesOrdering::Contiguous,
         }
     );
 
@@ -651,17 +647,14 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
     );
     assert_eq!(
         window(RangeFunction::Rate).properties(&[scanned]),
-        scanned.labels_rewritten()
+        scanned.label_sets_of_its_own()
     );
 
-    // Both facts a map could inherit from a complete child are exactly what it loses: a series ends
-    // under a label set the map built, so no grouping proof survives, and nothing has checked whether
-    // two of the series it emits now share one.
+    // The grouping proof a map could inherit from a complete child is exactly what it loses: a
+    // series ends under a label set the map built, so no grouping proof survives.
     let complete = NativeProperties {
         owner: CanonicalOwner::ByCanonicalKey,
         grouping: CanonicalGrouping::CanonicalComplete,
-        overlaps: OverlapStatus::Checked,
-        ordering: SeriesOrdering::Contiguous,
     };
     // `map_math` ends with `drop_metric_name`, so `abs(x)` and `x` no longer hold one label set:
     // this is the case the RFC read as inheriting grouping.
@@ -672,8 +665,6 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         NativeProperties {
             owner: CanonicalOwner::Unknown,
             grouping: CanonicalGrouping::SourcePiecesOnly,
-            overlaps: OverlapStatus::Pending,
-            ordering: SeriesOrdering::Contiguous,
         }
     );
 
@@ -704,20 +695,11 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
     );
 
     // An aggregate folds a group and a vector operation decides whole series against each other, so
-    // neither can claim the label sets of the series it read. What a whole-series node does emit is
-    // still each series whole, which is the ordering it proves.
+    // neither can claim the label sets of the series it read.
     let folded = complete_aggregate(input_on(Arc::clone(&shared)));
     assert_eq!(
         folded.properties(&[complete]).grouping,
         CanonicalGrouping::SourcePiecesOnly
-    );
-    assert_eq!(
-        folded.properties(&[complete]).overlaps,
-        OverlapStatus::Pending
-    );
-    assert_eq!(
-        folded.properties(&[complete]).ordering,
-        SeriesOrdering::Contiguous
     );
     // A group's identity is the group key, so an ownership per input key says nothing about it: two
     // input label sets placed in different executions can fold into one group.
@@ -730,10 +712,6 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         ordered.properties(&[complete]).grouping,
         CanonicalGrouping::SourcePiecesOnly
     );
-    assert_eq!(
-        ordered.properties(&[complete]).overlaps,
-        OverlapStatus::Pending
-    );
 
     // Two vectors are matched by label, which is the operation's own decision about what label set a
     // sample ends under, so neither side's grouping is the output's. The two sides are two sources,
@@ -745,10 +723,6 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
     assert_eq!(
         sum.properties(&[complete, complete]).grouping,
         CanonicalGrouping::SourcePiecesOnly
-    );
-    assert_eq!(
-        sum.properties(&[complete, complete]).overlaps,
-        OverlapStatus::Pending
     );
     // Its output holds series from both sides, so its ownership is only what both agree on - and
     // then only if it survives the match, whose output identity is its modifiers and not the keys it
@@ -769,7 +743,7 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         CanonicalGrouping::SourcePiecesOnly
     );
 
-    // A merge is the node that establishes both facts, and the placement of what it read is the
+    // A merge is the node that establishes that fact, and the placement of what it read is the
     // placement of what it wrote.
     let merged = merge_over(input_on(Arc::clone(&shared)));
     assert_eq!(
@@ -777,8 +751,6 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
         NativeProperties {
             owner: CanonicalOwner::ByCanonicalKey,
             grouping: CanonicalGrouping::CanonicalComplete,
-            overlaps: OverlapStatus::Checked,
-            ordering: SeriesOrdering::Contiguous,
         }
     );
 }
@@ -790,8 +762,8 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
 /// The old derivation united the two sides before looking at them, which answered wrong in both
 /// directions: with the vector on the left it took the ownership only the two sides agree on, and a
 /// vector side placed by canonical key came out `Unknown` (the constant answers `SinglePartition`);
-/// with the vector on the right it kept the left side's grouping and overlaps, so the constant's
-/// `CanonicalComplete` and `Checked` were handed to a vector side that is still only source pieces.
+/// with the vector on the right it kept the left side's grouping, so the constant's
+/// `CanonicalComplete` was handed to a vector side that is still only source pieces.
 /// The two orders are one query, `x > 0` and `0 < x`, so they are asserted against the same answer.
 #[test]
 fn a_broadcast_derives_its_vector_sides_properties_whichever_side_the_vector_is_on() {
@@ -815,9 +787,9 @@ fn a_broadcast_derives_its_vector_sides_properties_whichever_side_the_vector_is_
         );
     }
 
-    // The two facts the old formula lost, spelled out: a vector side placed by canonical key keeps
-    // that ownership (which is what a merge above the broadcast needs), and a vector side of source
-    // pieces stays ungrouped and unchecked (which is what a merge above it has to collect).
+    // The facts the old formula lost, spelled out: a vector side placed by canonical key keeps that
+    // ownership (which is what a merge above the broadcast needs), and a vector side of source pieces
+    // stays ungrouped (which is what a merge above it has to collect).
     let by_key = binary_with(vector(), constant(), matching(BinaryOp::Gt, false));
     assert_eq!(
         by_key.properties(&[proven_by_key()]).owner,
@@ -828,10 +800,6 @@ fn a_broadcast_derives_its_vector_sides_properties_whichever_side_the_vector_is_
     assert_eq!(
         pieces.properties(&[scan_pieces()]).grouping,
         CanonicalGrouping::SourcePiecesOnly
-    );
-    assert_eq!(
-        pieces.properties(&[scan_pieces()]).overlaps,
-        OverlapStatus::Pending
     );
 }
 
@@ -845,7 +813,7 @@ fn arithmetic_and_a_bool_comparison_rewrite_the_vector_sides_labels_only() {
     let vector = || input_on(Arc::clone(&shared));
 
     for boundary in [proven_by_key(), scan_pieces()] {
-        let expected = vector().properties(&[boundary]).labels_rewritten();
+        let expected = vector().properties(&[boundary]).label_sets_of_its_own();
         // `x * 2` and `2 * x`, which drop `__name__` in `BroadcastRuntime`; `x > bool 0` and
         // `0 < bool x`, the comparison that keeps a value instead of filtering.
         for (vector_left_op, constant_left_op) in [
@@ -862,7 +830,6 @@ fn arithmetic_and_a_bool_comparison_rewrite_the_vector_sides_labels_only() {
             assert_eq!(constant_left.properties(&[boundary]), expected);
             // The rewrite is a real downgrade and not a carried-over proof.
             assert_eq!(derived.grouping, CanonicalGrouping::SourcePiecesOnly);
-            assert_eq!(derived.overlaps, OverlapStatus::Pending);
             assert_eq!(derived.owner, CanonicalOwner::Unknown);
         }
     }
@@ -884,7 +851,7 @@ fn two_constants_hold_no_label_set() {
 }
 
 /// A vector/vector match answers series of both sides, so its ownership is only what the two sides
-/// agree on, and the match re-derives it for the label sets its modifiers name: `whole_vector` keeps
+/// agree on, and the match re-derives it for the label sets its modifiers name: `label_sets_of_its_own` keeps
 /// a one-execution ownership and downgrades one per canonical key, because the keys it read are not
 /// the label sets it writes.
 #[test]
@@ -897,13 +864,10 @@ fn a_two_vector_match_still_rederives_its_ownership() {
             input_on_at(1, Arc::clone(&shared)),
         )
     };
-    // What a match proves whatever it read: whole series on a contiguous stream, and the grouping and
-    // overlaps are the modifiers' decision.
+    // What a match proves whatever it read: the grouping is the modifiers' decision.
     let whole_vector = |owner: CanonicalOwner| NativeProperties {
         owner,
         grouping: CanonicalGrouping::SourcePiecesOnly,
-        overlaps: OverlapStatus::Pending,
-        ordering: SeriesOrdering::Contiguous,
     };
 
     // Both sides placed by canonical key agree on that ownership, and the match still downgrades it.
@@ -934,27 +898,16 @@ fn a_two_vector_match_still_rederives_its_ownership() {
 fn the_two_timestamp_shapes_downgrade_and_a_value_selection_inherits() {
     let shared = grid(0, 60_000, 4);
     let boundary = [proven_in_one_execution()];
-    // What each scan itself reports: the boundary's facts, with the ordering its binding states. The
-    // evaluated scan promises contiguous series and the raw one key-then-time.
-    let evaluated = NativeProperties {
-        ordering: SeriesOrdering::Contiguous,
-        ..boundary[0]
-    };
-    let raw = NativeProperties {
-        ordering: SeriesOrdering::KeyThenTime,
-        ..boundary[0]
-    };
 
     // `timestamp(rate(x[5m]))` and `timestamp(x)` both rewrite the labels.
     let stamped = timestamp_of(input_on(Arc::clone(&shared)));
-    assert_eq!(stamped.properties(&boundary), evaluated.labels_rewritten());
+    assert_eq!(
+        stamped.properties(&boundary),
+        boundary[0].label_sets_of_its_own()
+    );
     assert_eq!(
         stamped.properties(&boundary).grouping,
         CanonicalGrouping::SourcePiecesOnly
-    );
-    assert_eq!(
-        stamped.properties(&boundary).overlaps,
-        OverlapStatus::Pending
     );
 
     // A one-execution ownership is not invalidated by a rewrite, a per-key one is.
@@ -969,11 +922,14 @@ fn the_two_timestamp_shapes_downgrade_and_a_value_selection_inherits() {
 
     // A selection that reports the sample's time is the same rewrite, applied to a selected sample.
     let selected = instant_over(raw_input_at(0), true, Arc::clone(&shared));
-    assert_eq!(selected.properties(&boundary), raw.labels_rewritten());
+    assert_eq!(
+        selected.properties(&boundary),
+        boundary[0].label_sets_of_its_own()
+    );
 
     // A selection that reports the sample's value keeps the label set it read, so it inherits.
     let values = instant_over(raw_input_at(0), false, Arc::clone(&shared));
-    assert_eq!(values.properties(&boundary), raw);
+    assert_eq!(values.properties(&boundary), boundary[0]);
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.

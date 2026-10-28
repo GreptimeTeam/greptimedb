@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 
-use datatypes::series::SeriesOrdering;
 use datatypes::series::time::EvalGrid;
 
 use super::insert_native_merge_inside_current_fused;
@@ -28,7 +27,7 @@ use crate::native::plan::tests::{
 };
 use crate::native::plan::{
     BoundSetOp, CanonicalGrouping, CanonicalOwner, NativeExpr, NativeNode, NativeProperties,
-    NativeTree, OverlapStatus,
+    NativeTree,
 };
 use crate::range_eval::RangeFunction;
 use crate::vector_match::{MatchingLabels, SetOp};
@@ -36,7 +35,7 @@ use crate::vector_match::{MatchingLabels, SetOp};
 /// What a caller knows about a scan: this execution holds one partition's pieces of a metric, in
 /// scans that hand each series over whole.
 fn source_pieces() -> NativeProperties {
-    NativeProperties::source_pieces(SeriesOrdering::Contiguous)
+    NativeProperties::source_pieces()
 }
 
 /// What a caller knows about a scan it has already collected into one series per label set.
@@ -44,8 +43,6 @@ fn canonical_source() -> NativeProperties {
     NativeProperties {
         owner: CanonicalOwner::SinglePartition,
         grouping: CanonicalGrouping::CanonicalComplete,
-        overlaps: OverlapStatus::Checked,
-        ordering: SeriesOrdering::Contiguous,
     }
 }
 
@@ -352,7 +349,7 @@ fn a_fragment_of_one_label_set_is_collected_before_the_window_folds_it() {
 /// only at position 1, so no two fragments of the input answer the same position under one label set
 /// and an overlap check over the input is satisfied. The metric name is what tells them apart, and
 /// `rate` drops it in `RangeEvaluator::emit`; `{job="x"}` then holds two fragments at every position,
-/// one from each input series, and only a merge can assemble them. The input's `Checked` is therefore
+/// one from each input series, and only a merge can assemble them. The input's grouping is therefore
 /// not the output's, which is why the pass has to work from the facts of what the window does.
 #[test]
 fn a_name_dropping_window_gains_a_merge_above_it() {

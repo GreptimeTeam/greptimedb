@@ -777,13 +777,13 @@ fn input_boundary(
 ) -> Vec<NativeProperties> {
     inputs
         .iter()
-        .map(|(input, _, ordering)| NativeProperties {
+        .map(|(input, _, _)| NativeProperties {
             owner: if input.downcast_ref::<SeriesRepartitionExec>().is_some() {
                 CanonicalOwner::ByCanonicalKey
             } else {
                 CanonicalOwner::Unknown
             },
-            ..NativeProperties::source_pieces(*ordering)
+            ..NativeProperties::source_pieces()
         })
         .collect()
 }

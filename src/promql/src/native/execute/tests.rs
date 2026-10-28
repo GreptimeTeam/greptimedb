@@ -10830,11 +10830,9 @@ fn an_inserted_merge_answers_the_rows_the_unmerged_tree_answered() {
     let schema = evaluated_schema(Arc::clone(&grid));
     let unmerged = NativeTree::try_new(map(evaluated_input(Arc::clone(&grid)), vec![MathOp::Abs]))
         .expect("a map over an evaluated input is a legal tree");
-    let merged = insert_native_merge_inside_current_fused(
-        &unmerged,
-        &[NativeProperties::source_pieces(SeriesOrdering::Contiguous)],
-    )
-    .expect("the pass keeps the tree legal");
+    let merged =
+        insert_native_merge_inside_current_fused(&unmerged, &[NativeProperties::source_pieces()])
+            .expect("the pass keeps the tree legal");
     // What is executed below is the pass's insertion: the pass put the merge at the root.
     assert!(
         matches!(merged.root().expr, NativeExpr::Merge { .. }),

@@ -647,7 +647,7 @@ impl PromPlanner {
         let tree = if let NativePlacement::SingleExecution = placement {
             // What the route knows about each fused input: one scan partition's pieces of the
             // metric, read by the pass at the leaf the compiler bound to that source index.
-            let boundary = vec![NativeProperties::source_pieces(NATIVE_ORDERING); children.len()];
+            let boundary = vec![NativeProperties::source_pieces(); children.len()];
             insert_native_merge_inside_current_fused(&compiled.tree, &boundary)
                 .context(DataFusionPlanningSnafu)?
         } else {
@@ -1483,7 +1483,7 @@ mod tests {
     /// a metric. It is the only thing the planner can say about a scan, because whether one
     /// partition's series are whole label sets is decided when the region splits its ranges.
     fn source_pieces() -> NativeProperties {
-        NativeProperties::source_pieces(SeriesOrdering::Contiguous)
+        NativeProperties::source_pieces()
     }
 
     /// `query`'s tree with the canonical merges the insertion pass puts in it.
