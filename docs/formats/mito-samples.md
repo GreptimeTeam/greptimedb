@@ -1,21 +1,11 @@
 # Mito columnar samples format
 
-**Status: implemented as an opt-in internal backend.**
-This document specifies a standalone samples writer and reader. Query-consumer
-integration, caches, and enabling samples by default are separate work.
+This document specifies the version 1 on-disk layout, encodings, ordering rules,
+and validation limits for samples artifacts. It shares artifact conventions with
+[Mito columnar series format](mito-series.md).
 
-The port is stacked on [#9841](https://github.com/GreptimeTeam/greptimedb/pull/9841),
-at commit `6b44040c0ad96fb06d592c7bba5a1744e2274718`, and follows the presentation
-and artifact conventions in [Mito columnar series](mito-series.md). Its sample
-encodings and single-series blocks derive from the benchmark's
-[columnar samples v2 specification][bench-spec] and [implementation][bench-code]
-at revision `8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4`.
-The benchmark variant name does not determine the Mito wire version.
-
-The principal format choices are nullable Float64 fields, preservation of source
-rows and operation types, blocks bounded by rows and bytes without hourly splits,
-and Mito framing with sample-specific time bounds. This is an independent format;
-it does not read or write benchmark files.
+Samples store nullable Float64 fields, timestamps, sequences, and operation types
+in single-series blocks bounded by rows and decoded bytes.
 
 ## Artifact manifest
 
@@ -55,16 +45,13 @@ The field list records the build-time region field schema in metadata order.
 Require 1..=1,024 fields, each with `type = "float64"` and `nullable = true`.
 A non-nullable source Float64 field is represented by this same nullable logical
 type with no null values. Sparse logical-table fields may be entirely null.
-Reject any other source field type; do not silently drop or cast it. Timestamp
-and field IDs must be distinct, and all output names must be unique, including
-the internal names below. Tags are not sample fields and are not stored here.
+Timestamp and field IDs must be distinct. All output names must be unique,
+including the internal names below. Tags are not sample fields and are not stored here.
 
 The stored logical Arrow schema is `__table_id: UInt32`, `__tsid: UInt64`, the
 timestamp column with its recorded unit, `__sequence: UInt64`, `__op_type: UInt8`,
 then nullable Float64 fields in manifest order. The first five columns are
-non-null. No `__primary_key` or tag columns are exposed by the format reader.
-Schema reconciliation with a later region schema belongs to a future consumer;
-the reader always exposes the stored schema.
+non-null. No `__primary_key` or tag columns are stored.
 
 Each `files` entry contains `part_id: u32`, `file_size: u64`, `num_rows: u64`,
 `num_blocks: u64`, `first`, `last`, `min_timestamp: i64`, and `max_timestamp: i64`.
@@ -80,18 +67,14 @@ in another part. The shared boundary series can also have equal timestamps on
 both sides. These ranges are **not disjoint**, unlike the series-index format.
 Readers consider every matching part rather than choosing a unique owner.
 
-The manifest is written only after all parts close successfully. Existing samples
-catalog publication commits the artifact. `ArtifactMetadata.objects` records the
-manifest and every part as `{ path, file_size }`; the artifact's `file_size` is
-their checked sum. Record sizes while writing, including the manifest's size.
-An empty writer produces a manifest with an empty file list and no part files;
-the existing builder may instead skip an SST for which it has no readable input.
+`ArtifactMetadata.objects` records the manifest and every part as `{ path, file_size }`;
+the artifact's `file_size` is their checked sum. An empty artifact has an empty
+file list and no part files. The manifest is at most 64 MiB.
 
-On open, bound the manifest to 64 MiB before parsing. Validate its format, schema,
-part order, and sizes; match region, source SST, and generation to the pinned handle.
-Require the artifact object list to contain exactly the derived manifest and part
-paths, without duplicates, extra objects, or inconsistent size totals. Read order
-comes from the manifest, not the lifecycle object list.
+Region, source SST, and generation must match the catalog entry. The artifact
+object list must contain exactly the derived manifest and part paths, without
+duplicates, extra objects, or inconsistent size totals. Part order comes from
+the manifest.
 
 ## Part file
 
@@ -130,36 +113,17 @@ its descriptor. Timestamp, sequence, operation type, and each present value fiel
 are independent chunks; their references are in the metadata, not inline headers.
 Emit chunks in that order, with value fields following manifest order.
 
-The input is the flat `RecordBatch` stream from the existing per-SST samples
-builder, after its `FlatCompatBatch` schema adaptation. Preserve every row
-delivered by that builder. The writer neither deduplicates timestamps nor chooses
-the highest sequence. It preserves delete markers, duplicate rows, and equal-key
-ties, including conflicting values at the same sequence. This is not a statement
-that an SST itself retains every historical write.
+Rows preserve delete markers, duplicate timestamps, and equal-key ties, including
+conflicting values at the same sequence. The format does not encode a deduplicated
+or snapshot-filtered view.
 
-Require nondecreasing identifiers, nondecreasing timestamps within an identifier,
-and nonincreasing sequence within equal timestamps, across batches and parts.
+Identifiers are nondecreasing, timestamps are nondecreasing within an identifier,
+and sequences are nonincreasing within equal timestamps, including across parts.
 Equal ordering keys retain input order; operation type is not a sorting key.
-Reject decreasing input rather than sorting or buffering a whole SST. Future
-query adapters remain responsible for snapshot visibility, cross-SST merging,
-deduplication, and delete processing.
 
-`(table_id, tsid)` is the complete identity under #9841's current uniqueness
-assumption. Equal TSIDs in different tables are distinct. Exact sparse primary
-keys and tags are not retained, and this format does not promise collision-safe
-identity. TODO: evaluate exact-key storage and collision handling with the series
-format before using these sidecars as a general query source.
-
-TODO: evaluate adding dedicated `job_id` and `instance_id` components to the
-identifier for locality, following the VM native approach. The current
-`(table_id, tsid)` pair is the version-1 identity, not a permanent restriction on
-future formats. The extended identifier's component order, widths, derivation,
-and relationship to TSID uniqueness require a separate design and benchmarks.
-Coordinate that change with the series format: sample block identities,
-part/page bounds, sorting, and selected-series requests must agree. Changing
-the persisted identifier layout requires a new format version; do not repurpose
-reserved bytes or silently reinterpret existing keys. Ordinary `job` and
-`instance` tags do not become dedicated identifier components in this port.
+`(table_id, tsid)` is the complete identity under the uniqueness assumption.
+Equal TSIDs in different tables are distinct. Exact sparse primary keys, tags,
+and collision discriminators are not stored.
 
 Blocks split on an identity change or before the next row would exceed a packing
 limit. There is no hourly split and no padding of short blocks. The default row
@@ -179,12 +143,6 @@ The effective row cap is the largest integer satisfying both limits: 8,192 for
 one field and 31 for 1,024 fields. Encoded buffers and metadata have separate
 bounds below. Increasing the reader maximum requires an explicit compatibility
 decision; it is not merely a writer option in this version.
-
-Materializing the two identity columns adds at most `12 * N` bytes to an output
-batch. Thus a full-schema output batch has at most `262144 + 12 * 8192 = 360448`
-bytes of value/validity buffers under this accounting, plus Arrow and allocation
-overhead. Temporary encoded, compact non-null, and selected-output buffers can
-coexist; the block limit is not a promise that total reader memory is 256 KiB.
 
 ### Payload reference
 
@@ -264,7 +222,7 @@ physical field IDs for internal columns. Time, sequence, and operation descripto
 are mandatory, appear first in that order, and have zero null counts. Value
 descriptors follow manifest order with no repeated or unknown IDs. A value with
 all rows null is omitted and synthesized as null by the reader; present value
-chunks have `null_count < row_count`. No value statistics are stored in this port.
+chunks have `null_count < row_count`. No value statistics are stored.
 
 A block with `P` present fields has `C = 3 + P` chunks and a descriptor of
 `44 + 44 * C` bytes. This is 220 bytes for one present field and 45,232 bytes for
@@ -344,7 +302,7 @@ For `(7,42)` and `[90,95)`, A is still visited although its block starts before
 the requested interval. Global time envelopes must not be computed from just
 the first and last blocks: B's range is `[0,200]`, not `[100,50]`.
 
-This differs from #9841, which has no sample timestamps or time navigation.
+The series-index format has no sample timestamps or time bounds.
 
 ### Trailer
 
@@ -385,9 +343,9 @@ namespaces as well. Never reuse an assigned ID with a different meaning.
 
 Encode first, then compress each chunk/page independently. The default writer
 tries Zstd level 3 and chooses it only if strictly smaller than the raw encoded
-bytes, following the sample benchmark. Compression 0 requires equal stored and
+bytes. Compression 0 requires equal stored and
 decoded lengths. Compression level is a writer choice; decoding information is
-in the frame. Codec selection adds no public configuration.
+in the frame.
 
 Unsigned varints use base-128/LEB128: seven data bits per byte and a high
 continuation bit. Writers emit the shortest representation. Readers reject
@@ -472,187 +430,3 @@ changed field meanings, or incompatible limits require a new version. Deeper
 metadata trees require an explicit reader-support and rollout decision; an
 unchanged layout alone does not make them readable by version-1 implementations.
 
-## Writer, OpenDAL I/O, and lifecycle
-
-Implement behind `SamplesFormat::writer` and `FormatWriter`, using the existing
-`object_store::ObjectStore` OpenDAL operator. Extend the internal writer factory
-with an explicit source SST `FileId` so the manifest does not infer identity by
-parsing an opaque prefix. Check that the supplied prefix agrees with metadata,
-source ID, and generation. The builder supplies these values from its pinned SST
-and captured region version; fake backends follow the same internal interface.
-
-Validate supported sparse primary-key metadata and extract `(table_id, tsid)`
-with the same conventions as the series port. Accept the builder's binary or
-dictionary primary-key array representation. Validate column types and mandatory
-non-null values before writing; preserve ordering state across `write` calls.
-Retain only the active block and bounded per-part descriptors, not all SST rows.
-No external sort, benchmark manifest/schema file, or filesystem scratch spool is
-introduced.
-
-Write chunks as each block completes. Finish a part at the next block boundary
-once its stored position reaches 512 MiB or its accumulated serialized block
-descriptors reach 8 MiB. Both are soft packing limits; one bounded block may
-overshoot. Root capacity is a separate hard limit checked before emitting that
-block. Write leaves, the internal root if needed, and the trailer, then close the
-part before opening its successor. Bound the manifest and lifecycle object-list
-growth as parts complete; fail rather than constructing a manifest over 64 MiB.
-
-Use recorded sizes for reads; do not issue object stats just to locate trailers.
-Fetch metadata and selected column ranges only. A query lazily reuses one OpenDAL
-reader per accessed part across partition streams. Selected block columns are fetched
-with concurrency 8 and zero-gap coalescing; no unselected fields or neighboring
-blocks are prefetched. The block size limit and scan memory reservation bound
-retained buffers. Boundary blocks read timestamps first
-so empty selections avoid value I/O. Native requests reserve stored/decompressed
-buffers, selection, typed values, and output against the scan memory pool before
-payload reads, releasing the reservation when the yielded batch is consumed or
-the stream is dropped. Mapper-required fields plus identity/time/sequence/operation
-columns determine projection. Keep
-fetch/validate/decode entrypoints for metadata and columns separate so a later
-cache integration can use immutable generation, part, byte range, checksum,
-codec IDs, and representation without changing the format.
-
-Writers own all partial outputs until `finish` succeeds. Write/close errors,
-explicit abort, and cancellation clean up every created object, including an
-unfinished manifest. Use the existing cleanup/runtime pattern from #9841;
-cleanup errors must not hide the original error. A process crash can leave orphan
-objects, but never publishes an unfinished generation as valid. Reconciliation
-and existing orphan handling remain responsible for recovery.
-
-After finish, ownership transfers to the build/catalog lifecycle. Failed catalog
-publication retires unpublished outputs and preserves the prior catalog. Each
-reader and returned stream holds a `SamplesFileHandle`; superseded objects are
-purged only after those handles are released. Sample sidecars remain rebuildable,
-and authoritative data stays in Parquet SSTs.
-
-## Reader API and execution
-
-Add a sample-specific reader factory to `SamplesFormat`, accepting the store and
-a pinned `SamplesFileHandle`. Provide access to the handle's region/source identity
-for manifest validation. Return a `SamplesFormatReader` exposing `schema()` and
-`read(SamplesReadRequest)` as an independent stream of projected Arrow batches.
-Do not reuse the series-only read request: it has no time semantics.
-
-The internal request has these fields:
-
-| Field | Meaning |
-| --- | --- |
-| `projection: Vec<String>` | Ordered names from the stored logical schema |
-| `table_id: Option<u32>` | Optional table restriction |
-| `ids: Option<BTreeSet<MetricSeriesId>>` | Optional qualified identity set |
-| `start: Option<i64>` | Inclusive timestamp in the stored unit |
-| `end: Option<i64>` | Exclusive timestamp in the stored unit |
-
-`ids = None` means unrestricted; an explicitly empty set means zero rows.
-Intersect `ids` with `table_id` when both are supplied. Validate unknown or
-duplicate projection names before part I/O; preserve requested output order.
-An empty projection preserves selected row counts. Equal time endpoints produce
-an empty stream, and a reversed interval is an error. Unbounded endpoints avoid
-sentinel arithmetic and permit selecting `i64::MAX` with no end bound. Callers
-perform any unit conversion explicitly; the format API does not guess units.
-
-1. The factory opens the bounded manifest, validates handle identity and recorded
-   sizes, and exposes the stored schema. Each `read` validates its request even
-   if the artifact or selection is empty. An empty selection needs no part reads.
-2. Prune parts using inclusive ID ranges and time envelopes. Read and validate
-   selected headers/trailers, then traverse only candidate pages in physical
-   order. At depth 2, retain the root references and one active leaf.
-3. Select blocks by exact identity and overlapping time bounds. Decode timestamp
-   chunks for a constrained time request, validate their bounds, and select rows.
-   With no time restriction, an unprojected timestamp chunk need not be fetched.
-4. Fetch the remaining projected chunks only for blocks with surviving rows,
-   reusing a timestamp chunk already decoded for selection. Decode each chunk
-   once per block, synthesize identity constants and omitted null fields, and
-   emit selected rows in input order. One output batch per selected block is the
-   initial packing choice, with the additional identity-column accounting above.
-
-Sequence and operation chunks are mandatory on disk but are read only if
-projected. The format reader does not silently apply visibility or delete rules.
-A future query adapter must request them when required for merging. There are
-no tag/value predicates in this initial request, no selector-result cache, and
-no cross-read page/data cache. All reads have independent traversal state and
-can outlive the factory. Validation is incremental over visited metadata and
-decoded chunks, not an eager whole-artifact integrity scan; unselected payload
-corruption is not guaranteed to be discovered by a selective query.
-Check block ordinals and row ordering across adjacent blocks when both are read;
-do not require the first selected block to have ordinal zero after pruning.
-A complete traversal also verifies the manifest's row and block totals. These
-totals are diagnostic summaries, not allocation sizes or a replacement for block
-row counts when producing output.
-
-## Compatibility, validation, and deferred work
-
-The backend is opt-in through internal format selection, like #9841. Existing catalogs, Parquet
-artifacts, and series artifacts retain their meaning. An older binary is not
-promised to understand the new catalog identifier or sample bytes; do not claim
-downgrade compatibility merely because the samples are rebuildable. The new
-backend must not become necessary for reading authoritative SSTs. Query-consumer
-integration and a public enablement/rollout mechanism are separate work.
-
-Implementation acceptance includes:
-
-- Codec tests and round trips for every supported timestamp unit, repeated and
-  negative timestamps, signed extremes, full-range sequences, both operations,
-  null/NaN distinction, Float64 bit patterns, and nulls between XOR values.
-- Empty input, singleton blocks, all-null/missing fields, mixed tables and sparse
-  schemas, identical TSIDs in different tables, cross-batch continuation,
-  duplicate/conflicting rows, and decreasing-input rejection.
-- Row and decoded-byte caps with narrow/wide schemas; smaller row limits; blocks
-  spanning hours; forced payload/metadata rollover; depths 1/2 and root-capacity
-  rollover without creating depth 3. Reject depths 0/3 and internal children.
-- Projection order and empty projection, all/empty/absent ID sets, table/ID
-  intersection, exact time boundaries, unbounded endpoints, and equal timestamps
-  spanning multiple leaves and parts. Verify selected physical ranges: no unused
-  value chunks, duplicate page reads, or hidden stat requests.
-- Truncation, corrupt checksums, invalid area bounds, u64 offset overflow,
-  references beyond 4 GiB, wrong lengths/counts/roles/ordinals, inconsistent
-  time bounds, malformed validity/varints, unsupported codecs, and bounded
-  decompression. Test malformed metadata without allocating from untrusted counts.
-- Manifest/schema/handle identity mismatches, wrong or duplicate object paths,
-  size accounting, reopen and reconciliation, OpenDAL write/close failures,
-  abort/cancellation, failed catalog publication, and retirement with pinned
-  streams on memory and filesystem stores.
-- A persisted-format compatibility case under `tests/compatibility/`, following
-  its [README](../../tests/compatibility/README.md) and
-  [agent guide](../../tests/compatibility/AGENTS.md), covering the approved version-1
-  bytes and legacy catalog behavior. Do not substitute a SQL query test that
-  never enables this internal backend or claim cross-binary coverage from a
-  same-build round trip.
-- `cargo nextest run -p mito2`, crate Clippy, formatting, and license checks for
-  new sources. Any broader workspace validation and its limitations must be
-  reported when the implementation PR is prepared.
-
-The benchmark comparison changes materially: nullable fields and operation types
-add bytes; native timestamp units and preserved duplicate rows change codec
-inputs; 64-bit checksums, Mito manifests/references, and overlapping page bounds
-change framing; bounded two-level trees replace disk-spooled arbitrary-depth
-indexes; row/byte packing replaces the benchmark's hourly default. OpenDAL and
-the absence of caches also change performance. Measure the port independently;
-no performance equivalence is asserted.
-
-The benchmark follow-ups from [PR #9887](https://github.com/GreptimeTeam/greptimedb/pull/9887)
-include:
-
-- High-churn series with only a few rows per SST. Report stored bytes per row
-  and separate metadata from column payloads across different rows-per-series
-  distributions. Each identity change starts a new block, whose descriptor is
-  220 bytes before metadata compression with one present field, in addition to
-  the mandatory timestamp, sequence, and operation chunks and the value chunk.
-- Integer-valued Float64 counters. Compare the current XOR encoding with an
-  exact `first`/`step` progression encoding like the prototype in
-  [PR #9556](https://github.com/GreptimeTeam/greptimedb/pull/9556), measuring encoded
-  and compressed sizes as well as encode/decode throughput. Include steady
-  counters, resets, irregular increments, and nulls; any candidate must preserve
-  Float64 bits exactly and fall back for values it cannot represent losslessly.
-
-These measurements are deferred and do not change the version-1 wire contract.
-
-Additional field types, value statistics/predicates, exact primary keys,
-dedicated job/instance identifier components, label reconstruction, cache
-integration, deeper trees, and query integration are deferred. The byte assignments
-above define the version-1 contract. The
-[frozen sample fixture](../../tests/compatibility/wire/mito_columnar_samples/README.md)
-checks those bytes independently of writer/reader round trips.
-
-[bench-spec]: https://github.com/GreptimeTeam/series-format-bench/blob/8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4/docs/formats/columnar-samples-v2.md
-[bench-code]: https://github.com/GreptimeTeam/series-format-bench/blob/8650c3003a861c8cf2c9f5037bfc81fde6a3bdc4/src/sample_columnar.rs
