@@ -819,6 +819,43 @@ class WorkflowContractTests(unittest.TestCase):
                 blocks[current].append(line)
         return {name: "\n".join(lines) for name, lines in blocks.items()}
 
+    def test_every_script_a_gated_job_runs_is_always_run(self):
+        """A script a gated job executes must widen the gate.
+
+        A change confined to such a script would otherwise select no suite, so
+        the jobs that run it are skipped exactly when they are worth running.
+        The reference is often not in the workflow: a composite action the job
+        `uses` can run the script, so the search follows those actions too.
+        """
+        action_use = re.compile(r"uses:\s*\./(\.github/actions/[A-Za-z0-9_.-]+)")
+        script_ref = re.compile(
+            r"(?:\./)?(\.github/[A-Za-z0-9_./-]+\.(?:sh|py|js|cjs|ts))\b"
+        )
+        always = [ci_scope.glob_to_regex(pattern) for pattern in ALWAYS_RUN]
+
+        gated = [b for b in self.job_blocks().values() if "needs.scope.outputs" in b]
+        pending = {ref for block in gated for ref in script_ref.findall(block)}
+        pending |= {a for block in gated for a in action_use.findall(block)}
+        seen = set()
+        while pending:
+            reference = pending.pop()
+            if reference in seen:
+                continue
+            seen.add(reference)
+            if not reference.startswith(".github/actions/"):
+                continue
+            for suffix in ("action.yml", "action.yaml"):
+                path = REPO_ROOT / reference / suffix
+                if path.exists():
+                    text = path.read_text()
+                    pending |= set(script_ref.findall(text))
+                    pending |= set(action_use.findall(text))
+                    break
+        uncovered = sorted(
+            ref for ref in seen if not any(pattern.match(ref) for pattern in always)
+        )
+        self.assertEqual(uncovered, [], "a gated job runs a script ALWAYS_RUN misses")
+
     def test_gates_treat_a_missing_output_as_run(self):
         blocks = self.job_blocks()
         gated = [

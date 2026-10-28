@@ -32,9 +32,11 @@ always_run = [
   ".github/ci/**",
   ".github/workflows/integration.yml",
   ".github/actions/**",
-  # Runs through `.github/actions/setup-kind` for the distributed and chaos
-  # fuzz jobs; a broken registry setup fails those jobs, not this one.
+  # Both run through a composite action, so neither appears in the workflow:
+  # `setup-kind` starts the cluster for the distributed and chaos jobs, and
+  # `fuzz-test` seeds the corpus every fuzz job starts from.
   ".github/scripts/kind-with-registry.sh",
+  ".github/scripts/prepare-fuzz-corpus.sh",
   ".github/scripts/run-fuzz-targets.sh",
   ".github/scripts/collect-fuzz-target-artifacts.sh",
   ".github/scripts/wait-kafka-ready.sh",

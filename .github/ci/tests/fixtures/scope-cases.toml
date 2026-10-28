@@ -148,3 +148,11 @@ paths = [
   ".github/scripts/kind-with-registry.sh",
 ]
 suites = ["*"]
+
+[[case]]
+name = "fuzz corpus seeding: every suite"
+note = "Every fuzz job seeds its corpus through the `fuzz-test` action first."
+paths = [
+  ".github/scripts/prepare-fuzz-corpus.sh",
+]
+suites = ["*"]
