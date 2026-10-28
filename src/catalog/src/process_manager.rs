@@ -25,7 +25,7 @@ use common_event_recorder::EventRecorderRef;
 use common_frontend::selector::{FrontendSelector, MetaClientSelector};
 use common_frontend::slow_query_event::SlowQueryEvent;
 use common_telemetry::logging::SlowQueriesRecordType;
-use common_telemetry::{debug, info, slow, warn};
+use common_telemetry::{debug, info, slow};
 use common_time::util::current_time_millis;
 use meta_client::MetaClientRef;
 use promql_parser::parser::EvalStmt;
@@ -166,6 +166,9 @@ impl ProcessManager {
         Ok(result)
     }
 
+    /// Lists running processes from every selected frontend and the local registry.
+    ///
+    /// Returns an error if a remote frontend cannot provide its process list.
     pub async fn list_all_processes(
         &self,
         catalog: Option<&str>,
@@ -177,20 +180,13 @@ impl ProcessManager {
                 .await
                 .context(error::InvokeFrontendSnafu)?;
             for mut f in frontends {
-                let result = f
+                let resp = f
                     .list_process(ListProcessRequest {
                         catalog: catalog.unwrap_or_default().to_string(),
                     })
                     .await
-                    .context(error::InvokeFrontendSnafu);
-                match result {
-                    Ok(resp) => {
-                        processes.extend(resp.processes);
-                    }
-                    Err(e) => {
-                        warn!(e; "Skipping failing node: {:?}", f)
-                    }
-                }
+                    .context(error::InvokeFrontendSnafu)?;
+                processes.extend(resp.processes);
             }
         }
         processes.extend(self.local_processes(catalog)?);
