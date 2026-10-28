@@ -16,9 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use common_catalog::consts::{
-    DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, MITO_ENGINE, MITO2_ENGINE,
-};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_macro::ToMetaBuilder;
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
@@ -31,9 +29,7 @@ use datatypes::schema::{
 use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metric_engine_consts::{
-    MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PHYSICAL_TABLE_METADATA_KEY, PRIMARY_KEY_ENCODING,
-};
+use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_EXPERIMENTAL_OUTPUT_PARALLELISM,
     COMPACTION_TYPE, COMPACTION_TYPE_TWCS, MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY,
@@ -866,9 +862,6 @@ impl TableMeta {
                     .fail();
                 }
 
-                if col_to_add.is_key {
-                    self.validate_sparse_tag_default(table_name, &col_to_add.column_schema)?;
-                }
                 new_columns.push(col_to_add.clone());
             }
         }
@@ -1403,7 +1396,7 @@ impl TableMeta {
         let table_schema = &self.schema;
         let mut meta_builder = self.new_meta_builder();
         let mut columns = Vec::with_capacity(table_schema.num_columns());
-        for (index, column_schema) in table_schema.column_schemas().iter().enumerate() {
+        for column_schema in table_schema.column_schemas() {
             if let Some(set_default) = set_defaults
                 .iter()
                 .find(|s| s.column_name == column_schema.name)
@@ -1414,11 +1407,6 @@ impl TableMeta {
                     .with_context(|_| error::SchemaBuildSnafu {
                         msg: format!("Table {table_name} cannot set default values"),
                     })?;
-                if self.primary_key_indices.contains(&index)
-                    && new_column_schema.default_constraint() != column_schema.default_constraint()
-                {
-                    self.validate_sparse_tag_default(table_name, &new_column_schema)?;
-                }
                 columns.push(new_column_schema);
             } else {
                 columns.push(column_schema.clone());
@@ -1441,34 +1429,6 @@ impl TableMeta {
         let _ = meta_builder.schema(Arc::new(new_schema));
 
         Ok(meta_builder)
-    }
-
-    fn validate_sparse_tag_default(&self, table_name: &str, column: &ColumnSchema) -> Result<()> {
-        if matches!(self.engine.as_str(), MITO_ENGINE | MITO2_ENGINE)
-            && self
-                .options
-                .extra_options
-                .get(PRIMARY_KEY_ENCODING)
-                .or_else(|| {
-                    self.options
-                        .extra_options
-                        .get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING)
-                })
-                .is_some_and(|v| v.eq_ignore_ascii_case("sparse"))
-        {
-            store_api::metadata::validate_sparse_tag_default(
-                &column.name,
-                column.default_constraint(),
-            )
-            .map_err(|err| {
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: err.to_string(),
-                }
-                .build()
-            })?;
-        }
-        Ok(())
     }
 }
 
@@ -2016,62 +1976,6 @@ mod tests {
             meta.builder_with_alter_kind("my_table", &alter_kind)
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn test_sparse_tag_default_alter_validation() {
-        use common_catalog::consts::METRIC_ENGINE;
-        use datatypes::schema::ColumnDefaultConstraint;
-        use datatypes::value::Value;
-
-        let default = ColumnDefaultConstraint::Value(Value::from("east"));
-        for (engine, key, encoding, allowed) in [
-            (MITO_ENGINE, PRIMARY_KEY_ENCODING, "sparse", false),
-            (MITO_ENGINE, PRIMARY_KEY_ENCODING, "SPARSE", false),
-            (
-                MITO_ENGINE,
-                MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING,
-                "sparse",
-                false,
-            ),
-            (MITO_ENGINE, PRIMARY_KEY_ENCODING, "dense", true),
-            (METRIC_ENGINE, PRIMARY_KEY_ENCODING, "sparse", true),
-        ] {
-            let mut options = TableOptions::default();
-            options.extra_options.insert(key.into(), encoding.into());
-            let meta = TableMetaBuilder::empty()
-                .schema(Arc::new(new_test_schema()))
-                .primary_key_indices(vec![0])
-                .engine(engine)
-                .options(options)
-                .next_column_id(3)
-                .build()
-                .unwrap();
-            let kind = AlterKind::AddColumns {
-                columns: vec![AddColumnRequest {
-                    column_schema: ColumnSchema::new(
-                        "zone",
-                        ConcreteDataType::string_datatype(),
-                        true,
-                    )
-                    .with_default_constraint(Some(default.clone()))
-                    .unwrap(),
-                    is_key: true,
-                    location: None,
-                    add_if_not_exists: false,
-                }],
-            };
-            assert_eq!(meta.builder_with_alter_kind("test", &kind).is_ok(), allowed);
-
-            let meta = add_columns_to_meta(&meta);
-            let kind = AlterKind::SetDefaults {
-                defaults: vec![SetDefaultRequest {
-                    column_name: "my_tag".into(),
-                    default_constraint: Some(default.clone()),
-                }],
-            };
-            assert_eq!(meta.builder_with_alter_kind("test", &kind).is_ok(), allowed);
-        }
     }
 
     #[test]

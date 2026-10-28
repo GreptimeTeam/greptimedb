@@ -1,5 +1,5 @@
 name = "exemplar_legacy_keys"
-reason = "Ordinary sparse support must preserve existing dense and metric-engine sparse data."
+reason = "Reserved sparse key validation must preserve existing dense and metric-engine sparse data."
 introduced_by = "persistent_metric_exemplars"
 topologies = ["standalone", "distributed"]
 from_range = [">=v1.2.1"]

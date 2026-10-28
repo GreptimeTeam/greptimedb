@@ -39,19 +39,17 @@ use crate::row_converter::dense::SortField;
 pub use crate::row_converter::sparse::checked::SparsePrimaryKeyView;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
-/// A codec for metric-engine and ordinary sparse string keys.
+/// A codec for sparse keys with reserved table ID and TSID columns.
 ///
 /// ## Encoding format
 /// Each primary key is encoded as a sequence of `(column_id, value)` pairs:
 /// - Keys start with reserved `table_id` (uint32) and `tsid` (uint64).
-///   Ordinary tables use zero for both, since their regions already isolate their keys.
-/// - Metric labels follow in column-name order; ordinary tags follow metadata's primary-key order.
-/// - Null values are omitted (not encoded).
+/// - String tags follow the reserved prefix; null tags are omitted.
 ///
 /// The `column_id` is encoded as a 4-byte big-endian integer, and the value is encoded
 /// using memcomparable serialization.
 ///
-/// `decode_leftmost` returns the first metadata tag, or no bound when it is absent.
+/// `decode_leftmost` returns the reserved `table_id` value.
 ///
 /// ## Requirements
 /// Encoders supply columns in the layout's order using stable physical-region IDs.
@@ -368,31 +366,6 @@ impl SparsePrimaryKeyCodec {
         Ok(())
     }
 
-    /// Encodes a complete key, supplying the existing reserved prefix for ordinary tables.
-    fn encode_primary_key<'a>(
-        &self,
-        row: impl Iterator<Item = (ColumnId, ValueRef<'a>)>,
-        buffer: &mut Vec<u8>,
-    ) -> Result<()> {
-        if let Some(fields) = &self.inner.fields
-            && fields
-                .iter()
-                .all(|(id, _)| !ReservedColumnId::is_reserved(*id))
-        {
-            ensure!(
-                fields
-                    .iter()
-                    .all(|(_, field)| field.data_type().is_string()),
-                UnsupportedOperationSnafu {
-                    err_msg: "ordinary sparse primary keys require string tags",
-                }
-            );
-            // Keep the metric-engine byte layout without adding internal columns to the table.
-            self.encode_internal(0, 0, buffer)?;
-        }
-        self.encode_to_vec(row, buffer)
-    }
-
     pub fn encode_raw_tag_value<'a, I>(&self, row: I, buffer: &mut Vec<u8>) -> Result<()>
     where
         I: Iterator<Item = (ColumnId, &'a [u8])>,
@@ -531,29 +504,13 @@ impl SparsePrimaryKeyCodec {
         Ok(values)
     }
 
-    /// Decodes the first metadata tag, or no bound when that tag is omitted.
+    /// Decodes the reserved table ID from the key prefix.
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         if bytes.is_empty() {
             return Ok(None);
         }
-        let first_id = self
-            .inner
-            .fields
-            .as_ref()
-            .and_then(|fields| fields.first())
-            .map(|field| field.0)
-            .unwrap_or(RESERVED_COLUMN_ID_TABLE_ID);
-        let mut offsets = SparseOffsetsCache::new();
-        let mut view = SparsePrimaryKeyView::new(bytes, &mut offsets)?;
-        let Some(encoded) = view.encoded_value(first_id)? else {
-            return Ok(None);
-        };
-        self.get_field(first_id)
-            .context(UnsupportedOperationSnafu {
-                err_msg: "missing first sparse primary key field",
-            })?
-            .deserialize(&mut Deserializer::new(encoded))
-            .map(Some)
+        self.decode_ids(bytes)
+            .map(|(table_id, _)| Some(Value::UInt32(table_id)))
     }
 
     /// Returns the offset of the given column id in the given primary key.
@@ -660,14 +617,14 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
             .context(UnsupportedOperationSnafu {
                 err_msg: "raw row encoding requires primary key metadata",
             })?;
-        self.encode_primary_key(
+        self.encode_to_vec(
             fields.iter().map(|f| f.0).zip(key_value.primary_keys()),
             buffer,
         )
     }
 
     fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()> {
-        self.encode_primary_key(values.iter().map(|v| (v.0, v.1.as_value_ref())), buffer)
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1.as_value_ref())), buffer)
     }
 
     fn encode_value_refs(
@@ -675,7 +632,7 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
         values: &[(ColumnId, ValueRef)],
         buffer: &mut Vec<u8>,
     ) -> Result<()> {
-        self.encode_primary_key(values.iter().map(|v| (v.0, v.1.clone())), buffer)
+        self.encode_to_vec(values.iter().map(|v| (v.0, v.1.clone())), buffer)
     }
 
     fn estimated_size(&self) -> Option<usize> {
@@ -838,86 +795,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ordinary_sparse_roundtrip_and_missing_first_tag() {
-        let codec = SparsePrimaryKeyCodec::with_fields(vec![
-            (7, SortField::new(ConcreteDataType::string_datatype())),
-            (2, SortField::new(ConcreteDataType::string_datatype())),
-        ]);
-        let mut bytes = Vec::new();
-        codec
-            .encode_value_refs(
-                &[(7, ValueRef::Null), (2, ValueRef::String("api"))],
-                &mut bytes,
-            )
-            .unwrap();
-        assert_eq!(codec.encoding(), PrimaryKeyEncoding::Sparse);
-        assert_eq!(codec.decode_ids(&bytes).unwrap(), (0, 0));
-        let legacy = SparsePrimaryKeyCodec::schemaless();
-        let mut expected = Vec::new();
-        legacy.encode_internal(0, 0, &mut expected).unwrap();
-        legacy
-            .encode_to_vec([(2, ValueRef::String("api"))].into_iter(), &mut expected)
-            .unwrap();
-        assert_eq!(bytes, expected);
-        assert_eq!(
-            &bytes[TAGS_START_OFFSET..TAGS_START_OFFSET + 4],
-            &2u32.to_be_bytes()
-        );
-        let decoded = codec.decode(&bytes).unwrap().into_sparse();
-        assert_eq!(
-            decoded,
-            SparsePrimaryKeyCodec::schemaless()
-                .decode(&bytes)
-                .unwrap()
-                .into_sparse()
-        );
-        assert_eq!(decoded.get_or_null(7), &Value::Null);
-        assert_eq!(decoded.get_or_null(2), &Value::from("api"));
-        assert_eq!(codec.decode_leftmost(&bytes).unwrap(), None);
-        assert_eq!(codec.decode_leftmost(&[]).unwrap(), None);
-        let mut offsets = SparseOffsetsCache::new();
-        assert!(
-            codec
-                .encoded_value_for_column(&bytes, &mut offsets, 7)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            codec
-                .encoded_value_for_column(&bytes, &mut offsets, 2)
-                .unwrap()
-                .is_some()
-        );
-        for len in (1..TAGS_START_OFFSET).chain(TAGS_START_OFFSET + 1..bytes.len()) {
-            assert!(codec.decode(&bytes[..len]).is_err());
-            assert!(
-                SparsePrimaryKeyView::new(&bytes[..len], &mut offsets)
-                    .and_then(|mut view| view.encoded_value(2).map(|_| ()))
-                    .is_err()
-            );
-        }
-        bytes.clear();
-        codec
-            .encode_value_refs(
-                &[(7, ValueRef::String("")), (2, ValueRef::Null)],
-                &mut bytes,
-            )
-            .unwrap();
-        assert_eq!(
-            codec.decode_leftmost(&bytes).unwrap(),
-            Some(Value::from(""))
-        );
-        let mut view = SparsePrimaryKeyView::new(&bytes, &mut offsets).unwrap();
-        assert_eq!(view.label(7, &mut Vec::new()).unwrap(), Some(""));
-        bytes.clear();
-        codec
-            .encode_value_refs(&[(7, ValueRef::Null), (2, ValueRef::Null)], &mut bytes)
-            .unwrap();
-        assert_eq!(bytes.len(), TAGS_START_OFFSET);
-        assert_eq!(codec.decode_leftmost(&bytes).unwrap(), None);
-    }
-
-    #[test]
     fn test_sparse_value_new_and_get_or_null() {
         let mut sparse_value = SparseValues::new();
         sparse_value.insert(1, Value::Int32(42));
@@ -1071,6 +948,12 @@ mod tests {
         assert!(!buffer.is_empty());
         let result = codec.decode_leftmost(&buffer).unwrap().unwrap();
         assert_eq!(result, Value::UInt32(42));
+        assert_eq!(codec.decode_leftmost(&[]).unwrap(), None);
+        assert!(
+            codec
+                .decode_leftmost(&buffer[..TAGS_START_OFFSET - 1])
+                .is_err()
+        );
     }
 
     #[test]

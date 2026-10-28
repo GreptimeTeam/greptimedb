@@ -654,12 +654,27 @@ mod tests {
     #[test]
     fn test_sparse_ranges_keep_their_original_encoding() {
         use mito_codec::row_converter::SparsePrimaryKeyCodec;
-        let mut metadata = (*metadata(&[Value::from(""), Value::Null])).clone();
-        metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
-        let metadata = Arc::new(metadata);
+        let metadata = Arc::new(
+            crate::test_util::sst_util::sst_region_metadata_with_encoding(
+                PrimaryKeyEncoding::Sparse,
+            ),
+        );
         let mut bytes = Vec::new();
         SparsePrimaryKeyCodec::new(&metadata)
-            .encode_values(&[(0, Value::from("a"))], &mut bytes)
+            .encode_values(
+                &[
+                    (
+                        store_api::storage::consts::ReservedColumnId::table_id(),
+                        Value::UInt32(42),
+                    ),
+                    (
+                        store_api::storage::consts::ReservedColumnId::tsid(),
+                        Value::UInt64(7),
+                    ),
+                    (0, Value::from("a")),
+                ],
+                &mut bytes,
+            )
             .unwrap();
         let key = Bytes::from(bytes);
         let mapper = PrimaryKeyRangeMapper::new(metadata);

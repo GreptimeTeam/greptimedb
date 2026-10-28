@@ -701,7 +701,7 @@ impl BulkPartConverter {
                 .fail();
             }
         } else {
-            // Raw tags can target either dense or ordinary sparse storage.
+            // Encode raw primary key columns with the destination codec.
             self.key_buf.clear();
             self.primary_key_codec
                 .encode_key_value(kv, &mut self.key_buf)
@@ -2346,40 +2346,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bulk_part_converter_rejects_non_string_ordinary_sparse_tags() {
-        let mut metadata = metadata_for_test().as_ref().clone();
-        metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
-        let metadata = Arc::new(metadata);
-        let key_values = build_key_values_with_ts_seq_values(
-            &metadata,
-            "key1".to_string(),
-            1,
-            [1000].into_iter(),
-            [Some(1.0)].into_iter(),
-            1,
-        );
-        let schema = to_flat_sst_arrow_schema(
-            &metadata,
-            &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
-        );
-        let mut converter = BulkPartConverter::new(
-            &metadata,
-            schema,
-            1,
-            build_primary_key_codec(&metadata),
-            false,
-        );
-        let error = converter.append_key_values(&key_values).unwrap_err();
-        assert!(matches!(
-            error,
-            error::Error::Encode {
-                source: mito_codec::error::Error::UnsupportedOperation { .. },
-                ..
-            }
-        ));
-    }
-
-    #[test]
     fn test_bulk_part_converter_append_and_convert() {
         let metadata = metadata_for_test();
         let capacity = 100;
@@ -2800,6 +2766,24 @@ mod tests {
                     .map(|value| api::v1::value::ValueData::StringValue(value.to_string()).into()),
             );
         }
+        rows.schema.extend(
+            [
+                ("__table_id", api::v1::ColumnDataType::Uint32),
+                ("__tsid", api::v1::ColumnDataType::Uint64),
+            ]
+            .map(|(name, datatype)| api::v1::ColumnSchema {
+                column_name: name.into(),
+                datatype: datatype as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            }),
+        );
+        for row in &mut rows.rows {
+            row.values.extend([
+                api::v1::value::ValueData::U32Value(2048).into(),
+                api::v1::value::ValueData::U64Value(100).into(),
+            ]);
+        }
         let raw = KeyValues::new(&metadata, raw_mutation).unwrap();
         let mut raw_converter = BulkPartConverter::new(
             &metadata,
@@ -2822,6 +2806,14 @@ mod tests {
         let keys = keys.as_any().downcast_ref::<BinaryArray>().unwrap();
         for key in keys.iter().flatten() {
             let decoded = primary_key_codec.decode(key).unwrap().into_sparse();
+            assert_eq!(
+                Some(&Value::UInt32(2048)),
+                decoded.get(&ReservedColumnId::table_id())
+            );
+            assert_eq!(
+                Some(&Value::UInt64(100)),
+                decoded.get(&ReservedColumnId::tsid())
+            );
             assert_eq!(Some(&Value::from("raw🦀")), decoded.get(&0));
             assert_eq!(Some(&Value::from("")), decoded.get(&1));
         }
@@ -2986,30 +2978,6 @@ mod tests {
             &metadata,
             &FlatSchemaOptions::from_encoding(metadata.primary_key_encoding),
         );
-
-        let mut sparse_metadata = metadata.as_ref().clone();
-        sparse_metadata.primary_key_encoding = PrimaryKeyEncoding::Sparse;
-        let sparse_metadata = Arc::new(sparse_metadata);
-        let sparse_schema = to_flat_sst_arrow_schema(
-            &sparse_metadata,
-            &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
-        );
-        let error = convert_bulk_part(
-            part.clone(),
-            &sparse_metadata,
-            build_primary_key_codec(&sparse_metadata),
-            sparse_schema,
-            false,
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(
-            error,
-            error::Error::Encode {
-                source: mito_codec::error::Error::UnsupportedOperation { .. },
-                ..
-            }
-        ));
 
         let result = convert_bulk_part(
             part,

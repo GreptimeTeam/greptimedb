@@ -46,134 +46,37 @@ use crate::tests::test_util::{
 #[apply(both_instances_cases)]
 async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
-    let error = try_execute_sql(
-        &instance,
-        "CREATE TABLE sparse_tags (host BIGINT PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)
-         WITH ('primary_key_encoding'='sparse')",
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error
-            .output_msg()
-            .contains("ordinary sparse primary keys require string tags"),
-        "{error:?}"
-    );
+    for columns in [
+        "host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "host BIGINT PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ts TIMESTAMP TIME INDEX, PRIMARY KEY (__table_id, __tsid)",
+    ] {
+        let error = try_execute_sql(
+            &instance,
+            &format!("CREATE TABLE sparse_tags ({columns}) WITH ('primary_key_encoding'='sparse')"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .output_msg()
+                .contains("sparse primary keys must start with (__table_id, __tsid)"),
+            "{error:?}"
+        );
+    }
 
     // Reusing the name verifies that rejected creation did not persist the invalid schema.
     execute_sql(
         &instance,
-        "CREATE TABLE sparse_tags (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)
-         WITH ('primary_key_encoding'='sparse')",
+        "CREATE TABLE sparse_tags (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)",
     )
     .await;
     execute_sql(&instance, "INSERT INTO sparse_tags VALUES ('a', 1000, 2.0)").await;
-    let error = try_execute_sql(
-        &instance,
-        "ALTER TABLE sparse_tags ADD COLUMN zone BIGINT PRIMARY KEY",
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error
-            .output_msg()
-            .contains("ordinary sparse primary keys require string tags"),
-        "{error:?}"
-    );
-
-    execute_sql(&instance, "INSERT INTO sparse_tags VALUES ('b', 2000, 3.0)").await;
-    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_tags')").await;
-    let error = try_execute_sql(
-        &instance,
-        "ALTER TABLE sparse_tags ADD COLUMN zone STRING DEFAULT 'east' PRIMARY KEY",
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error.output_msg().contains("non-NULL defaults"),
-        "{error:?}"
-    );
-
-    // The rejected ALTER must leave both table and region metadata unchanged.
-    execute_sql(
-        &instance,
-        "ALTER TABLE sparse_tags ADD COLUMN zone STRING PRIMARY KEY",
-    )
-    .await;
-    let error = try_execute_sql(
-        &instance,
-        "ALTER TABLE sparse_tags MODIFY COLUMN zone SET DEFAULT 'east'",
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        error.output_msg().contains("non-NULL defaults"),
-        "{error:?}"
-    );
-    execute_sql(
-        &instance,
-        "ALTER TABLE sparse_tags MODIFY COLUMN zone SET DEFAULT NULL",
-    )
-    .await;
-    execute_sql(
-        &instance,
-        "INSERT INTO sparse_tags VALUES ('c', 3000, 4.0, 'east')",
-    )
-    .await;
     let output = execute_sql(&instance, "SELECT COUNT(*) FROM sparse_tags").await;
     assert_eq!(
         output.data.pretty_print().await,
-        "+----------+\n| count(*) |\n+----------+\n| 3        |\n+----------+"
-    );
-    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_tags')").await;
-    for compact in [false, true] {
-        if compact {
-            execute_sql(
-                &instance,
-                "ADMIN COMPACT_TABLE('sparse_tags', 'strict_window', 'window=3600')",
-            )
-            .await;
-        }
-        let output = execute_sql(
-            &instance,
-            "SELECT host, zone FROM sparse_tags ORDER BY host",
-        )
-        .await;
-        assert_eq!(
-            output.data.pretty_print().await,
-            "+------+------+\n| host | zone |\n+------+------+\n| a    |      |\n| b    |      |\n| c    | east |\n+------+------+"
-        );
-    }
-
-    // A default present from creation requires no backfill; explicit NULL must remain NULL.
-    execute_sql(&instance,
-        "CREATE TABLE sparse_initial_default (host STRING DEFAULT 'api' PRIMARY KEY, ts TIMESTAMP TIME INDEX)
-         WITH ('primary_key_encoding'='sparse')").await;
-    execute_sql(
-        &instance,
-        "INSERT INTO sparse_initial_default (ts) VALUES (1000)",
-    )
-    .await;
-    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_initial_default')").await;
-    execute_sql(
-        &instance,
-        "INSERT INTO sparse_initial_default VALUES (NULL, 2000)",
-    )
-    .await;
-    execute_sql(&instance, "ADMIN FLUSH_TABLE('sparse_initial_default')").await;
-    execute_sql(
-        &instance,
-        "ADMIN COMPACT_TABLE('sparse_initial_default', 'strict_window', 'window=3600')",
-    )
-    .await;
-    let output = execute_sql(
-        &instance,
-        "SELECT host FROM sparse_initial_default ORDER BY ts",
-    )
-    .await;
-    assert_eq!(
-        output.data.pretty_print().await,
-        "+------+\n| host |\n+------+\n| api  |\n|      |\n+------+"
+        "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+"
     );
 }
 

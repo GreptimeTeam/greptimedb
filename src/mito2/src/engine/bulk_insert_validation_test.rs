@@ -39,12 +39,7 @@ use crate::engine::MitoEngine;
 use crate::request::WorkerRequest;
 use crate::test_util::{CreateRequestBuilder, TestEnv, build_rows, reopen_region, rows_schema};
 
-const REGION_LAYOUTS: [(&str, &str); 4] = [
-    ("flat", "dense"),
-    ("primary_key", "dense"),
-    ("flat", "sparse"),
-    ("primary_key", "sparse"),
-];
+const SST_FORMATS: [&str; 2] = ["flat", "primary_key"];
 
 fn column(name: &str, array: ArrayRef) -> (Field, ArrayRef) {
     (Field::new(name, array.data_type().clone(), true), array)
@@ -106,12 +101,22 @@ async fn test_encoded_sparse_keys_reject_whole_batch_and_replay() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, 1);
-        let create = CreateRequestBuilder::new()
+        let mut create = CreateRequestBuilder::new()
             .insert_option("primary_key_encoding", "sparse")
             .build();
+        let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+            store_api::codec::PrimaryKeyEncoding::Sparse,
+        );
+        create
+            .column_metadatas
+            .extend(reserved.column_metadatas.into_iter().take(2));
+        create
+            .primary_key
+            .splice(0..0, reserved.primary_key.into_iter().take(2));
         let table_dir = create.table_dir.clone();
         let options = create.options.clone();
         let mut schema = rows_schema(&create);
+        schema.truncate(3);
         schema[0].column_name = "__primary_key".to_string();
         schema[0].datatype = ColumnDataType::Binary as i32;
         schema.swap(1, 2);
@@ -122,7 +127,7 @@ async fn test_encoded_sparse_keys_reject_whole_batch_and_replay() {
 
         let codec = SparsePrimaryKeyCodec::schemaless();
         let mut key = Vec::new();
-        codec.encode_internal(0, 0, &mut key).unwrap();
+        codec.encode_internal(42, 7, &mut key).unwrap();
         codec
             .encode_raw_tag_value([(0, "1234567🦀".as_bytes())].into_iter(), &mut key)
             .unwrap();
@@ -262,14 +267,13 @@ async fn test_bulk_insert_rejects_batches_not_matching_schema() {
             column("unknown", Arc::new(Int64Array::from(vec![1, 2]))),
         ],
     ];
-    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
+    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
             .all_not_null(true)
             .insert_option("sst_format", sst_format)
-            .insert_option("primary_key_encoding", encoding)
             .build();
         let column_schemas = rows_schema(&request);
         let table_dir = request.table_dir.clone();
@@ -316,14 +320,13 @@ async fn test_bulk_insert_accepts_tag_encodings() {
         Arc::new(LargeStringArray::from(vec!["a", "b"])),
         Arc::new(StringViewArray::from(vec!["a", "b"])),
     ];
-    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
+    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         for (j, tag) in tags.iter().enumerate() {
             let region_id = RegionId::new(i as u32 + 1, j as u32 + 1);
             let request = CreateRequestBuilder::new()
                 .insert_option("sst_format", sst_format)
-                .insert_option("primary_key_encoding", encoding)
                 .build();
             let table_dir = request.table_dir.clone();
             let options = request.options.clone();
@@ -353,13 +356,12 @@ async fn test_bulk_insert_accepts_tag_encodings() {
 #[tokio::test]
 async fn test_bulk_insert_rechecks_batch_after_schema_change() {
     common_telemetry::init_default_ut_logging();
-    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
+    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
             .insert_option("sst_format", sst_format)
-            .insert_option("primary_key_encoding", encoding)
             .build();
         let table_dir = request.table_dir.clone();
         let options = request.options.clone();
@@ -411,14 +413,13 @@ async fn test_bulk_insert_rechecks_batch_after_schema_change() {
 #[tokio::test]
 async fn test_bulk_insert_fills_columns_missing_from_aligned_batch() {
     common_telemetry::init_default_ut_logging();
-    for (i, (sst_format, encoding)) in REGION_LAYOUTS.into_iter().enumerate() {
+    for (i, sst_format) in SST_FORMATS.into_iter().enumerate() {
         let mut env = TestEnv::new().await;
         let engine = env.create_engine(MitoConfig::default()).await;
         let region_id = RegionId::new(1, i as u32 + 1);
         let request = CreateRequestBuilder::new()
             .tag_num(2)
             .insert_option("sst_format", sst_format)
-            .insert_option("primary_key_encoding", encoding)
             .build();
         let table_dir = request.table_dir.clone();
         let options = request.options.clone();
@@ -473,11 +474,41 @@ async fn test_bulk_insert_json2_physical_layout() {
                 .insert_option("sst_format", "flat")
                 .insert_option("primary_key_encoding", encoding)
                 .build();
+            if encoding == "sparse" {
+                let reserved = crate::test_util::sst_util::sst_region_metadata_with_encoding(
+                    store_api::codec::PrimaryKeyEncoding::Sparse,
+                );
+                request
+                    .column_metadatas
+                    .extend(reserved.column_metadatas.into_iter().take(2));
+                request
+                    .primary_key
+                    .splice(0..0, reserved.primary_key.into_iter().take(2));
+            }
+            let key_columns = if encoding == "sparse" {
+                let codec = mito_codec::row_converter::SparsePrimaryKeyCodec::schemaless();
+                let keys: Vec<_> = (1..=2)
+                    .map(|tsid| {
+                        let mut key = Vec::new();
+                        codec.encode_internal(42, tsid, &mut key).unwrap();
+                        key
+                    })
+                    .collect();
+                vec![
+                    column(
+                        "__primary_key",
+                        Arc::new(BinaryArray::from_iter_values(&keys)),
+                    ),
+                    ts(),
+                ]
+            } else {
+                vec![tag(), ts()]
+            };
             let json_column = &mut request.column_metadatas[1].column_schema;
             json_column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
                 settings.clone(),
             ))));
-            let mut columns = vec![tag(), ts()];
+            let mut columns = key_columns.clone();
             if layout != "missing" {
                 let (array, metadata) = if layout == "legacy" {
                     let array = Arc::new(StructArray::from(vec![(
@@ -531,7 +562,7 @@ async fn test_bulk_insert_json2_physical_layout() {
                             region_id,
                             bulk_request(
                                 region_id,
-                                vec![tag(), ts(), (malformed_field, malformed)],
+                                [key_columns.clone(), vec![(malformed_field, malformed)]].concat(),
                             ),
                         )
                         .await
@@ -554,7 +585,11 @@ async fn test_bulk_insert_json2_physical_layout() {
                         region_id,
                         bulk_request(
                             region_id,
-                            vec![tag(), ts(), (null_field, Arc::new(NullArray::new(2)))],
+                            [
+                                key_columns.clone(),
+                                vec![(null_field, Arc::new(NullArray::new(2)) as ArrayRef)],
+                            ]
+                            .concat(),
                         ),
                     )
                     .await

@@ -120,7 +120,7 @@ pub struct RegionOptions {
     /// Max number of rows in a parquet row group. Uses [DEFAULT_ROW_GROUP_SIZE] if `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_row_group_row_count: Option<usize>,
-    /// Primary key encoding for ordinary Mito and metric-engine regions.
+    /// Primary key encoding. Sparse regions require reserved table ID and TSID columns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
     /// Per-region write buffer size. A positive size flushes/stalls this region
