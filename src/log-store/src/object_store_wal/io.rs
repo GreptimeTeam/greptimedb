@@ -96,16 +96,15 @@ impl ObjectStoreIo {
     /// call, twice, and then deletes it.
     pub(crate) async fn probe_conditional_create(&self) -> Result<()> {
         let path = format!("{}{}", self.probe_prefix, Uuid::new_v4());
-        let create = || {
-            self.store
-                .write_with(&path, PROBE_CONTENT)
-                .if_not_exists(true)
-        };
-        create().await.context(WalObjectStoreSnafu {
-            operation: "write",
-            path: path.clone(),
-        })?;
-        let recreated = create().await;
+        self.put_path_if_absent(path.clone(), Bytes::from_static(PROBE_CONTENT))
+            .await?;
+        // Sent directly: only the store's own refusal shows that it honours
+        // the condition, and a read-back would find the first create's object.
+        let recreated = self
+            .store
+            .write_with(&path, PROBE_CONTENT)
+            .if_not_exists(true)
+            .await;
         if let Err(error) = self.store.delete(&path).await {
             warn!(error; "Failed to delete the conditional create probe {path} of the object store WAL");
         }
@@ -134,15 +133,23 @@ impl ObjectStoreIo {
         }
     }
 
-    /// Creates the object `object_seq` unless it already exists. A retry with
-    /// the same content is accepted, different content is rejected.
+    /// Creates the object `object_seq` unless it already exists, see
+    /// [`Self::put_path_if_absent`].
+    pub(crate) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+        self.put_path_if_absent(self.object_path(object_seq), content)
+            .await
+    }
+
+    /// Creates `path` unless it already exists. A retry with the same content
+    /// is accepted, different content is rejected: a create the store stored
+    /// but whose response was lost can be retried, by the caller or by the
+    /// retry layer, and then finds its own object.
     ///
     /// When the store reports that the object exists but the read that
     /// compares its content fails, the read failure is returned, so that its
     /// retry hint says whether comparing again may settle the outcome. Any
     /// other create failure is returned as the write failure it is.
-    pub(crate) async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
-        let path = self.object_path(object_seq);
+    async fn put_path_if_absent(&self, path: String, content: Bytes) -> Result<PutResult> {
         let write_result = self
             .store
             .write_with(&path, content.clone())
