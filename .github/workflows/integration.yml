@@ -51,6 +51,10 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # `/pulls/{n}` and `/pulls/{n}/files`. An explicit block sets every
+      # unlisted permission to none, and a 403 here would silently widen every
+      # gate instead of classifying.
+      pull-requests: read
     outputs:
       any_fuzz: ${{ steps.classify.outputs.any_fuzz }}
       build_ci_needed: ${{ steps.classify.outputs.build_ci_needed }}

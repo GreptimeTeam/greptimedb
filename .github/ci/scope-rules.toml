@@ -151,6 +151,8 @@ meta-core = [
 # exercise: the backend implementations, the metadata service and the startup
 # wiring that picks a backend.
 kv-backend = [
+  # The runner implements `--setup-pg`/`--setup-mysql`, which only these legs pass.
+  "tests/runner/**",
   "src/common/meta/**",
   "src/meta-srv/**",
   "src/meta-client/**",

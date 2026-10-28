@@ -87,8 +87,10 @@ Add the `ci:full` label to the pull request and click "Re-run all jobs". The
 label is read through the API at run time, not from the event payload, so one
 added after the first run still counts. `/ci` dispatch
 (`.github/scripts/ci-slash.py`), the `CI_SCOPE_FORCE_ALL` repository variable
-and every merge-queue run also run everything; the classifier returns a forced
-plan there, so a wrong skip costs one queue failure, not a broken `main`.
+and every merge-queue run also run everything: the classifier returns a forced
+plan there, so a wrong skip is still exercised before the change lands. None of
+the gated jobs is a required check, so a failure in the queue does not block the
+merge by itself.
 
 `CI_SCOPE_FORCE_ALL` is the switch to flip while debugging the rules themselves.
 

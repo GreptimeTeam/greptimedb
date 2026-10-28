@@ -373,7 +373,6 @@ UNMAPPED_CRATES = {
     "src/promql": "PromQL execution is covered by rust.yml and sqlness",
     "tests-fuzz": "in ALWAYS_RUN",
     "tests-integration": "in ALWAYS_RUN",
-    "tests/runner": "the sqlness runner; sqlness is not gated",
 }
 
 
@@ -687,6 +686,13 @@ class PathRuleCoverageTests(ScopeTestCase):
             "fuzz-standalone/logical-table",
             "fuzz-unstable/standalone",
         ):
+            self.assertTrue(plan["suites"][suite]["run"], suite)
+
+    def test_sqlness_runner_selects_the_kvbackend_legs(self):
+        # `--setup-pg` / `--setup-mysql` live in the runner and only these legs
+        # pass them, so a change there must not skip the only job that uses it.
+        plan = self.plan([file_entry("tests/runner/src/server_mode.rs")])
+        for suite in ("sqlness-kvbackend/metasrv-postgres", "sqlness-kvbackend/metasrv-mysql"):
             self.assertTrue(plan["suites"][suite]["run"], suite)
 
     def test_shared_ddl_selects_export_import(self):
