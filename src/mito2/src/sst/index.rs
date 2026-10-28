@@ -212,7 +212,7 @@ impl IndexOutput {
         indexes
     }
 
-    pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
+    pub fn build_column_indexes(&self) -> Vec<ColumnIndexMetadata> {
         let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
 
         if self.inverted_index.is_available() {
@@ -1404,7 +1404,7 @@ impl IndexBuildTask {
     ) -> Result<IndexPublication> {
         let mut updated = self.source.file_meta.clone();
         updated.available_indexes = output.build_available_indexes();
-        updated.indexes = output.build_indexes();
+        updated.indexes = output.build_column_indexes();
         updated.json_path_indexes = output.build_json_path_indexes();
         updated.index_file_size = output.file_size;
         updated.index_version = new_index_version;
