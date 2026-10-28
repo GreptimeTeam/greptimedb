@@ -187,8 +187,8 @@ impl AggregateFinalize {
     /// its binding: its `Utf8` columns are the labels it writes, and its `Float64` columns name the
     /// merged fields by position, since the merge folds the cut aggregate's fields in the order the
     /// statement declares them. Building rejects an input that is not state, a suffix the runtime
-    /// does not execute (the supported suffix operations are maps, aggregates, TopK and
-    /// constant-sided binary operations) and a schema [`classify_output`] cannot convert.
+    /// does not execute (the supported suffix operations are maps, aggregates, canonical merges,
+    /// TopK and constant-sided binary operations) and a schema [`classify_output`] cannot convert.
     pub fn to_execution_plan(
         &self,
         input: Arc<dyn ExecutionPlan>,
@@ -348,9 +348,11 @@ struct Split {
 /// Splits the innermost aggregate out of `node`.
 ///
 /// `Ok(None)` is a subtree holding no aggregate. The currently verified suffix operations are maps,
-/// aggregates, TopK/BottomK and binary operations with a constant on one side. TopK/BottomK run once
-/// in the suffix over the fully merged aggregate series, per evaluation timestamp, and never in the
-/// partition-local producer. A map is point-wise and an aggregate runs over the complete merge.
+/// aggregates, canonical merges, TopK/BottomK and binary operations with a constant on one side.
+/// TopK/BottomK run once in the suffix over the fully merged aggregate series, per evaluation
+/// timestamp, and never in the partition-local producer. A map is point-wise, an aggregate runs over
+/// the complete merge and a canonical merge canonicalizes values that are already evaluated, so none
+/// of them can tell whether its input was assembled from partitions or produced by one execution.
 /// LimitK is declined because it selects the first `k` series in input order
 /// ([`crate::select::limitk`]), while this merge does not preserve the storage input order. Other
 /// vector operations have not yet been verified/supported by this split.
@@ -435,7 +437,23 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
             };
             Ok(Some(inner))
         }
-        NativeExpr::Merge { .. } => Err(declined("an aggregate split across a canonical merge")),
+        // A merge above the cut canonicalizes the values the aggregate folded, which are already
+        // evaluated: it belongs in the suffix for the same reason an aggregate above the cut does.
+        // What it canonicalizes there is what the collector receives, and a merge names no operator
+        // below it, so re-wrapping the suffix in it is the same merge the query wrote - over the
+        // merged values instead of over the fragments one partition produced.
+        NativeExpr::Merge { input } => {
+            let Some(mut inner) = split(input, fields, time_index)? else {
+                return Ok(None);
+            };
+            inner.suffix = NativeNode {
+                expr: NativeExpr::Merge {
+                    input: Box::new(inner.suffix),
+                },
+                output: node.output.clone(),
+            };
+            Ok(Some(inner))
+        }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
@@ -620,6 +638,15 @@ fn admit_prefix(root: &NativeNode) -> DfResult<()> {
                     }
                 };
             }
+            // A merge reads the whole vector at every point: the fragments it canonicalizes are every
+            // series' contribution, and two input series can collapse into the one it answers. A
+            // prefix holding one therefore does not answer one series from one series' samples, and
+            // the fold would see the partitions that arrived rather than the statement's series.
+            NativeExpr::Merge { .. } => {
+                return Err(declined(
+                    "a per-series prefix across a canonical merge, which reads the whole vector",
+                ));
+            }
             _ => break,
         }
     }
@@ -661,8 +688,9 @@ const STRING_CAPACITY: usize = 1024;
 /// that stream, which is the only owner it has: the plan answers once.
 ///
 /// The suffix above the cut is built from the aggregate's output and may contain maps, aggregates,
-/// TopK/BottomK or a binary operation with a constant on one side. [`ExecutionPlan::execute`]
-/// builds its state and is where a shape the runtime cannot run is refused.
+/// canonical merges, TopK/BottomK or a binary operation with a constant on one side.
+/// [`ExecutionPlan::execute`] builds its state and is where a shape the runtime cannot run is
+/// refused.
 ///
 /// The plain state-batch input is temporary. The final design consumes series frames directly
 /// from FusedSeries instead of decoding and rebuilding this intermediate state-row layout.
