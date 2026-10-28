@@ -5,7 +5,16 @@ build job. Disable the implicit cache in `setup-rust-toolchain` when adding an
 explicit cache: otherwise its independent save policy can write PR-scoped
 caches even when the explicit cache only saves on main.
 
-The existing main schedules (or manual runs on main) populate shared caches.
+Integration CI's existing weekday schedule runs the fuzz builds and suites,
+including the profile-CI binary and Kafka helper, to populate main caches.
+To warm these caches manually after deployment, run Integration CI on main with
+`fuzz_profile: all`; no internal `ci_command` marker is required.
+
+Rust CI's existing weekday schedule warms the Windows and RISC-V compilation
+caches. Nightly CI's existing schedule warms its Windows runtime test caches.
+A manual Rust CI run on main can warm the compilation caches sooner. These jobs
+keep their separate keys and existing runner types; no extra warmup job is added.
+Coverage caches are not warmed by these schedules.
 PR, merge-group, and non-main manual runs restore caches without saving them.
 Fuzz binaries still flow to downstream jobs through workflow artifacts on every
 run; only the persistent binary cache is main-written. Re-running a PR cannot
