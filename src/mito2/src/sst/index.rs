@@ -175,7 +175,6 @@ pub struct IndexOutput {
 }
 
 impl IndexOutput {
-    /// Returns the index types available in this file.
     pub fn build_available_index_types(&self) -> SmallVec<[IndexType; 4]> {
         let mut indexes = SmallVec::new();
         if self.inverted_index.is_available() {
@@ -190,7 +189,6 @@ impl IndexOutput {
         indexes
     }
 
-    /// Returns the indexes created for whole columns and JSON paths.
     pub fn build_indexes(&self) -> Vec<ColumnIndexMetadata> {
         let mut map: HashMap<(ColumnId, Option<Vec<String>>), IndexTypes> = HashMap::new();
         for (output, index_type) in [
