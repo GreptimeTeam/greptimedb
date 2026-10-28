@@ -23,7 +23,7 @@ use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, MapOp, NativeExpr,
     NativeNode, NativeProperties, NativeTree, NativeType, OverlapStatus, needs_single_execution,
-    needs_single_execution_in, preserves_canonical_identity, reads_across_series,
+    needs_single_execution_in, no_label_sets, preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
 use crate::histogram_eval::NativeHistogramFunction;
@@ -334,6 +334,16 @@ pub(crate) fn add() -> BinaryMatching {
     }
 }
 
+/// The same modifiers with another operator, which is what decides whether a scalar broadcast drops
+/// the label set it read: `broadcast_drops_labels` reads the operator and whether it returns a bool.
+fn matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool,
+        ..add()
+    }
+}
+
 /// A `sum by (job)` folded into `inner` within this execution, which is an aggregate whose output is
 /// a query value rather than state.
 pub(crate) fn complete_aggregate(inner: NativeNode) -> NativeNode {
@@ -385,6 +395,35 @@ pub(crate) fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
             matching: add(),
         },
         output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// `left <op> right` with the modifiers `matching` states, on the grid both sides are evaluated on.
+///
+/// The output is what the kinds of the two sides make it: two constants make a scalar and anything
+/// else an evaluated vector, which is what [`NativeNode::validate`] asks of a binary operation.
+pub(crate) fn binary_with(
+    left: NativeNode,
+    right: NativeNode,
+    matching: BinaryMatching,
+) -> NativeNode {
+    let output = match (&left.output, &right.output) {
+        (NativeType::Scalar(grid), NativeType::Scalar(_)) => NativeType::Scalar(Arc::clone(grid)),
+        _ => evaluated(
+            Arc::new([]),
+            left.output
+                .grid()
+                .expect("a binary operation needs a grid")
+                .clone(),
+        ),
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output,
     }
 }
 
@@ -741,6 +780,146 @@ fn properties_follow_what_each_node_does_to_a_label_set() {
             overlaps: OverlapStatus::Checked,
             ordering: SeriesOrdering::Contiguous,
         }
+    );
+}
+
+/// A scalar broadcast reaches each series of its vector side as it is, so the facts it derives are
+/// the vector side's and nothing else: a constant holds no label set, and which side it is written on
+/// cannot change the answer.
+///
+/// The old derivation united the two sides before looking at them, which answered wrong in both
+/// directions: with the vector on the left it took the ownership only the two sides agree on, and a
+/// vector side placed by canonical key came out `Unknown` (the constant answers `SinglePartition`);
+/// with the vector on the right it kept the left side's grouping and overlaps, so the constant's
+/// `CanonicalComplete` and `Checked` were handed to a vector side that is still only source pieces.
+/// The two orders are one query, `x > 0` and `0 < x`, so they are asserted against the same answer.
+#[test]
+fn a_broadcast_derives_its_vector_sides_properties_whichever_side_the_vector_is_on() {
+    let shared = grid(0, 60_000, 4);
+    // `0` broadcast over the vector, which is a filtering comparison and keeps the label set it read.
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+    let vector = || input_on(Arc::clone(&shared));
+
+    for boundary in [proven_by_key(), scan_pieces()] {
+        // What the vector side proves on its own, which is what the broadcast has to prove: nothing
+        // about a label set is added, dropped or rewritten.
+        let expected = vector().properties(&[boundary]);
+        // `x > 0` and `0 < x`.
+        let vector_left = binary_with(vector(), constant(), matching(BinaryOp::Gt, false));
+        let vector_right = binary_with(constant(), vector(), matching(BinaryOp::Lt, false));
+        assert_eq!(vector_left.properties(&[boundary]), expected);
+        assert_eq!(vector_right.properties(&[boundary]), expected);
+        assert_eq!(
+            vector_left.properties(&[boundary]),
+            vector_right.properties(&[boundary])
+        );
+    }
+
+    // The two facts the old formula lost, spelled out: a vector side placed by canonical key keeps
+    // that ownership (which is what a merge above the broadcast needs), and a vector side of source
+    // pieces stays ungrouped and unchecked (which is what a merge above it has to collect).
+    let by_key = binary_with(vector(), constant(), matching(BinaryOp::Gt, false));
+    assert_eq!(
+        by_key.properties(&[proven_by_key()]).owner,
+        CanonicalOwner::ByCanonicalKey
+    );
+    assert_eq!(by_key.properties(&[proven_by_key()]), proven_by_key());
+    let pieces = binary_with(constant(), vector(), matching(BinaryOp::Lt, false));
+    assert_eq!(
+        pieces.properties(&[scan_pieces()]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    assert_eq!(
+        pieces.properties(&[scan_pieces()]).overlaps,
+        OverlapStatus::Pending
+    );
+}
+
+/// Arithmetic and a `bool` comparison answer a series under the metric name dropped, so the broadcast
+/// derives its vector side's facts rewritten — and, as for a filtering comparison, only its vector
+/// side's: the constant's `no_label_sets()` facts never reach the output.
+#[test]
+fn arithmetic_and_a_bool_comparison_rewrite_the_vector_sides_labels_only() {
+    let shared = grid(0, 60_000, 4);
+    let constant = || scalar_on(2.0, Arc::clone(&shared));
+    let vector = || input_on(Arc::clone(&shared));
+
+    for boundary in [proven_by_key(), scan_pieces()] {
+        let expected = vector().properties(&[boundary]).labels_rewritten();
+        // `x * 2` and `2 * x`, which drop `__name__` in `BroadcastRuntime`; `x > bool 0` and
+        // `0 < bool x`, the comparison that keeps a value instead of filtering.
+        for (vector_left_op, constant_left_op) in [
+            (
+                matching(BinaryOp::Mul, false),
+                matching(BinaryOp::Mul, false),
+            ),
+            (matching(BinaryOp::Gt, true), matching(BinaryOp::Lt, true)),
+        ] {
+            let vector_left = binary_with(vector(), constant(), vector_left_op);
+            let constant_left = binary_with(constant(), vector(), constant_left_op);
+            let derived = vector_left.properties(&[boundary]);
+            assert_eq!(derived, expected);
+            assert_eq!(constant_left.properties(&[boundary]), expected);
+            // The rewrite is a real downgrade and not a carried-over proof.
+            assert_eq!(derived.grouping, CanonicalGrouping::SourcePiecesOnly);
+            assert_eq!(derived.overlaps, OverlapStatus::Pending);
+            assert_eq!(derived.owner, CanonicalOwner::Unknown);
+        }
+    }
+}
+
+/// Two constants answer one value for every series there is, so neither holds a label set and the
+/// operation cannot claim one: what it derives is `no_label_sets()`, whatever the boundary says.
+#[test]
+fn two_constants_hold_no_label_set() {
+    let shared = grid(0, 60_000, 4);
+    let node = binary_with(
+        scalar_on(1.0, Arc::clone(&shared)),
+        scalar_on(2.0, Arc::clone(&shared)),
+        add(),
+    );
+    assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
+    assert_eq!(node.properties(&[]), no_label_sets());
+    assert_eq!(node.properties(&[proven_by_key()]), no_label_sets());
+}
+
+/// A vector/vector match answers series of both sides, so its ownership is only what the two sides
+/// agree on, and the match re-derives it for the label sets its modifiers name: `whole_vector` keeps
+/// a one-execution ownership and downgrades one per canonical key, because the keys it read are not
+/// the label sets it writes.
+#[test]
+fn a_two_vector_match_still_rederives_its_ownership() {
+    let shared = grid(0, 60_000, 4);
+    // `rate(a) + rate(b)`, whose two sides are two sources with an entry of their own.
+    let matched = || {
+        sum_of(
+            input_on_at(0, Arc::clone(&shared)),
+            input_on_at(1, Arc::clone(&shared)),
+        )
+    };
+    // What a match proves whatever it read: whole series on a contiguous stream, and the grouping and
+    // overlaps are the modifiers' decision.
+    let whole_vector = |owner: CanonicalOwner| NativeProperties {
+        owner,
+        grouping: CanonicalGrouping::SourcePiecesOnly,
+        overlaps: OverlapStatus::Pending,
+        ordering: SeriesOrdering::Contiguous,
+    };
+
+    // Both sides placed by canonical key agree on that ownership, and the match still downgrades it.
+    assert_eq!(
+        matched().properties(&[proven_by_key(), proven_by_key()]),
+        whole_vector(CanonicalOwner::Unknown)
+    );
+    // Sides that disagree agree on nothing.
+    assert_eq!(
+        matched().properties(&[proven_by_key(), scan_pieces()]),
+        whole_vector(CanonicalOwner::Unknown)
+    );
+    // One execution holds every series there is, so that is the one ownership the match keeps.
+    assert_eq!(
+        matched().properties(&[proven_in_one_execution(), proven_in_one_execution()]),
+        whole_vector(CanonicalOwner::SinglePartition)
     );
 }
 
@@ -1575,6 +1754,66 @@ fn a_merge_alone_does_not_collapse_the_owner_partitions() {
     ));
     // The wrapper that states no facts keeps the conservative answer.
     assert!(needs_single_execution(&tree));
+}
+
+/// The ownership a broadcast derives is what decides where a merge above it runs, so deriving the
+/// constant's facts into the vector's had a placement consequence and not only a fact wrong on
+/// paper: `x > 0` keeps the label set it read, so a vector side placed by canonical key still
+/// proves that the pieces of a label set arrive together and a merge over the comparison stays
+/// within the owner partitions a canonical repartition just created.
+///
+/// The other comparisons below are what keep the assertions from being vacuous: arithmetic and a
+/// `bool` comparison drop the metric name, so the same merge over the same vector side does need one
+/// execution, and so does a merge over a tree whose facts are the ones the old formula derived - the
+/// vector side united with the constant's `no_label_sets()`, whose ownership is `Unknown`.
+#[test]
+fn a_merge_over_a_filtering_comparison_keeps_the_owner_partitions() {
+    let shared = grid(0, 60_000, 4);
+    let by_key = [proven_by_key()];
+    let vector = || input_on(Arc::clone(&shared));
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+    // `x > 0`, which keeps the label set it read, and `0 < x`, the same query written the other way.
+    let filtering = |vector_left: bool| {
+        if vector_left {
+            binary_with(vector(), constant(), matching(BinaryOp::Gt, false))
+        } else {
+            binary_with(constant(), vector(), matching(BinaryOp::Lt, false))
+        }
+    };
+
+    for node in [filtering(true), filtering(false)] {
+        assert!(
+            !needs_single_execution_in(&merge_over(node), &by_key),
+            "a broadcast that keeps the label set leaves the merge's pieces co-located"
+        );
+    }
+
+    // The contrast: a label set the broadcast rewrote is not the one the boundary's keys name, so
+    // the merge above it cannot read each label set whole.
+    for node in [
+        binary_with(vector(), constant(), matching(BinaryOp::Mul, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Mul, false)),
+        binary_with(vector(), constant(), matching(BinaryOp::Gt, true)),
+        binary_with(constant(), vector(), matching(BinaryOp::Lt, true)),
+    ] {
+        assert!(
+            needs_single_execution_in(&merge_over(node), &by_key),
+            "a broadcast that drops the metric name leaves the merge's pieces unproved"
+        );
+    }
+
+    // The old answer, reproduced through the facts it derived: a vector side placed by canonical key
+    // united with the constant's facts owns nothing it can name, and a merge over a tree whose
+    // vector side proves that does need one execution. That is the answer the fix removes from the
+    // co-located case above.
+    assert_eq!(
+        proven_by_key().united(no_label_sets()).owner,
+        CanonicalOwner::Unknown
+    );
+    assert!(needs_single_execution_in(
+        &merge_over(filtering(true)),
+        &[proven_by_key().united(no_label_sets())]
+    ));
 }
 
 /// A binary operation is point-wise on a grid, so a side of raw samples has no positions to line

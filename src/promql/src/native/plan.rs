@@ -570,8 +570,10 @@ impl NativeProperties {
 
     /// What two inputs' facts prove together.
     ///
-    /// A binary or set operation answers series from both of its sides, so its output holds every
-    /// label set either side produced: the ownership is only what both sides agree on.
+    /// A binary operation over two vectors, and a set operation, answers series of both of its sides,
+    /// so its output holds every label set either side produced: the ownership is only what both
+    /// sides agree on. A side that is a constant is never united in, because it holds no label set:
+    /// the vector side's facts are the broadcast's alone.
     fn united(self, other: Self) -> Self {
         Self {
             owner: if self.owner == other.owner {
@@ -673,27 +675,50 @@ impl NativeNode {
                 left,
                 right,
                 matching,
-            } => {
-                let operand = left.properties(boundary).united(right.properties(boundary));
-                match (&left.output, &right.output) {
-                    // Two constants make a constant: there is no label set to canonicalize.
-                    (NativeType::Scalar(_), NativeType::Scalar(_)) => no_label_sets(),
-                    // A scalar broadcast reaches each series of its vector side as it is, unless the
-                    // operation drops the metric name on the way: arithmetic and a `bool` comparison
-                    // do, a filtering comparison keeps the label set it read.
-                    (NativeType::Samples(_), NativeType::Scalar(_))
-                    | (NativeType::Scalar(_), NativeType::Samples(_)) => {
-                        if broadcast_drops_labels(matching) {
-                            operand.labels_rewritten()
-                        } else {
-                            operand
-                        }
+            } => match (&left.output, &right.output) {
+                // Two constants make a constant: there is no label set to canonicalize.
+                (NativeType::Scalar(_), NativeType::Scalar(_)) => no_label_sets(),
+                // A scalar broadcast reaches each series of its vector side as it is, unless the
+                // operation drops the metric name on the way: arithmetic and a `bool` comparison do,
+                // a filtering comparison keeps the label set it read.
+                (NativeType::Samples(_), NativeType::Scalar(_))
+                | (NativeType::Scalar(_), NativeType::Samples(_)) => {
+                    // Only the vector side's facts are the output's, because a constant contributes
+                    // no label set at all: the broadcast answers the vector side's series under the
+                    // label set it read, or under that label set rewritten.
+                    //
+                    // A `united` of the two sides cannot express that, and answers wrong in both
+                    // directions. It keeps the left side's grouping and overlaps, so with the
+                    // constant on the left the output would claim the constant's `CanonicalComplete`
+                    // and `Checked` for a vector side that is still only source pieces - the alias a
+                    // merge above has to collect would then never be collected. And it keeps an
+                    // ownership only the two sides agree on, so with the constant on the right a
+                    // vector side placed by canonical key would be downgraded to `Unknown`, which
+                    // collapses the owner partitions a merge above it could have stayed within.
+                    //
+                    // The side that holds the samples is therefore the base either way, so `x > 0`
+                    // and `0 < x` derive the same facts.
+                    let vector = if left.output.samples().is_some() {
+                        left
+                    } else {
+                        right
+                    };
+                    let vector = vector.properties(boundary);
+                    if broadcast_drops_labels(matching) {
+                        vector.labels_rewritten()
+                    } else {
+                        vector
                     }
-                    // Two vectors are matched by label, and the modifiers decide what label set a
-                    // sample ends under, so neither side's grouping is the output's.
-                    (_, _) => operand.whole_vector(),
                 }
-            }
+                // Two vectors are matched by label, and the modifiers decide what label set a
+                // sample ends under, so neither side's grouping is the output's. A match answers
+                // series of both sides, so its ownership is only what both agree on, and
+                // `whole_vector` re-derives it for the output's keys.
+                (_, _) => left
+                    .properties(boundary)
+                    .united(right.properties(boundary))
+                    .whole_vector(),
+            },
             NativeExpr::Set { left, right, .. } => left
                 .properties(boundary)
                 .united(right.properties(boundary))
