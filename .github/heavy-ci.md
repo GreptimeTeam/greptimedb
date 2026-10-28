@@ -1,5 +1,10 @@
 # Heavy CI scheduling
 
+Checks, Rust CI, and Integration CI each run the shared GitHub script test
+action before expensive builds and tests. A failed, skipped, or cancelled
+script-test job blocks those jobs, including manually dispatched runs. Each
+workflow runs its own preflight so it does not wait on another workflow run.
+
 Rust CI keeps the Windows compilation check on PRs and merge groups. Windows
 nextest and Windows SQLness run in the existing Nightly CI workflow, which also
 supports manual dispatch. Its existing schedule is Tuesday through Friday at

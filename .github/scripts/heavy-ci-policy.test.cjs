@@ -6,13 +6,17 @@ const workflows = resolve(__dirname, '../workflows');
 const integration = readFileSync(resolve(workflows, 'integration.yml'), 'utf8');
 const suites = ['fuzztest', 'unstable-fuzztest', 'distributed-fuzztest', 'distributed-fuzztest-with-chaos'];
 const prerequisites = ['prepare-fuzz-targets', 'build-greptime-ci'];
-function enabled(job, { event = 'pull_request', action = 'synchronize', draft = false, attempt = 1, profile = 'none', repository = 'GreptimeTeam/greptimedb', outputs = {}, results = {}, cancelled = false } = {}) {
-  const expression = integration.match(new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}`, 'm'))[1];
+function enabled(job, { event = 'pull_request', action = 'synchronize', draft = false, attempt = 1, profile = 'none', repository = 'GreptimeTeam/greptimedb', outputs = {}, results = {}, cancelled = false, workflow = integration } = {}) {
+  const block = workflow.split(`  ${job}:\n`)[1].split(/\n  [a-z][\w-]*:/)[0];
+  if (block.includes("needs['github-script-tests']")) {
+    assert.match(block, /^    needs: \[.*github-script-tests.*\]/m);
+  }
+  const expression = block.match(/^    if: \$\{\{ (.+) \}\}/m)[1];
   // These job guards use only operators whose semantics match JS for this fixture.
   return new Function('github', 'inputs', 'needs', 'cancelled', `return (${expression});`)(
     { repository, event_name: event, event: { action, pull_request: { draft } }, run_attempt: attempt },
     { fuzz_profile: profile, ci_command: false },
-    { scope: { outputs }, ...Object.fromEntries(['build', ...prerequisites].map(name => [name, { result: results[name] || 'success' }])) },
+    { scope: { outputs }, ...Object.fromEntries(['github-script-tests', 'build', ...prerequisites].map(name => [name, { result: results[name] || 'success' }])) },
     () => cancelled
   );
 }
@@ -69,6 +73,33 @@ test('scope exclusions and dependency failures compose with the event policy', (
       assert.equal(enabled(job, { action: 'opened', results: { 'prepare-fuzz-targets': result } }), false, job);
       const build = job === 'fuzztest' ? 'build' : 'build-greptime-ci';
       assert.equal(enabled(job, { action: 'opened', results: { [build]: result } }), false, job);
+    }
+  }
+});
+
+test('script tests must pass before any expensive integration job can start', () => {
+  const jobs = ['build', 'sqlness', 'sqlness-kvbackend', 'export-import-v2-e2e',
+    'run-multi-lang-tests', 'compat', ...prerequisites, ...suites];
+  for (const job of jobs) {
+    assert.equal(enabled(job, { action: 'opened' }), true, job);
+    for (const result of ['failure', 'skipped', 'cancelled']) {
+      assert.equal(enabled(job, { action: 'opened', results: { 'github-script-tests': result } }), false, job);
+    }
+  }
+});
+
+test('script tests gate expensive Rust and Checks jobs', () => {
+  for (const [file, jobs] of [
+    ['rust.yml', ['clippy', 'check-riscv64', 'check-windows', 'test', 'coverage']],
+    ['checks.yml', ['check']]
+  ]) {
+    const workflow = readFileSync(resolve(workflows, file), 'utf8');
+    for (const job of jobs) {
+      const event = job === 'coverage' ? 'merge_group' : 'workflow_dispatch';
+      assert.equal(enabled(job, { workflow, event }), true, job);
+      for (const result of ['failure', 'skipped', 'cancelled']) {
+        assert.equal(enabled(job, { workflow, event, results: { 'github-script-tests': result } }), false, job);
+      }
     }
   }
 });
