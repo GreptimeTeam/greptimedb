@@ -24,7 +24,7 @@ on:
 name: Rust CI
 
 env:
-  CARGO_SHEAR_VERSION: "1.13.4"
+  SHEAR_VERSION: "1.13.4"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -45,6 +45,7 @@ jobs:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: false
           components: rustfmt
       - name: Check format
         run: make fmt-check
@@ -63,6 +64,7 @@ jobs:
           tool: protoc@3.23.4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          cache: false
           components: clippy
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
@@ -85,10 +87,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Install cargo-shear
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          tool: cargo-shear@${{ env.SHEAR_VERSION }}
           fallback: none
       - name: Check unused dependencies
         run: make check-udeps
@@ -108,6 +112,8 @@ jobs:
       - name: Install riscv64 cross toolchain
         run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Add riscv64 target
         run: rustup target add riscv64gc-unknown-linux-gnu
       - name: Rust Cache
@@ -137,6 +143,8 @@ jobs:
         with:
           version: "14.0"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
