@@ -595,7 +595,7 @@ mod tests {
                 }
             }
 
-            assert_eq!(creator.column_ids().count(), 0);
+            assert_eq!(creator.indexed_column_ids().count(), 0);
             let object_store = mock_object_store();
             let manager = factory.build(
                 object_store.clone(),

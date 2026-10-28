@@ -309,7 +309,7 @@ impl Indexer {
             .chain(
                 self.bloom_filter_indexer
                     .iter()
-                    .flat_map(|indexer| indexer.column_ids()),
+                    .flat_map(|indexer| indexer.indexed_column_ids()),
             )
             .collect();
         if metadata.primary_key.iter().all(|id| requested.contains(id)) {

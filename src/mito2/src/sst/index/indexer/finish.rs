@@ -198,7 +198,7 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
+        let column_ids = indexer.indexed_column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_bloom_filter_output(

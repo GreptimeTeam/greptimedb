@@ -451,7 +451,7 @@ impl InvertedIndexer {
         self.temp_file_provider.cleanup().await
     }
 
-    /// Returns column-level index IDs, excluding JSON path targets.
+    /// Returns column IDs indexed as whole columns, excluding JSON path targets.
     pub fn indexed_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
         self.index_targets
             .iter()
