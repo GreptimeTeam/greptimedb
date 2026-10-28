@@ -912,20 +912,6 @@ fn eval_time(date: Option<DateFunction>, grid: Arc<EvalGrid>) -> NativeNode {
     }
 }
 
-fn scalar_of(input: NativeNode) -> NativeNode {
-    let grid = input
-        .output
-        .grid()
-        .cloned()
-        .expect("scalar() reads evaluated values");
-    NativeNode {
-        expr: NativeExpr::ScalarOf {
-            input: Box::new(input),
-        },
-        output: NativeType::Scalar(grid),
-    }
-}
-
 fn vector_of(input: NativeNode) -> NativeNode {
     let grid = input
         .output
@@ -995,70 +981,28 @@ fn vector_of_a_constant_is_one_unlabelled_series() {
     assert_eq!(sample_values(&chunks[0]), vec![Some(4.0); 3]);
 }
 
-/// `scalar(v)` reports the value of the only series present at a point and NaN where none or
-/// several are, and answers only once its whole input has arrived.
+/// A varying scalar is broadcast point by point, on the side it was written.
 #[test]
-fn scalar_of_reads_the_whole_vector_at_each_point() {
-    let grid = grid(0, 10, 3);
+fn a_varying_scalar_is_broadcast_on_its_side() {
+    let grid = grid(1_000, 1_000, 3);
     let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(scalar_of(evaluated_input(Arc::clone(&grid)))).unwrap();
-    let pool = pool();
-    let mut execution = executor(&tree, Arc::clone(&pool));
-    execution
-        .push_evaluated(
-            InputId::new(0),
-            evaluated_chunk_of(
-                &schema,
-                named_metric("x", "a"),
-                0,
-                vec![Some(1.0), Some(2.0), None],
-                true,
-            ),
-        )
-        .unwrap();
-    assert!(
-        execution.next_chunk().unwrap().is_none(),
-        "a later series may still be present at these points"
-    );
-    execution
-        .push_evaluated(
-            InputId::new(0),
-            evaluated_chunk_of(&schema, named_metric("x", "b"), 1, vec![Some(5.0)], true),
-        )
-        .unwrap();
-    let chunks = execution.finish().unwrap();
-    assert_eq!(chunks.len(), 1);
-    assert!(chunks[0].series.metric.tags().is_empty());
-    let values = sample_values(&chunks[0]);
-    assert_eq!(values[0], Some(1.0));
-    assert!(values[1].is_some_and(f64::is_nan), "two series: {values:?}");
-    assert!(values[2].is_some_and(f64::is_nan), "no series: {values:?}");
-    assert_eq!(pool.reserved(), 0);
-}
-
-/// A varying scalar is broadcast point by point, on the side it was written: the vector chunks that
-/// arrive before it are held, charged to the node, and answered once it has arrived.
-#[test]
-fn a_varying_scalar_is_broadcast_on_its_side_once_it_arrives() {
-    let grid = grid(0, 10, 3);
-    let schema = evaluated_schema(Arc::clone(&grid));
-    let vector = || evaluated_input_with_source_index(Arc::clone(&grid), 0);
-    let varying = || scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1));
+    let vector = || evaluated_input(Arc::clone(&grid));
+    let time = || eval_time(None, Arc::clone(&grid));
     let gt_bool = BinaryMatching {
         return_bool: true,
         ..binary_matching(BinaryOp::Gt)
     };
     let cases = [
         (
-            scalar_binary(vector(), varying(), binary_matching(BinaryOp::Sub)),
+            scalar_binary(vector(), time(), binary_matching(BinaryOp::Sub)),
             vec![Some(9.0), Some(18.0), Some(27.0)],
         ),
         (
-            scalar_binary(varying(), vector(), binary_matching(BinaryOp::Sub)),
+            scalar_binary(time(), vector(), binary_matching(BinaryOp::Sub)),
             vec![Some(-9.0), Some(-18.0), Some(-27.0)],
         ),
         (
-            scalar_binary(vector(), varying(), gt_bool),
+            scalar_binary(vector(), time(), gt_bool),
             vec![Some(1.0), Some(1.0), Some(1.0)],
         ),
     ];
@@ -1066,12 +1010,10 @@ fn a_varying_scalar_is_broadcast_on_its_side_once_it_arrives() {
         let tree = NativeTree::try_new(root).unwrap();
         let pool = pool();
         let mut execution = executor(&tree, Arc::clone(&pool));
-        // Leaves are counted left to right, so the source index is what names each side.
-        let source = |index| execution.state().input_ids(index).next().unwrap();
-        let (vector_input, scalar_input) = (source(0), source(1));
+        let input = execution.state().input_ids(0).next().unwrap();
         execution
             .push_evaluated(
-                vector_input,
+                input,
                 evaluated_chunk_of(
                     &schema,
                     named_metric("x", "a"),
@@ -1081,24 +1023,7 @@ fn a_varying_scalar_is_broadcast_on_its_side_once_it_arrives() {
                 ),
             )
             .unwrap();
-        execution
-            .push_evaluated(
-                scalar_input,
-                evaluated_chunk_of(
-                    &schema,
-                    named_metric("y", "b"),
-                    0,
-                    vec![Some(1.0), Some(2.0), Some(3.0)],
-                    true,
-                ),
-            )
-            .unwrap();
-        assert!(execution.next_chunk().unwrap().is_none());
-        assert!(
-            execution.state().reserved_bytes() > 0,
-            "the held vector chunk is charged"
-        );
-        let chunks = execution.finish().unwrap();
+        let chunks = run(&mut execution);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].series.metric.name(), None, "the name is dropped");
         assert_eq!(chunks[0].series.metric.get("job"), Some("a"));
@@ -1146,40 +1071,20 @@ fn parameterized(
     }
 }
 
-/// Runs `root` over one vector series `x{job="a"}` on input 0 and the series `y` its parameters read
-/// on input 1, with the vector pushed first, and returns the one answer.
-fn run_parameterized(
-    root: NativeNode,
-    vector: Vec<Option<f64>>,
-    y: Vec<Option<f64>>,
-) -> EvaluatedChunk {
+/// Runs `root` over one vector series `x{job="a"}` and returns the one answer.
+fn run_parameterized(root: NativeNode, vector: Vec<Option<f64>>) -> EvaluatedChunk {
     let schema = evaluated_schema(root.output.grid().cloned().unwrap());
     let tree = NativeTree::try_new(root).unwrap();
     let pool = pool();
     let mut execution = executor(&tree, Arc::clone(&pool));
-    let source = |index| execution.state().input_ids(index).next().unwrap();
-    let (vector_input, scalar_input) = (source(0), source(1));
+    let input = execution.state().input_ids(0).next().unwrap();
     execution
         .push_evaluated(
-            vector_input,
+            input,
             evaluated_chunk_of(&schema, named_metric("x", "a"), 0, vector, true),
         )
         .unwrap();
-    assert!(
-        execution.next_chunk().unwrap().is_none(),
-        "the vector waits for its parameters"
-    );
-    assert!(
-        execution.state().reserved_bytes() > 0,
-        "the held chunk is charged"
-    );
-    execution
-        .push_evaluated(
-            scalar_input,
-            evaluated_chunk_of(&schema, named_metric("y", "b"), 0, y, true),
-        )
-        .unwrap();
-    let mut chunks = execution.finish().unwrap();
+    let mut chunks = run(&mut execution);
     assert_eq!(chunks.len(), 1);
     assert_eq!(pool.reserved(), 0);
     chunks.remove(0)
@@ -1209,48 +1114,41 @@ fn a_constant_parameter_is_reserved_before_it_is_built() {
 }
 
 /// A parameter is read at each point, as Prometheus reads it at each step: `round` rounds every
-/// point to its own nearest, and a NaN nearest makes that point NaN.
+/// point to its own nearest.
 #[test]
 fn a_map_reads_its_scalar_parameter_at_each_point() {
-    let grid = grid(0, 10, 3);
+    let grid = grid(1_000, 9_000, 2);
     let root = parameterized(
-        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input(Arc::clone(&grid)),
         ParameterizedOp::Round,
-        vec![scalar_of(evaluated_input_with_source_index(grid, 1))],
+        vec![eval_time(None, grid)],
     );
-    let chunk = run_parameterized(
-        root,
-        vec![Some(12.4), Some(17.0), Some(5.0)],
-        vec![Some(1.0), Some(10.0), Some(f64::NAN)],
-    );
+    let chunk = run_parameterized(root, vec![Some(12.4), Some(17.0)]);
     assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
     assert_eq!(chunk.series.metric.get("job"), Some("a"));
-    let values = sample_values(&chunk);
-    assert_eq!(&values[..2], &[Some(12.0), Some(20.0)]);
-    assert!(values[2].is_some_and(f64::is_nan), "{values:?}");
+    assert_eq!(sample_values(&chunk), vec![Some(12.0), Some(20.0)]);
 }
 
 /// `clamp` with a maximum below its minimum at a point has no value there, which is Prometheus'
 /// empty vector for that step; a constant parameter beside a varying one is read as the constant.
 #[test]
 fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
-    let grid = grid(0, 10, 3);
+    let grid = grid(0, 1_000, 3);
+    // `time() - 1` is -1, 0 and 1.
+    let max = scalar_binary(
+        eval_time(None, Arc::clone(&grid)),
+        scalar(1.0, Arc::clone(&grid)),
+        binary_matching(BinaryOp::Sub),
+    );
     let root = parameterized(
-        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input(Arc::clone(&grid)),
         ParameterizedOp::Clamp,
-        vec![
-            scalar(0.0, Arc::clone(&grid)),
-            scalar_of(evaluated_input_with_source_index(grid, 1)),
-        ],
+        vec![scalar(0.0, grid), max],
     );
-    let chunk = run_parameterized(
-        root,
-        vec![Some(7.0), Some(3.0), Some(-2.0)],
-        vec![Some(5.0), Some(-1.0), Some(10.0)],
-    );
+    let chunk = run_parameterized(root, vec![Some(7.0), Some(3.0), Some(5.0)]);
     assert_eq!(
         decided(std::slice::from_ref(&chunk)),
-        vec![(0, Some(5.0)), (2, Some(0.0))]
+        vec![(1, Some(0.0)), (2, Some(1.0))]
     );
 }
 
@@ -1259,16 +1157,13 @@ fn clamp_with_a_varying_bound_has_no_value_where_max_is_below_min() {
 /// from "no more input" by that chunk alone.
 #[test]
 fn a_closing_chunk_that_keeps_no_value_is_handed_over_empty() {
-    let grid = grid(0, 10, 2);
+    let grid = grid(0, 1_000, 2);
     let root = parameterized(
-        evaluated_input_with_source_index(Arc::clone(&grid), 0),
+        evaluated_input(Arc::clone(&grid)),
         ParameterizedOp::Clamp,
-        vec![
-            scalar(1.0, Arc::clone(&grid)),
-            scalar_of(evaluated_input_with_source_index(grid, 1)),
-        ],
+        vec![scalar(5.0, Arc::clone(&grid)), eval_time(None, grid)],
     );
-    let chunk = run_parameterized(root, vec![Some(5.0), Some(6.0)], vec![Some(0.0), Some(0.0)]);
+    let chunk = run_parameterized(root, vec![Some(5.0), Some(6.0)]);
     assert!(chunk.is_last);
     assert_eq!(chunk.series.time.len(), 0);
     assert_eq!(chunk.series.metric.name(), None, "the name is dropped");
@@ -11171,51 +11066,5 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
         ]
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
-    assert_eq!(pool.reserved(), 0);
-}
-
-/// Vector chunks that arrive before the scalar they are broadcast with are held with their label
-/// sets charged, and the charge is given back once they are answered.
-#[test]
-fn chunks_held_for_a_varying_scalar_hold_their_labels() {
-    const SERIES: usize = 64;
-    const LABEL: usize = 4_096;
-    let grid = grid(0, 60_000, 1);
-    let schema = evaluated_schema(Arc::clone(&grid));
-    let tree = NativeTree::try_new(scalar_binary(
-        evaluated_input_with_source_index(Arc::clone(&grid), 0),
-        scalar_of(evaluated_input_with_source_index(Arc::clone(&grid), 1)),
-        binary_matching(BinaryOp::Sub),
-    ))
-    .unwrap();
-    let pool = pool();
-    let mut execution = executor(&tree, Arc::clone(&pool));
-    let (vector, scalar) = (
-        execution.state().input_ids(0).next().unwrap(),
-        execution.state().input_ids(1).next().unwrap(),
-    );
-    for index in 0..SERIES {
-        let metric = pod_metric("x", &format!("{index:0>LABEL$}"), "a");
-        execution
-            .push_evaluated(
-                vector,
-                evaluated_chunk_of(&schema, metric, 0, vec![Some(1.0)], true),
-            )
-            .unwrap();
-    }
-    // `scalar(y)` answers only once its input has ended, so every vector chunk is held.
-    assert!(execution.next_chunk().unwrap().is_none());
-    assert!(
-        pool.reserved() >= SERIES * LABEL,
-        "{} bytes held for {SERIES} pending chunks of {LABEL}-byte labels",
-        pool.reserved()
-    );
-    execution
-        .push_evaluated(
-            scalar,
-            evaluated_chunk_of(&schema, named_metric("y", "b"), 0, vec![Some(1.0)], true),
-        )
-        .unwrap();
-    assert_eq!(execution.finish().unwrap().len(), SERIES);
     assert_eq!(pool.reserved(), 0);
 }

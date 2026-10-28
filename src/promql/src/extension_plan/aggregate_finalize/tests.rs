@@ -619,7 +619,6 @@ fn the_prefix_and_the_suffix_each_name_their_own_source_zero() {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => inputs(input, found),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }

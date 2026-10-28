@@ -23,8 +23,8 @@
 //! operation states about its input, which is what lets a new combination of supported operations
 //! be an ordinary tree instead of another hand-written shape.
 //!
-//! What the tree cannot express yet is deliberate for this stage: the legality below is about the
-//! operations that exist, not about PromQL's whole surface.
+//! What the tree cannot express yet is deliberate for this stage: `scalar(v)` has no node. The
+//! legality below is therefore about the operations that exist, not about PromQL's whole surface.
 
 use std::sync::Arc;
 
@@ -145,8 +145,7 @@ pub struct BoundInput {
 ///
 /// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
 /// keeps a binary operation from label-matching it is its type, not its constness. The varying
-/// ones are [`NativeExpr::EvalTime`], [`NativeExpr::ScalarOf`] and a binary operation between
-/// scalars.
+/// ones are [`NativeExpr::EvalTime`] and a binary operation between scalars.
 #[derive(Clone, Debug)]
 pub struct BoundScalar {
     /// The constant value.
@@ -372,9 +371,6 @@ pub enum NativeExpr {
     /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
     /// exactly for every timestamp.
     EvalTime { date: Option<DateFunction> },
-    /// `scalar(v)`: the value of the only series present at each grid point, NaN otherwise. It reads
-    /// the whole vector at each point.
-    ScalarOf { input: Box<NativeNode> },
     /// `vector(s)`: the scalar as one series without labels.
     VectorOf { input: Box<NativeNode> },
     /// An instant selection over its input.
@@ -449,10 +445,9 @@ pub struct NativeNode {
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
 /// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
-/// by label, an `Info` looks the info series of each series up by its identifying labels, a
+/// by label, an `Info` looks the info series of each series up by its identifying labels, and a
 /// `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...) reorders or
-/// reads the whole vector at a grid point, and `ScalarOf` (`scalar(v)`) is defined only when the
-/// whole vector holds exactly one series.
+/// reads the whole vector at a grid point.
 ///
 /// `Merge` answers one series per label set, and the label sets it answers span every input series:
 /// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
@@ -488,7 +483,6 @@ pub fn reads_across_series(node: &NativeNode) -> bool {
         } => reads_across_series(input) || parameters.iter().any(reads_across_series),
         NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
-        | NativeExpr::ScalarOf { .. }
         | NativeExpr::Set { .. }
         | NativeExpr::Info { .. }
         | NativeExpr::Merge { .. } => true,
@@ -549,23 +543,6 @@ impl NativeNode {
                 // A scalar's output is the scalar type: one value per grid point and no labels.
                 if !matches!(self.output, NativeType::Scalar(_)) {
                     return Err(invalid("a scalar node does not produce a scalar"));
-                }
-            }
-            NativeExpr::ScalarOf { input } => {
-                input.validate()?;
-                // A scalar holds one value per point, so the vector it is read from holds one too.
-                let Some((schema, input_grid)) = evaluated_vector(&input.output) else {
-                    return Err(invalid(&format!(
-                        "scalar() consumes an evaluated vector, not {}",
-                        input.output.describe()
-                    )));
-                };
-                ensure_field_count(schema.fields.len(), 1, "scalar()'s input")?;
-                if !matches!(&self.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
-                {
-                    return Err(invalid(
-                        "scalar() does not produce a scalar on its input's grid",
-                    ));
                 }
             }
             NativeExpr::VectorOf { input } => {

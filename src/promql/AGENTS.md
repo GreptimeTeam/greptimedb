@@ -39,11 +39,8 @@ aggregate on each scan partition is globally complete.
 
 The native `timestamp` operation evaluates on its input grid. A tree without
 a source (a literal, `time()`, `vector(s)`) is materialized on its bound grid
-without a scan. `scalar(v)` needs every series of `v` in one execution:
-`FusedSeriesExec` reads all input partitions into one execution for a tree
-holding `ScalarOf`, so the planner admits such trees only over an unpartitioned
-single-region Mito table. Native `count` produces Float64 values, unlike the
-legacy PromQL path's Int64 count. Native SQL/TQL output is not necessarily
+without a scan. Native `count` produces Float64 values, unlike the legacy
+PromQL path's Int64 count. Native SQL/TQL output is not necessarily
 schema-identical to legacy output.
 
 The native tree and its compiler describe the implemented model, not the whole

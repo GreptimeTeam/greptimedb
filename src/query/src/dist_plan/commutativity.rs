@@ -30,9 +30,7 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-use crate::promql::planner::native::{
-    independent_scan_pair, pointwise_operand, same_table_scans, whole_input_scalar,
-};
+use crate::promql::planner::native::{independent_scan_pair, pointwise_operand, same_table_scans};
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -255,8 +253,7 @@ impl Categorizer {
                         return Commutativity::NonCommutative;
                     }
                 } else if !(same_table_scans(children)
-                    && (independent_scan_pair(fused.tree().root())
-                        || whole_input_scalar(fused.tree().root())))
+                    && independent_scan_pair(fused.tree().root()))
                 {
                     return Commutativity::NonCommutative;
                 }
@@ -265,11 +262,7 @@ impl Categorizer {
                     return Commutativity::NonCommutative;
                 }
                 let root = fused.tree().root();
-                // A `scalar(v)` tree is answered by one execution over the region's whole scan; the
-                // planner admits it only over a table of one region.
-                let per_series = pointwise_operand(root)
-                    || independent_scan_pair(root)
-                    || whole_input_scalar(root);
+                let per_series = pointwise_operand(root) || independent_scan_pair(root);
                 if reads_across_series(root) && !per_series {
                     return Commutativity::NonCommutative;
                 }

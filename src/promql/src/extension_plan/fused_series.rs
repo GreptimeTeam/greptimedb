@@ -652,7 +652,6 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => collect(input, inputs),
             NativeExpr::ParameterizedMap {
                 input, parameters, ..
@@ -677,32 +676,6 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
     let mut inputs = Vec::new();
     collect(tree.root(), &mut inputs);
     inputs
-}
-
-/// Whether `node` holds a `scalar(v)`, which needs every series of its input in one execution.
-fn reads_scalar_of(node: &NativeNode) -> bool {
-    match &node.expr {
-        NativeExpr::ScalarOf { .. } => true,
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. }
-        | NativeExpr::VectorOf { input } => reads_scalar_of(input),
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => reads_scalar_of(input) || parameters.iter().any(reads_scalar_of),
-        NativeExpr::Binary { left, right, .. }
-        | NativeExpr::Set { left, right, .. }
-        | NativeExpr::Info {
-            base: left,
-            info: right,
-            ..
-        } => reads_scalar_of(left) || reads_scalar_of(right),
-    }
 }
 
 fn ordering_satisfies(producer: SeriesOrdering, required: SeriesOrdering) -> bool {
@@ -942,9 +915,6 @@ pub struct FusedSeriesExec {
     /// Aggregate state exported by each partition, when this is the partial mode.
     partial_fold: Option<BoundAggregate>,
     format: FusedOutputFormat,
-    /// Whether one execution reads every partition of every input: several sources are matched
-    /// with each other, and a tree that reads across series has to see all of them.
-    gather: bool,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -1009,7 +979,6 @@ impl FusedSeriesExec {
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let output_series = tree.root().output.samples();
         let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
-        let gather = inputs.len() != 1 || reads_scalar_of(tree.root());
         if let Some(op) = &partial_fold {
             aggregate_op(op)?;
         }
@@ -1057,7 +1026,7 @@ impl FusedSeriesExec {
                     "FusedSeries input {index} has no partitions"
                 )));
             }
-            let required_ordering = if gather && count > 1 {
+            let required_ordering = if inputs.len() > 1 && count > 1 {
                 SeriesOrdering::Contiguous
             } else {
                 *ordering
@@ -1082,7 +1051,11 @@ impl FusedSeriesExec {
         }
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(output_schema.clone()),
-            Partitioning::UnknownPartitioning(if gather { 1 } else { partition_count }),
+            Partitioning::UnknownPartitioning(if inputs.len() != 1 {
+                1
+            } else {
+                partition_count
+            }),
             if partial_fold.is_some() {
                 // Partial aggregate state is only emitted after the scan reaches EOF.
                 EmissionType::Final
@@ -1110,7 +1083,6 @@ impl FusedSeriesExec {
             properties,
             partial_fold,
             format,
-            gather,
         })
     }
 
@@ -1232,15 +1204,16 @@ impl ExecutionPlan for FusedSeriesExec {
         let mut streams = Vec::new();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
-            if !self.gather && partition >= count {
+            if self.inputs.len() == 1 && partition >= count {
                 return Err(DataFusionError::Execution(format!(
                     "FusedSeries input {source} has no partition {partition}"
                 )));
             }
-            let (start, end) = if self.gather {
-                (0, count)
+            let start = if self.inputs.len() > 1 { 0 } else { partition };
+            let end = if self.inputs.len() > 1 {
+                count
             } else {
-                (partition, partition + 1)
+                partition + 1
             };
             let partitions = start..end;
             for child_partition in partitions {

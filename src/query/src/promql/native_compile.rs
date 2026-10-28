@@ -33,10 +33,10 @@
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
 //!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
-//!   <expression> <operator> <scalar>               e.g. x * 100, x > bool scalar(y)
+//!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
 //!   <scalar> <operator> <expression>               e.g. 1 / x, time() - timestamp(x)
-//!   <scalar> <operator> <scalar>                   e.g. time() - 60, scalar(x) > bool 1
-//!   time(), scalar(<expression>), vector(<scalar>) e.g. scalar(sum(x)), vector(time())
+//!   <scalar> <operator> <scalar>                   e.g. time() - 60, time() > bool 1
+//!   time(), vector(<scalar>)                       e.g. vector(time())
 //!   <date function>()                              e.g. hour(), which is `hour(vector(time()))`
 //!   -<expression>                                  e.g. -x
 //!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
@@ -56,7 +56,7 @@
 //!           | <expression>[<range>:<step>]<modifiers>
 //!                                                  a subquery: <expression> evaluated on a grid;
 //!                                                  the step may be omitted as `[<range>:]`
-//! <scalar>    <constant> | time() | scalar(<expression>) | <scalar> <operator> <scalar>
+//! <scalar>    <constant> | time() | <scalar> <operator> <scalar>
 //! <modifiers>                                      nothing, `offset <duration>`, `@ <anchor>`, or
 //!                                                  both, in either order — e.g. `x[5m] @ 1234
 //!                                                  offset 1m`
@@ -253,8 +253,8 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
                          operation between one of them and a scalar (`2 / (x + 1)`, \
-                         `x > bool scalar(y)`, `time() - timestamp(x)`), a scalar — a constant, \
-                         `time()`, `scalar(<expression>)` or a binary operation between scalars — \
+                         `x > bool time()`, `time() - timestamp(x)`), a scalar — a constant, \
+                         `time()` or a binary operation between scalars — \
                          `vector(<scalar>)`, a date function without an argument (`hour()`), a \
                          negation of one of them (`-x`), a set operation between two of them \
                          (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
@@ -397,7 +397,6 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
@@ -1253,7 +1252,7 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     )))
 }
 
-/// Binds `time()`, `scalar(v)`, `vector(s)` and a date function called without an argument, or
+/// Binds `time()`, `vector(s)` and a date function called without an argument, or
 /// returns `None` when the call is none of them.
 ///
 /// A date function without an argument is `f(vector(time()))` in Prometheus, but it reads the
@@ -1271,28 +1270,6 @@ fn scalar_call(
     };
     let node = match (name, args) {
         ("time", []) => eval_time(None),
-        ("scalar", [vector]) => {
-            let input = compile_expr(context, vector)?;
-            let Some(schema) = input.output.samples() else {
-                return Err(not_implemented(&format!(
-                    "`scalar({vector})`, whose argument does not compile to a vector"
-                )));
-            };
-            // A field per value column would be one scalar per field, which PromQL has no type
-            // for.
-            if schema.fields.len() != 1 {
-                return Err(not_implemented(&format!(
-                    "`scalar({vector})` over {} value columns, where it reads one",
-                    schema.fields.len()
-                )));
-            }
-            NativeNode {
-                expr: NativeExpr::ScalarOf {
-                    input: Box::new(input),
-                },
-                output: NativeType::Scalar(grid()),
-            }
-        }
         ("vector", [scalar]) => vector_of(compile_expr(context, scalar)?, &grid()),
         (name, []) => match math_signature(name) {
             Some(MathSignature::Unary(MathOp::Date(date))) => {

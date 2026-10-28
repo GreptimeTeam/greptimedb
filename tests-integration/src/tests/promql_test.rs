@@ -3243,17 +3243,6 @@ async fn native_promql_cross_table_pairs_run_above_both_regions() {
             1,
             at_five(&|index| used(index, 5), 0..100),
         ),
-        (
-            "native_xt_used * scalar(native_xt_total{host=\"h0000\"})",
-            1,
-            at_five(&|index| used(index, 5) * total(0, 5), 0..HOSTS),
-        ),
-        (
-            // A scalar on the left still reports the vector side's labels.
-            "scalar(native_xt_used{host=\"h0000\"}) - native_xt_total",
-            1,
-            at_five(&|index| used(0, 5) - total(index, 5), 0..HOSTS),
-        ),
     ] {
         let sql = format!("TQL EVAL (5, 5, '1s') {query}");
         observer.clear();
@@ -5165,14 +5154,9 @@ fn expected_rows(rows: &[(i64, &str, f64)]) -> Vec<(i64, String, String)> {
     rows
 }
 
-/// Dynamic scalars run natively and answer what Prometheus answers: `scalar(v)` is the value of the
-/// only series present at a step and NaN where none or two are, a varying scalar is broadcast over a
-/// vector on either side, and `time()` needs no scan.
-///
-/// The existing planner disagrees on two shapes, and the native answers follow Prometheus there:
-/// it reports NaN at every step once `v` holds two series anywhere in the range, and it drops a row
-/// where the scalar is NaN because no series was present. It refuses `vector(time())` and a date
-/// function without an argument.
+/// Dynamic scalars run natively and answer what Prometheus answers: a varying scalar is broadcast
+/// over a vector, and `time()` needs no scan. The existing planner refuses `vector(time())` and a
+/// date function without an argument.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     common_telemetry::init_default_ut_logging();
@@ -5194,7 +5178,6 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         QueryContext::arc(),
     )
     .await;
-    let nan = f64::NAN;
     // (query, Prometheus answer, scan children, whether the existing planner agrees, or `None`
     // where it refuses the query)
     type Case = (
@@ -5204,49 +5187,6 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         Option<bool>,
     );
     let cases: Vec<Case> = vec![
-        // a alone at 0s and 10s, a and b at 20s, b alone at 30s, nothing at 40s.
-        (
-            "TQL EVAL (0, 40, '10s', '5s') scalar(dyn_scalar)",
-            vec![
-                (0, "", 1.0),
-                (10_000, "", 2.0),
-                (20_000, "", nan),
-                (30_000, "", 20.0),
-                (40_000, "", nan),
-            ],
-            1,
-            Some(false),
-        ),
-        (
-            "TQL EVAL (30, 30, '1s', '5s') scalar(dyn_scalar)",
-            vec![(30_000, "", 20.0)],
-            1,
-            Some(true),
-        ),
-        (
-            "TQL EVAL (0, 40, '10s', '5s') dyn_scalar - scalar(dyn_scalar{host=\"a\"})",
-            vec![
-                (0, "a", 0.0),
-                (10_000, "a", 0.0),
-                (20_000, "a", 0.0),
-                (20_000, "b", 7.0),
-                (30_000, "b", nan),
-            ],
-            2,
-            Some(false),
-        ),
-        (
-            "TQL EVAL (0, 40, '10s', '5s') scalar(dyn_scalar{host=\"a\"}) < bool dyn_scalar",
-            vec![
-                (0, "a", 0.0),
-                (10_000, "a", 0.0),
-                (20_000, "a", 0.0),
-                (20_000, "b", 1.0),
-                (30_000, "b", 0.0),
-            ],
-            2,
-            Some(false),
-        ),
         (
             "TQL EVAL (0, 40, '10s', '5s') time() - timestamp(dyn_scalar)",
             vec![
@@ -5288,13 +5228,6 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
         let plan = observer.take();
         assert_eq!(plan.name(), "FusedSeriesExec", "{sql}");
         assert_eq!(plan.children().len(), children, "{sql}");
-        if sql.contains("scalar(") {
-            // One execution reads every scan partition, which is what lets it see every series.
-            assert_eq!(plan.output_partitioning().partition_count(), 1, "{sql}");
-            for child in plan.children() {
-                assert_eq!(child.output_partitioning().partition_count(), 4, "{sql}");
-            }
-        }
         assert_eq!(native, expected_rows(&expected), "{sql}");
         let Some(legacy_agrees) = legacy_agrees else {
             continue;
@@ -5306,30 +5239,12 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
             "{sql}: legacy answered {legacy:?}"
         );
     }
-
-    // A partitioned table is several regions, and no one execution would see every series.
-    execute_all(
-        &instance,
-        "CREATE TABLE dyn_scalar_parted (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) \
-         PARTITION ON COLUMNS (host) (host < 'b', host >= 'b'); \
-         INSERT INTO dyn_scalar_parted (host, ts, val) VALUES ('a', 0, 1), ('b', 0, 2)",
-        QueryContext::arc(),
-    )
-    .await;
-    observer.clear();
-    let sql = "TQL EVAL (0, 0, '1s', '5s') scalar(dyn_scalar_parted)";
-    let rows = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
-    assert!(
-        observer.fused().is_none(),
-        "a partitioned table keeps the existing plan"
-    );
-    assert_eq!(rows, expected_rows(&[(0, "", nan)]));
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
-/// parameter that reads no data runs per partition over the scan; `scalar(v)` runs as one execution
-/// over every partition. The answers are Prometheus' literal ones: the existing planner does not plan
-/// a parameter that is not a number literal, so it has no answer to compare.
+/// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
+/// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
+/// has no answer to compare.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_map_with_varying_parameters_matches_prometheus() {
     common_telemetry::init_default_ut_logging();
@@ -5351,45 +5266,6 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
         QueryContext::arc(),
     )
     .await;
-    // `scalar(dyn_param{host="a"})` is 1, 2, 3 and then NaN; Go's `math.Max` answers NaN for it.
-    let sql = "TQL EVAL (0, 40, '10s', '5s') clamp_min(dyn_param, scalar(dyn_param{host=\"a\"}))";
-    observer.clear();
-    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
-    let plan = observer.take();
-    assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.children().len(), 2);
-    assert_eq!(plan.output_partitioning().partition_count(), 1);
-    assert_eq!(
-        native,
-        expected_rows(&[
-            (0, "a", 1.0),
-            (10_000, "a", 2.0),
-            (20_000, "a", 3.0),
-            (20_000, "b", 10.0),
-            (30_000, "b", f64::NAN),
-        ])
-    );
-
-    // Three scans of one table: `scalar(dyn_param{host="b"})` is NaN, NaN, 10, 20 and then NaN,
-    // and a NaN bound makes Go's `math.Min` / `math.Max` answer NaN.
-    let sql = "TQL EVAL (0, 40, '10s', '5s') \
-               clamp(dyn_param, scalar(dyn_param{host=\"a\"}), scalar(dyn_param{host=\"b\"}))";
-    observer.clear();
-    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
-    let plan = observer.take();
-    assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.children().len(), 3);
-    assert_eq!(
-        native,
-        expected_rows(&[
-            (0, "a", f64::NAN),
-            (10_000, "a", f64::NAN),
-            (20_000, "a", 3.0),
-            (20_000, "b", 10.0),
-            (30_000, "b", f64::NAN),
-        ])
-    );
-
     // The nearest is 1, 2, 4 and 8 at the four steps that hold samples.
     let sql = "TQL EVAL (0, 40, '10s', '5s') round(dyn_param, 2 ^ (time() / 10))";
     observer.clear();
@@ -5408,30 +5284,4 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
             (30_000, "b", 24.0),
         ])
     );
-}
-
-/// `vector(s)` names its own result, so a table whose field is not called `value` still answers it
-/// natively: one unlabelled sample.
-#[tokio::test(flavor = "multi_thread")]
-async fn native_promql_vector_of_scalar_names_its_own_field() {
-    common_telemetry::init_default_ut_logging();
-    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
-        "native_promql_vector_of_scalar_e2e",
-    ))
-    .await;
-    let instance = standalone.fe_instance().clone();
-    execute_all(
-        &instance,
-        "CREATE TABLE scalar_vector_case (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY (host)); \
-         INSERT INTO scalar_vector_case VALUES ('a', 0, 1)",
-        QueryContext::arc(),
-    )
-    .await;
-    let sql = "TQL EVAL (0, 0, '1s') vector(scalar(scalar_vector_case))";
-    observer.clear();
-    let rows = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
-    let plan = observer.take();
-    assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.children().len(), 1);
-    assert_eq!(rows, expected_rows(&[(0, "", 1.0)]));
 }

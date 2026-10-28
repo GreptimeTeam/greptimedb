@@ -2179,10 +2179,9 @@ fn a_statement_that_reads_no_data_compiles_without_input() {
     }
 }
 
-/// `scalar(v)` reads its vector whole and reports a scalar on the statement's grid, so it is broadcast
-/// over a vector on the side it was written, and a statement whose value is one is a scalar root.
+/// A varying scalar is broadcast over a vector on the side it was written.
 #[test]
-fn scalar_of_a_vector_binds_a_scalar_that_is_broadcast_where_it_was_written() {
+fn a_varying_scalar_is_broadcast_where_it_was_written() {
     let compile_tree = |query: &str| {
         compile_selectors(
             &eval_stmt(query),
@@ -2192,19 +2191,10 @@ fn scalar_of_a_vector_binds_a_scalar_that_is_broadcast_where_it_was_written() {
         .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
         .tree
     };
-    let tree = compile_tree("scalar(sum(x)) * 2");
-    let (left, right, _) = binary_parts(tree.root());
-    let NativeExpr::ScalarOf { input } = &left.expr else {
-        panic!("the left side is `scalar(sum(x))`: {tree}");
-    };
-    assert!(matches!(input.expr, NativeExpr::Aggregate { .. }));
-    assert_eq!(constant(right), Some(2.0));
-    assert_eq!((0, 5_000, 21), scalar_grid(tree.root()));
-
-    let tree = compile_tree("x > bool scalar(y)");
+    let tree = compile_tree("x > bool time()");
     let (left, right, matching) = binary_parts(tree.root());
     assert!(matches!(left.expr, NativeExpr::Instant { .. }));
-    assert!(matches!(right.expr, NativeExpr::ScalarOf { .. }));
+    assert!(matches!(right.expr, NativeExpr::EvalTime { date: None }));
     assert!(matching.return_bool);
     assert!(matches!(tree.root().output, NativeType::Samples(_)));
 
@@ -2216,8 +2206,7 @@ fn scalar_of_a_vector_binds_a_scalar_that_is_broadcast_where_it_was_written() {
 }
 
 /// `round` and the `clamp` functions bind their parameters as scalar nodes, in argument order, when
-/// any of them varies, and keep the constant map otherwise; each selector is bound in the order it
-/// was written.
+/// any of them varies, and keep the constant map otherwise.
 #[test]
 fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
     let compiled = |query: &str| {
@@ -2237,14 +2226,14 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
         other => panic!("expected a parameterized map, got {other:?}"),
     };
 
-    let tree = compiled("round(x, scalar(y))").tree;
+    let tree = compiled("round(x, time() / 10)").tree;
     let (input, op, parameters) = parts(&tree);
     assert_eq!(op, ParameterizedOp::Round);
     assert!(matches!(input.expr, NativeExpr::Instant { .. }));
     assert!(matches!(
         parameters.as_slice(),
         [NativeNode {
-            expr: NativeExpr::ScalarOf { .. },
+            expr: NativeExpr::Binary { .. },
             ..
         }]
     ));
@@ -2258,38 +2247,11 @@ fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
         NativeExpr::EvalTime { date: None }
     ));
 
-    let compiled_three = compiled("clamp(x, scalar(a), scalar(b))");
-    let (_, op, parameters) = parts(&compiled_three.tree);
-    assert_eq!(op, ParameterizedOp::Clamp);
-    assert_eq!(parameters.len(), 2);
-    let names = compiled_three
-        .inputs
-        .iter()
-        .map(|input| input.requirement.metric.clone().unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(names, ["x", "a", "b"]);
-
     let tree = compiled("round(x, 2 * 5)").tree;
     assert!(matches!(
         map_op(tree.root()),
         MathOp::Round { nearest } if nearest == 10.0
     ));
-}
-
-/// A scalar holds one value per point, so `scalar(v)` over two value columns is refused rather
-/// than answered from one of them.
-#[test]
-fn scalar_of_several_value_columns_is_refused() {
-    let error = compile_selectors(
-        &eval_stmt("scalar(x)"),
-        &|_| Ok(raw_schema_with_fields(2)),
-        SeriesOrdering::KeyThenTime,
-    )
-    .expect_err("`scalar(x)` over two fields compiled");
-    assert!(
-        error.to_string().contains("over 2 value columns"),
-        "{error}"
-    );
 }
 
 /// A vector-matching modifier has nothing to match when one operand is a constant, and the tree's
@@ -5180,7 +5142,6 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => set_input_source(input, source),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }

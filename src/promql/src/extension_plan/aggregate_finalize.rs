@@ -440,7 +440,6 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
         | NativeExpr::Vector { input, .. }
-        | NativeExpr::ScalarOf { input }
         | NativeExpr::VectorOf { input }
         | NativeExpr::ParameterizedMap { input, .. } => match split(input, fields, time_index)? {
             Some(_) => Err(declined(
@@ -541,7 +540,6 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::ScalarOf { input }
             | NativeExpr::VectorOf { input } => raw_fields(input),
             NativeExpr::ParameterizedMap {
                 input, parameters, ..

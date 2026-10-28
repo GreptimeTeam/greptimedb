@@ -1694,7 +1694,7 @@ impl BinaryRuntime {
 /// each logical series, and runs its kernel once, after the input has ended. The results are queued
 /// in the node's own output queue and handed over from there.
 struct VectorRuntime {
-    kernel: VectorKernel,
+    op: BoundVectorOp,
     /// The layout of the input, which is also what the node produces.
     schema: Arc<SeriesSchema>,
     input: RetainedInput,
@@ -1705,18 +1705,10 @@ struct VectorRuntime {
     computed: bool,
 }
 
-/// What a vector node computes over its whole input.
-enum VectorKernel {
-    /// An operation that answers a vector.
-    Op(BoundVectorOp),
-    /// `scalar(v)`, which answers one unlabelled series over the whole grid.
-    Scalar,
-}
-
 impl VectorRuntime {
-    fn new(kernel: VectorKernel, schema: Arc<SeriesSchema>) -> Self {
+    fn new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Self {
         Self {
-            kernel,
+            op,
             schema,
             input: RetainedInput::default(),
             merge_input: false,
@@ -1764,18 +1756,11 @@ impl VectorRuntime {
         } else {
             assembled
         };
-        let workspace = match &self.kernel {
-            VectorKernel::Op(op) => vector_workspace_bytes(op, &self.schema, &assembled),
-            VectorKernel::Scalar => scalar_workspace_bytes(&self.schema),
-        };
-        buffer.grow(workspace)?;
+        buffer.grow(vector_workspace_bytes(&self.op, &self.schema, &assembled))?;
         let metrics = Arc::clone(&buffer.metrics);
         let output = {
             let _timer = metrics.timer();
-            match &self.kernel {
-                VectorKernel::Op(op) => vector_series(op, &self.schema, assembled)?,
-                VectorKernel::Scalar => vec![select::scalar(&self.schema, &assembled)?],
-            }
+            vector_series(&self.op, &self.schema, assembled)?
         };
         self.input.release();
         self.computed = true;
@@ -1790,14 +1775,6 @@ fn vector_overflow() -> DataFusionError {
          reserve overflow"
             .to_string(),
     )
-}
-
-/// What `scalar(v)` allocates beside its input: a value and a count per grid point, and the result.
-fn scalar_workspace_bytes(schema: &SeriesSchema) -> usize {
-    let points = schema.eval_grid.as_ref().map_or(0, |grid| {
-        usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
-    });
-    points.saturating_mul(std::mem::size_of::<Option<f64>>() + 1 + std::mem::size_of::<f64>())
 }
 
 /// Runs the kernel `op` binds over the whole input.
@@ -1992,33 +1969,12 @@ struct BroadcastRuntime {
     /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
     /// on. A chunk of the vector side is checked against it by the kernel itself.
     sample_schema: Arc<SeriesSchema>,
-    /// Vector chunks that arrived before a varying scalar did, and the bytes charged for them and
-    /// for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
-    held: HeldForScalars,
+    /// The bytes charged for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
+    scalar_bytes: usize,
 }
 
-/// The vector chunks a node computed with varying scalars holds until they have arrived, and the
-/// bytes charged for those chunks and for the scalars' values, which the node keeps itself.
-///
-/// A point of the vector can only be computed with the scalars' values at that point, and a
-/// scalar such as `scalar(v)` arrives only once its whole input has ended.
-#[derive(Default)]
-struct HeldForScalars {
-    pending: VecDeque<(EvaluatedChunk, usize)>,
-    bytes: usize,
-}
-
-impl HeldForScalars {
-    /// The next held vector chunk, no longer charged here.
-    fn pop(&mut self) -> Option<EvaluatedChunk> {
-        let (chunk, bytes) = self.pending.pop_front()?;
-        self.bytes = self.bytes.saturating_sub(bytes);
-        Some(chunk)
-    }
-}
-
-/// What a map with scalar parameters holds: its function and output layout, each parameter's
-/// value once it has arrived, and the vector chunks that arrived before them.
+/// What a map with scalar parameters holds: its function and output layout, and each parameter's
+/// value once it has arrived.
 struct ParameterizedMapRuntime {
     op: ParameterizedOp,
     schema: Arc<SeriesSchema>,
@@ -2026,7 +1982,8 @@ struct ParameterizedMapRuntime {
     literals: Vec<Option<f64>>,
     /// Each parameter's one unlabelled series, in argument order.
     values: Vec<Option<Series>>,
-    held: HeldForScalars,
+    /// The bytes charged for `values`.
+    parameter_bytes: usize,
 }
 
 impl ParameterizedMapRuntime {
@@ -2539,24 +2496,6 @@ impl RuntimeNode {
                     false,
                 )
             }
-            NativeExpr::ScalarOf { input } => {
-                let schema = input.output.samples().cloned().ok_or_else(|| {
-                    DataFusionError::Execution("scalar() consumes non-sample input".to_string())
-                })?;
-                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
-                (
-                    RuntimeOp::Vector {
-                        input: Box::new(child),
-                        vector: Some(VectorRuntime::new(VectorKernel::Scalar, schema)),
-                        state: NodeState::new(
-                            format!("native.scalar_of at {location}"),
-                            Arc::clone(&metrics),
-                            pool,
-                        ),
-                    },
-                    false,
-                )
-            }
             NativeExpr::Instant { input, op } => {
                 let (child, shared) =
                     Self::build(input, pool, inputs, format!("{location}.input"))?;
@@ -2699,7 +2638,7 @@ impl RuntimeNode {
                             schema,
                             literals,
                             values: vec![None; parameters.len()],
-                            held: HeldForScalars::default(),
+                            parameter_bytes: 0,
                         }),
                         state,
                     },
@@ -2907,7 +2846,7 @@ impl RuntimeNode {
                             .to_string(),
                     ));
                 }
-                let mut vector = VectorRuntime::new(VectorKernel::Op(op.clone()), schema);
+                let mut vector = VectorRuntime::new(op.clone(), schema);
                 let (child, child_shared) =
                     Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });
@@ -3218,38 +3157,33 @@ impl RuntimeNode {
                             )
                         })?;
                         state
-                            .hold_constant(&mut operation.held, slot, grid, value)
+                            .hold_constant(&mut operation.parameter_bytes, slot, grid, value)
                             .map_err(|error| state.context(error))?;
                         continue;
                     }
                     while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
                         state
-                            .hold_scalar(&mut operation.held, slot, chunk)
+                            .hold_scalar(&mut operation.parameter_bytes, slot, chunk)
                             .map_err(|error| state.context(error))?;
                     }
                 }
+                // A parameter reads no data, so it hands its value over on its first pull and is
+                // always ready by now.
+                if !operation.ready() {
+                    return Err(DataFusionError::Execution(
+                        "a map parameter did not hand over its value when it was read".to_string(),
+                    ));
+                }
                 loop {
-                    if !operation.ready() {
-                        let Some(chunk) = input.pull(inputs, inputs_finished)? else {
-                            return Ok(None);
-                        };
-                        state
-                            .hold_pending(&mut operation.held, chunk)
-                            .map_err(|error| state.context(error))?;
-                        continue;
-                    }
-                    let chunk = match operation.held.pop() {
-                        Some(chunk) => chunk,
-                        None => match input.pull(inputs, inputs_finished)? {
-                            Some(NativeChunk::Evaluated(chunk)) => chunk,
-                            Some(NativeChunk::Raw(_)) => {
-                                return Err(DataFusionError::Execution(
-                                    "the map node consumes an evaluated chunk, not raw samples"
-                                        .to_string(),
-                                ));
-                            }
-                            None => return Ok(None),
-                        },
+                    let chunk = match input.pull(inputs, inputs_finished)? {
+                        Some(NativeChunk::Evaluated(chunk)) => chunk,
+                        Some(NativeChunk::Raw(_)) => {
+                            return Err(DataFusionError::Execution(
+                                "the map node consumes an evaluated chunk, not raw samples"
+                                    .to_string(),
+                            ));
+                        }
+                        None => return Ok(None),
                     };
                     if let Some(output) = state
                         .parameterized_map(operation, chunk)
@@ -3329,9 +3263,9 @@ impl RuntimeNode {
                     return Err(no_broadcast());
                 };
                 // A constant is on the node's binding, so only the vector side is pulled. A varying
-                // scalar is read first, whole: until it arrives the vector side's chunks are held,
-                // and afterwards each chunk is transformed as it arrives and handed up, which is
-                // what keeps a broadcast over a whole vector from costing the vector.
+                // scalar is read first, whole; then each vector chunk is transformed as it arrives
+                // and handed up, which is what keeps a broadcast over a whole vector from costing
+                // the vector.
                 let (vector, scalar) = if operation.vector_left {
                     (&mut **left, &mut **right)
                 } else {
@@ -3342,28 +3276,23 @@ impl RuntimeNode {
                 {
                     while let Some(chunk) = scalar.pull(inputs, inputs_finished)? {
                         state
-                            .hold_scalar(&mut operation.held, value, chunk)
+                            .hold_scalar(&mut operation.scalar_bytes, value, chunk)
                             .map_err(|error| state.context(error))?;
                     }
+                }
+                // A varying scalar reads no data, so it hands its value over on its first pull and
+                // is always ready by now.
+                if operation.awaits_scalar() {
+                    return Err(DataFusionError::Execution(
+                        "a broadcast scalar did not hand over its value when it was read"
+                            .to_string(),
+                    ));
                 }
                 // An operation that empties every position yields no chunk, and the node asks its
                 // vector side again rather than reporting a decision it did not make.
                 loop {
-                    if operation.awaits_scalar() {
-                        let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
-                            return Ok(None);
-                        };
-                        state
-                            .hold_pending(&mut operation.held, chunk)
-                            .map_err(|error| state.context(error))?;
-                        continue;
-                    }
-                    let chunk = match operation.held.pop() {
-                        Some(chunk) => NativeChunk::Evaluated(chunk),
-                        None => match vector.pull(inputs, inputs_finished)? {
-                            Some(chunk) => chunk,
-                            None => return Ok(None),
-                        },
+                    let Some(chunk) = vector.pull(inputs, inputs_finished)? else {
+                        return Ok(None);
                     };
                     if let Some(output) = state
                         .broadcast(operation, chunk)
@@ -3453,9 +3382,7 @@ impl RuntimeNode {
                 state,
             } => {
                 state.queued.is_empty()
-                    && map
-                        .as_ref()
-                        .is_some_and(|operation| operation.held.pending.is_empty())
+                    && map.is_some()
                     && input.settled(inputs)
                     && parameters.iter().all(|parameter| parameter.settled(inputs))
             }
@@ -3522,8 +3449,8 @@ impl RuntimeNode {
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
-            // A broadcast owes what its sides have not handed over yet and the vector chunks it
-            // holds for a scalar still to arrive. A constant side is settled from the start.
+            // A broadcast owes what its sides have not handed over yet. A constant side is settled
+            // from the start.
             RuntimeOp::Broadcast {
                 left,
                 right,
@@ -3531,9 +3458,7 @@ impl RuntimeNode {
                 state,
             } => {
                 state.queued.is_empty()
-                    && broadcast
-                        .as_ref()
-                        .is_some_and(|operation| operation.held.pending.is_empty())
+                    && broadcast.is_some()
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
@@ -4142,7 +4067,8 @@ impl NodeState {
             self.track(output)?;
         }
         let emitted = self.emitted_bytes();
-        self.buffer.resize(emitted.saturating_add(map.held.bytes))?;
+        self.buffer
+            .resize(emitted.saturating_add(map.parameter_bytes))?;
         Ok(output)
     }
 
@@ -4246,18 +4172,18 @@ impl NodeState {
                 self.track(output)?;
             }
         }
-        // The chunk is gone: the label sets this node has handed out, the chunks it holds for a
-        // scalar and the scalar's value are what is left.
+        // The chunk is gone: the label sets this node has handed out and the scalar's value are
+        // what is left.
         let emitted = self.emitted_bytes();
         self.buffer
-            .resize(emitted.saturating_add(broadcast.held.bytes))?;
+            .resize(emitted.saturating_add(broadcast.scalar_bytes))?;
         Ok(output)
     }
 
     /// Keeps the chunk a varying scalar operand hands over, the one closed series it is, in `slot`.
     fn hold_scalar(
         &mut self,
-        held: &mut HeldForScalars,
+        held: &mut usize,
         slot: &mut Option<Series>,
         chunk: NativeChunk,
     ) -> Result<()> {
@@ -4273,7 +4199,7 @@ impl NodeState {
         }
         let bytes = series_bytes(&series);
         self.buffer.grow(bytes)?;
-        held.bytes = held.bytes.saturating_add(bytes);
+        *held = held.saturating_add(bytes);
         *slot = Some(series);
         Ok(())
     }
@@ -4281,31 +4207,15 @@ impl NodeState {
     /// Keeps a constant parameter's values on `grid` in `slot`, reserved before they are built.
     fn hold_constant(
         &mut self,
-        held: &mut HeldForScalars,
+        held: &mut usize,
         slot: &mut Option<Series>,
         grid: Arc<EvalGrid>,
         value: f64,
     ) -> Result<()> {
         let bytes = grid_chunk_bytes(&grid)?;
         self.buffer.grow(bytes)?;
-        held.bytes = held.bytes.saturating_add(bytes);
+        *held = held.saturating_add(bytes);
         *slot = Some(scalar_chunk(grid, value)?.series);
-        Ok(())
-    }
-
-    /// Holds one vector chunk until the scalars it is computed with arrive.
-    fn hold_pending(&mut self, held: &mut HeldForScalars, chunk: NativeChunk) -> Result<()> {
-        let NativeChunk::Evaluated(chunk) = chunk else {
-            return Err(DataFusionError::Execution(
-                "a scalar is applied to an evaluated vector, not raw samples".to_string(),
-            ));
-        };
-        // A held chunk owns its label set as well as its samples, and holding it is what keeps
-        // both alive until the scalar arrives.
-        let bytes = series_bytes(&chunk.series);
-        self.buffer.grow(bytes)?;
-        held.bytes = held.bytes.saturating_add(bytes);
-        held.pending.push_back((chunk, bytes));
         Ok(())
     }
 
@@ -4467,7 +4377,7 @@ impl NodeState {
 
     /// Runs this node's vector kernel and queues the series it kept.
     fn compute_vector(&mut self, vector: &mut VectorRuntime) -> Result<()> {
-        let shares_input = matches!(vector.kernel, VectorKernel::Op(BoundVectorOp::Sort(_)));
+        let shares_input = matches!(vector.op, BoundVectorOp::Sort(_));
         let output = vector.compute(&mut self.buffer)?;
         let Some(output) = output else {
             return Ok(());
@@ -5544,7 +5454,7 @@ fn broadcast_runtime(
         vector_left,
         op: broadcast_op(matching)?,
         sample_schema,
-        held: HeldForScalars::default(),
+        scalar_bytes: 0,
     })
 }
 

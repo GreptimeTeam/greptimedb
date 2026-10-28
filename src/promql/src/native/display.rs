@@ -99,7 +99,6 @@ fn describe(node: &NativeNode) -> String {
         NativeExpr::EvalTime { date: Some(date) } => {
             format!("{}() on grid {}", date.name(), grid_of(node))
         }
-        NativeExpr::ScalarOf { .. } => "scalar()".to_string(),
         NativeExpr::VectorOf { .. } => "vector()".to_string(),
         NativeExpr::ParameterizedMap { op, .. } => match op {
             ParameterizedOp::Round => "round".to_string(),
@@ -409,7 +408,6 @@ fn kind(expr: &NativeExpr) -> &'static str {
         NativeExpr::Vector { .. } => "Vector",
         NativeExpr::Binary { .. } => "Binary",
         NativeExpr::EvalTime { .. } => "EvalTime",
-        NativeExpr::ScalarOf { .. } => "ScalarOf",
         NativeExpr::VectorOf { .. } => "VectorOf",
         NativeExpr::ParameterizedMap { .. } => "ParameterizedMap",
         NativeExpr::Set { .. } => "Set",
@@ -439,7 +437,6 @@ fn display_node(
         | NativeExpr::Timestamp { input }
         | NativeExpr::Aggregate { input, .. }
         | NativeExpr::Vector { input, .. }
-        | NativeExpr::ScalarOf { input }
         | NativeExpr::VectorOf { input } => display_node(f, input, depth + 1, "input")?,
         NativeExpr::ParameterizedMap {
             input, parameters, ..

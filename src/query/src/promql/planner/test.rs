@@ -1942,38 +1942,25 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
     }
 }
 
-/// A statement that reads no data plans without a scan, and `scalar(v)` plans over its scan only
-/// when the table is one region: a partitioned table keeps the existing plan.
+/// A statement that reads no data plans without a scan. `scalar(v)` has no native node, so a
+/// statement that calls it keeps the existing plan.
 #[tokio::test]
-async fn native_fused_plans_dynamic_scalars_over_one_region() {
+async fn native_fused_plans_dynamic_scalars() {
     for query in ["time() - 60", "vector(time())", "hour()"] {
         let plan = build_native_fused_plan(query, true).await;
         let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
         assert!(fused.children().is_empty(), "{query}");
     }
-    // `vector(s)` names its own result, which is not a field of the table.
-    let plan = build_native_fused_plan("vector(scalar(some_metric))", true).await;
-    let fused = find_fused_series(&plan).expect("`vector(scalar(v))` uses the native route");
-    assert_eq!(1, fused.children().len());
-    assert!(
-        plan.schema().field_with_unqualified_name("value").is_ok(),
-        "{plan}"
-    );
     for query in [
         "scalar(some_metric)",
         "some_metric > bool scalar(some_metric)",
     ] {
         let plan = build_native_fused_plan(query, true).await;
-        assert!(find_fused_series(&plan).is_some(), "{query}");
-        let parted = native_engine_provider(vec![0]).await;
-        let plan = build_native_fused_plan_with_provider(query, true, parted).await;
         assert!(find_fused_series(&plan).is_none(), "{query}");
     }
 }
 
-/// A map whose parameter reads no data runs per partition over its scan, and one whose parameter
-/// is `scalar(v)` needs a table of one region. A partitioned table and three selectors are declined
-/// by the native route.
+/// A map whose parameter reads no data runs per partition over its scan.
 #[tokio::test]
 async fn native_fused_plans_varying_map_parameters() {
     let plan = build_native_fused_plan("round(some_metric, time() / 1e9)", true).await;
@@ -1984,31 +1971,6 @@ async fn native_fused_plans_varying_map_parameters() {
     let plan = build_native_fused_plan(query, true).await;
     let fused = find_fused_series(&plan).expect("the match uses the native route");
     assert_eq!(2, fused.children().len(), "{query}");
-
-    let query = "clamp_min(some_metric, scalar(some_metric))";
-    let plan = build_native_fused_plan(query, true).await;
-    assert!(find_fused_series(&plan).is_some(), "{query}");
-    let query = "clamp(some_metric, scalar(some_metric), scalar(some_metric))";
-    let plan = build_native_fused_plan(query, true).await;
-    let fused = find_fused_series(&plan).expect("each parameter reads its own scan");
-    assert_eq!(3, fused.children().len(), "{query}");
-
-    for (query, partitions) in [("clamp_min(some_metric, scalar(some_metric))", vec![0])] {
-        // Asked of the native route alone: what the existing planner does with the query is not
-        // this route's to decide.
-        let stmt = build_eval_stmt(query);
-        let mut planner = PromPlanner {
-            table_provider: native_engine_provider(partitions).await,
-            ctx: PromPlannerContext::from_eval_stmt(&stmt).unwrap(),
-            promql_annotations: None,
-            native_fused: true,
-        };
-        let plan = planner
-            .try_plan_native_fused(&stmt.expr, &build_query_engine_state())
-            .await
-            .unwrap();
-        assert!(plan.is_none(), "{query}");
-    }
 }
 
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
@@ -2620,7 +2582,6 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                 }
                 NativeExpr::Scalar(_)
                 | NativeExpr::EvalTime { .. }
-                | NativeExpr::ScalarOf { .. }
                 | NativeExpr::VectorOf { .. }
                 | NativeExpr::ParameterizedMap { .. }
                 | NativeExpr::Aggregate { .. }
