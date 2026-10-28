@@ -43,8 +43,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use crate::native::plan::{
-    BoundInput, BoundInstant, BoundVectorOp, Grouping, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    BoundInput, BoundInstant, BoundVectorOp, Grouping, InstantValue, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 
 const GRID_START: i64 = 300_000;
@@ -676,7 +676,7 @@ fn logical_select() -> VectorSelect {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: grid(),
             },
         },
