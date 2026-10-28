@@ -485,27 +485,40 @@ impl NativeProperties {
         Self::source_pieces()
     }
 
-    /// What a node whose output label sets are its own still proves.
+    /// What a node whose output label sets are its own still proves about *ownership*.
     ///
-    /// Two unrelated node families reach this, and the conclusion is the same for both: the label
-    /// sets the output answers under are not the ones the input's keys named, so neither fact about
-    /// the input carries over.
+    /// Ownership is the first question: does this execution hold every piece of the label sets the
+    /// output names? An operator whose output identity is not the input's keys cannot carry the
+    /// input's answer over. A rewrite can give two series one label set - `rate(x)` and `rate(y)`
+    /// coincide on `{job="z"}` where `x` and `y` did not - and an aggregate's output identity is its
+    /// group key while a match's is its modifiers, so a co-location proof about the *input* keys says
+    /// nothing about the output keys: two input label sets this execution holds and one it does not
+    /// can fold into one group here, and that group is then not whole.
     ///
-    /// A rewrite can give two series one label set - `rate(x)` and `rate(y)` coincide on `{job="z"}`
-    /// where `x` and `y` did not - so the output is no longer one series per label set, and an
-    /// ownership per canonical key no longer names the label sets the rewrite invented.
+    /// `SinglePartition` survives because it is not a claim about keys at all - it holds every series
+    /// there is - and `ByCanonicalKey` becomes `Unknown`, because the keys it named are not the ones
+    /// the output answers under.
     ///
-    /// An aggregate's output identity is its group key and a match's is its modifiers, so a
-    /// co-location proof about the *input* keys says nothing about the output keys: two input label
-    /// sets this execution holds and one it does not can fold into one group here, and that group is
-    /// then not whole. A single execution survives as the only ownership possible, because it holds
-    /// every series there is rather than a named set of keys.
+    /// This answers ownership only. What a node's *output* is grouped like is a separate question,
+    /// answered where that node is derived: an operator that has collapsed to one series per key
+    /// says so itself and is not downgraded by this.
+    fn owner_of_its_own_labels(self) -> CanonicalOwner {
+        match self.owner {
+            CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
+            other => other,
+        }
+    }
+
+    /// What a node whose output label sets are its own proves: neither question carries over.
+    ///
+    /// The ownership is [`Self::owner_of_its_own_labels`] and the grouping falls back to
+    /// [`CanonicalGrouping::SourcePiecesOnly`], which is the honest answer for a node that has not
+    /// established that its output is one series per key. A node that *has* established it - a
+    /// finished aggregate, a match, a set operation - derives its grouping itself instead of calling
+    /// this.
     fn label_sets_of_its_own(self) -> Self {
         Self {
-            owner: match self.owner {
-                CanonicalOwner::ByCanonicalKey => CanonicalOwner::Unknown,
-                other => other,
-            },
+            owner: self.owner_of_its_own_labels(),
             grouping: CanonicalGrouping::SourcePiecesOnly,
         }
     }
@@ -632,10 +645,63 @@ impl NativeNode {
                 .united(info.properties(boundary))
                 .label_sets_of_its_own(),
             NativeExpr::Merge { input } => input.properties(boundary).merged(),
-            // An aggregate folds a group and a vector operation decides whole series against each
-            // other, so the input's label sets are not what their output holds.
-            NativeExpr::Aggregate { input, .. } | NativeExpr::Vector { input, .. } => {
-                input.properties(boundary).label_sets_of_its_own()
+            // An aggregate answers two questions with two answers, and they are not the same one.
+            //
+            // *Grouping*: a finished fold is one series per group (`FloatAggregator::finish` builds
+            // one `Series` per group, and `AggregateRuntime::compute` hands over exactly that), and
+            // two groups are two label sets, so the output already holds at most one series per
+            // canonical label set. Nothing above it has a series to collect, whatever the labels it
+            // ended up with. `Partial` answers aggregate state instead, which is not an evaluated
+            // series at all: it carries no series per label set, so it makes no completeness claim.
+            //
+            // *Ownership*: the output's identity is the group key, so a co-location proof about the
+            // input's canonical keys does not name the groups this node invents - two input label
+            // sets this execution holds and one it does not can fold into one group here - and the
+            // owner is re-derived rather than carried over.
+            NativeExpr::Aggregate { input, .. } => {
+                let input = input.properties(boundary);
+                NativeProperties {
+                    owner: input.owner_of_its_own_labels(),
+                    grouping: match &self.output {
+                        NativeType::Samples(_) => CanonicalGrouping::CanonicalComplete,
+                        NativeType::Scalar(_) | NativeType::AggregateState(_) => {
+                            CanonicalGrouping::SourcePiecesOnly
+                        }
+                    },
+                }
+            }
+            // A vector operation is decided one operator at a time, because the seven do not answer
+            // the same shape.
+            //
+            // *Grouping*: `topk`, `limitk`, `limit_ratio` and `sort` hand back series of their input
+            // with their labels unchanged - `topk` rebuilds the selected points of the series it
+            // picked, `limitk` the same over its merged input, `limit_ratio` keeps whole series and
+            // `sort` reorders them - so what the input held about label sets is what the output
+            // holds. `limitk` reads one series per label set only because the insertion pass (or the
+            // runtime, when the child shares runs) merges its input, which is why its grouping is
+            // the input's and cannot be claimed on its own. `absent` answers one series of its own,
+            // `histogram_quantile`/`histogram_fraction` merge label-set pieces before the kernel
+            // (`vector_series` calls `merge_same_labelset`) and answer one series per set, and
+            // `count_values` files one series per group and value: all three are complete.
+            //
+            // *Ownership*: the same four that keep their labels keep the ownership too, while the
+            // three that invent a label set - `absent`'s matcher labels, a histogram's shared bucket
+            // labels, `count_values`' value label - re-derive it from a proof about keys they no
+            // longer name.
+            NativeExpr::Vector { input, op } => {
+                let input = input.properties(boundary);
+                match op {
+                    BoundVectorOp::TopK { .. }
+                    | BoundVectorOp::LimitK { .. }
+                    | BoundVectorOp::LimitRatio { .. }
+                    | BoundVectorOp::Sort(_) => input,
+                    BoundVectorOp::Absent { .. }
+                    | BoundVectorOp::Histogram(_)
+                    | BoundVectorOp::CountValues { .. } => NativeProperties {
+                        owner: input.owner_of_its_own_labels(),
+                        grouping: CanonicalGrouping::CanonicalComplete,
+                    },
+                }
             }
             NativeExpr::Binary {
                 left,
@@ -676,19 +742,40 @@ impl NativeNode {
                         vector
                     }
                 }
-                // Two vectors are matched by label, and the modifiers decide what label set a
-                // sample ends under, so neither side's grouping is the output's. A match answers
-                // series of both sides, so its ownership is only what both agree on, and
+                // Two vectors are matched by label. The two questions are answered apart.
+                //
+                // *Grouping*: the kernel files its rows by *result label set* (`Results` is keyed by
+                // the label set a pairing's sample ends under) and hands over one series per set,
+                // refusing two values of a field at one point (`Results::sort_rows` -> "vector
+                // cannot contain metrics with the same labelset"). What it answers is therefore one
+                // series per canonical label set however the operands arrived.
+                //
+                // *Ownership*: the modifiers decide what label set a sample ends under, so the
+                // match's keys are not the keys a co-location proof about either side names; a match
+                // answers series of both sides, so its ownership is only what both agree on and
                 // `label_sets_of_its_own` re-derives it for the output's keys.
-                (_, _) => left
+                (_, _) => NativeProperties {
+                    owner: left
+                        .properties(boundary)
+                        .united(right.properties(boundary))
+                        .label_sets_of_its_own()
+                        .owner,
+                    grouping: CanonicalGrouping::CanonicalComplete,
+                },
+            },
+            // A set operation keeps each side's samples as they are, and its kernel files them by
+            // label set as a match does, refusing two values of a field at one point
+            // (`set_vectors` -> `Results::sort_rows`). *Grouping*: one series per label set, so
+            // nothing above it has a series to collect. *Ownership*: the samples keep the labels
+            // they arrived with, so the label sets the output names are the ones the sides' keys
+            // named and the two proofs unite without being re-derived.
+            NativeExpr::Set { left, right, .. } => NativeProperties {
+                owner: left
                     .properties(boundary)
                     .united(right.properties(boundary))
-                    .label_sets_of_its_own(),
+                    .owner,
+                grouping: CanonicalGrouping::CanonicalComplete,
             },
-            NativeExpr::Set { left, right, .. } => left
-                .properties(boundary)
-                .united(right.properties(boundary))
-                .label_sets_of_its_own(),
         }
     }
 }
@@ -1403,6 +1490,143 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
         matching.op,
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
     ) || matching.return_bool
+}
+
+/// Whether `node` hands over one logical series per canonical label set, or several.
+///
+/// This is the rule the runtime applies when it decides whether a consumer above `node` has to
+/// collect what `node` emits, asked of the plan node rather than of the runtime node. It lives here
+/// so that `RuntimeNode::build` in [`execute`](crate::native::execute) and the insertion pass
+/// ([`insert_native_merge_inside_current_fused`]) read one rule: a second copy of it would be a
+/// rule that can silently disagree with this one about the same tree.
+///
+/// Three answers, because the flag the runtime computes carries two facts and a boundary answers
+/// neither:
+///
+/// - `Some(true)`: the output is one series per canonical label set, established here. The runtime
+///   marks such a node `shared = false` and nothing above it collects.
+/// - `Some(false)`: the output may hold several series of one label set, and this node *says so*.
+///   The runtime marks it `shared = true`, so a consumer that needs one unified series collects it
+///   through `MergeInput`. A [`NativeExpr::Merge`] inserted above such a node would turn that
+///   collection off - a merge answers `Some(true)`, so the consumer would stream an already-merged
+///   series - and the pass inserts none there.
+/// - `None`: the output may hold several, and this node says nothing: it has neither a proof to
+///   offer nor a report to make. Only a boundary ([`NativeExpr::Input`]) answers this, and a node
+///   that hands its input's series back unchanged passes the answer on. The runtime's flag is
+///   `false` here too, so the flag alone cannot tell this case from a proof - and `None` is exactly
+///   the case the pass exists for: the one state in which neither the runtime nor the tree collects
+///   anything.
+///
+/// `matches!(answer, Some(false))` is the runtime's `shared` flag bit for bit, which is what makes
+/// the two readers' agreement checkable: `the_predicate_and_the_runtime_agree` in
+/// [`execute`](crate::native::execute)'s tests asserts it node for node on
+/// `RuntimeNode::build`'s own return value.
+///
+/// [`insert_native_merge_inside_current_fused`]:
+///     crate::native::canonicalize::insert_native_merge_inside_current_fused
+#[allow(clippy::match_same_arms)] // Each arm is one line of `RuntimeNode::build`, and the reason each answers as it does is written there rather than merged into a bucket.
+pub fn unifies_its_own_contributions(node: &NativeNode) -> Option<bool> {
+    match &node.expr {
+        // A boundary hands over the pieces some upstream execution produced: what it holds is one
+        // storage series at a time for a scan and one partition's fragments of a label set for an
+        // exchange, and nothing in the tree can tell which series those fragments belong to. The
+        // runtime reports `shared = false` for it because a merge binds samples evaluated on a
+        // grid, not because the pieces are one series per label set, so a proof is not this
+        // function's to give; it answers `None`, and the flag follows with `false`.
+        NativeExpr::Input(_) => None,
+        // A constant holds no label set at all, so it has nothing that could arrive twice.
+        NativeExpr::Scalar(_) => Some(true),
+        // A selection reads raw samples - `validate` refuses an evaluated input - and raw samples
+        // arrive one whole storage series at a time, so it answers one series per series it read,
+        // under the label set it read. `timestamp(x)` is the exception: it reports the sample's own
+        // time under the metric name dropped, which can give two series one label set.
+        NativeExpr::Instant { op, .. } => Some(op.value != InstantValue::Timestamp),
+        // The merge is the collection: whatever its input handed over, it groups the fragments by
+        // canonical label set and emits one series per set, so what it emits shares none.
+        NativeExpr::Merge { .. } => Some(true),
+        // The runtime's rule for a window is `drops_metric_name() || !child_shared`, so a window is
+        // *not* shared - and this arm answers `Some(true)` - exactly when both hold: the function
+        // keeps the metric name, and the child reports its own fragments. The window then collects
+        // them (`MergeInput`) and emits one series per label set.
+        //
+        // Every other window answers `Some(false)`, and for two different reasons that the runtime's
+        // formula does not separate:
+        //
+        // - the function drops the metric name, so what it emits can coincide with another series'
+        //   label set whatever its input held (this is a real report, and the case `Map`, `Timestamp`
+        //   and a label-dropping broadcast are in);
+        // - or the child does not report fragments at all - `None` for a boundary, or `Some(true)`
+        //   for a child that has already unified. With a `None` child the window folds each
+        //   contribution on its own, so what it emits does alias its input's fragments and answering
+        //   `Some(false)` is exact. With an already-unified child there is only one series per label
+        //   set to begin with, so `Some(false)` is conservative rather than exact - it makes a
+        //   consumer above collect a stream that needs no collecting, which is what the runtime does
+        //   too, and is the safe direction: nothing is left uncollected.
+        NativeExpr::Window { input, op } => Some(
+            !op.function.drops_metric_name()
+                && matches!(unifies_its_own_contributions(input), Some(false)),
+        ),
+        // A map rewrites labels: `preserves_canonical_identity` is `false` for every [`MapOp`], so
+        // two series can end under one label set and the runtime records what it wrote in an
+        // `Emitted` table.
+        NativeExpr::Map { .. } => Some(false),
+        // A timestamp reports a position under the metric name dropped.
+        NativeExpr::Timestamp { .. } => Some(false),
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
+            if evaluated_vector(&left.output).is_some() && evaluated_vector(&right.output).is_some()
+            {
+                // Two vectors are matched by the kernel, which files its rows by the label set a
+                // sample ends under and emits one series per set.
+                Some(true)
+            } else if broadcast_drops_labels(matching) {
+                // A broadcast whose operation drops the metric name can give two series of its
+                // vector side one label set.
+                Some(false)
+            } else {
+                // A filtering comparison keeps the label set it read, so the vector side's answer
+                // is this node's.
+                let vector = if left.output.samples().is_some() {
+                    left
+                } else {
+                    right
+                };
+                unifies_its_own_contributions(vector)
+            }
+        }
+        // A set operation keeps each side's samples and files them by label set, one series per
+        // set.
+        NativeExpr::Set { .. } => Some(true),
+        // `info` indexes the info side by identifying labels and merges the results that share a
+        // label set.
+        NativeExpr::Info { .. } => Some(true),
+        // A finished aggregate emits one series per group, and two groups are two label sets.
+        // `Partial` state is not a series at all, which is not several either.
+        NativeExpr::Aggregate { .. } => Some(true),
+        // `topk`, `limit_ratio` and `sort` hand back the series they read with their labels, so the
+        // input's answer is theirs. The four that read the whole vector - `limitk`, `absent`,
+        // `histogram_*` and `count_values` - emit one series per label set: `limitk` counts series
+        // in input order, so its input carries the merge the pass inserts below it (or the one the
+        // runtime performs when that input reports fragments), and the other three group their rows
+        // by label set themselves.
+        NativeExpr::Vector { input, op } => {
+            let whole = matches!(
+                op,
+                BoundVectorOp::LimitK { .. }
+                    | BoundVectorOp::Absent { .. }
+                    | BoundVectorOp::Histogram(_)
+                    | BoundVectorOp::CountValues { .. }
+            );
+            if whole {
+                Some(true)
+            } else {
+                unifies_its_own_contributions(input)
+            }
+        }
+    }
 }
 
 /// The schema and grid of an evaluated vector, or `None` when `ty` is raw samples, a scalar or
