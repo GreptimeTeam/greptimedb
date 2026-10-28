@@ -160,10 +160,7 @@ struct Manifest {
 }
 impl Manifest {
     fn prefix(&self) -> String {
-        format!(
-            "{}/samples/{}/{}/",
-            self.region_id, self.source_file_id, self.generation
-        )
+        samples_prefix(self.region_id, self.generation)
     }
     fn path(&self) -> String {
         format!("{}manifest.json", self.prefix())
@@ -220,4 +217,9 @@ fn valid_rows(rows: usize, fields: usize) -> bool {
     (1..=MAX_ROWS).contains(&rows)
         && (1..=MAX_FIELDS).contains(&fields)
         && rows * (17 + 8 * fields) + fields * rows.div_ceil(8) <= BLOCK_BYTES
+}
+
+/// Immutable samples output directory, independent of the source SST identity.
+pub(crate) fn samples_prefix(region_id: u64, generation: FileId) -> String {
+    format!("{region_id}/samples/{generation}/")
 }

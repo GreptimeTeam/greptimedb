@@ -602,3 +602,8 @@ Shared-schema column references and a Protobuf footer require separate benchmark
 and remain outside this port.
 Depth 3+ metadata is also deferred until larger parts justify the added traversal.
 No performance equivalence is asserted by this document.
+
+The local series-index cache has a root `version` marker independent of this
+format version. Before workers start, a missing or incompatible marker causes
+the entire derived cache (including samples, ranges, and catalogs) to be reset.
+Matching-version restarts preserve the cache.

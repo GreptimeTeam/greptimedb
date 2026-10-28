@@ -16,9 +16,9 @@ Existing `parquet` and `columnar-series` identifiers keep their meaning.
 One artifact is derived from one immutable source SST. It owns these objects:
 
 ```text
-<region_id>/samples/<source_file_id>/<generation>/manifest.json
-<region_id>/samples/<source_file_id>/<generation>/part-0.samples
-<region_id>/samples/<source_file_id>/<generation>/part-1.samples
+<region_id>/samples/<generation>/manifest.json
+<region_id>/samples/<generation>/part-0.samples
+<region_id>/samples/<generation>/part-1.samples
 ...
 ```
 
@@ -429,3 +429,7 @@ New column encodings or compression methods receive new IDs. Structural changes,
 changed field meanings, or incompatible limits require a new version. Deeper
 metadata trees require an explicit reader-support and rollout decision; an
 unchanged layout alone does not make them readable by version-1 implementations.
+
+The local cache root contains a layout-version marker. Startup clears the entire
+series-index cache when this marker is absent or incompatible, then rebuilds
+artifacts through existing maintenance. Source SST identity remains in metadata.
