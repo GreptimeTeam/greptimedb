@@ -68,8 +68,8 @@ use crate::grid_series::series_bytes;
 use crate::map::MathOp;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
-    AggregateKind, AggregateStage, BoundAggregate, BoundInput, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType,
+    AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType,
 };
 
 /// One node that merges the partition-local state of a split aggregate.
@@ -348,12 +348,21 @@ struct Split {
 /// Splits the innermost aggregate out of `node`.
 ///
 /// `Ok(None)` is a subtree holding no aggregate. The currently verified suffix operations are maps,
-/// aggregates, TopK/BottomK and binary operations with a constant on one side. TopK/BottomK run once
-/// in the suffix over the fully merged aggregate series, per evaluation timestamp, and never in the
-/// partition-local producer. A map is point-wise and an aggregate runs over the complete merge.
-/// LimitK is declined because it selects the first `k` series in input order
-/// ([`crate::select::limitk`]), while this merge does not preserve the storage input order. Other
-/// vector operations have not yet been verified/supported by this split.
+/// aggregates, TopK/BottomK, classic histogram functions (`histogram_quantile`,
+/// `histogram_fraction`) and binary operations with a constant on one side. TopK/BottomK and the
+/// histogram functions run once in the suffix over the fully merged aggregate series, per evaluation
+/// timestamp, and never in the partition-local producer.
+///
+/// A histogram function reads each classic histogram from the bucket series that share its other
+/// labels, and drops `le`. The merge has already folded every partition's contribution to each
+/// `(..., le)` group into one complete series on the evaluated grid, so the bucket series it reads
+/// are exactly the ones this statement's input would have produced in one execution: reading `le`
+/// off those merged series is the same computation, not an approximation. TopK is already accepted
+/// for that reason: it runs once over the fully merged series. This admits a second operation of
+/// that kind, not a new mechanism. LimitK stays declined because it depends on the storage input
+/// order, which the merge does not preserve ([`crate::select::limitk`]). A map is point-wise and an
+/// aggregate runs over the complete merge. Other vector operations have not yet been
+/// verified/supported by this split.
 ///
 /// An instant selection or window above the cut cannot be applied to the merged values under the
 /// tree's current binding: the cut output is evaluated, whereas these nodes consume raw samples.
@@ -421,7 +430,7 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
         }
         NativeExpr::Vector {
             input,
-            op: op @ crate::native::plan::BoundVectorOp::TopK { .. },
+            op: op @ (BoundVectorOp::TopK { .. } | BoundVectorOp::Histogram(_)),
         } => {
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);

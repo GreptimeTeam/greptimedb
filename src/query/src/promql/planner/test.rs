@@ -3195,6 +3195,27 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     );
 }
 
+/// A classic histogram function above the cut is the split's: `histogram_quantile` reads each
+/// histogram off the bucket series the merge produced, which are the ones the statement's input
+/// would have produced in one execution, so the statement is answered by the merge over the partial
+/// producer instead of falling back to the existing plan.
+#[tokio::test]
+async fn native_fused_histogram_quantile_over_aggregate_splits() {
+    let query = "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))";
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_aggregate_finalize(&plan).is_some(),
+        "`{query}` must be answered by a split aggregate: {display}"
+    );
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` must keep the producer that exports the state: {display}"
+    );
+    assert!(display.contains("AggregateFinalize: "), "{display}");
+    assert!(display.contains("histogram_quantile"), "{display}");
+}
+
 /// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
 /// samples, a binary operation whose sibling is data would match one side's series before the merge,
 /// a sibling a call computes has no native node at all, and a group by a value field cannot be named

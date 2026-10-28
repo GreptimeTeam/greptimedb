@@ -24,7 +24,9 @@ use datafusion::common::DFSchema;
 use datatypes::series::samples::FieldSpec;
 use datatypes::series::time::{EvalGrid, GridSpec};
 
+use crate::histogram_eval::HistogramFunction;
 use crate::native::plan::BoundVectorOp;
+use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
 
 /// The statement's grid, which every evaluated chunk is addressed on.
@@ -382,6 +384,73 @@ fn topk_and_bottomk_run_after_the_aggregate_cut() {
             matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0 && bound.output.samples().is_some_and(|schema| schema.fields.len() == 1 && schema.fields[0].name.as_ref() == "v0" && schema.eval_grid.as_ref().is_some_and(|actual| actual.spec() == grid().spec())))
         );
     }
+}
+
+/// A classic histogram function above the cut reads each histogram off the bucket series that share
+/// its other labels, and the merge has already folded every partition's `(..., le)` group into one
+/// complete series: the set it reads is the one the statement's input would have produced in one
+/// execution, so this is the same computation and not an approximation. This is the o11ybench Q10
+/// shape.
+#[test]
+fn histogram_quantile_over_an_aggregate_splits() {
+    let tree = NativeTree::try_new(vector_over(
+        complete(AggregateKind::Sum, by(&["instance", "le"]))(window()),
+        BoundVectorOp::Histogram(HistogramFunction::Quantile(0.99)),
+    ))
+    .unwrap();
+    assert!(AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
+
+    // The function stays above the cut, reading the merged series at its own source `0`.
+    let node = finalize(
+        tree.root().clone(),
+        output_schema(&["sum(v0)"], &["instance", "le"]),
+    )
+    .unwrap();
+    let NativeExpr::Vector {
+        input,
+        op: BoundVectorOp::Histogram(HistogramFunction::Quantile(quantile)),
+    } = &node.suffix.root().expr
+    else {
+        panic!(
+            "the histogram function stays above the cut: {}",
+            node.suffix
+        );
+    };
+    assert_eq!(0.99, *quantile);
+    assert!(
+        matches!(&input.expr, NativeExpr::Input(bound) if bound.source_index == 0),
+        "the merged values enter where the aggregate was: {}",
+        node.suffix
+    );
+
+    // The prefix is the per-series tree: the histogram function is not one partition's to compute.
+    let prefix = producer(&node).tree().to_string();
+    assert!(!prefix.contains("histogram_quantile"), "{prefix}");
+    assert!(!prefix.contains("Aggregate"), "{prefix}");
+    assert!(prefix.contains("Window"), "{prefix}");
+}
+
+/// Admitting the histogram functions widens one arm, not the whole `Vector` family: every other
+/// vector operation is still declined, `sort` here because it reorders the input rather than reading
+/// each series of it.
+#[test]
+fn a_vector_operation_that_is_neither_topk_nor_a_histogram_is_declined() {
+    let tree = NativeTree::try_new(vector_over(
+        complete(AggregateKind::Sum, by(&["instance"]))(window()),
+        BoundVectorOp::Sort(SortOrder::Asc),
+    ))
+    .unwrap();
+    assert!(!AggregateFinalize::can_split(&tree, &raw_fields(), "ts"));
+
+    let error = finalize(
+        tree.root().clone(),
+        output_schema(&["sum(v0)"], &["instance"]),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
 }
 
 #[test]
