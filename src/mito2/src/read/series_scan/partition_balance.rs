@@ -23,12 +23,10 @@
 //! partition series of roughly equal total weight. Those weights are obtained once per source and
 //! shared by every partition, rather than rebuilt by each partition that divides them.
 //!
-//! The weight a source actually reports today is the coarse first-version estimate, series count
-//! times grid points, which is uniform across one source's series: the grid is the scan's time range
-//! rather than a per-series figure. A uniform weight carries no information beyond the count, so the
-//! split falls back to the count split and assigns exactly what it assigned before any weight
-//! existed. The weighted split below only runs once a source reports differing weights, such as the
-//! row counts its index already records.
+//! The weight is the row count a series index records for each series, so a partition's share is a
+//! share of the samples rather than of the series. A source that cannot report differing weights --
+//! every series weighing the same -- falls back to the count split, which is exactly what it got
+//! before any weight existed.
 //!
 //! A series is never split across partitions: each partition reads a contiguous ordinal range, which
 //! is what `read_series` takes, and one series' chunks therefore stay in one partition, as the series
@@ -45,12 +43,8 @@ use std::ops::Range;
 /// the same costs, so a call here would pay for the whole source one time per partition.
 ///
 /// A source with no series, or a partition index past the end, reads an empty range. When every
-/// series weighs the same -- which is every source under the coarse estimate of the series count
-/// times grid points -- nothing but the count distinguishes one series from another, so the
-/// historical count split decides and the assignment is bit for bit what it was before any weight
-/// existed. That includes having fewer series than partitions, where the count split puts a lone
-/// series on a later partition; balancing by weight would instead fill the partitions from the
-/// front, which moves series between partitions without making any of them cheaper.
+/// series weighs the same, nothing but the count distinguishes one series from another, so the count
+/// split decides and the assignment is bit for bit what it was before any weight existed.
 ///
 /// Only a source that reports differing weights takes the split below, where partitions are filled
 /// in ordinal order, each taking the run of series whose total cost is nearest to its share of what
@@ -312,12 +306,12 @@ mod tests {
         assert_eq!(ranges, vec![0..3, 3..6, 6..9]);
     }
 
-    /// The coarse weight used today leaves every assignment exactly where the count split put it.
+    /// A uniformly weighted source keeps exactly the assignment the count split gave it.
     ///
-    /// This is the contract the scanner relies on: the coarse model weighs every series the same, so
-    /// introducing it must not move a series between partitions. Fewer series than partitions is the
-    /// case where a front-filling split would move one, and the count split is what keeps two scans of
-    /// the same region on the same partitions.
+    /// This is the contract the scanner relies on: a source that cannot report differing weights must
+    /// not have a series moved between partitions by the weighting. Fewer series than partitions is
+    /// the case where a front-filling split would move one, and the count split is what keeps two
+    /// scans of the same region on the same partitions.
     #[test]
     fn uniform_costs_reproduce_the_count_split() {
         for series in 0..12 {

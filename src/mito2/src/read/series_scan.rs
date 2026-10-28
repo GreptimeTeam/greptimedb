@@ -930,10 +930,10 @@ impl RegionScanner for SeriesScan {
                 let source = future.await?.ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar prepared capability disappeared" }.build()))?;
                 let costs = state.costs().ok_or_else(|| BoxedError::new(InvalidRecordBatchSnafu { reason: "columnar series costs missing after preparation" }.build()))?;
                 debug_assert_eq!(costs.len(), source.num_series(), "a source reports one cost per ordinal");
-                // Split by estimated work rather than blindly by ordinal, so a source that reports
-                // per-series weights is divided evenly; the current coarse estimate is the series
-                // count times grid points, which makes this a count split. Every ordinal still
-                // belongs to exactly one partition, so one series' chunks stay together.
+                // Split by estimated work rather than blindly by ordinal: each series is weighed by
+                // the row count its index records, so a partition's share is a share of the samples
+                // rather than of the series. Every ordinal still belongs to exactly one partition,
+                // so the chunks of one series stay together.
                 let range = partition_balance::partition_range(&costs, partition, partitions);
                 part_metrics.add_assigned_series(range.len());
                 let mut reader = source.read_series(range)?;
