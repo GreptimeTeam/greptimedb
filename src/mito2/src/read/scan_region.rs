@@ -971,6 +971,9 @@ pub struct ScanInput {
     pub(crate) sequence_range: Option<SequenceRange>,
     /// Whether this scan is for compaction.
     pub(crate) compaction: bool,
+    /// Max number of compaction inputs decoded concurrently ahead of the merge.
+    /// Values below 2 decode inputs on the merging task.
+    pub(crate) compaction_read_parallelism: usize,
     /// Compaction-only JSON2 physical rewrite targets.
     json2_rewrite_targets: Json2RewriteTargets,
     /// Counters that should receive query-load metrics.
@@ -1036,6 +1039,7 @@ impl ScanInput {
                 snapshot_sequence: None,
                 sequence_range: None,
                 compaction: false,
+                compaction_read_parallelism: 1,
                 json2_rewrite_targets: Arc::default(),
                 query_stat_counters: None,
                 #[cfg(feature = "enterprise")]
@@ -1390,6 +1394,13 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_compaction(mut self, compaction: bool) -> Self {
         self.input.compaction = compaction;
+        self
+    }
+
+    /// Sets the max number of compaction inputs decoded concurrently.
+    #[must_use]
+    pub(crate) fn with_compaction_read_parallelism(mut self, parallelism: usize) -> Self {
+        self.input.compaction_read_parallelism = parallelism;
         self
     }
 
