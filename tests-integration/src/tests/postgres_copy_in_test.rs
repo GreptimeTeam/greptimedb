@@ -735,7 +735,8 @@ async fn test_postgres_copy_in_influxdb_payload_limit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_postgres_copy_in_influxdb_flush_threshold_multiline() {
     init_default_ut_logging();
-    let (_guard, server) = setup_pg_server(StorageType::File, "pg_copy_in_influxdb_thr").await;
+    let (_guard, server) =
+        setup_pg_server(StorageType::File, "pg_copy_in_influxdb_threshold").await;
     let port = server.bind_addr().unwrap().port();
     let client = connect(port).await;
 
