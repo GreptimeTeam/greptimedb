@@ -56,7 +56,11 @@ use std::ops::Range;
 ///
 /// Only a source that reports differing weights takes the split below, where partitions are filled
 /// in ordinal order, each taking the run of series whose total cost is nearest to its share of what
-/// is left. The share is recomputed from the remaining cost, so a series that dwarfs the rest takes
+/// is left. The distance is compared against the exact share rather than against a rounded one, so a
+/// share that is not a whole number does not make a run stop short of the nearer total, and the same
+/// relative weights split the same way whatever unit they are reported in.
+///
+/// The share is recomputed from the remaining cost, so a series that dwarfs the rest takes
 /// a partition of its own and the series after it are divided over the partitions still to fill,
 /// instead of following the long one onto the same partition.
 ///
@@ -110,15 +114,20 @@ fn weighted_boundaries(costs: &[usize], partitions: usize) -> Vec<usize> {
         let partitions_left = partitions - filled + 1;
         // One series stays for every partition after this one, so none of them is skipped.
         let max_take = series - idx - (partitions_left - 1);
-        let share = remaining / partitions_left as u128;
+        let left = partitions_left as u128;
         let mut take = 1;
         let mut cost = costs[idx] as u128;
         while take < max_take {
             let next = costs[idx + take] as u128;
-            // Another series is taken only while it brings this partition closer to its share. The
-            // comparison is against the current distance, so the run ends at the nearest total
-            // instead of overshooting by a whole series.
-            if (cost + next).abs_diff(share) >= cost.abs_diff(share) {
+            // Another series is taken only while it brings this partition closer to its share, so
+            // the run ends at the nearest total instead of overshooting by a whole series. Both
+            // distances are scaled by `partitions_left`, which leaves them in proportion to the
+            // distances from the exact share `remaining / partitions_left` while keeping them
+            // integers: rounding the share down first would flatter the run that stops short of it
+            // and stop this partition early, pushing the weight it skipped onto its neighbours.
+            if (cost + next).saturating_mul(left).abs_diff(remaining)
+                >= cost.saturating_mul(left).abs_diff(remaining)
+            {
                 break;
             }
             cost += next;
@@ -358,6 +367,49 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A share that is not a whole number must not stop a run short of the nearer total.
+    ///
+    /// These costs total 13 over 4 partitions, so the exact share is 3.25. Taking the first two
+    /// series costs 4, a distance of 0.75; taking only the first costs 2, a distance of 1.25. The
+    /// second is nearer, so the run has to include it. Rounded down to 3 first, both distances
+    /// become 1 and the run stops early, which leaves 7 to the last partition where 4 is the most
+    /// any partition needs.
+    #[test]
+    fn a_fractional_share_does_not_stop_the_run_early() {
+        let costs = [2, 2, 2, 4, 1, 2];
+        let per_partition = split(&costs, 4);
+        assert_eq!(
+            per_partition,
+            vec![(0..2, 4), (2..3, 2), (3..4, 4), (4..6, 3)],
+            "the split does not follow the exact share"
+        );
+        assert_eq!(
+            4,
+            per_partition.iter().map(|(_, cost)| *cost).max().unwrap(),
+            "the heaviest partition carries more than the exact share of 3.25 allows"
+        );
+    }
+
+    /// The same relative weights must split the same way whatever unit they are reported in.
+    ///
+    /// The share of a partition is a ratio, so scaling every cost by the same factor cannot change
+    /// which series belong together. It does when the share is rounded before the comparison:
+    /// truncation error shrinks relative to the costs as they scale up, and the boundaries move with
+    /// it even though nothing about the source did.
+    #[test]
+    fn the_split_does_not_depend_on_the_unit_of_the_costs() {
+        let costs = [2, 2, 2, 4, 1, 2];
+        let expected = ranges(&costs, 4);
+        for scale in [10, 1000, 100_000] {
+            let scaled = costs.map(|cost| cost * scale);
+            assert_eq!(
+                expected,
+                ranges(&scaled, 4),
+                "scaling the costs by {scale} moved the split"
+            );
         }
     }
 

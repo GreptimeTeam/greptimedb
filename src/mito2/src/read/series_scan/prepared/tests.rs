@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -316,6 +316,50 @@ fn samples(chunks: &[RawSeriesChunk]) -> Vec<(i64, f64)> {
     rows(chunks)
         .into_iter()
         .map(|(_, time, value)| (time, value))
+        .collect()
+}
+
+/// Returns one partition's series, in the order its reader presented them, with their row counts.
+///
+/// The stream contract is checked while the order is still there to check: a series is read in one
+/// run of chunks rather than interleaved with another, its timestamps increase across those chunks,
+/// and `is_last` marks the final chunk of the series and nothing else. Sorting the rows first, as a
+/// series-by-series comparison does, would hide both a reordering and a wrongly closed series.
+fn partition_series(chunks: &[RawSeriesChunk]) -> Vec<(Vec<u8>, usize)> {
+    let mut runs = Vec::<(Vec<u8>, Vec<&RawSeriesChunk>)>::new();
+    for chunk in chunks {
+        let key = chunk.primary_key.to_vec();
+        match runs.last_mut() {
+            Some((last, run)) if *last == key => run.push(chunk),
+            _ => runs.push((key, vec![chunk])),
+        }
+    }
+    runs.into_iter()
+        .map(|(key, run)| {
+            let mut rows = 0;
+            let mut previous = None::<i64>;
+            for (index, chunk) in run.iter().enumerate() {
+                assert_eq!(
+                    index + 1 == run.len(),
+                    chunk.is_last,
+                    "only the final chunk of a series is marked last"
+                );
+                assert!(!chunk.time.is_empty(), "a chunk carries no samples");
+                for sample in 0..chunk.time.len() {
+                    let timestamp = chunk
+                        .time
+                        .timestamp(sample)
+                        .expect("a chunk sample carries a timestamp");
+                    assert!(
+                        previous.is_none_or(|previous| previous < timestamp),
+                        "the timestamps of a series must increase"
+                    );
+                    previous = Some(timestamp);
+                }
+                rows += chunk.time.len();
+            }
+            (key, rows)
+        })
         .collect()
 }
 
@@ -942,7 +986,6 @@ async fn ordinal_range_batches_sample_requests_and_pushes_time_bounds() {
         labels: source.labels.clone(),
         raw: source.raw.clone(),
         candidates: source.candidates.clone(),
-        costs: source.costs.clone(),
         boundaries: source.boundaries.clone(),
         metrics: source.metrics.clone(),
         reservation: source.reservation.clone(),
@@ -1529,13 +1572,16 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
         .unwrap()
         .expect("the columnar prepared source must serve the weighted split");
     let mut prepared_rows = Vec::new();
+    let mut read = Vec::with_capacity(SKEW_PARTITIONS);
     for partition in 0..SKEW_PARTITIONS {
         let stream = scan
             .scan_series_partition(&ctx, &metrics, partition, &binding)
             .unwrap()
             .unwrap();
         assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
-        prepared_rows.extend(rows(&stream.try_collect::<Vec<_>>().await.unwrap()));
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        prepared_rows.extend(rows(&chunks));
+        read.push(chunks);
     }
 
     // (a) Same series, timestamps and value bits as the legacy path, series by series.
@@ -1579,6 +1625,45 @@ async fn work_weighted_split_matches_the_legacy_path_and_balances_partitions() {
     let ranges = (0..SKEW_PARTITIONS)
         .map(|partition| partition_balance::partition_range(&boundaries, partition))
         .collect::<Vec<_>>();
+    // (d) Each partition actually reads the series of its own range, in ordinal order, and no two
+    // partitions read the same series. The split and the reader that consumes it are separate steps,
+    // so only the rows that came out say the two agree: a scan that kept the right plan and handed
+    // `read_series` the equal-count range would still pass every check above.
+    let mut rows_read = Vec::with_capacity(SKEW_PARTITIONS);
+    let mut seen = BTreeSet::new();
+    for (partition, range) in ranges.iter().enumerate() {
+        let series = partition_series(&read[partition]);
+        let expected = range
+            .clone()
+            .map(|ordinal| {
+                let info = source
+                    .series_info(ordinal)
+                    .expect("every ordinal of the source has an identity");
+                (info.primary_key.to_vec(), costs[ordinal])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected, series,
+            "partition {partition} does not read the series of {range:?} in ordinal order"
+        );
+        rows_read.push(series.iter().map(|(_, rows)| rows).sum::<usize>());
+        for (key, _) in series {
+            assert!(
+                seen.insert(key),
+                "partition {partition} read a series another partition had already read"
+            );
+        }
+    }
+    assert_eq!(
+        vec![2000, 3000, 2000, 3000],
+        rows_read,
+        "the partitions do not read the rows the cost split assigned them"
+    );
+    assert_eq!(
+        SKEW_LONG_SERIES + SKEW_SHORT_SERIES,
+        seen.len(),
+        "not every series was read exactly once"
+    );
     let mut assigned = Vec::with_capacity(SKEW_PARTITIONS);
     for (partition, range) in ranges.iter().enumerate() {
         let reported = assigned_series(
@@ -1834,12 +1919,15 @@ async fn series_cost_adds_every_bucket_the_series_appears_in() {
     // (b) The partitions read the rows of the range the split gives them, and together they read
     // exactly what the legacy path reads.
     let mut prepared_rows = Vec::new();
+    let mut read = Vec::with_capacity(CROSS_BUCKET_PARTITIONS);
     for partition in 0..CROSS_BUCKET_PARTITIONS {
         let stream = scan
             .scan_series_partition(&ctx, &metrics, partition, &binding)
             .unwrap()
             .unwrap();
-        prepared_rows.extend(rows(&stream.try_collect::<Vec<_>>().await.unwrap()));
+        let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+        prepared_rows.extend(rows(&chunks));
+        read.push(chunks);
     }
     for (partition, range) in ranges.iter().enumerate() {
         let reported = assigned_series(
@@ -1854,6 +1942,41 @@ async fn series_cost_adds_every_bucket_the_series_appears_in() {
             "partition {partition} reports the ordinals of {range:?}"
         );
     }
+
+    // (c) Each partition reads the series of its own range, with the rows of every bucket it covers,
+    // and no two partitions read the same series: the split is checked above, and this is what the
+    // reader it was handed actually produced.
+    let mut rows_read = Vec::with_capacity(CROSS_BUCKET_PARTITIONS);
+    let mut seen = BTreeSet::new();
+    for (partition, range) in ranges.iter().enumerate() {
+        let series = partition_series(&read[partition]);
+        let expected = range
+            .clone()
+            .map(|ordinal| {
+                let info = source
+                    .series_info(ordinal)
+                    .expect("every ordinal of the source has an identity");
+                (info.primary_key.to_vec(), costs[ordinal])
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected, series,
+            "partition {partition} does not read the series of {range:?} in ordinal order"
+        );
+        rows_read.push(series.iter().map(|(_, rows)| rows).sum::<usize>());
+        for (key, _) in series {
+            assert!(
+                seen.insert(key),
+                "partition {partition} read a series another partition had already read"
+            );
+        }
+    }
+    assert_eq!(
+        vec![CROSS_BUCKET_ROWS * series / CROSS_BUCKET_PARTITIONS; CROSS_BUCKET_PARTITIONS],
+        rows_read,
+        "the partitions do not read the rows the cost split assigned them"
+    );
+    assert_eq!(series, seen.len(), "not every series was read exactly once");
     let expected = by_series(rows(&legacy_rows));
     assert_eq!(
         CROSS_BUCKET_ROWS * series,

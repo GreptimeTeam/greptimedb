@@ -609,6 +609,12 @@ pub trait PreparedSeriesSource: Send + Sync {
     /// that cannot estimate its series honestly says so by not overriding this: every series then
     /// weighs the same and the assignment stays the count split it was before, rather than reporting
     /// a made-up figure that would make the split look balanced.
+    ///
+    /// `ordinal` is a precondition, not a checked argument: it must be below
+    /// [`num_series`](Self::num_series) of this source, as it is for [`series_info`](Self::series_info)
+    /// and [`read_series`](Self::read_series). Those two report an out-of-range ordinal as an error,
+    /// but this returns a plain number and cannot, so an ordinal past the end is a caller bug and
+    /// yields whatever fallback the source has rather than a diagnostic.
     fn series_cost(&self, ordinal: usize) -> usize {
         let _ = ordinal;
         1

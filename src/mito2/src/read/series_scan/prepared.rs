@@ -254,9 +254,9 @@ fn collect_inputs(
 ///
 /// The row count is a column of the candidate batch the index already returned, so reading it costs
 /// no extra I/O. The sum is built once while the source is prepared ([`Self::cost`] and
-/// [`Self::costed_by`] say how repeats are handled) and reported per ordinal by
-/// [`PreparedSeriesSource::series_cost`], so every partition divides the same copy instead of
-/// rebuilding it.
+/// [`Self::costed_by`] say how repeats are handled) and lives on the candidate, which every partition
+/// shares: [`PreparedSeriesSource::series_cost`] reads it straight off the ordinal, so a second copy
+/// of the per-series costs does not have to outlive preparation.
 struct Candidate {
     id: MetricSeriesId,
     key: Buffer,
@@ -281,18 +281,13 @@ struct ColumnarPreparedSource {
     labels: RawLabelSource,
     raw: Arc<RawScanPreparation>,
     candidates: Arc<Vec<Candidate>>,
-    /// The work estimate of every ordinal, in ordinal order, built together with the candidates.
-    ///
-    /// Ordinals do not change after preparation, so one copy serves the scan: the partitions divide
-    /// this slice instead of each rebuilding the whole source's costs. See
-    /// [`PreparedSeriesSource::series_cost`].
-    costs: Arc<[usize]>,
     /// The boundaries of the split of those ordinals over the scan's partitions.
     ///
-    /// Built once here for the same reason as [`Self::costs`]: the split is a property of the source
-    /// and the partition count, not of one partition, so P partitions read their own range out of one
-    /// shared result instead of each dividing the whole source. See
-    /// [`partition_balance::partition_range`].
+    /// Built once here, because the split is a property of the source and the partition count, not
+    /// of one partition: P partitions read their own range out of one shared result instead of each
+    /// dividing the whole source. See [`partition_balance::partition_range`]. The costs it was built
+    /// from are the candidates' own ([`Candidate::cost`]), so the split leaves no second copy of them
+    /// behind.
     boundaries: Arc<[usize]>,
     samples: Arc<Vec<Arc<dyn SamplesFormatReader>>>,
     metrics: PartitionMetrics,
@@ -492,20 +487,26 @@ impl ColumnarPreparedSource {
         }
         let mut candidates: Vec<_> = candidates.into_values().collect();
         candidates.sort_unstable_by(|a, b| a.key.as_slice().cmp(b.key.as_slice()));
-        // Built once here, with the ordinals the source exposes from now on, so no partition pays
-        // for the whole source again when it asks how to split them.
-        let costs: Arc<[usize]> = candidates.iter().map(|candidate| candidate.cost).collect();
-        // Decided here for the same reason: the split and the uniform-weight test are properties of
-        // the source and the partition count, so the partitions share one result instead of each
-        // dividing the whole source.
-        let boundaries: Arc<[usize]> =
-            partition_balance::partition_boundaries(&costs, partitions).into();
+        // Decided here, with the ordinals the source exposes from now on, so no partition pays for
+        // the whole source again when it asks how to split them. The weights are the candidates'
+        // own, and the slice is scratch: only the boundaries outlive this call.
+        let boundaries: Arc<[usize]> = {
+            let costs = candidates
+                .iter()
+                .map(|candidate| candidate.cost)
+                .collect::<Vec<_>>();
+            partition_balance::partition_boundaries(&costs, partitions).into()
+        };
+        // The boundaries are retained for as long as this source is, so they are accounted for out
+        // of the scan's pool rather than left to whatever slack the candidate estimate had.
+        reservation
+            .try_grow(boundaries.len() * std::mem::size_of::<usize>())
+            .map_err(|e| invalid(e.to_string()))?;
         Ok(Self {
             context,
             labels,
             raw: Arc::new(raw),
             candidates: Arc::new(candidates),
-            costs,
             boundaries,
             samples: Arc::new(samples),
             metrics,
@@ -564,7 +565,11 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
         &self.labels
     }
     fn series_cost(&self, ordinal: usize) -> usize {
-        self.costs.get(ordinal).copied().unwrap_or(1)
+        // Valid ordinals come from `num_series` of this same source, so the candidate is there; the
+        // fallback keeps an out-of-range ordinal from panicking in a method that cannot report one.
+        self.candidates
+            .get(ordinal)
+            .map_or(1, |candidate| candidate.cost)
     }
     fn series_info(&self, ordinal: usize) -> std::result::Result<SeriesInfo, BoxedError> {
         let candidate = self
