@@ -52,7 +52,9 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{
+    GreedyMemoryPool, MemoryConsumer, MemoryPool, UnboundedMemoryPool,
+};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
 use datafusion::logical_expr::{EmptyRelation, Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
@@ -86,8 +88,8 @@ use store_api::region_engine::RawLabelSource;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
-    series_to_record_batch,
+    EvaluatedGather, EvaluatedSources, FusedChunk, FusedOutputFormat, FusedSeries,
+    FusedSeriesBinding, OutputColumn, POLL_BUDGET, series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::aggregate_exchange::state_schema;
@@ -97,11 +99,13 @@ use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree,
-    NativeType,
+    BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
+    NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
 use common_query::series_frame::series_frame_ordering;
 
 /// The query every tree here is compiled from.
@@ -5278,6 +5282,14 @@ fn evaluated_schema() -> Arc<SeriesSchema> {
     })
 }
 
+/// The frame schema a child hands over when its series are already evaluated on [`grid`]: what
+/// [`ScriptedEvaluated`] executes and what a logical child of this node declares.
+fn evaluated_frame_schema() -> SchemaRef {
+    pack_evaluated_series(Box::pin(futures::stream::empty()), evaluated_schema())
+        .expect("an evaluated schema declares a frame")
+        .schema()
+}
+
 /// One evaluated chunk of `metric`: `len` rows from grid position `start`, each holding its own
 /// position as its value, and whether it closes the series.
 ///
@@ -5289,16 +5301,32 @@ fn evaluated_chunk(
     len: usize,
     is_last: bool,
 ) -> (Series, bool) {
+    let values = (0..len)
+        .map(|index| Some((start + index) as f64))
+        .collect::<Vec<_>>();
+    evaluated_chunk_with(metric, start, values, is_last)
+}
+
+/// One evaluated chunk of `metric` holding `values` from grid position `start` on, and whether it
+/// closes the series.
+///
+/// The values are the caller's, which is what a test of several sources needs: two sources carrying
+/// the same label set have to carry *different* values, or a chunk read as the wrong source's would
+/// answer the same thing and prove nothing.
+fn evaluated_chunk_with(
+    metric: &SeriesLabels,
+    start: usize,
+    values: Vec<Option<f64>>,
+    is_last: bool,
+) -> (Series, bool) {
     let schema = evaluated_schema();
+    let len = values.len();
     let spans = if len == 0 {
         Vec::new()
     } else {
         vec![GridSpan::new(start, len)]
     };
     let time = TimeAxis::from_grid_spans(grid(), spans).expect("one run on the grid");
-    let values = (0..len)
-        .map(|index| Some((start + index) as f64))
-        .collect::<Vec<_>>();
     (
         Series::try_new(
             &schema,
@@ -5327,12 +5355,7 @@ impl ScriptedEvaluated {
     /// The child plan over `partitions`, one partition per list of chunks.
     fn plan(partitions: Vec<Vec<(Series, bool)>>) -> Arc<dyn ExecutionPlan> {
         let series_schema = evaluated_schema();
-        let frame = pack_evaluated_series(
-            Box::pin(futures::stream::empty()),
-            Arc::clone(&series_schema),
-        )
-        .expect("an evaluated schema declares a frame")
-        .schema();
+        let frame = evaluated_frame_schema();
         Arc::new(Self {
             series_schema,
             properties: Arc::new(PlanProperties::new(
@@ -5405,10 +5428,16 @@ impl ExecutionPlan for ScriptedEvaluated {
 /// The tree's input node, bound to the grid: what a Fused reads when its child already decided the
 /// values.
 fn evaluated_input() -> NativeNode {
+    evaluated_input_of(0)
+}
+
+/// The grid-bound input node reading source `source_index`: the leaf a Fused decodes an evaluated
+/// frame into, for a tree whose child already decided the values.
+fn evaluated_input_of(source_index: usize) -> NativeNode {
     let evaluated = evaluated_of(&raw_schema(), &grid());
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
-            source_index: 0,
+            source_index,
             output: evaluated.clone(),
             ordering: SeriesOrdering::Contiguous,
         }),
@@ -7034,4 +7063,470 @@ async fn a_match_over_two_canonical_owners_is_refused_instead_of_answered_locall
     })
     .await
     .expect("the match is refused instead of waiting for a partition nobody reads");
+}
+
+/// `left - right` between two evaluated sources: both operands are grid-bound input leaves, so the
+/// node decodes an evaluated frame from each child and has to keep the two apart.
+///
+/// The subtraction makes the answer depend on which side is which - the same operands read the other
+/// way round answer the negation of every value - and the values themselves are the caller's, so a
+/// chunk read as the other source's data shows up as a wrong value instead of a plausible one.
+fn evaluated_binary_tree(op: BinaryOp, left_source: usize, right_source: usize) -> NativeTree {
+    let left = evaluated_input_of(left_source);
+    let right = evaluated_input_of(right_source);
+    let output = crate::vector_match::binary_output_schema(
+        left.output.samples().expect("an input produces samples"),
+        right.output.samples().expect("an input produces samples"),
+    )
+    .expect("both operands are evaluated on one grid");
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("a match over two evaluated sources is a legal tree")
+}
+
+/// `left or right` between two evaluated sources: every series of the left, then the right's series
+/// that no left series matches.
+///
+/// `or` hands the right side's series on under their own label sets, so the right side's data is
+/// observable even when the left has no series at all - which is what an empty source beside a
+/// non-empty one needs, since a subtraction of nothing from nothing answers nothing either way.
+fn evaluated_or_tree(left_source: usize, right_source: usize) -> NativeTree {
+    let left = evaluated_input_of(left_source);
+    let right = evaluated_input_of(right_source);
+    let output = left.output.clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp {
+                op: SetOp::Or,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+            },
+        },
+        output,
+    })
+    .expect("a set operation over two evaluated sources is a legal tree")
+}
+
+/// The physical node of `tree` over its two evaluated sources, `left` and `right`.
+fn evaluated_two_source_plan(
+    tree: &NativeTree,
+    output_schema: SchemaRef,
+    left: Arc<dyn ExecutionPlan>,
+    right: Arc<dyn ExecutionPlan>,
+) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+    let node = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(tree),
+        vec![
+            input_plan(evaluated_frame_schema()),
+            input_plan(evaluated_frame_schema()),
+        ],
+        output_schema.to_dfschema_ref()?,
+    )?;
+    node.to_execution_plan(vec![
+        (left, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+        (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
+    ])
+}
+
+/// [`GRID_LEN`] values starting at `first`, one per grid position: `first + position`.
+fn climb(first: f64) -> Vec<Option<f64>> {
+    (0..GRID_LEN as usize)
+        .map(|position| Some(first + position as f64))
+        .collect()
+}
+
+/// The `(time, value, host)` rows of a match's answer, ordered by timestamp.
+///
+/// A match's output has no metric-name column ([`binary_output_schema`]), so this reads the three
+/// columns it does have rather than going through [`rows`], which requires a name column.
+fn binary_rows(batches: &[RecordBatch]) -> Vec<(i64, Option<f64>, Option<String>)> {
+    let mut rows = Vec::new();
+    for batch in batches {
+        let time = batch
+            .column_by_name(TIME)
+            .expect("a binary batch has a time column")
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("the time column is a millisecond timestamp");
+        let value = batch
+            .column_by_name(VALUE)
+            .expect("a binary batch has the field column")
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("the field column is Float64");
+        let host = batch
+            .column_by_name(HOST)
+            .expect("a binary batch has the tag column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("the tag column is Utf8");
+        for row in 0..batch.num_rows() {
+            rows.push((
+                time.value(row),
+                value.is_valid(row).then(|| value.value(row)),
+                host.is_valid(row).then(|| host.value(row).to_string()),
+            ));
+        }
+    }
+    rows.sort_by_key(|row| row.0);
+    rows
+}
+
+/// A staged child that hands over `chunks` and then fails: an evaluated producer whose stream ends
+/// in an error rather than in EOF.
+fn staged_evaluated_with_error(
+    chunks: Vec<(Series, bool)>,
+    message: &'static str,
+) -> Arc<dyn ExecutionPlan> {
+    let schema = evaluated_frame_schema();
+    staged(schema, move || {
+        let items = chunks
+            .iter()
+            .cloned()
+            .map(Ok)
+            .chain(std::iter::once(Err(BoxedError::new(
+                common_query::error::Error::from(DataFusionError::Execution(message.to_string())),
+            ))))
+            .collect::<Vec<Result<(Series, bool), BoxedError>>>();
+        let source: SendableEvaluatedSeriesStream = Box::pin(futures::stream::iter(items));
+        pack_evaluated_series(source, evaluated_schema())
+            .expect("an evaluated schema declares a frame")
+    })
+}
+
+/// One evaluated source's gather, reading `chunks` from a single partition, charged to `pool`.
+fn evaluated_gather_of(
+    source: usize,
+    chunks: Vec<(Series, bool)>,
+    pool: &Arc<dyn MemoryPool>,
+) -> EvaluatedGather {
+    let stream: SendableEvaluatedSeriesStream = Box::pin(futures::stream::iter(
+        chunks.into_iter().map(Ok::<_, BoxedError>),
+    ));
+    let reservation = MemoryConsumer::new(format!("test.evaluated[{source}]")).register(pool);
+    EvaluatedGather::new(source, vec![stream], reservation)
+}
+
+/// Two evaluated sources are read side by side, and neither side's frames answer as the other's.
+///
+/// The two children carry different label sets *and* different values: `{host=web-1, zone=west}` on
+/// the left and `{host=web-1, zone=east}` on the right, so the `on(host)` match pairs them and the
+/// answer is `left - right` under `{host=web-1}`. This is the case the node used to refuse and then
+/// mishandle: reading source 1's frames as source 0's puts both series in the left operand - two
+/// series under one label set, which the runtime refuses - and leaves the right operand empty. A
+/// swap of the two sides answers `right - left`, so the sign and the offset below are both part of
+/// what this pins.
+#[tokio::test]
+async fn two_evaluated_sources_answer_each_sides_data_under_its_own_identity() {
+    let tree = evaluated_binary_tree(BinaryOp::Sub, 0, 1);
+    let left = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &metric(&[(HOST, "web-1"), (ZONE, "west")], Some(METRIC)),
+        0,
+        climb(100.0),
+        true,
+    )]]);
+    let right = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &metric(&[(HOST, "web-1"), (ZONE, "east")], Some(METRIC)),
+        0,
+        vec![Some(7.0); GRID_LEN as usize],
+        true,
+    )]]);
+
+    let exec = evaluated_two_source_plan(&tree, binary_output_schema(), left, right)
+        .expect("the node accepts two evaluated sources");
+    assert_eq!(
+        1,
+        exec.properties().partitioning.partition_count(),
+        "more than one source is one execution, which is the path this test reads"
+    );
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the two-source tree runs");
+    let answered = binary_rows(&batches);
+
+    assert_eq!(
+        grid_timestamps(),
+        answered.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "one row per grid position: {answered:?}"
+    );
+    assert_eq!(
+        (0..GRID_LEN as usize)
+            .map(|position| Some(100.0 + position as f64 - 7.0))
+            .collect::<Vec<_>>(),
+        answered.iter().map(|row| row.1).collect::<Vec<_>>(),
+        "`left - right`, so the left side's offset is positive and the right side's is subtracted"
+    );
+    assert!(
+        answered.iter().all(|row| row.2.as_deref() == Some("web-1")),
+        "the match is filed under the label set it matched on: {answered:?}"
+    );
+}
+
+/// Two evaluated sources may carry one label set, and the answer still comes from the right sides.
+///
+/// Both children carry `{host=web-1, zone=west}` - the same label set - with *different* values, so a
+/// chunk re-stamped with the other source's index collides inside one operand (two series under one
+/// label set, which the runtime refuses) or pairs a side with itself (which answers the difference of
+/// two different values, not zero). Either way the assertion below is about which source a chunk was
+/// read from, and nothing else.
+#[tokio::test]
+async fn two_evaluated_sources_with_one_label_set_do_not_cross_their_indices() {
+    let tree = evaluated_binary_tree(BinaryOp::Sub, 0, 1);
+    let shared = metric(&[(HOST, "web-1"), (ZONE, "west")], Some(METRIC));
+    let left = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &shared,
+        0,
+        climb(100.0),
+        true,
+    )]]);
+    let right = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &shared,
+        0,
+        climb(7.0),
+        true,
+    )]]);
+
+    let exec = evaluated_two_source_plan(&tree, binary_output_schema(), left, right)
+        .expect("the node accepts two evaluated sources");
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the two-source tree runs");
+    let answered = binary_rows(&batches);
+
+    assert_eq!(
+        grid_timestamps(),
+        answered.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the one label set is answered at every grid position: {answered:?}"
+    );
+    assert_eq!(
+        vec![Some(93.0); GRID_LEN as usize],
+        answered.iter().map(|row| row.1).collect::<Vec<_>>(),
+        "each position answers `(100 + p) - (7 + p)`: the two sources' chunks paired by position, \
+         not one side paired with itself"
+    );
+    assert!(
+        answered.iter().all(|row| row.2.as_deref() == Some("web-1")),
+        "one series, not two under the same label set: {answered:?}"
+    );
+}
+
+/// The node ends when *every* evaluated source ended, not when the first one does.
+///
+/// The left source answers its whole series in one chunk and ends immediately, while the right one
+/// answers the same positions in [`GRID_LEN`] chunks and closes last. Ending the node on the left
+/// source's end would end the runtime's input while the right operand is still open, which the
+/// runtime reports as a truncated input instead of answering - so the row count and the values below
+/// are what tell a correct end from a premature one.
+#[tokio::test]
+async fn one_source_ending_first_does_not_end_the_other_sources_frames() {
+    let tree = evaluated_binary_tree(BinaryOp::Sub, 0, 1);
+    let shared = metric(&[(HOST, "web-1")], Some(METRIC));
+    let left = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &shared,
+        0,
+        climb(100.0),
+        true,
+    )]]);
+    let right = ScriptedEvaluated::plan(vec![
+        (0..GRID_LEN as usize)
+            .map(|position| {
+                evaluated_chunk_with(
+                    &shared,
+                    position,
+                    vec![Some(7.0 + position as f64)],
+                    position == GRID_LEN as usize - 1,
+                )
+            })
+            .collect::<Vec<_>>(),
+    ]);
+
+    let exec = evaluated_two_source_plan(&tree, binary_output_schema(), left, right)
+        .expect("the node accepts two evaluated sources");
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .expect("the right source is read to its end after the left one ended");
+    let answered = binary_rows(&batches);
+
+    assert_eq!(
+        GRID_LEN as usize,
+        answered.len(),
+        "every position the longer source carries is answered: {answered:?}"
+    );
+    assert_eq!(
+        grid_timestamps(),
+        answered.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the positions of the source that ended later are all there"
+    );
+    assert_eq!(
+        vec![Some(93.0); GRID_LEN as usize],
+        answered.iter().map(|row| row.1).collect::<Vec<_>>(),
+        "the answer covers the whole grid rather than the first chunk"
+    );
+}
+
+/// A source that fails mid-stream surfaces its error instead of ending the node quietly.
+///
+/// The failing child hands over one chunk and then an error, and the other source is still open when
+/// it does. A merge that dropped the error for the source's EOF would answer `None` here, and one
+/// that never polled the failing source again would hang; the timeout tells those apart from a run
+/// that reports the error it was given.
+#[tokio::test]
+async fn an_evaluated_sources_error_ends_the_two_source_node() {
+    let tree = evaluated_binary_tree(BinaryOp::Sub, 0, 1);
+    let shared = metric(&[(HOST, "web-1")], Some(METRIC));
+    let left = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &shared,
+        0,
+        climb(100.0),
+        true,
+    )]]);
+    let right = staged_evaluated_with_error(
+        vec![evaluated_chunk_with(&shared, 0, climb(7.0), true)],
+        "evaluated source failed",
+    );
+
+    let exec = evaluated_two_source_plan(&tree, binary_output_schema(), left, right)
+        .expect("the node accepts two evaluated sources");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collect(exec, SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("the node waited on a source that had already failed")
+    .expect_err("the failing source's error is the node's answer");
+    let message = error_chain(&error);
+    assert!(
+        message.contains("evaluated source failed"),
+        "reported for another reason: {message}"
+    );
+}
+
+/// An empty evaluated source beside a non-empty one still terminates and answers the other's data.
+///
+/// Two sources of different shapes meet here: the left one holds no chunk in either of its two
+/// partitions, the right one holds a series. `or` hands the right side's series on unchanged where no
+/// left series matches it, so the right side's data is exactly what the node has to produce - a node
+/// that ended on the empty source's EOF, or that mixed the two sources' streams, answers nothing.
+#[tokio::test]
+async fn an_empty_evaluated_source_beside_a_non_empty_one_answers_the_non_empty_side() {
+    let tree = evaluated_or_tree(0, 1);
+    let empty = ScriptedEvaluated::plan(vec![Vec::new(), Vec::new()]);
+    let right = ScriptedEvaluated::plan(vec![vec![evaluated_chunk_with(
+        &metric(&[(HOST, "web-1")], Some(METRIC)),
+        0,
+        climb(500.0),
+        true,
+    )]]);
+
+    let exec = evaluated_two_source_plan(&tree, output_schema(), empty, right)
+        .expect("the node accepts two evaluated sources");
+    let batches = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        collect(exec, SessionContext::default().task_ctx()),
+    )
+    .await
+    .expect("the node hung on the empty source")
+    .expect("the node answers the non-empty source");
+    let answered = rows(&batches);
+
+    assert_eq!(
+        (0..GRID_LEN as usize)
+            .map(|position| Some(500.0 + position as f64))
+            .collect::<Vec<_>>(),
+        answered.iter().map(|row| row.1).collect::<Vec<_>>(),
+        "the non-empty side's values come out unchanged: {answered:?}"
+    );
+    assert_eq!(
+        grid_timestamps(),
+        answered.iter().map(|row| row.0).collect::<Vec<_>>(),
+        "the whole grid of the non-empty side is answered: {answered:?}"
+    );
+    assert!(
+        answered.iter().all(|row| row.2.as_deref() == Some("web-1")),
+        "the answer keeps the non-empty side's own label set: {answered:?}"
+    );
+}
+
+/// A source that always has a chunk ready does not starve a second source.
+///
+/// Both gathers here answer on every poll - nothing is pending to force a rotation - so this reads
+/// the merge's own order: every sweep starts at the source after the one that last handed a chunk
+/// over, which makes two always-ready sources alternate. A merge that drained one source before
+/// polling the other would hand over all eight of `busy`'s chunks before either of `quiet`'s, and
+/// the assertion below would fail on the second feed. The chunks carry their source's own hosts, so
+/// the order also says which source each chunk was read from.
+#[tokio::test]
+async fn an_always_ready_evaluated_source_does_not_starve_a_second_source() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(UnboundedMemoryPool::default());
+    let busy = (0..8)
+        .map(|index| {
+            evaluated_chunk_with(
+                &metric(&[(HOST, &format!("busy-{index}"))], Some(METRIC)),
+                0,
+                vec![Some(100.0 + index as f64)],
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let quiet = (0..2)
+        .map(|index| {
+            evaluated_chunk_with(
+                &metric(&[(HOST, &format!("quiet-{index}"))], Some(METRIC)),
+                0,
+                vec![Some(900.0 + index as f64)],
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut sources = EvaluatedSources::new(vec![
+        evaluated_gather_of(0, busy, &pool),
+        evaluated_gather_of(1, quiet, &pool),
+    ]);
+
+    let mut order = Vec::new();
+    let mut hosts = Vec::new();
+    while let Some(feed) = sources.next().await {
+        let feed = feed.expect("a scripted gather does not fail");
+        let FusedChunk::Evaluated(chunk) = feed.chunk else {
+            panic!("an evaluated gather hands over evaluated chunks");
+        };
+        order.push(feed.source);
+        hosts.push(
+            chunk
+                .series
+                .metric
+                .get(HOST)
+                .expect("every scripted series names its host")
+                .to_string(),
+        );
+    }
+
+    assert_eq!(
+        vec![0, 1, 0, 1, 0, 0, 0, 0, 0, 0],
+        order,
+        "the two always-ready sources alternate instead of one being drained first"
+    );
+    assert_eq!(
+        vec![
+            "busy-0", "quiet-0", "busy-1", "quiet-1", "busy-2", "busy-3", "busy-4", "busy-5",
+            "busy-6", "busy-7"
+        ],
+        hosts,
+        "each chunk is handed over under the source it was read from"
+    );
 }

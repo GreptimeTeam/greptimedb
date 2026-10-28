@@ -40,7 +40,7 @@ use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
-use crate::vector_match::{BinaryMatching, BinaryOp, MatchingLabels, SetOp};
+use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, MatchingLabels, SetOp};
 
 /// What one node produces.
 ///
@@ -857,11 +857,43 @@ pub fn needs_single_execution(node: &NativeNode) -> bool {
     needs_single_execution_in(node, &[])
 }
 
+/// Two fused sources whose producers this execution reads in step: the routing placed them
+/// identically, and their outputs name no series.
+///
+/// This is a *joint* fact about a pair and cannot be derived inside the tree that consumes them.
+/// An [`NativeExpr::Input`] over evaluated samples answers `None` to [`output_has_metric_name`],
+/// because whether its label sets still carry a metric name was decided by the node that built
+/// them, which is not in this tree. So the layer that builds those producers asks each producer's
+/// own root and states the answer here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CoPartitionedPair {
+    /// The left fused source index.
+    pub left: usize,
+    /// The right fused source index.
+    pub right: usize,
+    /// Both producers' outputs carry no metric name, proved where those producers were built.
+    pub name_free: bool,
+}
+
+impl CoPartitionedPair {
+    /// Whether this pair names the two sources `left` and `right`, in either orientation.
+    ///
+    /// The two orientations are one pair: a routing that sends source `i`'s partners to source `j`'s
+    /// execution sends `j`'s to `i`'s too, and which side of the match a source sits on is the
+    /// query's choice rather than the routing's.
+    fn joins(&self, left: usize, right: usize) -> bool {
+        (self.left == left && self.right == right) || (self.left == right && self.right == left)
+    }
+}
+
 /// Whether `node` answers a value for the whole vector, given what the caller knows about where the
-/// sources below it sit.
+/// sources below it sit and which of them route identically.
 ///
 /// `boundary` is the same slice [`NativeNode::properties`] takes: the facts of the fused inputs the
-/// tree was compiled over, indexed by `source_index`.
+/// tree was compiled over, indexed by `source_index`. `co_partitioned` is what the caller proved
+/// about pairs of those sources ([`CoPartitionedPair`]): that the routing placed the two identically,
+/// and that both producers' outputs name no series. It is the fact a match needs and a merge does not
+/// ([`match_is_co_partitioned`]), and it is read by no other node.
 ///
 /// A `Merge` needs every piece of ONE canonical label set, and one execution is one way of having
 /// them - but which way applies is not this predicate's question. A merge's own need is therefore
@@ -877,49 +909,78 @@ pub fn needs_single_execution(node: &NativeNode) -> bool {
 /// is the caller's. Two series that agree on `on(host)` can differ in every other label and sit
 /// under two canonical keys, so two owner partitions can each hold one series of that match group,
 /// pair them locally, and never run the duplicate-series check over the real group: the error a
-/// whole match reports is silently not reported. A match therefore needs one execution unless both
-/// sides are proven to sit in it ([`matching_co_located`]). A broadcast is not a match, so a
-/// constant's side is not asked for that proof.
-pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
+/// whole match reports is silently not reported. A match therefore needs one execution unless one
+/// of two proofs says otherwise. A broadcast is not a match, so a constant's side is not asked for
+/// either.
+///
+/// The first proof is the per-side one ([`matching_co_located`]): each side's series are all in this
+/// execution, so every pair of them is here too. The second is two-sided
+/// ([`match_is_co_partitioned`]): each side's series are *not* all here, but the sources the two
+/// sides read route identically and the match pairs by exactly the key that routing used, so a pair
+/// built from this partition is the pair the whole match would have built. The two answer different
+/// questions - "is everything here?" and "is the partner of what is here also here?" - and neither
+/// implies the other: a per-key placement proves each canonical label set whole without proving a
+/// match group whole, and a co-partitioned pair proves a match group whole without proving either
+/// side whole.
+pub fn needs_single_execution_in_co(
+    node: &NativeNode,
+    boundary: &[NativeProperties],
+    co_partitioned: &[CoPartitionedPair],
+) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => needs_single_execution_in(input, boundary),
+        | NativeExpr::Timestamp { input } => {
+            needs_single_execution_in_co(input, boundary, co_partitioned)
+        }
         // `info` pairs each base series with the info series that share its identifying labels,
         // which is a match by a label set of the caller's choosing rather than by a canonical key -
         // the same reason a two-vector `Binary` needs one execution unless both sides are proven to
         // sit in it.
         NativeExpr::Info { base, info, .. } => {
-            needs_single_execution_in(base, boundary)
-                || needs_single_execution_in(info, boundary)
+            needs_single_execution_in_co(base, boundary, co_partitioned)
+                || needs_single_execution_in_co(info, boundary, co_partitioned)
                 || !(matching_co_located(base, boundary) && matching_co_located(info, boundary))
         }
         NativeExpr::Aggregate { input, op } => {
-            op.stage == AggregateStage::Complete || needs_single_execution_in(input, boundary)
+            op.stage == AggregateStage::Complete
+                || needs_single_execution_in_co(input, boundary, co_partitioned)
         }
         // A match pairs the series of both sides by the label set its modifiers name, which is not
         // the canonical key a placement proves whole ([`matching_co_located`]), so it needs one
-        // execution unless both sides are already in it. A broadcast is not a match: it pairs a
-        // vector with one value, so the constant's side holds no series to pair and proves nothing it
-        // was asked for - `x > 0` and `x * 2` stay as parallel as the vector side.
-        NativeExpr::Binary { left, right, .. } => {
+        // execution unless both sides are already in it - or unless the two-sided proof says the
+        // match pairs by the key the sides' sources were routed by ([`match_is_co_partitioned`]).
+        // A broadcast is not a match: it pairs a vector with one value, so the constant's side holds
+        // no series to pair and proves nothing it was asked for - `x > 0` and `x * 2` stay as
+        // parallel as the vector side.
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => {
             let both_vectors = matches!(
                 (&left.output, &right.output),
                 (NativeType::Samples(_), NativeType::Samples(_))
             );
-            needs_single_execution_in(left, boundary)
-                || needs_single_execution_in(right, boundary)
+            needs_single_execution_in_co(left, boundary, co_partitioned)
+                || needs_single_execution_in_co(right, boundary, co_partitioned)
                 || (both_vectors
                     && !(matching_co_located(left, boundary)
-                        && matching_co_located(right, boundary)))
+                        && matching_co_located(right, boundary))
+                    && !match_is_co_partitioned(left, right, matching, co_partitioned))
         }
         // A set operation keeps samples of two evaluated vectors, so both sides are always matched:
         // `validate` refuses a scalar on either side and there is no broadcast form of it.
+        //
+        // It gains no two-sided proof this round. A set operation keeps each side's samples under the
+        // labels they arrived with, so what it compares is the two sides' own identities, and a
+        // per-partition answer would have to show that those identities - not the match's modifiers,
+        // which a set operation does not have - are the ones the routing used.
         NativeExpr::Set { left, right, .. } => {
-            needs_single_execution_in(left, boundary)
-                || needs_single_execution_in(right, boundary)
+            needs_single_execution_in_co(left, boundary, co_partitioned)
+                || needs_single_execution_in_co(right, boundary, co_partitioned)
                 || !(matching_co_located(left, boundary) && matching_co_located(right, boundary))
         }
         NativeExpr::Vector { .. } => true,
@@ -930,8 +991,101 @@ pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties
         // tree needs from an execution, and a merge's own need is its input's. Whether the merge can
         // be *placed* here is `merges_are_placeable_in`, asked by the caller that knows the
         // placement.
-        NativeExpr::Merge { input } => needs_single_execution_in(input, boundary),
+        NativeExpr::Merge { input } => {
+            needs_single_execution_in_co(input, boundary, co_partitioned)
+        }
     }
+}
+
+/// Whether `node` answers a value for the whole vector, given what the caller knows about where the
+/// sources below it sit but nothing about how they route.
+///
+/// This is [`needs_single_execution_in_co`] with no co-partitioned pair: a caller that has not proved
+/// two sources route identically has not proved a match between them can run per partition, so the
+/// two-sided proof is never given a pair to fire on and the answer is the per-side one it always was.
+pub fn needs_single_execution_in(node: &NativeNode, boundary: &[NativeProperties]) -> bool {
+    needs_single_execution_in_co(node, boundary, &[])
+}
+
+/// Whether a match between two routed inputs pairs its series by the key their sources were routed
+/// by, so one execution per partition answers it.
+///
+/// This is a *two-sided* proof, and the question it asks is neither the per-side one
+/// ([`matching_co_located`]: are both sides' series all in this execution?) nor a merge's
+/// ([`pieces_co_located`]: are the pieces of every canonical label set here?). It asks: does the key
+/// this match pairs by name the same groups the placement grouped the two sources by?
+///
+/// That question has two halves, and they are answered by two different parties.
+///
+/// The *tree* half is answered here. A placement by canonical key partitions by the canonical label
+/// set, which is `__name__` plus the ordinary labels - the key a [`NativeExpr::Merge`] groups by -
+/// while a match pairs by the label set its modifiers name: the default
+/// [`MatchingLabels::Ignoring`] with no label is every label *except* `__name__`. So
+/// `m1{ns="a"} / m2{ns="a"}` is two canonical label sets and one match group: routing by canonical
+/// key sends the two partners to different partitions, each partition finds no partner, and the
+/// match answers nothing where the whole match would answer a value. The two keys coincide exactly
+/// when neither side's series carries a metric name, because then the canonical key *is* the set of
+/// ordinary labels. Which operands and which modifiers make the keys coincide is the tree's question,
+/// and it is the one this function settles.
+///
+/// The *producer* half is [`CoPartitionedPair::name_free`], and it is supplied by whoever could
+/// observe it. It cannot be derived here: both operands of the shape this proof exists to serve are
+/// an [`NativeExpr::Input`] over evaluated samples, whose label sets another execution built, so
+/// [`output_has_metric_name`] answers `None` for them - it has no node to read the name off. The layer
+/// that builds those producers asks each producer's own root, where the answer is a function of the
+/// tree in front of it, and states it on the pair. Reading `None` as "no name" instead would be the
+/// guess that makes a named match look name-free, which is exactly the silent-empty-answer bug: the
+/// match would be run per partition, find no partner, and answer nothing.
+///
+/// `co_partitioned` is therefore what the caller proved about the pair, and both halves are required.
+/// Co-partitioned sources whose series carry a name still pair by a key no partition holds whole, and
+/// name-free sides whose sources are not co-partitioned can still have their partners in two
+/// executions.
+///
+/// The operands are read strictly: this round proves nothing about a node between the routed input
+/// and the match. A per-series node above the input hands the label set it read on unchanged, so the
+/// identity the router used would still be the identity the match sees through it, but a fold, a
+/// name-dropping window or a label rewrite does not: it invents an identity the routing never saw, and
+/// a proof about the routed key would then be about a key the match no longer reads. Looking through
+/// those nodes - only the ones that provably keep the identity the router used - is a later round's
+/// work, and answering it by assuming they all keep it is the silent-empty-answer bug this proof
+/// exists to prevent.
+///
+/// Every conjunct below is required:
+///
+/// 1. each operand is the routed input itself ([`NativeExpr::Input`]);
+/// 2. the caller proved those two sources co-partitioned, either way round;
+/// 3. the match is the default one - [`MatchingLabels::Ignoring`] with no label, whose key is every
+///    label but `__name__` - so its key is the canonical key of a name-free series;
+/// 4. it is one-to-one: `group_left`/`group_right` copy the one side's labels into each result, so a
+///    result's identity is not the many side's and the routed key does not name it;
+/// 5. that pair says both producers are name-free, which is what makes the canonical key and the
+///    match key one key. It is per pair, and one named side is enough to break it - which is why the
+///    pair states the joint fact rather than each side stating its own.
+pub fn match_is_co_partitioned(
+    left: &NativeNode,
+    right: &NativeNode,
+    matching: &BinaryMatching,
+    co_partitioned: &[CoPartitionedPair],
+) -> bool {
+    let (NativeExpr::Input(left_input), NativeExpr::Input(right_input)) = (&left.expr, &right.expr)
+    else {
+        return false;
+    };
+    let (left_source, right_source) = (left_input.source_index, right_input.source_index);
+    let Some(pair) = co_partitioned
+        .iter()
+        .find(|pair| pair.joins(left_source, right_source))
+    else {
+        return false;
+    };
+    if !matches!(&matching.labels, MatchingLabels::Ignoring(names) if names.is_empty()) {
+        return false;
+    }
+    if matching.cardinality != Cardinality::OneToOne {
+        return false;
+    }
+    pair.name_free
 }
 
 /// Whether every merge in `node` can be answered by an execution placed as `co_located` says.
@@ -1490,6 +1644,222 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
         matching.op,
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le
     ) || matching.return_bool
+}
+
+/// Whether every series `node` hands over carries a metric name (`__name__`).
+///
+/// This is the fact the two-sided match proof asks of each side ([`match_is_co_partitioned`]): a
+/// placement routes by the canonical label set, which holds `__name__` when a series has one, while a
+/// match pairs by the label set its modifiers name. The two keys are the same key only on series
+/// without a name, so one named side is already enough to make them differ.
+///
+/// - `Some(true)`: every series the output holds carries a name.
+/// - `Some(false)`: no series the output holds carries a name.
+/// - `None`: this walk cannot decide, which is not a claim in either direction: a consumer that
+///   needs the fact must read it as "not proved here" rather than as an answer.
+///
+/// The answer is derived from the node and the kernels it is bound to, never from a boundary, so a
+/// shape whose output labels are decided outside the tree answers `None`. The shapes decided in every
+/// case are the ones whose kernel writes the name away for whatever it read: `timestamp`, a window
+/// running any function but `last_over_time`/`first_over_time`, a map of the two dropping operations,
+/// an aggregate or `count_values` whose grouping does not list `__name__`, `absent`, the histogram
+/// functions, and a two-vector arithmetic or `bool` comparison. The shapes that follow their input
+/// are the ones that only carry labels through. Four answers are deliberately not given: a
+/// `label_replace`/`label_join` may write `__name__` or clear it, an input of evaluated samples hands
+/// on a value another execution built, a one-side-name-free `or`/`and`/`unless` keeps both sides'
+/// samples, and a `group_left`/`group_right` may copy a name from its one side. Each of those is a
+/// later fact's question, not this walk's.
+pub fn output_has_metric_name(node: &NativeNode) -> Option<bool> {
+    match &node.expr {
+        // A scan of raw samples reads one metric: the selector it was bound from names the metric, so
+        // every series it hands over carries that name, and raw samples are the only thing a scan
+        // hands over. The name itself is not in the tree - `BoundInput` holds the source index, the
+        // output type and the ordering, and the compiler keeps the name beside them - so this is the
+        // one input shape the tree can answer for: which type an input is decides whether anything
+        // above it can name a series at all.
+        //
+        // Evaluated samples at an input are another execution's answer: whether its label sets still
+        // carry a name was decided by the node that built them, which is not in this tree. Aggregate
+        // state is not a series at all, and no consumer of this fact has an operand of that type.
+        NativeExpr::Input(binding) => match binding.output.samples() {
+            Some(schema) if schema.eval_grid.is_none() => Some(true),
+            _ => None,
+        },
+        // A constant is one value per grid point and holds no label set, so it carries no name.
+        NativeExpr::Scalar(_) => Some(false),
+        // A selection answers the label set it read, except `timestamp(x)`: `output_metric` in
+        // [`execute`](crate::native::execute) rewrites the labels through `map::drop_metric_name` for
+        // `InstantValue::Timestamp` and clones them for `Sample` and `InfoTimestamp`, which is the
+        // selection `info` reads.
+        NativeExpr::Instant { input, op } => match op.value {
+            InstantValue::Sample | InstantValue::InfoTimestamp => output_has_metric_name(input),
+            InstantValue::Timestamp => Some(false),
+        },
+        // A merge groups the fragments it read by canonical label set and hands each set on as it
+        // arrived, so it writes no label of its own and what it emits carries the name the fragments
+        // carried.
+        NativeExpr::Merge { input } => output_has_metric_name(input),
+        // A window folds values and keeps the label set of the series it read, unless the function
+        // drops the metric name: `RangeFunction::drops_metric_name` holds for every function but
+        // `last_over_time` and `first_over_time`, and `RangeEvaluator::emit` applies it by removing
+        // `METADATA_LABELS` from the label set it hands over.
+        NativeExpr::Window { input, op } => {
+            if op.function.drops_metric_name() {
+                Some(false)
+            } else {
+                output_has_metric_name(input)
+            }
+        }
+        // A map rewrites the label set of every series it is handed. `map_math` and
+        // `map_native_histogram` both end with `drop_metric_name` (see
+        // [`preserves_canonical_identity`]), so their output carries no name whatever it read, while
+        // `label_replace`/`label_join` write a label of the caller's choosing - `__name__` included -
+        // and can empty it, so what a series ends under is not this node's to answer.
+        NativeExpr::Map { input, op } => {
+            if op.ops.is_empty() {
+                // A map with no operation rewrites nothing; `validate` refuses the shape, and
+                // following the input keeps the answer exact rather than reporting a rewrite that is
+                // not there.
+                output_has_metric_name(input)
+            } else if op
+                .ops
+                .iter()
+                .all(|op| matches!(op, MapOp::Math(_) | MapOp::Histogram(_)))
+            {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        // A timestamp reports each sample's position, and `NativeNode::timestamp` rebuilds the labels
+        // through `map::drop_metric_name` on the way: its output carries no name.
+        NativeExpr::Timestamp { .. } => Some(false),
+        // An aggregate answers its group key, which is `GroupingLabels::apply` in
+        // [`aggregate`](crate::aggregate): `by(names)` keeps the name only when `names` lists it
+        // (`SeriesLabels::keep_only` clears a name the list does not hold) and `without(_)` removes it
+        // whatever `names` says. Partial state is not a series at all, so it carries none.
+        NativeExpr::Aggregate { input, op } => match &node.output {
+            NativeType::Samples(_) => {
+                grouping_keeps_metric_name(&op.group, output_has_metric_name(input))
+            }
+            NativeType::Scalar(_) | NativeType::AggregateState(_) => Some(false),
+        },
+        // A vector operation is decided one operator at a time.
+        //
+        // `topk`, `bottomk`, `limitk`, `limit_ratio` and `sort` hand back series they read under the
+        // labels those series arrived with - `select.rs` rewrites no label - so the input's answer is
+        // theirs. `absent` builds its labels from the argument's matchers and skips `__name__`
+        // (`absent_labels`), `histogram_quantile`/`histogram_fraction` remove `METADATA_LABELS` from
+        // each group they read (`histogram_eval`), and `count_values` answers a grouping's label sets
+        // as an aggregate does.
+        NativeExpr::Vector { input, op } => match op {
+            BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::LimitRatio { .. }
+            | BoundVectorOp::Sort(_) => output_has_metric_name(input),
+            BoundVectorOp::Absent { .. } | BoundVectorOp::Histogram(_) => Some(false),
+            BoundVectorOp::CountValues { group, .. } => {
+                grouping_keeps_metric_name(group, output_has_metric_name(input))
+            }
+        },
+        // A binary operation answers under the label set `result_metric` builds in
+        // [`vector_match`](crate::vector_match), which is the many side's labels and the modifiers'
+        // rewrite of them.
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => match (&left.output, &right.output) {
+            // Two constants make a constant, which holds no label set.
+            (NativeType::Scalar(_), NativeType::Scalar(_)) => Some(false),
+            // A broadcast reaches each series of its vector side as it is, unless the operation drops
+            // the metric name on the way: arithmetic and a `bool` comparison do, a filtering
+            // comparison keeps the label set it read (`BroadcastRuntime::drops_labels`, which
+            // [`broadcast_drops_labels`] restates).
+            (NativeType::Scalar(_), _) | (_, NativeType::Scalar(_)) => {
+                let vector = if left.output.samples().is_some() {
+                    left
+                } else {
+                    right
+                };
+                if broadcast_drops_labels(matching) {
+                    Some(false)
+                } else {
+                    output_has_metric_name(vector)
+                }
+            }
+            // Two vectors are matched by the kernel, which files each pairing under the many side's
+            // labels with the name removed unless the operation is a filtering comparison: `drop_name`
+            // in `vector_match` is `!op.is_comparison() || return_bool`, the same rule the broadcast
+            // applies. One-to-one then rewrites that label set by the modifiers - `on(names)` keeps
+            // only `names`, `ignoring(names)` drops them - and `group_left`/`group_right` keep it as
+            // it is and copy the `include` labels of the one side instead.
+            (_, _) => {
+                if broadcast_drops_labels(matching) {
+                    return Some(false);
+                }
+                match &matching.cardinality {
+                    Cardinality::OneToOne => {
+                        let keeps_name = match &matching.labels {
+                            MatchingLabels::On(names) => {
+                                names.iter().any(|name| &**name == "__name__")
+                            }
+                            MatchingLabels::Ignoring(names) => {
+                                !names.iter().any(|name| &**name == "__name__")
+                            }
+                        };
+                        if keeps_name {
+                            output_has_metric_name(left)
+                        } else {
+                            Some(false)
+                        }
+                    }
+                    Cardinality::ManyToOne(include) => {
+                        if include.iter().any(|name| &**name == "__name__") {
+                            // The included name of the one side replaces the many side's.
+                            None
+                        } else {
+                            output_has_metric_name(left)
+                        }
+                    }
+                    Cardinality::OneToMany(include) => {
+                        if include.iter().any(|name| &**name == "__name__") {
+                            None
+                        } else {
+                            output_has_metric_name(right)
+                        }
+                    }
+                }
+            }
+        },
+        // A set operation keeps each side's samples under the label set they arrived with
+        // (`set_vectors` rewrites no label), so a name survives it only if both sides carry one and a
+        // name is absent only if both sides lack it. Sides that disagree settle nothing: `or` keeps
+        // both sides' samples and `and`/`unless` keep the left side's, so the answer would be a claim
+        // about one operator rather than about the shape.
+        NativeExpr::Set { left, right, .. } => {
+            match (output_has_metric_name(left), output_has_metric_name(right)) {
+                (Some(left), Some(right)) if left == right => Some(left),
+                _ => None,
+            }
+        }
+        // `info` enriches each base series with the data labels of the info series that share its
+        // identifying labels: `add_data_labels` copies the info series' ordinary tags only, never the
+        // name, so each result keeps the name its base series had.
+        NativeExpr::Info { base, .. } => output_has_metric_name(base),
+    }
+}
+
+/// What a grouping does to the metric name of the series it is handed.
+///
+/// `by(names)` keeps the name only when `names` lists it and `without(_)` removes it, which is
+/// `GroupingLabels::apply` in [`aggregate`](crate::aggregate): `keep_only` clears a name the list does
+/// not hold, and the `without` arm removes `__name__` after removing its own labels.
+fn grouping_keeps_metric_name(group: &Grouping, input: Option<bool>) -> Option<bool> {
+    match group {
+        Grouping::By(names) if names.iter().any(|name| &**name == "__name__") => input,
+        Grouping::By(_) | Grouping::Without(_) => Some(false),
+    }
 }
 
 /// Whether `node` hands over one logical series per canonical label set, or several.

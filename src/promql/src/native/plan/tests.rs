@@ -14,16 +14,12 @@
 
 use std::sync::Arc;
 
-use datafusion::common::DFSchema;
-use datatypes::series::SeriesOrdering;
-use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use datatypes::series::time::{EvalGrid, GridSpec};
-
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping,
-    InstantValue, MapOp, NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
-    merges_are_placeable_in, needs_single_execution, needs_single_execution_in, no_label_sets,
+    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, CoPartitionedPair,
+    Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeProperties, NativeTree,
+    NativeType, match_is_co_partitioned, merges_are_placeable_in, needs_single_execution,
+    needs_single_execution_in, needs_single_execution_in_co, no_label_sets, output_has_metric_name,
     preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
@@ -36,6 +32,11 @@ use crate::select::SortOrder;
 use crate::vector_match::{
     BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
 };
+use datafusion::common::DFSchema;
+use datatypes::series::SeriesLabels;
+use datatypes::series::SeriesOrdering;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
+use datatypes::series::time::{EvalGrid, GridSpec};
 
 // The tree builders below are `pub(crate)` because the rewrite in [`canonicalize`] is proved with
 // the trees they build, rather than with a second set of fixtures that could drift from these.
@@ -359,6 +360,52 @@ fn on_host() -> BinaryMatching {
     BinaryMatching {
         labels: MatchingLabels::On(vec!["host".into()]),
         ..add()
+    }
+}
+
+/// `by(names)`: the grouping `sum by(names)` folds with, which keeps only the labels it lists.
+fn by(names: &[&str]) -> Grouping {
+    Grouping::By(
+        names
+            .iter()
+            .map(|name| Arc::from(*name))
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// `without(names)`: the grouping `sum without(names)` folds with, which drops the labels it lists and
+/// `__name__` with them.
+fn without(names: &[&str]) -> Grouping {
+    Grouping::Without(
+        names
+            .iter()
+            .map(|name| Arc::from(*name))
+            .collect::<Vec<_>>()
+            .into(),
+    )
+}
+
+/// `sum` over `inner` folded into a query value, grouped as `group` says.
+///
+/// A `Complete` fold answers a group key of its own: `by(ns)` drops the metric name, `by("__name__")`
+/// keeps whatever the input had, and the same group is what a split plan's `Final` stage answers.
+fn sum_by(inner: NativeNode, group: Grouping) -> NativeNode {
+    let out = inner
+        .output
+        .grid()
+        .expect("an aggregate needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group,
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::new([]), out),
     }
 }
 
@@ -2811,4 +2858,460 @@ fn info_reads_the_sample_times_of_a_merged_selection_and_nothing_else() {
         error.to_string().contains("not their values"),
         "a selection of samples was read as sample times: {error}"
     );
+}
+
+/// The metric-name fact each shape answers, and the kernel each answer rests on.
+///
+/// The shapes whose output carries no name are the ones that write it away whatever they read, the
+/// shapes that only carry a label set through follow their input, and the shapes whose output labels
+/// are decided elsewhere answer `None`, which is not an answer in either direction.
+#[test]
+fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
+    let shared = grid(0, 60_000, 4);
+    let selected = || instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared));
+
+    // A scan of one metric hands its series over under that metric's name. A value another execution
+    // produced carries whatever that execution left on it, and this tree does not hold that
+    // execution, so the answer is `None` rather than a guess in either direction: reading it as "no
+    // name" is what would make a named match look name-free and run it per partition. That is why the
+    // match proof takes the fact on [`CoPartitionedPair::name_free`], from the layer that built the
+    // producers, instead of deriving it here.
+    assert_eq!(output_has_metric_name(&raw_input_at(0)), Some(true));
+    assert_eq!(
+        output_has_metric_name(&input_on_at(0, Arc::clone(&shared))),
+        None
+    );
+
+    // A selection answers the label set it read, except `timestamp(x)`, which rebuilds the labels
+    // through `drop_metric_name`. Over an evaluated input the same selection follows it into `None`.
+    assert_eq!(output_has_metric_name(&selected()), Some(true));
+    assert_eq!(
+        output_has_metric_name(&instant_over(
+            raw_input_at(0),
+            InstantValue::InfoTimestamp,
+            Arc::clone(&shared)
+        )),
+        Some(true)
+    );
+    assert_eq!(
+        output_has_metric_name(&instant_over(
+            raw_input_at(0),
+            InstantValue::Timestamp,
+            Arc::clone(&shared)
+        )),
+        Some(false)
+    );
+    assert_eq!(
+        output_has_metric_name(&instant_over(
+            input_on_at(0, Arc::clone(&shared)),
+            InstantValue::Sample,
+            Arc::clone(&shared)
+        )),
+        None
+    );
+
+    // A window drops the name with every function but the two that hand the sample they read on.
+    assert_eq!(
+        output_has_metric_name(&window_with(
+            raw_input_at(0),
+            RangeFunction::Rate,
+            None,
+            Arc::clone(&shared)
+        )),
+        Some(false)
+    );
+    assert_eq!(
+        output_has_metric_name(&window_with(
+            raw_input_at(0),
+            RangeFunction::LastOverTime,
+            None,
+            Arc::clone(&shared)
+        )),
+        Some(true)
+    );
+
+    // An aggregate answers its group key: `by(ns)` and `without(...)` drop `__name__`, and
+    // `by("__name__")` keeps the name the input had.
+    assert_eq!(
+        output_has_metric_name(&sum_by(selected(), by(&["ns"]))),
+        Some(false)
+    );
+    assert_eq!(
+        output_has_metric_name(&sum_by(selected(), by(&["__name__"]))),
+        Some(true)
+    );
+    assert_eq!(
+        output_has_metric_name(&sum_by(selected(), without(&["ns"]))),
+        Some(false)
+    );
+
+    // A timestamp reports a position under the name dropped, and a merge writes no label of its own.
+    assert_eq!(
+        output_has_metric_name(&timestamp_of(selected())),
+        Some(false)
+    );
+    assert_eq!(output_has_metric_name(&merge_over(selected())), Some(true));
+
+    // A map of `map_math`/`map_native_histogram` drops the name, while a label rewrite writes a label
+    // of its own choosing - `__name__` included - and can clear it.
+    let mapped = map_over(selected());
+    assert_eq!(output_has_metric_name(&mapped), Some(false));
+    assert_eq!(
+        output_has_metric_name(&map_rewriting_labels(selected())),
+        None
+    );
+
+    // `absent` builds its labels from the argument's matchers and binds no name; `sort` hands back the
+    // series it read.
+    let absent = NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(selected()),
+            op: BoundVectorOp::Absent {
+                labels: SeriesLabels::try_new(None, Vec::new()).expect("an empty label set"),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    assert_eq!(output_has_metric_name(&absent), Some(false));
+    assert_eq!(output_has_metric_name(&sorted(selected())), Some(true));
+
+    // A two-vector match drops the name for arithmetic and for a `bool` comparison, keeps the many
+    // side's labels for a filtering comparison under the default modifiers, and drops them under
+    // `on(host)`, which keeps only the labels it names.
+    let two_vectors = |modifiers: BinaryMatching| binary_with(selected(), selected(), modifiers);
+    assert_eq!(output_has_metric_name(&two_vectors(add())), Some(false));
+    assert_eq!(
+        output_has_metric_name(&two_vectors(matching(BinaryOp::Gt, false))),
+        Some(true)
+    );
+    assert_eq!(
+        output_has_metric_name(&two_vectors(matching(BinaryOp::Gt, true))),
+        Some(false)
+    );
+    assert_eq!(output_has_metric_name(&two_vectors(on_host())), Some(false));
+
+    // A broadcast answers the vector side's series, and the operation decides whether the labels
+    // survive it.
+    let constant = || scalar_on(2.0, Arc::clone(&shared));
+    assert_eq!(
+        output_has_metric_name(&binary_with(
+            selected(),
+            constant(),
+            matching(BinaryOp::Mul, false)
+        )),
+        Some(false)
+    );
+    assert_eq!(
+        output_has_metric_name(&binary_with(
+            selected(),
+            constant(),
+            matching(BinaryOp::Gt, false)
+        )),
+        Some(true)
+    );
+
+    // A set operation keeps each side's samples, so it answers only when both sides agree.
+    let set = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(left),
+            right: Box::new(right),
+            op: BoundSetOp {
+                op: SetOp::Or,
+                labels: MatchingLabels::Ignoring(Vec::new()),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    assert_eq!(
+        output_has_metric_name(&set(selected(), selected())),
+        Some(true)
+    );
+    assert_eq!(
+        output_has_metric_name(&set(selected(), sum_by(selected(), by(&["ns"])))),
+        None
+    );
+}
+
+/// The `m1{ns="a"} / m2{ns="a"}` match: two canonical label sets and one match group.
+///
+/// Both sides are selections over raw scans, so every series carries its metric's name, and the
+/// canonical key a placement routes by holds `__name__` while the default match key does not. A
+/// co-partitioned pair of sources therefore proves nothing about this match: routing by canonical key
+/// sends `m1{ns="a"}` and `m2{ns="a"}` to different partitions, each partition finds no partner, and
+/// the match answers nothing where the whole match answers a value. That is the silent-empty-answer
+/// case, and the two-sided proof must not touch it.
+///
+/// The pair below states the producer half as `false` because both scans hand over named series, which
+/// is what a caller that could observe the producers would state. The pairing itself is real, so what
+/// refuses the shape is the naming fact and nothing else.
+#[test]
+fn a_match_of_two_named_sides_needs_one_execution_whatever_the_routing_proved() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared)),
+            instant_over(raw_input_at(1), InstantValue::Sample, Arc::clone(&shared)),
+            add(),
+        )
+    };
+    let named_pair = CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: false,
+    };
+
+    assert_eq!(
+        output_has_metric_name(&instant_over(
+            raw_input_at(0),
+            InstantValue::Sample,
+            Arc::clone(&shared)
+        )),
+        Some(true),
+        "a scan of one metric hands its series over under that metric's name"
+    );
+    assert_eq!(
+        output_has_metric_name(&instant_over(
+            raw_input_at(1),
+            InstantValue::Sample,
+            Arc::clone(&shared)
+        )),
+        Some(true)
+    );
+    assert!(
+        needs_single_execution_in_co(
+            &matched(),
+            &[proven_by_key(), proven_by_key()],
+            &[named_pair]
+        ),
+        "the canonical key of `m1{{ns=\"a\"}}` is not the key `m1{{ns=\"a\"}} / m2{{ns=\"a\"}}` pairs by"
+    );
+    // The same tree in one execution is both sides here at once, which is the per-side proof and stays
+    // the answer it was.
+    assert!(!needs_single_execution_in_co(
+        &matched(),
+        &[proven_in_one_execution(), proven_in_one_execution()],
+        &[named_pair]
+    ));
+    // The naming conjunct on its own, asked of the operands the shape actually has: two routed inputs
+    // over named series, a pair that says so, and the answer is still no.
+    assert!(
+        !match_is_co_partitioned(
+            &instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared)),
+            &instant_over(raw_input_at(1), InstantValue::Sample, Arc::clone(&shared)),
+            &add(),
+            &[named_pair]
+        ),
+        "both sides hand over named series, so the match key is not the canonical key"
+    );
+}
+
+/// The shape the feature exists to serve: `B = FusedSeries { tree: Binary { left: Input(0), right:
+/// Input(1) } }` over two routed producers, each of which answers a name-free vector.
+///
+/// Both operands are an [`NativeExpr::Input`] over *evaluated* samples, so [`output_has_metric_name`]
+/// answers `None` for them: the node that built those label sets sits in the producers, not in this
+/// tree, and guessing `Some(false)` there would be exactly the silent-empty-answer bug. The producer
+/// half therefore travels on the pair ([`CoPartitionedPair::name_free`]), stated by the layer that
+/// built the producers, and this is the case that must engage: with the joint fact stated, the match
+/// runs once per partition.
+#[test]
+fn a_co_partitioned_name_free_pair_lets_the_match_run_per_partition() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            input_on_at(0, Arc::clone(&shared)),
+            input_on_at(1, Arc::clone(&shared)),
+            add(),
+        )
+    };
+    let by_key = [proven_by_key(), proven_by_key()];
+    let name_free = CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: true,
+    };
+
+    // What the tree cannot see, and the reason the fact has to travel beside it.
+    assert_eq!(
+        output_has_metric_name(&input_on_at(0, Arc::clone(&shared))),
+        None,
+        "an input over evaluated samples is another execution's answer"
+    );
+    // Conjuncts 1-5 all hold, so the match needs no execution of its own: `sum by(ns)(m1)` and
+    // `sum by(ns)(m2)` pair by the very key the routing used.
+    assert!(
+        !needs_single_execution_in_co(&matched(), &by_key, &[name_free]),
+        "a name-free co-partitioned pair is the case the two-sided proof exists for"
+    );
+    assert!(match_is_co_partitioned(
+        &input_on_at(0, Arc::clone(&shared)),
+        &input_on_at(1, Arc::clone(&shared)),
+        &add(),
+        &[name_free]
+    ));
+
+    // The producer half is required: the same pair stated as naming its series refuses the proof, and
+    // the match needs one execution again.
+    let named = CoPartitionedPair {
+        name_free: false,
+        ..name_free
+    };
+    assert!(!match_is_co_partitioned(
+        &input_on_at(0, Arc::clone(&shared)),
+        &input_on_at(1, Arc::clone(&shared)),
+        &add(),
+        &[named]
+    ));
+    assert!(
+        needs_single_execution_in_co(&matched(), &by_key, &[named]),
+        "a pair that names its series proves nothing about the match key"
+    );
+
+    // No pair at all proves nothing either: the routing fact is also required.
+    assert!(needs_single_execution_in_co(&matched(), &by_key, &[]));
+
+    // The two orientations are one pair. A match writes one source on its left and the other on its
+    // right because of how the query was written, not because of how the routing placed them, so a
+    // pair listed the other way round proves the same thing.
+    let reversed = CoPartitionedPair {
+        left: 1,
+        right: 0,
+        name_free: true,
+    };
+    assert!(match_is_co_partitioned(
+        &input_on_at(0, Arc::clone(&shared)),
+        &input_on_at(1, Arc::clone(&shared)),
+        &add(),
+        &[reversed]
+    ));
+    assert!(
+        !needs_single_execution_in_co(&matched(), &by_key, &[reversed]),
+        "the reversed orientation is the same pair"
+    );
+}
+
+/// A match with modifiers pairs by a key of the caller's own choosing, so co-partitioned sources say
+/// nothing about it: `on(host)` pairs two series whose canonical keys differ, and `group_left` answers
+/// a label set copied out of its one side.
+///
+/// The operands are the routed inputs over evaluated samples, and the pair states a name-free
+/// production, so conjuncts 1, 2 and 5 all hold: what refuses the shape is the modifier alone.
+#[test]
+fn a_match_with_modifiers_needs_one_execution_whatever_the_routing_proved() {
+    let shared = grid(0, 60_000, 4);
+    let matched = |modifiers: BinaryMatching| {
+        binary_with(
+            input_on_at(0, Arc::clone(&shared)),
+            input_on_at(1, Arc::clone(&shared)),
+            modifiers,
+        )
+    };
+    let by_key = [proven_by_key(), proven_by_key()];
+    let name_free = CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: true,
+    };
+    let group_left = BinaryMatching {
+        cardinality: Cardinality::ManyToOne(Vec::new()),
+        ..add()
+    };
+    // Every match modifier a caller could write that is not the default `Ignoring([])` one: `on(host)`
+    // names its own key, and `ignoring(host)` still names a key of its own.
+    let ignoring_host = BinaryMatching {
+        labels: MatchingLabels::Ignoring(vec!["host".into()]),
+        ..add()
+    };
+
+    for modifiers in [on_host(), ignoring_host, group_left] {
+        let tree = matched(modifiers);
+        assert!(
+            needs_single_execution_in_co(&tree, &by_key, &[name_free]),
+            "a modified match pairs by its own key, not by the one the routing used: {tree:?}"
+        );
+    }
+}
+
+/// The naming fact is joint, and it is the half the tree cannot see: with conjuncts 1-4 all satisfied
+/// and the operands being the routed inputs themselves, the pair's [`CoPartitionedPair::name_free`]
+/// alone decides.
+///
+/// The shape is `sum by(ns)(m1) / m2`, whose two producers disagree: one hands over a folded, name-free
+/// vector and the other a named series. One named side is enough, so the pair that knows both
+/// producers states `name_free: false`. Reading that bit as `true` is what would run the match per
+/// partition, pair the two sides under a key one of them does not answer under, and emit nothing.
+#[test]
+fn one_named_side_is_enough_to_refuse_the_name_free_proof() {
+    let shared = grid(0, 60_000, 4);
+    // The two operands are both routed inputs, so this pins the naming bit and nothing else: the tree
+    // half of the proof is satisfied either way.
+    let left = || input_on_at(0, Arc::clone(&shared));
+    let right = || input_on_at(1, Arc::clone(&shared));
+    let one_named = CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: false,
+    };
+
+    assert!(!match_is_co_partitioned(
+        &left(),
+        &right(),
+        &add(),
+        &[one_named]
+    ));
+    assert!(needs_single_execution_in_co(
+        &binary_with(left(), right(), add()),
+        &[proven_by_key(), proven_by_key()],
+        &[one_named]
+    ));
+    // The very same operands and pair with the joint bit flipped are parallel, so the bit is the whole
+    // of the producer half here rather than decoration.
+    let both_name_free = CoPartitionedPair {
+        name_free: true,
+        ..one_named
+    };
+    assert!(match_is_co_partitioned(
+        &left(),
+        &right(),
+        &add(),
+        &[both_name_free]
+    ));
+}
+
+/// A pair the caller did not prove co-partitioned proves nothing: source 0 and source 2 route as the
+/// caller said, and the caller said nothing about 0 and 2. The pair is read by the sources it names,
+/// never by the position the two sides happen to sit in.
+#[test]
+fn a_pair_missing_from_the_co_partitioned_list_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            input_on_at(0, Arc::clone(&shared)),
+            input_on_at(2, Arc::clone(&shared)),
+            add(),
+        )
+    };
+    let three_sources = [proven_by_key(), proven_by_key(), proven_by_key()];
+    let names_free_but_other_pair = CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: true,
+    };
+
+    assert!(
+        needs_single_execution_in_co(&matched(), &three_sources, &[names_free_but_other_pair]),
+        "sources 0 and 2 were never proved to route together"
+    );
+    // A pair that does name these two sources engages, which is what makes the assertion above about
+    // the pair list and not about the operands: the shape is otherwise the one that runs per partition,
+    // and the orientation is the reverse of the one the match writes.
+    assert!(!needs_single_execution_in_co(
+        &matched(),
+        &three_sources,
+        &[CoPartitionedPair {
+            left: 2,
+            right: 0,
+            name_free: true,
+        }]
+    ));
 }

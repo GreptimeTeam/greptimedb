@@ -1158,6 +1158,7 @@ impl FusedSeriesExec {
             input.properties().partitioning.partition_count()
         });
         let mut evaluated_sources = 0usize;
+        let mut raw_sources = 0usize;
         for (index, (input, label_source, ordering)) in inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if count == 0 {
@@ -1195,18 +1196,26 @@ impl FusedSeriesExec {
                 evaluated_sources += 1;
                 let _ = unpack_evaluated_series(empty(), Some(Arc::clone(&raw_schemas[index])))?;
             } else {
+                raw_sources += 1;
                 unpack_raw_series(empty(), Some(Arc::clone(&raw_schemas[index])))?;
             }
         }
-        // One evaluated source at a time is what this node reads: a raw source is gathered across
-        // its partitions by series, because one of its series may span them, and an evaluated one
-        // the same way, because each frame is contiguous within a partition and not across them.
-        // Combining the two, or evaluating more than one source, would need a routing this node does
-        // not have - which label set of one source belongs beside which of another - so it is
-        // refused instead of run with one side read wrongly.
-        if evaluated_sources > 1 || (evaluated_sources == 1 && inputs.len() > 1) {
+        // Several evaluated sources are read, each gathered from its own child: every source's
+        // partitions are read at once and kept apart, because a frame is contiguous within a
+        // partition and not across them, and because the runtime routes a chunk by the source index
+        // its gather hands it over with. What carries them out is the plain-row conversion, one
+        // evaluated chunk at a time; a frame output over more than one source is refused above,
+        // since packing several sources into one frame would have to say which label set of one
+        // source belongs beside which of another.
+        //
+        // An evaluated source beside a raw one is still refused. A raw source is gathered across its
+        // partitions by series with [`SeriesGather`], whose chunks and label materialization differ
+        // from an evaluated gather's, so reading both at once would need a third merge over the two
+        // kinds of gather; this node has none, and running one side through the other would read it
+        // wrongly. Nothing above this node asks for that combination, so it declines instead.
+        if evaluated_sources > 0 && raw_sources > 0 {
             return Err(DataFusionError::Plan(
-                "FusedSeries reads one evaluated source alone, not beside another source".into(),
+                "FusedSeries reads evaluated sources on their own, not beside a raw source".into(),
             ));
         }
         // One execution over every input partition, rather than one execution per partition: a tree
@@ -1379,7 +1388,12 @@ impl ExecutionPlan for FusedSeriesExec {
         // of them here; a per-partition execution does, and must name one the input has.
         let single_execution = Self::requires_single_execution(&self.inputs, &self.tree);
         let mut streams = Vec::new();
-        let mut evaluated: Option<(usize, Vec<SendableEvaluatedSeriesStream>)> = None;
+        // One list of streams per evaluated source, indexed by source index: the index is what
+        // routes a chunk into that source's own input slots, so the sources are kept apart here
+        // rather than collected into one list. Every source is dense ([`Self::build`] refused
+        // anything else), so the list's own index is the source index.
+        let mut evaluated: Vec<Vec<SendableEvaluatedSeriesStream>> =
+            (0..self.series_schemas.len()).map(|_| Vec::new()).collect();
         for (source, (input, _, _)) in self.inputs.iter().enumerate() {
             let count = input.properties().partitioning.partition_count();
             if !single_execution && partition >= count {
@@ -1401,15 +1415,14 @@ impl ExecutionPlan for FusedSeriesExec {
                 if decoded_input {
                     // An evaluated frame carries values its producer already decided on the grid,
                     // so its chunks are queued at the input node as they are: there are no scan
-                    // labels to materialize and no series to hold back.
+                    // labels to materialize and no series to hold back. The stream is filed under
+                    // the source it was read from, and every later chunk of it is handed over with
+                    // that same index.
                     let stream = unpack_evaluated_series(
                         frames,
                         Some(Arc::clone(&self.series_schemas[source])),
                     )?;
-                    evaluated
-                        .get_or_insert_with(|| (source, Vec::new()))
-                        .1
-                        .push(stream);
+                    evaluated[source].push(stream);
                 } else {
                     let raw =
                         unpack_raw_series(frames, Some(Arc::clone(&self.series_schemas[source])))?;
@@ -1444,17 +1457,24 @@ impl ExecutionPlan for FusedSeriesExec {
             })
             .transpose()?;
         let mut executor = NativeExecutor::new(state);
-        let inputs = if let Some((source, partitions)) = evaluated {
-            // One evaluated source, its partitions read through one gather: its frames are
-            // contiguous per partition by declaration, and the gather is what keeps a chain whole
-            // while none of the partitions waits on another.
-            let reservation = MemoryConsumer::new(format!("FusedSeriesEvaluated[{partition}]"))
-                .register(&context.runtime_env().memory_pool);
-            Some(FusedInputs::Evaluated(EvaluatedGather::new(
-                source,
-                partitions,
-                reservation,
-            )))
+        let inputs = if evaluated.iter().any(|partitions| !partitions.is_empty()) {
+            // Every evaluated source, each read through its own gather: its frames are contiguous
+            // per partition by declaration, and the gather is what keeps a chain whole within that
+            // source while none of its partitions waits on another. The gathers are charged
+            // separately - the consumer's name carries the source *and* the output partition - so
+            // one source's pressure is paid by its own reservation and never by another's.
+            let gathers = evaluated
+                .into_iter()
+                .enumerate()
+                .filter(|(_, partitions)| !partitions.is_empty())
+                .map(|(source, partitions)| {
+                    let reservation =
+                        MemoryConsumer::new(format!("FusedSeriesEvaluated[{source}][{partition}]"))
+                            .register(&context.runtime_env().memory_pool);
+                    EvaluatedGather::new(source, partitions, reservation)
+                })
+                .collect();
+            Some(FusedInputs::Evaluated(EvaluatedSources::new(gathers)))
         } else if streams.is_empty() {
             executor.end_of_input()?;
             None
@@ -1602,18 +1622,20 @@ struct FusedFeed {
     chunk: FusedChunk,
 }
 
-/// The input of one execution: its raw partitions gathered together, or one evaluated source's
+/// The input of one execution: its raw partitions gathered together, or its evaluated sources'
 /// partitions read at once.
 ///
-/// [`SeriesGather`] interleaves the partitions of one raw source while keeping every series
+/// [`SeriesGather`] interleaves the partitions of every raw source while keeping every series
 /// contiguous, because a series read from storage may span them. An evaluated source is gathered
 /// the same way and for the same reason: its frames are contiguous within a partition by
 /// declaration, and reading one partition to its end before the next would stall against an upstream
 /// that routes by series into bounded queues, since the partition being read cannot end while the
-/// read feeding it waits on a partition nobody reads.
+/// read feeding it waits on a partition nobody reads. Each evaluated source gets a gather of its own
+/// ([`EvaluatedSources`]), because what one source's chain holds back is only its own: the runtime
+/// routes a chunk by the source index it is handed over with.
 enum FusedInputs {
     Raw(SeriesGather),
-    Evaluated(EvaluatedGather),
+    Evaluated(EvaluatedSources),
 }
 
 impl Stream for FusedInputs {
@@ -1630,7 +1652,78 @@ impl Stream for FusedInputs {
                     chunk: FusedChunk::Raw(chunk),
                 }))),
             },
-            Self::Evaluated(gather) => Pin::new(gather).poll_next(cx),
+            Self::Evaluated(sources) => Pin::new(sources).poll_next(cx),
+        }
+    }
+}
+
+/// Every evaluated source of one execution, read at once, one gather per source.
+///
+/// Each [`EvaluatedGather`] keeps one chain whole *within its own source*: a series' chunks arrive
+/// contiguously, and a chunk of another series of that source is held back until its chain closes.
+/// Sources do not constrain each other, and that is a fact about the runtime rather than a hope:
+/// every chunk is queued at the input slots bound to its source index
+/// ([`NativeExecutionState::input_ids`]), each slot belongs to exactly one source, and a slot's
+/// chain rule is about the chunks queued at *it*. A chunk of source 1 handed over between two chunks
+/// of source 0 therefore reaches a different slot and cannot break the chain the other slot holds,
+/// so the two sources' chains may interleave.
+///
+/// What this type adds is the order the gathers are polled in. Every sweep starts at the source
+/// after the one that last handed a chunk over, so a source that always has a chunk ready cannot
+/// keep another from being polled - the same rotation [`EvaluatedGather`] keeps across one source's
+/// partitions, extended across sources. The node ends only when every source ended: a source ending
+/// while another still has frames is not the end, because the other's frames are still its answer.
+struct EvaluatedSources {
+    /// One gather per evaluated source, in source-index order.
+    gathers: Vec<EvaluatedGather>,
+    /// The gather polled first on the next sweep, so every source is reached even while one of them
+    /// stays ready.
+    next: usize,
+}
+
+impl EvaluatedSources {
+    fn new(gathers: Vec<EvaluatedGather>) -> Self {
+        Self { gathers, next: 0 }
+    }
+}
+
+impl Stream for EvaluatedSources {
+    type Item = Result<FusedFeed, BoxedError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let count = this.gathers.len();
+        let mut ended = 0;
+        for offset in 0..count {
+            let index = (this.next + offset) % count;
+            match Pin::new(&mut this.gathers[index]).poll_next(cx) {
+                // Handed over under the index of the gather that read it: a chunk never leaves the
+                // source it was read from, so nothing re-stamps it here.
+                Poll::Ready(Some(Ok(feed))) => {
+                    this.next = (index + 1) % count;
+                    return Poll::Ready(Some(Ok(feed)));
+                }
+                // The first error ends the node, and every other source's streams are dropped with
+                // it - and so are the reservations they hold - rather than read to their ends.
+                Poll::Ready(Some(Err(error))) => {
+                    this.gathers.clear();
+                    this.next = 0;
+                    return Poll::Ready(Some(Err(error)));
+                }
+                Poll::Ready(None) => ended += 1,
+                // A source still waiting has registered this task's waker, so one of them holding a
+                // read is the node still running.
+                Poll::Pending => {}
+            }
+        }
+        // A sweep that ends here either handed a chunk over (returned above) or found every source
+        // ended or waiting, so the node ends exactly when every source ended. A source that ended
+        // earlier is polled again and answers `None` again; that is what keeps a single source's
+        // end from being read as the node's.
+        if ended == count {
+            Poll::Ready(None)
+        } else {
+            Poll::Pending
         }
     }
 }
@@ -1649,8 +1742,9 @@ impl Stream for FusedInputs {
 /// whose held chain ended stops being polled until that chain is handed over. Every held chunk is
 /// charged to `reservation` until it leaves the gather.
 struct EvaluatedGather {
-    /// The source every partition of this gather belongs to: [`FusedSeriesExec::build`] refuses a
-    /// second evaluated source and an evaluated source beside a raw one.
+    /// The source every partition of this gather belongs to: one gather is built per evaluated
+    /// source ([`EvaluatedSources`]), so every chunk this gather hands over belongs to this source
+    /// and to no other. [`FusedSeriesExec::build`] refuses an evaluated source beside a raw one.
     source: usize,
     partitions: Vec<EvaluatedPartition>,
     /// The partition whose open chain is being handed over, if any. Until it closes, what the other
