@@ -3275,12 +3275,15 @@ async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
     }
 }
 
-/// A label rewrite stays on the existing plan, which is the one that projects its new label.
+/// A label rewrite keeps the existing plan, on every shape, because the native runtime refuses a
+/// label set its rewrite creates twice where the existing plan answers it.
 ///
-/// The native node's output schema is the table's own time index, fields and tags, so a tree that
-/// rewrote labels would report a label set the existing plan's projection emits and the node cannot.
-/// Each query below writes `newlabel`, which the fixture table does not have (its only tag is
-/// `tag_0`), so a fused plan would visibly lose it.
+/// The node's tags are copied from the existing plan, so a rewritten label is declarable - but the
+/// runtime is why this shape is not admitted: two series a rewrite gives one label set collide, and
+/// `a_label_rewrite_relabels_series_and_refuses_a_shared_point` (`promql/src/native/execute/tests.rs`)
+/// pins that refusal. The existing plan has no such check, so admitting the shape would turn an
+/// answer into an error. Every shape below therefore keeps the existing plan, the two-occurrence one
+/// included: the refusal sits in `collect_selectors`, ahead of any placement decision.
 #[tokio::test]
 async fn native_fused_label_rewrites_keep_legacy_output_labels() {
     for query in [
@@ -3290,12 +3293,17 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
         // ... and below another call, which is the same shape one level deeper.
         r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
         r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
+        // A second occurrence does not admit it either: the collision is the runtime's, not the
+        // placement's, so the pair keeps the existing plan as well.
+        r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)") + on(newlabel) some_metric"#,
+        r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0") + some_metric"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let display = native.display_indent().to_string();
         assert!(
             find_fused_series(&native).is_none(),
-            "`{query}` rewrites labels the node's schema cannot declare: {display}"
+            "`{query}` writes a label the runtime would refuse twice, so it keeps the existing \
+             plan: {display}"
         );
         assert!(
             display.contains("newlabel"),
