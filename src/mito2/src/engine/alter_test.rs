@@ -37,7 +37,9 @@ use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datatypes::extension::json::Json2ExtensionType;
 use datatypes::json::value::JsonValue;
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions};
+use datatypes::schema::{
+    ColumnDefaultConstraint, ColumnSchema, FulltextAnalyzer, FulltextBackend, FulltextOptions,
+};
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::logstore::provider::Provider;
@@ -46,8 +48,8 @@ use store_api::metric_engine_consts::{PRIMARY_KEY_ENCODING, TABLE_COLUMN_METADAT
 use store_api::region_engine::{RegionEngine, RegionManifestInfo, RegionRole};
 use store_api::region_request::{
     AddColumn, AddColumnLocation, AlterKind, ModifyColumnType, PathType, RegionAlterRequest,
-    RegionBulkInsertsRequest, RegionCompactRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest, SetIndexOption, SetRegionOption, UnsetRegionOption,
+    RegionBulkInsertsRequest, RegionCompactRequest, RegionCreateRequest, RegionOpenRequest,
+    RegionPutRequest, RegionRequest, SetIndexOption, SetRegionOption, UnsetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, RegionId, ScanRequest};
@@ -56,6 +58,7 @@ use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{AlterFlushListener, NotifyRegionChangeResultListener};
 use crate::error;
+use crate::request::WorkerRequest;
 use crate::sst::FormatType;
 use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
@@ -3903,4 +3906,158 @@ async fn test_alter_time_index_widen_strict_window_compaction() {
     values.sort();
     // Each instant exactly once, rescaled to microseconds.
     assert_eq!(vec![0, 1_000_000, 2_000_000, 3_000_000, 4_000_000], values);
+}
+
+/// Returns a create request with a field `field_1` that defaults to 42, and the
+/// schema of rows that leave `field_1` out, so the engine fills it on puts.
+fn create_request_with_default_field() -> (RegionCreateRequest, Vec<api::v1::ColumnSchema>) {
+    let mut request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    request.column_metadatas.push(ColumnMetadata {
+        column_schema: ColumnSchema::new("field_1", ConcreteDataType::float64_datatype(), true)
+            .with_default_constraint(Some(ColumnDefaultConstraint::Value(
+                datatypes::value::Value::Float64(42.0.into()),
+            )))
+            .unwrap(),
+        semantic_type: SemanticType::Field,
+        column_id: 3,
+    });
+    (request, column_schemas)
+}
+
+fn add_nullable_field2() -> RegionAlterRequest {
+    RegionAlterRequest {
+        kind: AlterKind::AddColumns {
+            columns: vec![AddColumn {
+                column_metadata: ColumnMetadata {
+                    column_schema: ColumnSchema::new(
+                        "field_2",
+                        ConcreteDataType::float64_datatype(),
+                        true,
+                    ),
+                    semantic_type: SemanticType::Field,
+                    column_id: 4,
+                },
+                location: None,
+            }],
+        },
+    }
+}
+
+fn build_put_request(
+    schema: Vec<api::v1::ColumnSchema>,
+    start: usize,
+    end: usize,
+) -> RegionRequest {
+    RegionRequest::Put(RegionPutRequest {
+        rows: Rows {
+            schema,
+            rows: build_rows(start, end),
+        },
+        hint: None,
+        skip_wal: false,
+        partition_expr_version: None,
+    })
+}
+
+/// Sends a put that the engine boundary checked and filled with `metadata`,
+/// the region metadata before an alter, and returns the worker's answer.
+async fn put_filled_with_stale_metadata(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    metadata: store_api::metadata::RegionMetadataRef,
+    schema: Vec<api::v1::ColumnSchema>,
+) -> error::Result<usize> {
+    let (request, receiver) = WorkerRequest::try_from_region_request(
+        region_id,
+        build_put_request(schema, 0, 2),
+        Some(metadata),
+    )
+    .unwrap();
+    engine
+        .inner
+        .workers
+        .submit_to_worker(region_id, request)
+        .await
+        .unwrap();
+    receiver
+        .await
+        .expect("the worker dropped the request without an answer")
+}
+
+/// A put filled with a default value at the engine boundary is checked again by
+/// the worker after a schema change; the filled column must not break the check.
+#[tokio::test]
+async fn test_put_filled_at_boundary_rechecked_after_add_column() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let (request, column_schemas) = create_request_with_default_field();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    engine
+        .handle_request(region_id, RegionRequest::Alter(add_nullable_field2()))
+        .await
+        .unwrap();
+
+    let result =
+        put_filled_with_stale_metadata(&engine, region_id, metadata, column_schemas.clone()).await;
+    assert_eq!(2, result.unwrap());
+
+    // The worker still serves the region.
+    let response = engine
+        .handle_request(region_id, build_put_request(column_schemas, 2, 3))
+        .await
+        .unwrap();
+    assert_eq!(1, response.affected_rows);
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap();
+    let expected = "\
++-------+---------+---------------------+---------+---------+
+| tag_0 | field_0 | ts                  | field_1 | field_2 |
++-------+---------+---------------------+---------+---------+
+| 0     | 0.0     | 1970-01-01T00:00:00 | 42.0    |         |
+| 1     | 1.0     | 1970-01-01T00:00:01 | 42.0    |         |
+| 2     | 2.0     | 1970-01-01T00:00:02 | 42.0    |         |
++-------+---------+---------------------+---------+---------+";
+    assert_eq!(expected, batches.pretty_print().unwrap());
+}
+
+/// A put that left out a column which is dropped before the worker handles the
+/// put is still valid.
+#[tokio::test]
+async fn test_put_filled_at_boundary_rechecked_after_drop_column() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let (request, column_schemas) = create_request_with_default_field();
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let metadata = engine.get_region(region_id).unwrap().metadata();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::DropColumns {
+                    names: vec!["field_1".to_string()],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+
+    let result = put_filled_with_stale_metadata(&engine, region_id, metadata, column_schemas).await;
+    assert_eq!(2, result.unwrap());
 }

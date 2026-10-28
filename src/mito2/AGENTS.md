@@ -92,6 +92,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
+- In flat batches, equal `__primary_key` dictionary keys imply the same series, but
+  not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
+  bytes when grouping rows by series.
 
 ## Maintenance contract
 

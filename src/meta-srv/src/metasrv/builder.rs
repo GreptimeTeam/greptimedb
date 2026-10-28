@@ -38,6 +38,7 @@ use common_meta::key::runtime_switch::{RuntimeSwitchManager, RuntimeSwitchManage
 use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::kv_backend::{KvBackendRef, ResettableKvBackendRef};
 use common_meta::node_manager::NodeManagerRef;
+use common_meta::peer::PeerDiscoveryRef;
 use common_meta::reconciliation::manager::ReconciliationManager;
 use common_meta::region_keeper::MemoryRegionKeeper;
 use common_meta::region_registry::LeaderRegionRegistry;
@@ -461,7 +462,7 @@ impl MetasrvBuilder {
         {
             let ctx = DdlManagerConfigureContext {
                 kv_backend: kv_backend.clone(),
-                meta_peer_client: meta_peer_client.clone(),
+                peer_discovery: selector_ctx.peer_discovery.clone(),
             };
             configurator
                 .configure(ddl_manager, ctx)
@@ -722,7 +723,7 @@ impl Default for MetasrvBuilder {
 /// The context for [`DdlManagerConfiguratorRef`].
 pub struct DdlManagerConfigureContext {
     pub kv_backend: KvBackendRef,
-    pub meta_peer_client: MetaPeerClientRef,
+    pub peer_discovery: PeerDiscoveryRef,
 }
 
 #[cfg(test)]
@@ -800,5 +801,46 @@ mod tests {
             .build()
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_builder_shares_peer_discovery_with_ddl_configurator() {
+        use common_meta::ddl_manager::DdlManagerConfigurator;
+
+        struct RecordingConfigurator {
+            discovery: Arc<std::sync::Mutex<Option<PeerDiscoveryRef>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl DdlManagerConfigurator<DdlManagerConfigureContext> for RecordingConfigurator {
+            async fn configure(
+                &self,
+                ddl_manager: DdlManager,
+                ctx: DdlManagerConfigureContext,
+            ) -> std::result::Result<DdlManager, common_error::ext::BoxedError> {
+                *self.discovery.lock().unwrap() = Some(ctx.peer_discovery);
+                Ok(ddl_manager)
+            }
+        }
+
+        let discovery = Arc::new(std::sync::Mutex::new(None));
+        let plugins = Plugins::new();
+        plugins.insert(Arc::new(RecordingConfigurator {
+            discovery: discovery.clone(),
+        })
+            as DdlManagerConfiguratorRef<DdlManagerConfigureContext>);
+        let metasrv = MetasrvBuilder::new()
+            .options(MetasrvOptions {
+                enable_telemetry: false,
+                ..Default::default()
+            })
+            .plugins(plugins)
+            .build()
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            discovery.lock().unwrap().as_ref().unwrap(),
+            &metasrv.selector_ctx().peer_discovery,
+        ));
     }
 }

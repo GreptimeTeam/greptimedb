@@ -66,6 +66,7 @@ TQL EVAL (0, 100, '15s') test{host=~"(10\\.0\\.160\\.237:8080|10\\.0\\.160\\.237
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".*"};
 
 +-+-+-+
@@ -77,7 +78,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".*"};
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[1000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["host"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "REDACTED
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -90,6 +91,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".*"};
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".+"};
 
 +-+-+-+
@@ -101,7 +103,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".+"};
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[1000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["host"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["host != Dictionary(UInt32, Utf8(\"\"))", "ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "REDACTED
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["host != Dictionary(UInt32, Utf8(\"\"))", "ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 2_|
 +-+-+-+
@@ -114,6 +116,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host=~".+"};
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 
 +-+-+-+
@@ -136,6 +139,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".*"};
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (flat_format.*) REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".+"};
 
 +-+-+-+
@@ -147,7 +151,7 @@ TQL ANALYZE VERBOSE (0, 0, '1s') test{host!~".+"};
 | 1_| 0_|_PromInstantManipulateExec: range=[0..0], lookback=[300000], interval=[1000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["host"] REDACTED
 |_|_|_CooperativeExec REDACTED
-|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["host IS NULL OR host = Dictionary(UInt32, Utf8(\"\"))", "ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "REDACTED
+|_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "selector":"LastRow { after_merge: true }", "distribution":"PerSeries", "projection": ["ts", "host", "val"], "filters": ["host IS NULL OR host = Dictionary(UInt32, Utf8(\"\"))", "ts >= TimestampMillisecond(-299999, None)", "ts <= TimestampMillisecond(0, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 0_|
 +-+-+-+

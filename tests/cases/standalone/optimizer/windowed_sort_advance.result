@@ -56,6 +56,7 @@ select ts as ts, status, value from `a` where ts >= '2026-03-12T08:00:00+08:00' 
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE select ts as ts, status, value from `a` where ts >= '2026-03-12T08:00:00+08:00' and ts < '2026-03-12T08:02:01+08:00' order by ts asc;
 
 +-+-+-+
@@ -67,7 +68,7 @@ EXPLAIN ANALYZE select ts as ts, status, value from `a` where ts >= '2026-03-12T
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_ProjectionExec: expr=[ts@2 as ts, status@1 as status, value@0 as value] REDACTED
 |_|_|_WindowedSortExec: expr=ts@2 ASC NULLS LAST num_ranges=REDACTED REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["value", "status", "ts"], "filters": ["ts >= TimestampNanosecond(1773273600000000000, None)", "ts < TimestampNanosecond(1773273721000000000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 10_|
 +-+-+-+
@@ -95,6 +96,7 @@ select to_timestamp_millis(ts) as ts, status, value from `a` where ts >= '2026-0
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE num_ranges=\d+ num_ranges=REDACTED
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE select to_timestamp_millis(ts) as ts, status, value from `a` where ts >= '2026-03-12T08:00:00+08:00' and ts < '2026-03-12T08:02:01+08:00' order by ts asc;
 
 +-+-+-+
@@ -106,7 +108,7 @@ EXPLAIN ANALYZE select to_timestamp_millis(ts) as ts, status, value from `a` whe
 | 1_| 0_|_SortPreservingMergeExec: [ts@0 ASC NULLS LAST] REDACTED
 |_|_|_SortExec: expr=[ts@0 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
 |_|_|_ProjectionExec: expr=[to_timestamp_millis(ts@2) as ts, status@1 as status, value@0 as value] REDACTED
-|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0} REDACTED
+|_|_|_SeqScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "projection": ["value", "status", "ts"], "filters": ["ts >= TimestampNanosecond(1773273600000000000, None)", "ts < TimestampNanosecond(1773273721000000000, None)"], "time_range":REDACTED
 |_|_|_|
 |_|_| Total rows: 10_|
 +-+-+-+

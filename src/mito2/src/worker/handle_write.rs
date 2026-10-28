@@ -34,7 +34,9 @@ use crate::metrics::{
 };
 use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::region_write_ctx::{RegionWriteCtx, WriteSource};
-use crate::request::{SenderBulkRequest, SenderWriteRequest, WriteRequest};
+use crate::request::{
+    SenderBulkRequest, SenderWriteRequest, WriteRequest, check_bulk_insert_batch,
+};
 use crate::wal::Wal;
 use crate::worker::RegionWorkerLoop;
 
@@ -552,19 +554,21 @@ impl<S> RegionWorkerLoop<S> {
                     aligned_schema.schema_version == region_ctx.version().metadata.schema_version
                 });
 
-            // Fill missing columns if needed
-            if need_fill_missing_columns
-                && let Err(e) = bulk_req
-                    .request
-                    .fill_missing_columns(&region_ctx.version().metadata)
-            {
-                bulk_req.sender.send(Err(e));
-                continue;
+            // Fill missing columns if needed. The batch is checked again as the region
+            // schema may have changed since the request was checked.
+            if need_fill_missing_columns {
+                let metadata = &region_ctx.version().metadata;
+                if let Err(e) = check_bulk_insert_batch(metadata, &bulk_req.request.batch)
+                    .and_then(|_| bulk_req.request.fill_missing_columns(metadata))
+                {
+                    bulk_req.sender.send(Err(e));
+                    continue;
+                }
             }
 
             // Collect requests by region.
             if !region_ctx.push_bulk(bulk_req.sender, bulk_req.request, None, bulk_req.skip_wal) {
-                return;
+                continue;
             }
         }
     }
