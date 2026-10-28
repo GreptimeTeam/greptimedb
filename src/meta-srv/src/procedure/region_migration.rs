@@ -630,13 +630,13 @@ impl Context {
         Ok(datanode_table_value)
     }
 
-    /// Notifies the RegionSupervisor to register failure detectors of failed region.
+    /// Notifies the RegionSupervisor to register failure detectors of the given regions on the
+    /// source peer.
     ///
     /// The original failure detector was removed once the procedure was triggered.
     /// Now, we need to register the failure detector for the failed region again.
-    pub async fn register_failure_detectors(&self) {
+    pub async fn register_failure_detectors(&self, region_ids: &[RegionId]) {
         let datanode_id = self.persistent_ctx.from_peer.id;
-        let region_ids = &self.persistent_ctx.region_ids;
         let detecting_regions = region_ids
             .iter()
             .map(|region_id| (datanode_id, *region_id))
@@ -650,10 +650,10 @@ impl Context {
         );
     }
 
-    /// Notifies the RegionSupervisor to reset failure detectors of candidate regions.
-    pub async fn reset_failure_detectors_for_candidate_regions(&self) {
+    /// Notifies the RegionSupervisor to reset failure detectors of the given regions on the target
+    /// peer.
+    pub async fn reset_failure_detectors(&self, region_ids: &[RegionId]) {
         let datanode_id = self.persistent_ctx.to_peer.id;
-        let region_ids = &self.persistent_ctx.region_ids;
         let detecting_regions = region_ids
             .iter()
             .map(|region_id| (datanode_id, *region_id))
@@ -662,7 +662,7 @@ impl Context {
             .reset_failure_detectors(detecting_regions)
             .await;
         info!(
-            "Reset failure detectors after migration success for datanode {}, regions {:?}",
+            "Reset failure detectors of regions for datanode {}, regions {:?}",
             datanode_id, region_ids
         );
     }
@@ -878,12 +878,29 @@ impl RegionMigrationProcedure {
             .with_label_values(&["rollback"])
             .start_timer();
         let ctx = &self.context;
+        let to_peer_id = ctx.persistent_ctx.to_peer.id;
         let table_regions = ctx.persistent_ctx.table_regions();
+        // Regions whose route was switched to the target before the procedure aborted.
+        let mut switched_regions = Vec::new();
         for (table_id, regions) in table_regions {
             let table_lock = TableLock::Write(table_id).into();
             let _guard = procedure_ctx.provider.acquire_lock(&table_lock).await;
-            let table_route = ctx.get_table_route_value(table_id).await?;
+            let table_route = match ctx.get_table_route_value(table_id).await {
+                Ok(table_route) => table_route,
+                // The table has been dropped meanwhile.
+                Err(error::Error::TableRouteNotFound { .. }) => continue,
+                Err(err) => return Err(err),
+            };
             let region_routes = table_route.region_routes().unwrap();
+            switched_regions.extend(
+                region_routes
+                    .iter()
+                    .filter(|route| regions.contains(&route.region.id))
+                    .filter(|route| {
+                        route.leader_peer.as_ref().map(|peer| peer.id) == Some(to_peer_id)
+                    })
+                    .map(|route| route.region.id),
+            );
             let downgraded = region_routes
                 .iter()
                 .filter(|route| regions.contains(&route.region.id))
@@ -912,7 +929,24 @@ impl RegionMigrationProcedure {
         self.context
             .deregister_failure_detectors_for_candidate_regions()
             .await;
-        self.context.register_failure_detectors().await;
+        // The switched regions are served by the target, so they are monitored there instead.
+        let unswitched_regions = ctx
+            .persistent_ctx
+            .region_ids
+            .iter()
+            .filter(|region_id| !switched_regions.contains(region_id))
+            .copied()
+            .collect::<Vec<_>>();
+        self.context
+            .register_failure_detectors(&unswitched_regions)
+            .await;
+        // The target's next heartbeat would register these detectors again, but nothing would if
+        // the target stopped before sending one.
+        if !switched_regions.is_empty() {
+            self.context
+                .reset_failure_detectors(&switched_regions)
+                .await;
+        }
 
         Ok(())
     }
@@ -1014,8 +1048,8 @@ mod tests {
 
     use common_meta::distributed_time_constants::default_distributed_time_constants;
     use common_meta::instruction::Instruction;
-    use common_meta::key::test_utils::new_test_table_info;
-    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_meta::key::test_utils::{new_test_table_info, new_test_table_info_with_name};
+    use common_meta::rpc::router::{LeaderState, Region, RegionRoute};
 
     use super::*;
     use crate::handler::HeartbeatMailbox;
@@ -1025,10 +1059,64 @@ mod tests {
         new_downgrade_region_reply, new_flush_region_reply_for_region, new_open_region_reply,
         new_upgrade_region_reply,
     };
+    use crate::region::supervisor::{Event, RegionFailureDetectorControl};
     use crate::service::mailbox::Channel;
 
     fn new_persistent_context() -> PersistentContext {
         test_util::new_persistent_context(1, 2, RegionId::new(1024, 1))
+    }
+
+    #[tokio::test]
+    async fn test_rollback_registers_detectors_for_switched_regions() {
+        let env = TestingEnv::new();
+        // The route switch aborted after the table of `switched` was switched to the target and
+        // before the table of `unswitched`, whose leader is still downgrading; the table of
+        // `dropped` has been dropped.
+        let switched = RegionId::new(1024, 1);
+        let unswitched = RegionId::new(1025, 1);
+        let dropped = RegionId::new(1026, 1);
+        for (region_id, leader) in [(switched, 2), (unswitched, 1)] {
+            let table_id = region_id.table_id();
+            let table_info = new_test_table_info_with_name(table_id, &format!("table_{table_id}"));
+            let region_routes = vec![RegionRoute {
+                region: Region::new_test(region_id),
+                leader_peer: Some(Peer::empty(leader)),
+                leader_state: (region_id == unswitched).then_some(LeaderState::Downgrading),
+                ..Default::default()
+            }];
+            env.create_physical_table_metadata(table_info, region_routes)
+                .await;
+        }
+        let mut persistent_ctx = new_persistent_context();
+        persistent_ctx.region_ids = vec![switched, unswitched, dropped];
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut context_factory = env.context_factory();
+        context_factory.region_failure_detector_controller =
+            Arc::new(RegionFailureDetectorControl::new(tx));
+        let mut procedure = RegionMigrationProcedure::new(persistent_ctx, context_factory, vec![]);
+
+        procedure
+            .rollback_inner(&new_procedure_context())
+            .await
+            .unwrap();
+
+        // The target's detectors are replaced by the source's, except for `switched`, which stays
+        // monitored on the target.
+        let target = [switched, unswitched, dropped].map(|region_id| (2, region_id));
+        let source = [unswitched, dropped].map(|region_id| (1, region_id));
+        assert_matches!(rx.try_recv(), Ok(Event::DeregisterFailureDetectors(r)) if r == target);
+        assert_matches!(rx.try_recv(), Ok(Event::RegisterFailureDetectors(r)) if r == source);
+        assert_matches!(rx.try_recv(), Ok(Event::ResetFailureDetectors(r)) if r == [(2, switched)]);
+        assert!(rx.try_recv().is_err());
+        let table_route = env
+            .table_metadata_manager()
+            .table_route_manager()
+            .table_route_storage()
+            .get(unswitched.table_id())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(table_route.region_routes().unwrap()[0].leader_state, None);
     }
 
     #[test]
