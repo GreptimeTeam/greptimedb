@@ -176,29 +176,8 @@ pub struct IndexOutput {
 }
 
 impl IndexOutput {
-    /// Returns the path indexes successfully written to this index file.
-    pub fn build_json_path_indexes(&self) -> Vec<JsonPathIndexMetadata> {
-        let mut indexes = Vec::new();
-        for (output, index_type) in [
-            (&self.inverted_index, IndexType::InvertedIndex),
-            (&self.fulltext_index, IndexType::FulltextIndex),
-            (&self.bloom_filter, IndexType::BloomFilterIndex),
-        ] {
-            if !output.is_available() {
-                continue;
-            }
-            indexes.extend(output.targets.iter().filter_map(|target| match target {
-                IndexTarget::JsonPath(target) => Some(JsonPathIndexMetadata {
-                    target: target.clone(),
-                    index_type,
-                }),
-                IndexTarget::ColumnId(_) => None,
-            }));
-        }
-        indexes
-    }
-
-    pub fn build_available_indexes(&self) -> SmallVec<[IndexType; 4]> {
+    /// Returns the index types available in this file.
+    pub fn build_available_index_types(&self) -> SmallVec<[IndexType; 4]> {
         let mut indexes = SmallVec::new();
         if self.inverted_index.is_available() {
             indexes.push(IndexType::InvertedIndex);
@@ -212,6 +191,7 @@ impl IndexOutput {
         indexes
     }
 
+    /// Returns the indexes created for whole columns.
     pub fn build_column_indexes(&self) -> Vec<ColumnIndexMetadata> {
         let mut map: HashMap<ColumnId, IndexTypes> = HashMap::new();
 
@@ -246,6 +226,28 @@ impl IndexOutput {
                 created_indexes,
             })
             .collect::<Vec<_>>()
+    }
+
+    /// Returns the path indexes successfully written to this index file.
+    pub fn build_json_path_indexes(&self) -> Vec<JsonPathIndexMetadata> {
+        let mut indexes = Vec::new();
+        for (output, index_type) in [
+            (&self.inverted_index, IndexType::InvertedIndex),
+            (&self.fulltext_index, IndexType::FulltextIndex),
+            (&self.bloom_filter, IndexType::BloomFilterIndex),
+        ] {
+            if !output.is_available() {
+                continue;
+            }
+            indexes.extend(output.targets.iter().filter_map(|target| match target {
+                IndexTarget::JsonPath(target) => Some(JsonPathIndexMetadata {
+                    target: target.clone(),
+                    index_type,
+                }),
+                IndexTarget::ColumnId(_) => None,
+            }));
+        }
+        indexes
     }
 }
 
@@ -1403,7 +1405,7 @@ impl IndexBuildTask {
         new_index_version: u64,
     ) -> Result<IndexPublication> {
         let mut updated = self.source.file_meta.clone();
-        updated.available_indexes = output.build_available_indexes();
+        updated.available_indexes = output.build_available_index_types();
         updated.indexes = output.build_column_indexes();
         updated.json_path_indexes = output.build_json_path_indexes();
         updated.index_file_size = output.file_size;
