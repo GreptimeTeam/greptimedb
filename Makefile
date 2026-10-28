@@ -266,6 +266,7 @@ run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git -v /tmp:/tmp \
 	-e GT_S3_BUCKET -e GT_S3_ACCESS_KEY_ID -e GT_S3_ACCESS_KEY -e GT_S3_REGION \
+	-e RUST_MIN_STACK \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 

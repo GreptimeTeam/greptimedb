@@ -81,6 +81,7 @@ VALUES
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE \\?"(dyn_filters|time_range|file_summary|max_part_range)\\?":.* "$1":REDACTED
 EXPLAIN ANALYZE VERBOSE SELECT
     rack
 FROM
@@ -122,6 +123,39 @@ group by
 
 -- Query the row at the latest timestamp through a scalar subquery.
 SELECT
+    rack,
+    os,
+    greptime_timestamp
+FROM
+    cpu
+WHERE
+    greptime_timestamp = (
+        SELECT
+            greptime_timestamp
+        FROM
+            cpu
+        ORDER BY
+            greptime_timestamp DESC
+        LIMIT
+            1
+    );
+
+-- The resolved scalar subquery reaches the region scans as a dynamic filter.
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (metrics.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
+-- SQLNESS REPLACE "flat_format":\s\w+, "flat_format": REDACTED,
+-- SQLNESS REPLACE (?m)^\|_\|_\|_SortExec:.*\n
+-- SQLNESS REPLACE FilterExec:\sDynamicFilter\s\[[^\]]*\] FilterExec: DynamicFilter [ REDACTED ]
+-- SQLNESS REPLACE "files":\s\[.*?\],\s
+-- SQLNESS REPLACE IS\sNULL\sOR\sgreptime_timestamp@0\s>\s\d+ IS NULL OR greptime_timestamp@0 > REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE UnorderedScan:.*"dyn_filters":\s(\["DynamicFilter\s\[[^\]]*\]"\]).* UnorderedScan: REDACTED, "dyn_filters": $1
+EXPLAIN ANALYZE VERBOSE SELECT
     rack,
     os,
     greptime_timestamp

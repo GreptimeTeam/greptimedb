@@ -140,9 +140,15 @@ mod test {
         ) -> common_meta::error::Result<RegionResponse> {
             let gate = {
                 let mut gate = self.gate.lock().unwrap();
-                if gate.as_ref().is_some_and(|gate| {
-                    matches!(&request.body, Some(region_request::Body::Inserts(inserts))
-                        if inserts.requests.iter().any(|insert| insert.region_id == gate.region_id.as_u64()))
+                if gate.as_ref().is_some_and(|gate| match &request.body {
+                    Some(region_request::Body::Inserts(inserts)) => inserts
+                        .requests
+                        .iter()
+                        .any(|insert| insert.region_id == gate.region_id.as_u64()),
+                    Some(region_request::Body::BulkInsert(insert)) => {
+                        insert.region_id == gate.region_id.as_u64()
+                    }
+                    _ => false,
                 }) {
                     gate.take()
                 } else {
@@ -713,11 +719,11 @@ mod test {
         };
         let expected = r#"CREATE TABLE IF NOT EXISTS "trace_v2" (
   "timestamp" TIMESTAMP(9) NOT NULL,
-  "timestamp_end" TIMESTAMP(9) NULL,
+  "timestamp_end" TIMESTAMP(9) NULL COMPRESSION WITH(encoding = 'delta_binary_packed', type = 'zstd'),
   "duration_nano" BIGINT NULL,
-  "parent_span_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  "parent_span_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM') COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),
   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
-  "span_id" STRING NULL,
+  "span_id" STRING NULL COMPRESSION WITH(encoding = 'plain', page_size = '64KiB', type = 'zstd'),
   "span_kind" STRING NULL,
   "span_name" STRING NULL,
   "span_status_code" STRING NULL,
@@ -741,22 +747,22 @@ mod test {
   PRIMARY KEY ("service_name")
 )
 PARTITION ON COLUMNS ("trace_id") (
-  trace_id < '1',
-  trace_id >= '1' AND trace_id < '2',
-  trace_id >= '2' AND trace_id < '3',
-  trace_id >= '3' AND trace_id < '4',
-  trace_id >= '4' AND trace_id < '5',
-  trace_id >= '5' AND trace_id < '6',
-  trace_id >= '6' AND trace_id < '7',
-  trace_id >= '7' AND trace_id < '8',
-  trace_id >= '8' AND trace_id < '9',
-  trace_id >= '9' AND trace_id < 'a',
-  trace_id >= 'a' AND trace_id < 'b',
-  trace_id >= 'b' AND trace_id < 'c',
-  trace_id >= 'c' AND trace_id < 'd',
-  trace_id >= 'd' AND trace_id < 'e',
-  trace_id >= 'e' AND trace_id < 'f',
-  trace_id >= 'f'
+  "trace_id" < '1',
+  "trace_id" >= '1' AND "trace_id" < '2',
+  "trace_id" >= '2' AND "trace_id" < '3',
+  "trace_id" >= '3' AND "trace_id" < '4',
+  "trace_id" >= '4' AND "trace_id" < '5',
+  "trace_id" >= '5' AND "trace_id" < '6',
+  "trace_id" >= '6' AND "trace_id" < '7',
+  "trace_id" >= '7' AND "trace_id" < '8',
+  "trace_id" >= '8' AND "trace_id" < '9',
+  "trace_id" >= '9' AND "trace_id" < 'a',
+  "trace_id" >= 'a' AND "trace_id" < 'b',
+  "trace_id" >= 'b' AND "trace_id" < 'c',
+  "trace_id" >= 'c' AND "trace_id" < 'd',
+  "trace_id" >= 'd' AND "trace_id" < 'e',
+  "trace_id" >= 'e' AND "trace_id" < 'f',
+  "trace_id" >= 'f'
 )
 ENGINE=mito
 WITH(
@@ -1561,7 +1567,9 @@ WITH(
                         Arc::new(fixed)
                     )
                     .await
-                    .is_err()
+                    .unwrap()
+                    .rejected_data_points
+                    == 1
             );
         }
         assert_eq!(results[..3], results[3..]);
@@ -1604,14 +1612,21 @@ WITH(
         let result = output.remove(0);
         assert!(result.is_ok(), "{result:?}");
 
-        let error = instance
+        let outcome = instance
             .metrics(
                 build_sum_request("fixed.delta", AggregationTemporality::Delta, &[(60, 10)]),
                 ctx.clone(),
             )
             .await
-            .unwrap_err();
-        assert!(format!("{error:?}").contains("otlp_aggregation_temporality"));
+            .unwrap();
+        assert_eq!(outcome.accepted_data_points, 0);
+        assert_eq!(outcome.rejected_data_points, 1);
+        assert!(
+            outcome
+                .error_message
+                .unwrap()
+                .contains("otlp_aggregation_temporality")
+        );
 
         let mut output = instance
             .do_query("SELECT COUNT(*) FROM fixed_delta_total", ctx)
@@ -2226,6 +2241,1174 @@ WITH(
                 }),
                 ..Default::default()
             }],
+        }
+    }
+
+    fn metric_request(metrics: Vec<Metric>) -> ExportMetricsServiceRequest {
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn gauge_metric(name: &str, points: &[(u64, f64, Option<&str>)]) -> Metric {
+        Metric {
+            name: name.into(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: points
+                    .iter()
+                    .map(|&(time, value, host)| NumberDataPoint {
+                        time_unix_nano: time,
+                        value: Some(Value::AsDouble(value)),
+                        attributes: host
+                            .map(|host| vec![keyvalue("host", host)])
+                            .unwrap_or_default(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    fn native_metric(name: &str, scale: i32) -> Metric {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+            ExponentialHistogram, ExponentialHistogramDataPoint,
+        };
+        Metric {
+            name: name.into(),
+            data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                aggregation_temporality: AggregationTemporality::Delta as i32,
+                data_points: vec![ExponentialHistogramDataPoint {
+                    time_unix_nano: 60_000_000_000,
+                    count: 10,
+                    zero_count: 10,
+                    scale,
+                    sum: Some(0.0),
+                    ..Default::default()
+                }],
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_otlp_primary_and_descriptor_write_failures() {
+        for sync in [false, true] {
+            temp_env::with_var("PENDING_ROWS_BATCH_SYNC", Some(sync.to_string()), || {
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        tokio::time::timeout(
+                            Duration::from_secs(60),
+                            check_metric_write_failure(sync),
+                        )
+                        .await
+                        .expect("metric acknowledgement must make progress");
+                    });
+            });
+        }
+    }
+
+    async fn check_metric_write_failure(sync: bool) {
+        use prost::Message;
+
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_write_failure")
+            .with_logical_batcher(BatcherOptions {
+                protocols: vec![BatchingProtocol::Otlp],
+                max_batch_rows: 1,
+                pending_rows_flush_interval: Duration::from_secs(3600),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let source = standalone.fe_instance();
+        let gate = Arc::new(Mutex::new(None));
+        let cache_registry = Arc::new(
+            cache::with_default_composite_cache_registry(
+                LayeredCacheRegistryBuilder::default().add_cache_registry(
+                    cache::build_fundamental_cache_registry(standalone.kv_backend.clone()),
+                ),
+            )
+            .unwrap()
+            .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new(
+                standalone.opts.frontend_options(),
+                standalone.kv_backend.clone(),
+                cache_registry,
+                source.catalog_manager().clone(),
+                Arc::new(GatedTraceNodeManager {
+                    inner: source.node_manager().clone(),
+                    gate: gate.clone(),
+                }),
+                source.procedure_executor().clone(),
+                Arc::new(catalog::process_manager::ProcessManager::new(
+                    "otlp_write_failure".into(),
+                    None,
+                )),
+            )
+            .try_build()
+            .await
+            .unwrap(),
+        );
+        instance.init_logical_batcher(&standalone.opts.frontend_options());
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let mut warm = metric_request(vec![gauge_metric(
+            "ack_metric",
+            &[(60_000_000_000, 1.0, None)],
+        )]);
+        warm.resource_metrics[0].resource = Some(Resource {
+            attributes: vec![
+                keyvalue("service.name", "ack-service"),
+                keyvalue("host.id", "ack-host"),
+            ],
+            ..Default::default()
+        });
+        instance
+            .metrics(warm.clone(), Arc::new(ctx.clone()))
+            .await
+            .unwrap();
+        let region = async |name: &str| {
+            let table = instance
+                .catalog_manager()
+                .table(DEFAULT_CATALOG_NAME, "public", name, None)
+                .await
+                .unwrap()
+                .unwrap();
+            instance
+                .partition_manager()
+                .find_physical_table_route(table.table_info().table_id())
+                .await
+                .unwrap()
+                .region_routes[0]
+                .region
+                .id
+        };
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *gate.lock().unwrap() = Some(TraceAuxWriteGate {
+            region_id: region("ack_metric").await,
+            started: started_tx,
+            release: release_rx,
+        });
+        ctx.set_logical_batching_enabled(true);
+        let request = metric_request(vec![gauge_metric(
+            "ack_metric",
+            &[(120_000_000_000, 2.0, None)],
+        )]);
+        let failures = servers::metrics::FLUSH_FAILURES.get();
+        let dropped = servers::metrics::FLUSH_DROPPED_ROWS.get();
+        let write = tokio::spawn({
+            let instance = instance.clone();
+            let ctx = Arc::new(ctx.clone());
+            async move { instance.metrics(request, ctx).await }
+        });
+        tokio::time::timeout(Duration::from_secs(10), started_rx)
+            .await
+            .expect("primary batch must reach the write gate")
+            .unwrap();
+        if sync {
+            assert!(!write.is_finished());
+            release_tx.send(false).unwrap();
+            assert!(write.await.unwrap().is_err());
+        } else {
+            let accepted = tokio::time::timeout(Duration::from_secs(10), write)
+                .await
+                .expect("asynchronous acknowledgement must precede physical completion")
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (accepted.accepted_data_points, accepted.rejected_data_points),
+                (1, 0)
+            );
+            release_tx.send(false).unwrap();
+            while servers::metrics::FLUSH_FAILURES.get() == failures
+                || servers::metrics::FLUSH_DROPPED_ROWS.get() == dropped
+            {
+                tokio::task::yield_now().await;
+            }
+        }
+        assert_eq!(servers::metrics::FLUSH_FAILURES.get(), failures + 1);
+        assert_eq!(servers::metrics::FLUSH_DROPPED_ROWS.get(), dropped + 1);
+        assert_trace_v2_query(
+            &instance,
+            "SELECT COUNT(*)=1 AND MAX(greptime_value)=1 FROM ack_metric",
+            Arc::new(ctx),
+        )
+        .await
+        .unwrap();
+
+        // The derived write fails after the metric was accepted, including when
+        // primary logical batching acknowledges before its flush completes.
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *gate.lock().unwrap() = Some(TraceAuxWriteGate {
+            region_id: region("greptime_otel_resource_info").await,
+            started: started_tx,
+            release: release_rx,
+        });
+        let options = standalone.opts.clone();
+        let services = frontend::server::Services::new(
+            options.clone(),
+            instance.clone(),
+            common_base::Plugins::default(),
+        );
+        let server = services
+            .http_server_builder(
+                &options.frontend_options(),
+                services.server_memory_limiter.clone(),
+            )
+            .build();
+        let client =
+            servers::http::test_helpers::TestClient::new(server.build(server.make_app()).unwrap())
+                .await;
+        let errors = frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get();
+        let accepted_rows = frontend::OTLP_METRICS_ROWS.get();
+        let response = tokio::spawn(async move {
+            client
+                .post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(warm.encode_to_vec())
+                .send()
+                .await
+        });
+        started_rx.await.unwrap();
+        release_tx.send(false).unwrap();
+        let response = response.await.unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let bytes = response.bytes().await;
+        let response = otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceResponse::decode(bytes).unwrap();
+        let partial = response.partial_success.unwrap();
+        assert_eq!(partial.rejected_data_points, 0);
+        assert!(partial.error_message.contains("descriptor"));
+        assert_eq!(frontend::OTLP_RESOURCE_INFO_WRITE_ERRORS.get(), errors + 1);
+        assert_eq!(frontend::OTLP_METRICS_ROWS.get(), accepted_rows + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_metric_permission_precedes_preflight() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+
+        #[derive(Default)]
+        struct DenyRestricted {
+            calls: Mutex<Vec<Vec<String>>>,
+        }
+
+        impl auth::PermissionChecker for DenyRestricted {
+            fn check_permission(
+                &self,
+                _user_info: auth::UserInfoRef,
+                _req: auth::PermissionReq,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                Ok(auth::PermissionResp::Allow)
+            }
+
+            fn check_permission_with_table_targets(
+                &self,
+                _user_info: auth::UserInfoRef,
+                req: auth::PermissionReq,
+                targets: auth::PermissionTableTargets,
+            ) -> auth::error::Result<auth::PermissionResp> {
+                if matches!(req, auth::PermissionReq::Action(auth::OTLP_WRITE)) {
+                    let auth::PermissionTableTargets::Resolved(targets) = targets else {
+                        panic!("metric destinations must be resolved");
+                    };
+                    let denied = targets.iter().any(|t| t.table == "restricted_metric");
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push(targets.into_iter().map(|t| t.table).collect());
+                    if denied {
+                        return Ok(auth::PermissionResp::Reject);
+                    }
+                }
+                Ok(auth::PermissionResp::Allow)
+            }
+        }
+
+        let checker = Arc::new(DenyRestricted::default());
+        let plugins = common_base::Plugins::new();
+        plugins.insert::<auth::PermissionCheckerRef>(checker.clone());
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_permission_preflight")
+            .with_plugin(plugins)
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let ctx = QueryContext::arc();
+        instance
+            .do_query(
+                "CREATE TABLE restricted_metric (greptime_timestamp TIMESTAMP(3) TIME INDEX, \
+                 greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY) \
+                 WITH ('otlp_metric_compat'='prom')",
+                ctx.clone(),
+            )
+            .await
+            .remove(0)
+            .unwrap();
+
+        for host in [Some("present"), None] {
+            for with_allowed in [false, true] {
+                let mut metrics = vec![gauge_metric(
+                    "restricted_metric",
+                    &[(60_000_000_000, 1.0, host), (120_000_000_000, 2.0, host)],
+                )];
+                let mut expected_targets = vec!["restricted_metric"];
+                if with_allowed {
+                    metrics.push(gauge_metric(
+                        "allowed_metric",
+                        &[(60_000_000_000, 7.0, None)],
+                    ));
+                    expected_targets.push("allowed_metric");
+                }
+                let err = instance
+                    .metrics(metric_request(metrics), ctx.clone())
+                    .await
+                    .unwrap_err();
+                assert_eq!(err.status_code(), StatusCode::PermissionDenied);
+                assert!(!err.to_string().contains("missing required column"));
+                assert_eq!(
+                    std::mem::take(&mut *checker.calls.lock().unwrap()),
+                    vec![expected_targets]
+                );
+            }
+        }
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='allowed_metric'",
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_preflight_defaults_order_and_required_columns() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_preflight_defaults")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
+        instance.do_query("CREATE TABLE defaulted (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL DEFAULT 'unknown' PRIMARY KEY)",ctx.clone()).await.remove(0).unwrap();
+        let outcome = instance
+            .metrics(
+                metric_request(vec![gauge_metric(
+                    "defaulted",
+                    &[
+                        (60_000_000_000, 10.0, None),
+                        (60_000_000_000, 20.0, Some("unknown")),
+                        (60_000_000_000, 30.0, None),
+                    ],
+                )]),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (3, 0)
+        );
+        for flushed in [false, true] {
+            if flushed {
+                instance
+                    .do_query("ADMIN FLUSH_TABLE('defaulted')", ctx.clone())
+                    .await
+                    .remove(0)
+                    .unwrap();
+            }
+            assert_trace_v2_query(instance,"SELECT COUNT(*)=1 AND MIN(greptime_value)=30 AND MIN(host)='unknown' FROM defaulted",ctx.clone()).await.unwrap();
+        }
+        instance.do_query("CREATE TABLE required (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY)",ctx.clone()).await.remove(0).unwrap();
+        for (name, points, expected) in [
+            (
+                "defaulted",
+                [
+                    (120_000_000_000, 1.0, None),
+                    (180_000_000_000, 2.0, Some("supplied")),
+                ],
+                (3, 0),
+            ),
+            (
+                "required",
+                [
+                    (60_000_000_000, 10.0, None),
+                    (120_000_000_000, 20.0, Some("present")),
+                ],
+                (2, 1),
+            ),
+        ] {
+            for reverse in [false, true] {
+                let mut points = points;
+                if reverse {
+                    points.reverse();
+                }
+                let outcome = instance
+                    .metrics(
+                        metric_request(vec![
+                            gauge_metric(name, &points),
+                            gauge_metric("independent", &[(60_000_000_000, 7.0, None)]),
+                        ]),
+                        ctx.clone(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    (outcome.accepted_data_points, outcome.rejected_data_points),
+                    expected,
+                    "{name}, reverse={reverse}"
+                );
+            }
+        }
+        for sql in [
+            "SELECT COUNT(*)=1 FROM defaulted WHERE greptime_value=1 AND host='unknown'",
+            "SELECT COUNT(*)=1 FROM defaulted WHERE greptime_value=2 AND host='supplied'",
+            "SELECT COUNT(*)=1 AND MIN(host)='present' FROM required",
+        ] {
+            assert_trace_v2_query(instance, sql, ctx.clone())
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_preflight_custom_backing_and_timestamp_units() {
+        for policy in 0..3 {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("otlp_backing_{policy}"))
+                .with_auto_create_table(policy != 0)
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            for precision in [0, 3, 6, 9] {
+                let db = format!("backing_{precision}");
+                let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, &db);
+                ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                    with_metric_engine: true,
+                    ..Default::default()
+                }));
+                if policy < 2 {
+                    ctx.set_extension(
+                        "auto_create_table",
+                        if policy == 0 { "true" } else { "false" },
+                    );
+                }
+                let ctx = Arc::new(ctx);
+                for sql in [
+                    format!("CREATE DATABASE {db}"),
+                    format!(
+                        "CREATE TABLE custom_physical (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')"
+                    ),
+                    format!(
+                        "CREATE TABLE custom_total (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, \"stream\" STRING PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='custom_physical','otlp_metric_compat'='prom')"
+                    ),
+                ] {
+                    instance
+                        .do_query(&sql, ctx.clone())
+                        .await
+                        .remove(0)
+                        .unwrap();
+                }
+                let mut request =
+                    build_sum_request("custom", AggregationTemporality::Cumulative, &[(60, 7)]);
+                if let Some(metric::Data::Sum(data)) = request.resource_metrics[0].scope_metrics[0]
+                    .metrics[0]
+                    .data
+                    .as_mut()
+                {
+                    data.data_points[0].time_unix_nano += 123_456_789;
+                }
+                request.resource_metrics[0].scope_metrics[0]
+                    .metrics
+                    .push(native_metric("bad", -5));
+                let outcome = instance.metrics(request, ctx.clone()).await.unwrap();
+                assert_eq!(
+                    (outcome.accepted_data_points, outcome.rejected_data_points),
+                    (1, 1),
+                    "policy={policy}, precision={precision}, {outcome:?}"
+                );
+                let expected = 60_123_456_789i64 / 10i64.pow(9 - precision);
+                let output = instance
+                    .do_query(
+                        "SELECT greptime_timestamp,greptime_value FROM custom_total",
+                        ctx.clone(),
+                    )
+                    .await
+                    .remove(0)
+                    .unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    unreachable!()
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                let column = batches[0].column(0);
+                let actual = match precision {
+                    0 => column.as_primitive::<TimestampSecondType>().value(0),
+                    3 => column.as_primitive::<TimestampMillisecondType>().value(0),
+                    6 => column.as_primitive::<TimestampMicrosecondType>().value(0),
+                    _ => column.as_primitive::<TimestampNanosecondType>().value(0),
+                };
+                assert_eq!(actual, expected);
+                assert_trace_v2_query(instance,&format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_schema='{db}' AND table_name IN ('greptime_physical_table','bad')"),ctx.clone()).await.unwrap();
+                if policy == 2 && precision == 3 {
+                    instance.do_query("CREATE TABLE not_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE)", ctx.clone()).await.remove(0).unwrap();
+                    let mut selected = (*ctx).clone();
+                    selected.set_extension(
+                        servers::http::prom_store::PHYSICAL_TABLE_PARAM,
+                        "not_physical",
+                    );
+                    let mut request = build_sum_request(
+                        "custom",
+                        AggregationTemporality::Cumulative,
+                        &[(120, 9)],
+                    );
+                    request.resource_metrics[0].scope_metrics[0]
+                        .metrics
+                        .push(gauge_metric(
+                            "invalid_backing",
+                            &[(120_000_000_000, 1.0, None)],
+                        ));
+                    let outcome = instance.metrics(request, Arc::new(selected)).await.unwrap();
+                    assert_eq!(
+                        (outcome.accepted_data_points, outcome.rejected_data_points),
+                        (1, 1)
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_delta_exponential_distributed_queries() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::exponential_histogram_data_point::Buckets;
+
+        let cluster = tests::create_distributed_instance("delta_exponential_dist").await;
+        let instance = cluster.frontend();
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        let mut metric = native_metric("delta_distribution", 0);
+        let Some(metric::Data::ExponentialHistogram(data)) = metric.data.as_mut() else {
+            unreachable!()
+        };
+        let point = data.data_points[0].clone();
+        data.data_points = [(60, 10), (120, 20), (180, 15)]
+            .into_iter()
+            .map(|(end, count)| {
+                let mut point = point.clone();
+                point.time_unix_nano = end * 1_000_000_000;
+                point.start_time_unix_nano = (end - 60) * 1_000_000_000;
+                point.count = count;
+                point.sum = Some(count as f64 * 1.5);
+                point.zero_count = 0;
+                point.zero_threshold = 0.001;
+                point.positive = Some(Buckets {
+                    offset: 0,
+                    bucket_counts: vec![count],
+                });
+                point
+            })
+            .collect();
+        let outcome = instance
+            .metrics(metric_request(vec![metric]), ctx.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (3, 0)
+        );
+        for flushed in [false, true] {
+            if flushed {
+                instance
+                    .do_query("ADMIN FLUSH_TABLE('delta_distribution')", ctx.clone())
+                    .await
+                    .remove(0)
+                    .unwrap();
+            }
+            let series =
+                native_histogram_remote_read(&instance, "delta_distribution", ctx.clone()).await;
+            assert_eq!(series.len(), 1);
+            assert!(
+                series[0]
+                    .labels
+                    .iter()
+                    .any(|l| l.name == "otlp_aggregation_temporality" && l.value == "delta")
+            );
+            assert_eq!(series[0].histograms.len(), 3);
+            for (histogram, (timestamp, count)) in
+                series[0]
+                    .histograms
+                    .iter()
+                    .zip([(60_000, 10), (120_000, 20), (180_000, 15)])
+            {
+                assert_eq!(histogram.timestamp, timestamp);
+                assert_eq!(
+                    histogram.count,
+                    Some(api::prom_store::remote::histogram::Count::CountInt(count))
+                );
+                assert_eq!(histogram.positive_deltas, vec![count as i64]);
+                assert_eq!(histogram.positive_spans[0].offset, 1);
+                assert_eq!(histogram.sum, count as f64 * 1.5);
+                assert_eq!(histogram.reset_hint, 3);
+            }
+            for (expression, expected) in [
+                (
+                    "histogram_count(sum_over_time(delta_distribution[3m]))",
+                    45.0,
+                ),
+                ("histogram_sum(sum_over_time(delta_distribution[3m]))", 67.5),
+                (
+                    "histogram_count(sum_over_time(delta_distribution[3m]) / 180)",
+                    0.25,
+                ),
+                (
+                    "histogram_fraction(1, 2, sum_over_time(delta_distribution[3m]))",
+                    1.0,
+                ),
+            ] {
+                let output = instance
+                    .do_query(
+                        &format!("TQL EVAL (180,180,'1m') {expression}"),
+                        ctx.clone(),
+                    )
+                    .await
+                    .remove(0)
+                    .unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    unreachable!()
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                assert_eq!(batches[0].num_rows(), 1);
+                assert_eq!(
+                    batches[0]
+                        .columns()
+                        .iter()
+                        .find(|column| column.data_type() == &DataType::Float64)
+                        .unwrap()
+                        .as_primitive::<datatypes::arrow::datatypes::Float64Type>()
+                        .value(0),
+                    expected,
+                    "{expression}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_preflight_logical_nullability_and_multiple_backing_units() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_logical_presence")
+            .with_logical_batcher(BatcherOptions {
+                protocols: vec![BatchingProtocol::Otlp],
+                max_batch_rows: 1,
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        for (physical, logical, precision) in [
+            ("greptime_physical_table", "millis", 3),
+            ("custom_physical", "nanos", 9),
+        ] {
+            for sql in [
+                format!(
+                    "CREATE TABLE {physical} (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')"
+                ),
+                format!(
+                    "CREATE TABLE {logical} (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE, host STRING NOT NULL PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='{physical}')"
+                ),
+            ] {
+                instance
+                    .do_query(&sql, Arc::new(ctx.clone()))
+                    .await
+                    .remove(0)
+                    .unwrap();
+            }
+        }
+        for with_metric_engine in [false, true] {
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine,
+                ..Default::default()
+            }));
+            for batching in [false, true] {
+                ctx.set_logical_batching_enabled(batching);
+                for reverse in [false, true] {
+                    let mut points = vec![
+                        (60_000_000_123, 10.0, None),
+                        (120_000_000_456, 20.0, Some("present")),
+                    ];
+                    if reverse {
+                        points.reverse();
+                    }
+                    // The default-backed target remains eligible when sent alone;
+                    // custom-backed targets retain the established fallback.
+                    for names in [vec!["millis"], vec!["millis", "nanos"]] {
+                        // Ordinary ingestion emits milliseconds; test it against the
+                        // matching existing logical table without auto-creation.
+                        if !with_metric_engine && names.contains(&"nanos") {
+                            continue;
+                        }
+                        let outcome = instance
+                            .metrics(
+                                metric_request(
+                                    names
+                                        .iter()
+                                        .map(|name| gauge_metric(name, &points))
+                                        .collect(),
+                                ),
+                                Arc::new(ctx.clone()),
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            (outcome.accepted_data_points, outcome.rejected_data_points),
+                            (names.len() as i64 * 2, 0)
+                        );
+                    }
+                }
+            }
+        }
+        for (name, unit, expected) in [
+            ("greptime_physical_table", TimeUnit::Millisecond, 60_000),
+            ("custom_physical", TimeUnit::Nanosecond, 60_000_000_123),
+        ] {
+            let output = instance.do_query(&format!("SELECT greptime_timestamp, host, greptime_value FROM {name} ORDER BY greptime_timestamp"), Arc::new(ctx.clone())).await.remove(0).unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                unreachable!()
+            };
+            let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                2
+            );
+            assert!(batches[0].column(1).is_null(0));
+            assert_eq!(
+                batches[0]
+                    .column(2)
+                    .as_primitive::<datatypes::arrow::datatypes::Float64Type>()
+                    .value(0),
+                10.0
+            );
+            let timestamp = batches[0].column(0);
+            assert_eq!(timestamp.data_type(), &DataType::Timestamp(unit, None));
+            let actual = if unit == TimeUnit::Millisecond {
+                timestamp
+                    .as_primitive::<TimestampMillisecondType>()
+                    .value(0)
+            } else {
+                timestamp.as_primitive::<TimestampNanosecondType>().value(0)
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_preflight_shared_physical_and_fanout_conflicts() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_physical_conflicts")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        for reverse in [false, true] {
+            let db = format!("physical_{reverse}");
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, &db);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            instance
+                .do_query(&format!("CREATE DATABASE {db}"), ctx.clone())
+                .await
+                .remove(0)
+                .unwrap();
+            let mut scalar = gauge_metric("scalar", &[(60_000_000_000, 1.0, None)]);
+            if let Some(metric::Data::Gauge(data)) = scalar.data.as_mut() {
+                data.data_points[0]
+                    .attributes
+                    .push(keyvalue("greptime_native_histogram", "tag"));
+            }
+            let mut metrics = vec![
+                scalar,
+                native_metric("native", 0),
+                gauge_metric("independent", &[(60_000_000_000, 7.0, None)]),
+            ];
+            if reverse {
+                metrics.reverse();
+            }
+            let outcome = instance
+                .metrics(metric_request(metrics.clone()), ctx.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 2)
+            );
+            assert_trace_v2_query(instance,&format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_schema='{db}' AND table_name IN ('scalar','native')"),ctx.clone()).await.unwrap();
+            assert_trace_v2_query(instance,&format!("SELECT COUNT(*)=0 FROM information_schema.columns WHERE table_schema='{db}' AND column_name='greptime_native_histogram'"),ctx.clone()).await.unwrap();
+            // The existing physical Float64 definition is authoritative, including
+            // for existing-column writes that propose no ALTER.
+            instance.do_query("CREATE TABLE bad_type (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value BIGINT) WITH ('otlp_metric_compat'='prom')",ctx.clone()).await.remove(0).unwrap();
+            let outcome = instance
+                .metrics(
+                    metric_request(vec![
+                        gauge_metric("bad_type", &[(60_000_000_000, 3.0, None)]),
+                        gauge_metric("independent", &[(120_000_000_000, 9.0, None)]),
+                    ]),
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 1)
+            );
+            assert_trace_v2_query(instance, "SELECT COUNT(*)=0 FROM bad_type", ctx.clone())
+                .await
+                .unwrap();
+            let compatible_name = if reverse { "scalar" } else { "native" };
+            let compatible = metrics
+                .iter()
+                .find(|m| m.name == compatible_name)
+                .unwrap()
+                .clone();
+            let outcome = instance
+                .metrics(metric_request(vec![compatible]), ctx.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 0)
+            );
+            if !reverse {
+                // An existing scalar logical table cannot ALTER a shared Struct
+                // field into a string tag either.
+                metrics
+                    .iter_mut()
+                    .find(|m| m.name == "scalar")
+                    .unwrap()
+                    .name = "independent".into();
+            }
+            let outcome = instance
+                .metrics(metric_request(metrics), ctx.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (2, 1)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_metrics_ignore_compat_option() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_compat_metadata")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "public"));
+        let tables = [
+            ("without_option", ""),
+            ("with_prom_option", "WITH ('otlp_metric_compat'='prom')"),
+            ("with_old_option", "WITH ('otlp_metric_compat'='legacy')"),
+        ];
+        for (name, options) in tables {
+            instance
+                .do_query(
+                    &format!("CREATE TABLE {name} (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE) {options}"),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+        }
+        // Neither absent nor retained option values select a different conversion
+        // or make tables incompatible within the same request.
+        for timestamp in [60_000_000_123, 120_000_000_456] {
+            let outcome = instance
+                .metrics(
+                    metric_request(
+                        tables
+                            .iter()
+                            .map(|(name, _)| gauge_metric(name, &[(timestamp, 7.0, None)]))
+                            .collect(),
+                    ),
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (3, 0)
+            );
+        }
+        for (name, _) in tables {
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=2 AND MIN(greptime_value)=7 AND MIN(greptime_timestamp)='1970-01-01 00:01:00'::TIMESTAMP FROM {name}"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn native_histogram_remote_read(
+        instance: &Arc<Instance>,
+        table: &str,
+        ctx: Arc<QueryContext>,
+    ) -> Vec<api::prom_store::remote::TimeSeries> {
+        use api::prom_store::remote::{LabelMatcher, Query, ReadRequest, ReadResponse};
+        use prost::Message;
+        use servers::query_handler::PromStoreProtocolHandler;
+
+        let response = instance
+            .read(
+                ReadRequest {
+                    queries: vec![Query {
+                        start_timestamp_ms: 0,
+                        end_timestamp_ms: 200_000,
+                        matchers: vec![LabelMatcher {
+                            name: "__name__".to_string(),
+                            value: table.to_string(),
+                            r#type: 0,
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ctx,
+            )
+            .await
+            .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        ReadResponse::decode(body.as_slice())
+            .unwrap()
+            .results
+            .remove(0)
+            .timeseries
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_delta_exponential_storage_precision_and_replacement() {
+        use datatypes::arrow::datatypes::Int64Type;
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_histogram_precision")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        for precision in [0, 3, 6, 9] {
+            let db = format!("native_{precision}");
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, &db);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            for sql in [
+                format!("CREATE DATABASE {db}"),
+                format!(
+                    "CREATE TABLE greptime_physical_table (greptime_timestamp TIMESTAMP({precision}) TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='true')"
+                ),
+            ] {
+                instance
+                    .do_query(&sql, ctx.clone())
+                    .await
+                    .remove(0)
+                    .unwrap();
+            }
+            let large = (1u64 << 53) + 1;
+            // Replace the sample after timestamp truncation, then replay it exactly.
+            for (round, count) in [(0, 10), (1, large), (1, large)] {
+                let mut metric = native_metric("interval", 0);
+                if let Some(metric::Data::ExponentialHistogram(data)) = metric.data.as_mut() {
+                    let point = &mut data.data_points[0];
+                    point.count = count;
+                    point.zero_count = count;
+                    point.start_time_unix_nano = round as u64 * 1_000_000_000;
+                    point.time_unix_nano =
+                        60_000_000_000 + if precision == 9 { 1 } else { 1 + round as u64 };
+                }
+                let outcome = instance
+                    .metrics(metric_request(vec![metric]), ctx.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    (outcome.accepted_data_points, outcome.rejected_data_points),
+                    (1, 0)
+                );
+                for flushed in [false, true] {
+                    if flushed {
+                        instance
+                            .do_query("ADMIN FLUSH_TABLE('interval')", ctx.clone())
+                            .await
+                            .remove(0)
+                            .unwrap();
+                    }
+                    let series =
+                        native_histogram_remote_read(instance, "interval", ctx.clone()).await;
+                    assert_eq!(series.len(), 1);
+                    assert!(series[0].labels.iter().any(|l| l.name == "otlp_aggregation_temporality" && l.value == "delta"));
+                    let histogram = &series[0].histograms[0];
+                    assert_eq!(histogram.timestamp, 60_000);
+                    assert_eq!(
+                        histogram.count,
+                        Some(api::prom_store::remote::histogram::Count::CountInt(count))
+                    );
+                    assert_eq!(
+                        histogram.zero_count,
+                        Some(api::prom_store::remote::histogram::ZeroCount::ZeroCountInt(
+                            count
+                        ))
+                    );
+                    assert_eq!(histogram.reset_hint, 3);
+                    assert_eq!(histogram.sum, 0.0);
+                    let output = instance
+                        .do_query(
+                            "SELECT greptime_timestamp,greptime_native_histogram FROM interval",
+                            ctx.clone(),
+                        )
+                        .await
+                        .remove(0)
+                        .unwrap();
+                    let OutputData::Stream(stream) = output.data else {
+                        unreachable!()
+                    };
+                    let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
+                    let counts = batches[0]
+                        .column(1)
+                        .as_struct()
+                        .column_by_name("count_i64")
+                        .unwrap()
+                        .as_primitive::<Int64Type>();
+                    assert_eq!(counts.value(0), count as i64);
+                    assert_eq!(
+                        batches[0].column(0).data_type(),
+                        &DataType::Timestamp(
+                            match precision {
+                                0 => TimeUnit::Second,
+                                3 => TimeUnit::Millisecond,
+                                6 => TimeUnit::Microsecond,
+                                _ => TimeUnit::Nanosecond,
+                            },
+                            None
+                        )
+                    );
+                }
+            }
+            if precision >= 6 {
+                let mut metric = native_metric("interval", 0);
+                if let Some(metric::Data::ExponentialHistogram(data)) = metric.data.as_mut() {
+                    data.data_points[0].time_unix_nano += if precision == 6 { 1_000 } else { 2 };
+                }
+                instance
+                    .metrics(metric_request(vec![metric]), ctx.clone())
+                    .await
+                    .unwrap();
+                assert_trace_v2_query(instance, "SELECT COUNT(*)=2 FROM interval", ctx.clone())
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_preflight_disabled_delta_and_schema_precedence() {
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_disabled_delta")
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        let mut cumulative = native_metric("histogram", 0);
+        if let Some(metric::Data::ExponentialHistogram(data)) = cumulative.data.as_mut() {
+            data.aggregation_temporality = AggregationTemporality::Cumulative as i32;
+        }
+        instance
+            .metrics(
+                metric_request(vec![
+                    cumulative,
+                    gauge_metric("independent", &[(60_000_000_000, 7.0, None)]),
+                ]),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        let mut fixed = ctx.fork();
+        fixed.set_extension("auto_create_table", "false");
+        let outcome = instance
+            .metrics(
+                metric_request(vec![
+                    native_metric("histogram", 0),
+                    gauge_metric("independent", &[(120_000_000_000, 9.0, None)]),
+                ]),
+                Arc::new(fixed),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (outcome.accepted_data_points, outcome.rejected_data_points),
+            (1, 1),
+            "{outcome:?}"
+        );
+        assert_trace_v2_query(instance,"SELECT COUNT(*)=0 FROM information_schema.columns WHERE column_name='otlp_aggregation_temporality'",ctx.clone()).await.unwrap();
+        for reverse in [false, true] {
+            let prefix = if reverse { "second" } else { "first" };
+            instance.do_query(&format!("CREATE TABLE {prefix}_sum (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value BIGINT) WITH ('otlp_metric_compat'='prom')"),ctx.clone()).await.remove(0).unwrap();
+            let mut explicit = build_histogram_request(
+                prefix,
+                vec![HistogramDataPoint {
+                    time_unix_nano: 60_000_000_000,
+                    count: 10,
+                    bucket_counts: vec![10],
+                    sum: Some(10.0),
+                    ..Default::default()
+                }],
+            )
+            .resource_metrics
+            .remove(0)
+            .scope_metrics
+            .remove(0)
+            .metrics
+            .remove(0);
+            explicit.name = prefix.into();
+            let mut metrics = vec![explicit, native_metric(&format!("{prefix}_bucket"), 0)];
+            if reverse {
+                metrics.reverse();
+            }
+            let outcome = instance
+                .metrics(metric_request(metrics), ctx.clone())
+                .await
+                .unwrap();
+            assert_eq!(
+                (outcome.accepted_data_points, outcome.rejected_data_points),
+                (1, 1),
+                "{outcome:?}"
+            );
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*)=1 FROM {prefix}_bucket"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            assert_trace_v2_query(instance,&format!("SELECT COUNT(*)=0 FROM information_schema.tables WHERE table_name='{prefix}_count'"),ctx.clone()).await.unwrap();
         }
     }
 

@@ -72,6 +72,7 @@ use datatypes::value::Value;
 use datatypes::vectors::{StringVector, VectorRef};
 use humantime::parse_duration;
 use partition::expr::{Operand, PartitionExpr, RestrictedOp};
+use partition::function::IcebergHash;
 use partition::multi_dim::MultiDimPartitionRule;
 use query::parser::QueryStatement;
 use query::plan::extract_and_rewrite_full_table_names;
@@ -92,11 +93,13 @@ use sql::statements::create::{
     CreateExternalTable, CreateFlow, CreateTable, CreateTableLike, CreateView, Partitions,
 };
 use sql::statements::statement::Statement;
-use sqlparser::ast::{Expr, Ident, UnaryOperator, Value as ParserValue};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, UnaryOperator,
+    Value as ParserValue,
+};
 use store_api::metric_engine_consts::{
     LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY,
 };
-use store_api::mito_engine_options::APPEND_MODE_KEY;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::TableRef;
 use table::dist_table::DistTable;
@@ -124,10 +127,20 @@ use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
 
+/// Options shared by SQL DDL submission paths.
 #[derive(Debug, Clone, Copy)]
-struct DdlSubmitOptions {
+pub(crate) struct DdlSubmitOptions {
     wait: bool,
     timeout: Duration,
+}
+
+impl Default for DdlSubmitOptions {
+    fn default() -> Self {
+        Self {
+            wait: SubmitDdlTaskRequest::default_wait(),
+            timeout: SubmitDdlTaskRequest::default_timeout(),
+        }
+    }
 }
 
 #[cfg(not(feature = "enterprise"))]
@@ -136,8 +149,7 @@ const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
 ];
 
-fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
-    let procedure_id = String::from_utf8_lossy(&procedure_id).to_string();
+fn build_procedure_id_output(procedure_id: &str) -> Result<Output> {
     let vector: VectorRef = Arc::new(StringVector::from(vec![procedure_id]));
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         "Procedure ID",
@@ -151,7 +163,9 @@ fn build_procedure_id_output(procedure_id: Vec<u8>) -> Result<Output> {
     Ok(Output::new_with_record_batches(batches))
 }
 
-fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+/// Parses DDL submission options using the existing request defaults.
+pub(crate) fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
+    let defaults = DdlSubmitOptions::default();
     let wait = match options.get(DDL_WAIT) {
         Some(value) => value.parse::<bool>().map_err(|_| {
             InvalidSqlSnafu {
@@ -159,7 +173,7 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
             }
             .build()
         })?,
-        None => SubmitDdlTaskRequest::default_wait(),
+        None => defaults.wait,
     };
 
     let timeout = match options.get(DDL_TIMEOUT) {
@@ -169,7 +183,7 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
             }
             .build()
         })?,
-        None => SubmitDdlTaskRequest::default_timeout(),
+        None => defaults.timeout,
     };
 
     Ok(DdlSubmitOptions { wait, timeout })
@@ -1717,11 +1731,28 @@ impl StatementExecutor {
         }
     }
 
-    #[tracing::instrument(skip_all)]
     pub async fn truncate_table(
         &self,
         table_name: TableName,
         time_ranges: Vec<(Timestamp, Timestamp)>,
+        query_context: QueryContextRef,
+    ) -> Result<Output> {
+        self.truncate_table_with_options(
+            table_name,
+            time_ranges,
+            DdlSubmitOptions::default(),
+            query_context,
+        )
+        .await
+    }
+
+    /// Truncates a table, optionally waiting for the submitted procedure to finish.
+    #[tracing::instrument(name = "truncate_table", skip_all)]
+    pub(crate) async fn truncate_table_with_options(
+        &self,
+        table_name: TableName,
+        time_ranges: Vec<(Timestamp, Timestamp)>,
+        ddl_options: DdlSubmitOptions,
         query_context: QueryContextRef,
     ) -> Result<Output> {
         ensure_table_writable(&table_name.schema_name, &table_name.table_name)?;
@@ -1740,8 +1771,22 @@ impl StatementExecutor {
                 table_name: table_name.to_string(),
             })?;
         let table_id = table.table_info().table_id();
-        self.truncate_table_procedure(&table_name, table_id, time_ranges, query_context)
+        let response = self
+            .truncate_table_procedure(
+                &table_name,
+                table_id,
+                time_ranges,
+                ddl_options,
+                query_context.clone(),
+            )
             .await?;
+
+        if !ddl_options.wait {
+            let procedure_id = String::from_utf8_lossy(&response.key).into_owned();
+            let output = build_procedure_id_output(&procedure_id)?;
+            query_context.set_last_procedure_id(procedure_id);
+            return Ok(output);
+        }
 
         Ok(Output::new_with_affected_rows(0))
     }
@@ -2022,7 +2067,10 @@ impl StatementExecutor {
             .context(error::ExecuteDdlSnafu)?;
 
         if !ddl_options.wait {
-            return build_procedure_id_output(response.key);
+            let procedure_id = String::from_utf8_lossy(&response.key).into_owned();
+            let output = build_procedure_id_output(&procedure_id)?;
+            query_context.set_last_procedure_id(procedure_id);
+            return Ok(output);
         }
 
         // Only invalidate cache if wait is true.
@@ -2353,16 +2401,19 @@ impl StatementExecutor {
         table_name: &TableName,
         table_id: TableId,
         time_ranges: Vec<(Timestamp, Timestamp)>,
+        ddl_options: DdlSubmitOptions,
         query_context: QueryContextRef,
     ) -> Result<SubmitDdlTaskResponse> {
         let executor_context = to_executor_context(query_context, TriggerReason::Manual);
-        let request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
+        let mut request = SubmitDdlTaskRequest::new(DdlTask::new_truncate_table(
             table_name.catalog_name.clone(),
             table_name.schema_name.clone(),
             table_name.table_name.clone(),
             table_id,
             time_ranges,
         ));
+        request.wait = ddl_options.wait;
+        request.timeout = ddl_options.timeout;
 
         self.procedure_executor
             .submit_ddl_task(executor_context, request)
@@ -2580,7 +2631,7 @@ pub fn verify_alter(
         .build()
         .context(error::BuildTableMetaSnafu { table_name })?;
 
-    validate_json2_columns_append_mode(&new_meta.schema, &new_meta.options)?;
+    validate_json2_primary_keys(&new_meta.schema, &new_meta.primary_key_indices)?;
 
     Ok(true)
 }
@@ -2630,7 +2681,7 @@ pub fn create_table_info(
     let mut table_options = TableOptions::try_from_iter(&create_table.table_options)
         .context(UnrecognizedTableOptionSnafu)?;
 
-    validate_json2_columns_append_mode(&schema, &table_options)?;
+    validate_json2_primary_keys(&schema, &primary_key_indices)?;
 
     validate_and_normalize_annotations(&mut table_options, &schema, &partition_key_indices)?;
 
@@ -2669,26 +2720,16 @@ pub fn create_table_info(
     Ok(table_info)
 }
 
-fn validate_json2_columns_append_mode(schema: &Schema, table_options: &TableOptions) -> Result<()> {
-    let append_mode = table_options
-        .extra_options
-        .get(APPEND_MODE_KEY)
-        .is_some_and(|value| value == "true");
-
-    for column in schema.column_schemas() {
-        if column.data_type.is_json2() {
-            ensure!(
-                append_mode,
-                InvalidSqlSnafu {
-                    err_msg: format!(
-                        "JSON2 column `{}` requires {}='true'",
-                        column.name, APPEND_MODE_KEY
-                    ),
-                }
-            );
-        }
+fn validate_json2_primary_keys(schema: &Schema, primary_key_indices: &[usize]) -> Result<()> {
+    for &index in primary_key_indices {
+        let column = &schema.column_schemas()[index];
+        ensure!(
+            !column.data_type.is_json2(),
+            InvalidSqlSnafu {
+                err_msg: format!("JSON2 column `{}` cannot be a primary key", column.name),
+            }
+        );
     }
-
     Ok(())
 }
 
@@ -2871,6 +2912,15 @@ fn ensure_partition_operand_columns_in_target(
             ensure_partition_operand_columns_in_target(&expr.lhs, target_partition_columns)?;
             ensure_partition_operand_columns_in_target(&expr.rhs, target_partition_columns)?;
         }
+        Operand::IcebergHash(hash) => ensure!(
+            target_partition_columns.contains(&hash.column().to_string()),
+            InvalidPartitionRuleSnafu {
+                reason: format!(
+                    "partition expression references column '{}' that is not in target partition columns",
+                    hash.column()
+                )
+            }
+        ),
         Operand::Value(_) => {}
     }
 
@@ -2922,6 +2972,22 @@ fn convert_one_expr(
             let value = convert_value(&v.value, data_type, timezone, Some(*unary_op))?;
             (Operand::Value(value), op, Operand::Column(column_name))
         }
+        // func, val
+        (Expr::Function(function), literal)
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::IcebergHash(hash), op, Operand::Value(value))
+        }
+        // val, func
+        (literal, Expr::Function(function))
+            if !matches!(op, RestrictedOp::And | RestrictedOp::Or) =>
+        {
+            let hash = convert_iceberg_hash(function, column_name_and_type)?;
+            let value = convert_literal(literal, IcebergHash::output_type(), timezone)?;
+            (Operand::Value(value), op, Operand::IcebergHash(hash))
+        }
         (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
             // sub-expr must against another sub-expr
             let lhs = convert_one_expr(left, column_name_and_type, timezone)?;
@@ -2937,6 +3003,70 @@ fn convert_one_expr(
     };
 
     Ok(PartitionExpr::new(lhs, op, rhs))
+}
+
+/// Converts an `iceberg_hash` call, which takes exactly one partition column.
+fn convert_iceberg_hash(
+    function: &Function,
+    column_name_and_type: &HashMap<&String, ConcreteDataType>,
+) -> Result<IcebergHash> {
+    let invalid = || {
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function call {function}"),
+        }
+        .build()
+    };
+    let FunctionArguments::List(args) = &function.args else {
+        return Err(invalid());
+    };
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Identifier(ident)))] =
+        args.args.as_slice()
+    else {
+        return Err(invalid());
+    };
+    if function.filter.is_some()
+        || function.over.is_some()
+        || function.null_treatment.is_some()
+        || !function.within_group.is_empty()
+        || !matches!(function.parameters, FunctionArguments::None)
+        || args.duplicate_treatment.is_some()
+        || !args.clauses.is_empty()
+    {
+        return Err(invalid());
+    }
+    ensure!(
+        function
+            .name
+            .to_string()
+            .eq_ignore_ascii_case(IcebergHash::NAME),
+        InvalidPartitionRuleSnafu {
+            reason: format!("unsupported partition function {}", function.name),
+        }
+    );
+    let (column_name, data_type) = convert_identifier(ident, column_name_and_type)?;
+    ensure!(
+        IcebergHash::accepts(&data_type),
+        InvalidPartitionRuleSnafu {
+            reason: format!(
+                "partition function {} does not support column type {data_type}",
+                IcebergHash::NAME
+            ),
+        }
+    );
+    Ok(IcebergHash::new(column_name))
+}
+
+fn convert_literal(expr: &Expr, data_type: ConcreteDataType, timezone: &Timezone) -> Result<Value> {
+    match expr {
+        Expr::Value(value) => convert_value(&value.value, data_type, timezone, None),
+        Expr::UnaryOp { op, expr } if let Expr::Value(value) = &**expr => {
+            convert_value(&value.value, data_type, timezone, Some(*op))
+        }
+        _ => InvalidPartitionRuleSnafu {
+            reason: format!("expect a literal in partition expr, got {expr}"),
+        }
+        .fail(),
+    }
 }
 
 fn convert_identifier(
@@ -3272,6 +3402,10 @@ mod test {
 
     #[test]
     fn test_parse_ddl_options() {
+        let defaults = parse_ddl_options(&OptionMap::default()).unwrap();
+        assert!(defaults.wait);
+        assert_eq!(defaults.timeout, SubmitDdlTaskRequest::default_timeout());
+
         let options = OptionMap::from([
             ("timeout".to_string(), "5m".to_string()),
             ("wait".to_string(), "false".to_string()),
@@ -3279,6 +3413,23 @@ mod test {
         let ddl_options = parse_ddl_options(&options).unwrap();
         assert!(!ddl_options.wait);
         assert_eq!(Duration::from_secs(300), ddl_options.timeout);
+
+        let options = OptionMap::from([("timeout".to_string(), "1500ms".to_string())]);
+        assert_eq!(
+            parse_ddl_options(&options).unwrap().timeout,
+            Duration::from_millis(1500)
+        );
+        for (key, value) in [
+            ("wait", "yes"),
+            ("timeout", "not-a-duration"),
+            ("timeout", "-1s"),
+        ] {
+            let options = OptionMap::from([(key.to_string(), value.to_string())]);
+            assert!(matches!(
+                parse_ddl_options(&options),
+                Err(error::Error::InvalidSql { .. })
+            ));
+        }
     }
 
     #[test]
@@ -3680,6 +3831,66 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     }
 
     #[test]
+    fn test_convert_iceberg_hash() {
+        let names = ["host", "count", "device", "measure", "host-name"].map(String::from);
+        let column_name_and_type = HashMap::from([
+            (&names[0], ConcreteDataType::string_datatype()),
+            (&names[1], ConcreteDataType::int16_datatype()),
+            (&names[2], ConcreteDataType::uint64_datatype()),
+            (&names[3], ConcreteDataType::float64_datatype()),
+            (&names[4], ConcreteDataType::string_datatype()),
+        ]);
+        let timezone = Timezone::from_tz_string("UTC").unwrap();
+        let dialect = GreptimeDbDialect {};
+        let parse = |sql: &str| {
+            Parser::new(&dialect)
+                .try_with_sql(sql)
+                .unwrap()
+                .parse_expr()
+                .unwrap()
+        };
+
+        for sql in [
+            "iceberg_hash(host) < 0",
+            "ICEBERG_HASH(device) >= -1073741824",
+            "0 > iceberg_hash(count)",
+            "iceberg_hash(host) < 100 AND host < 'm'",
+            r#"iceberg_hash("host-name") < 0 AND "host-name" < 'm'"#,
+        ] {
+            let expr = convert_one_expr(&parse(sql), &column_name_and_type, &timezone).unwrap();
+            // SHOW CREATE TABLE prints the rule back as SQL, quoting identifiers.
+            let mut partitions = Partitions {
+                column_list: vec![],
+                exprs: vec![expr.to_parser_expr()],
+            };
+            partitions.set_quote('"');
+            let restored = parse(&partitions.exprs[0].to_string());
+            assert_eq!(
+                convert_one_expr(&restored, &column_name_and_type, &timezone).unwrap(),
+                expr,
+                "{sql}"
+            );
+        }
+
+        for sql in [
+            "iceberg_hash(measure) < 0",
+            "iceberg_hash(host, count) < 0",
+            "iceberg_hash('a') < 0",
+            "iceberg_hash(missing) < 0",
+            "iceberg_hash(DISTINCT host) < 0",
+            "md5(host) < 0",
+            "iceberg_hash(host) < host",
+            "iceberg_hash(host) < 'abc'",
+            "iceberg_hash(host) < 2147483648",
+        ] {
+            assert!(
+                convert_one_expr(&parse(sql), &column_name_and_type, &timezone).is_err(),
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
     fn test_partition_expr_equivalence_with_swapped_operands() {
         let column_name = "device_id".to_string();
         let column_name_and_type =
@@ -3749,25 +3960,28 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             (&area, ConcreteDataType::string_datatype()),
         ]);
         let dialect = GreptimeDbDialect {};
-        let mut parser = Parser::new(&dialect)
-            .try_with_sql("device_id >= 100")
-            .unwrap();
-        let remaining_old_expr = convert_one_expr(
-            &parser.parse_expr().unwrap(),
-            &column_name_and_type,
-            &timezone,
-        )
-        .unwrap();
         let target_partition_columns = HashSet::from([&area]);
+        for sql in ["device_id >= 100", "iceberg_hash(device_id) >= 0"] {
+            let mut parser = Parser::new(&dialect).try_with_sql(sql).unwrap();
+            let remaining_old_expr = convert_one_expr(
+                &parser.parse_expr().unwrap(),
+                &column_name_and_type,
+                &timezone,
+            )
+            .unwrap();
 
-        let err = ensure_partition_expr_columns_in_target(
-            &[remaining_old_expr],
-            &target_partition_columns,
-        )
-        .unwrap_err();
+            let err = ensure_partition_expr_columns_in_target(
+                &[remaining_old_expr],
+                &target_partition_columns,
+            )
+            .unwrap_err();
 
-        assert!(err.to_string().contains("device_id"));
-        assert!(err.to_string().contains("target partition columns"));
+            assert!(err.to_string().contains("device_id"), "{sql}");
+            assert!(
+                err.to_string().contains("target partition columns"),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -3922,26 +4136,36 @@ WITH ('repartition.column.hint' = ' host ')",
     }
 
     #[test]
-    fn test_json2_requires_append_mode() {
-        let cases = [
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX);",
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='false');",
-        ];
-
-        for sql in cases {
-            let expr = create_expr_from_sql(sql);
-            let err = create_table_info(&expr, vec![]).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("JSON2 column `payload` requires append_mode='true'"),
-                "{err}"
-            );
+    fn test_json2_supports_non_append_mode() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        for options in [
+            "",
+            "WITH (append_mode='false')",
+            "WITH (append_mode='true')",
+            "WITH (merge_mode='last_non_null')",
+        ] {
+            let expr = create_expr_from_sql(&format!(
+                "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) {options};"
+            ));
+            create_table_info(&expr, vec![])?;
         }
+        Ok(())
+    }
 
+    #[test]
+    fn test_json2_cannot_be_primary_key() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let expr = create_expr_from_sql(
-            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');",
+            "CREATE TABLE monitor (payload JSON2, ts TIMESTAMP TIME INDEX, PRIMARY KEY(payload));",
         );
-        create_table_info(&expr, vec![]).unwrap();
+        let err = create_table_info(&expr, vec![])
+            .err()
+            .ok_or("expected JSON2 primary key rejection")?;
+        assert!(
+            err.to_string()
+                .contains("JSON2 column `payload` cannot be a primary key"),
+            "{err}"
+        );
+        Ok(())
     }
 
     #[test]

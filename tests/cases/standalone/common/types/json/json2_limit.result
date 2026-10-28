@@ -65,36 +65,6 @@ drop table json2_whole_and_path_read;
 
 Affected Rows: 0
 
-create table json2_without_append_mode (
-    ts timestamp time index,
-    j json2
-);
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-create table json2_append_mode_false (
-    ts timestamp time index,
-    j json2
-) with (
-    'append_mode' = 'false'
-);
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-create table json2_alter_non_append (
-    ts timestamp time index
-);
-
-Affected Rows: 0
-
-alter table json2_alter_non_append add column j json2;
-
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
-
-drop table json2_alter_non_append;
-
-Affected Rows: 0
-
 create table json2_set_append_mode_false (
     ts timestamp time index,
     j json2
@@ -104,11 +74,140 @@ create table json2_set_append_mode_false (
 
 Affected Rows: 0
 
+-- SQLNESS REPLACE \d+\(\d+,\s+\d+\) REDACTED
 alter table json2_set_append_mode_false set 'append_mode' = 'false';
 
-Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` requires append_mode='true'
+Error: 1004(InvalidArguments), Invalid region request, region_id: REDACTED, err: Only allow changing append_mode from false to true
 
 drop table json2_set_append_mode_false;
+
+Affected Rows: 0
+
+create table json2_primary_key (
+    ts timestamp time index,
+    j json2,
+    primary key (j)
+);
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` cannot be a primary key
+
+create table json2_add_primary_key (ts timestamp time index);
+
+Affected Rows: 0
+
+alter table json2_add_primary_key add column j json2 primary key;
+
+Error: 1004(InvalidArguments), Invalid SQL, error: JSON2 column `j` cannot be a primary key
+
+drop table json2_add_primary_key;
+
+Affected Rows: 0
+
+-- JSON2 requires flat SST output even when append mode is enabled.
+create table json2_primary_key_format (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'primary_key'
+);
+
+Error: 1004(InvalidArguments), Invalid region options, JSON2 columns require sst_format=flat
+
+create table json2_alter_primary_key_format (
+    ts timestamp time index,
+    j json2
+) with (
+    'append_mode' = 'true',
+    'memtable.type' = 'bulk'
+);
+
+Affected Rows: 0
+
+insert into json2_alter_primary_key_format values (1, '{"a": 1}');
+
+Affected Rows: 1
+
+alter table json2_alter_primary_key_format set 'sst_format' = 'primary_key';
+
+Error: 1004(InvalidArguments), Invalid region options, JSON2 columns require sst_format=flat
+
+show create table json2_alter_primary_key_format;
+
++--------------------------------+---------------------------------------------------------------+
+| Table                          | Create Table                                                  |
++--------------------------------+---------------------------------------------------------------+
+| json2_alter_primary_key_format | CREATE TABLE IF NOT EXISTS "json2_alter_primary_key_format" ( |
+|                                |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                                |   "j" JSON2(                                                  |
+|                                |     max_auto_expanded_paths = 100                             |
+|                                |   ) NULL,                                                     |
+|                                |   TIME INDEX ("ts")                                           |
+|                                | )                                                             |
+|                                |                                                               |
+|                                | ENGINE=mito                                                   |
+|                                | WITH(                                                         |
+|                                |   append_mode = 'true',                                       |
+|                                |   'memtable.type' = 'bulk'                                    |
+|                                | )                                                             |
++--------------------------------+---------------------------------------------------------------+
+
+insert into json2_alter_primary_key_format values (2, '{"a": 2}');
+
+Affected Rows: 1
+
+admin flush_table('json2_alter_primary_key_format');
+
++-----------------------------------------------------+
+| ADMIN flush_table('json2_alter_primary_key_format') |
++-----------------------------------------------------+
+| 0                                                   |
++-----------------------------------------------------+
+
+select ts, json_get(j, 'a') from json2_alter_primary_key_format order by ts;
+
++-------------------------+------------------------------------------------------+
+| ts                      | json_get(json2_alter_primary_key_format.j,Utf8("a")) |
++-------------------------+------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                    |
+| 1970-01-01T00:00:00.002 | 2                                                    |
++-------------------------+------------------------------------------------------+
+
+drop table json2_alter_primary_key_format;
+
+Affected Rows: 0
+
+create table json2_add_to_primary_key_format (
+    ts timestamp time index
+) with (
+    'append_mode' = 'true',
+    'sst_format' = 'primary_key'
+);
+
+Affected Rows: 0
+
+alter table json2_add_to_primary_key_format add column j json2;
+
+Error: 1004(InvalidArguments), Invalid region options, JSON2 columns require sst_format=flat
+
+show create table json2_add_to_primary_key_format;
+
++---------------------------------+----------------------------------------------------------------+
+| Table                           | Create Table                                                   |
++---------------------------------+----------------------------------------------------------------+
+| json2_add_to_primary_key_format | CREATE TABLE IF NOT EXISTS "json2_add_to_primary_key_format" ( |
+|                                 |   "ts" TIMESTAMP(3) NOT NULL,                                  |
+|                                 |   TIME INDEX ("ts")                                            |
+|                                 | )                                                              |
+|                                 |                                                                |
+|                                 | ENGINE=mito                                                    |
+|                                 | WITH(                                                          |
+|                                 |   append_mode = 'true',                                        |
+|                                 |   sst_format = 'primary_key'                                   |
+|                                 | )                                                              |
++---------------------------------+----------------------------------------------------------------+
+
+drop table json2_add_to_primary_key_format;
 
 Affected Rows: 0
 

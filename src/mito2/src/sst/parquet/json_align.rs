@@ -12,8 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Shared JSON2 conversion for Parquet streams and in-memory query batches.
+//! Query types must agree before merge/dedup; compaction Rewrite retains physical layouts.
+
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion_common::cast_column;
@@ -167,6 +171,45 @@ where
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+/// Aligns existing JSON2 columns to the Arrow types of matching fields in
+/// `query_schema`, matching columns by name.
+/// Preserves column order and skips columns absent from the batch.
+pub(crate) fn align_query_batch(
+    batch: RecordBatch,
+    query_schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let mut aligned = None;
+    for target in query_schema
+        .fields()
+        .iter()
+        .filter(|field| is_json2_extension_type(field))
+    {
+        let Ok(index) = batch.schema_ref().index_of(target.name()) else {
+            continue;
+        };
+        let source = batch.schema_ref().field(index);
+        if source.data_type() != target.data_type() {
+            let array = align_array(batch.column(index), source, target)?;
+            let (fields, columns) = aligned.get_or_insert_with(|| {
+                (
+                    batch.schema_ref().fields().to_vec(),
+                    batch.columns().to_vec(),
+                )
+            });
+            fields[index] = Arc::new(source.clone().with_data_type(target.data_type().clone()));
+            columns[index] = array;
+        }
+    }
+    let Some((fields, columns)) = aligned else {
+        return Ok(batch);
+    };
+    let schema = Arc::new(Schema::new_with_metadata(
+        fields,
+        batch.schema().metadata().clone(),
+    ));
+    RecordBatch::try_new(schema, columns).context(NewRecordBatchSnafu)
 }
 
 fn align_projected_batch(
@@ -327,6 +370,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use super::*;
+    use crate::test_util;
     use datatypes::arrow::array::{
         Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
     };
@@ -336,8 +381,6 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::types::parse_string_to_jsonb;
     use futures::{StreamExt, stream};
-
-    use super::*;
 
     #[test]
     fn test_aligner_resolves_json2_rewrite_settings()
@@ -954,5 +997,33 @@ mod tests {
 
     fn string_array(values: impl IntoIterator<Item = &'static str>) -> ArrayRef {
         Arc::new(StringArray::from_iter_values(values))
+    }
+    #[test]
+    fn test_query_alignment_preserves_source_columns_until_compatibility()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_, batch) = test_util::sst_util::new_json2_record_batch()?;
+        let values = int_array([10, 20]);
+        let mut fields = vec![Arc::new(Field::new("value", DataType::Int64, true))];
+        fields.extend(batch.schema_ref().fields().iter().cloned());
+        let mut columns = vec![values.clone()];
+        columns.extend_from_slice(batch.columns());
+        let input = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)?;
+        let target = schema([
+            Field::new("new_column", DataType::Utf8, true),
+            Field::new("new_json", DataType::Binary, true)
+                .with_extension_type(Json2ExtensionType::default()),
+            Field::new("j", DataType::Binary, true)
+                .with_extension_type(Json2ExtensionType::default()),
+            Field::new("value", DataType::Int64, true),
+        ]);
+        let aligned = align_query_batch(input, &target)?;
+        assert_eq!(batch.num_columns() + 1, aligned.num_columns());
+        assert_eq!("value", aligned.schema_ref().field(0).name());
+        assert!(Arc::ptr_eq(&values, aligned.column(0)));
+        assert_eq!("j", aligned.schema_ref().field(1).name());
+        assert_eq!(&DataType::Binary, aligned.column(1).data_type());
+        let repeated = align_query_batch(aligned.clone(), &target)?;
+        assert!(Arc::ptr_eq(aligned.column(1), repeated.column(1)));
+        Ok(())
     }
 }

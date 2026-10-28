@@ -44,15 +44,15 @@ use common_meta::key::SchemaMetadataManagerRef;
 use common_runtime::JoinHandle;
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{error, info, warn};
-use futures::future::try_join_all;
+use futures::future::{join_all, try_join_all};
 use object_store::ObjectStore;
 use object_store::manager::ObjectStoreManagerRef;
 use prometheus::{Histogram, IntGauge};
 use rand::{Rng, rng};
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
-    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -71,8 +71,8 @@ use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
-    RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, NodeLease, OpeningRegions, OpeningRegionsRef,
+    RegionMap, RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -87,6 +87,8 @@ use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
+#[cfg(feature = "hdfs-object-store")]
+use crate::temp_file_sweeper;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::wal::Wal;
 use crate::worker::handle_manifest::RegionEditQueues;
@@ -155,6 +157,7 @@ pub(crate) struct WorkerGroup {
     file_ref_manager: FileReferenceManagerRef,
     /// Gc limiter to limit concurrent gc jobs.
     gc_limiter: GcLimiterRef,
+    node_lease: Arc<NodeLease>,
     /// Object store manager.
     object_store_manager: ObjectStoreManagerRef,
     /// Puffin manager factory.
@@ -241,6 +244,14 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        // A sweep waits for a permit while a GC job takes one without waiting, so
+        // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
+        // A datanode that allows no concurrent GC job runs no sweep either: a
+        // limiter of zero would never hand out the permit the task waits for.
+        #[cfg(feature = "hdfs-object-store")]
+        let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
+            .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
+        let node_lease = Arc::new(NodeLease::default());
 
         let workers = (0..config.num_workers)
             .map(|id| {
@@ -269,6 +280,9 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    #[cfg(feature = "hdfs-object-store")]
+                    sweep_limiter: sweep_limiter.clone(),
+                    node_lease: node_lease.clone(),
                 }
                 .start()
             })
@@ -283,6 +297,7 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            node_lease,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -318,6 +333,40 @@ impl WorkerGroup {
         self.worker(region_id).submit_request(request).await
     }
 
+    /// Submits the writes of one request, those of each worker in one message, so that the
+    /// worker handles them in one batch. The messages are sent concurrently, so a full worker
+    /// queue holds back no other worker. A write whose worker has stopped receives the error a
+    /// write submitted on its own gets.
+    pub(crate) async fn submit_writes(&self, writes: Vec<SenderWriteRequest>) {
+        let mut writes_by_worker: HashMap<usize, Vec<SenderWriteRequest>> = HashMap::new();
+        for write in writes {
+            let index = region_id_to_index(write.request.region_id, self.workers.len());
+            writes_by_worker.entry(index).or_default().push(write);
+        }
+        join_all(
+            writes_by_worker
+                .into_iter()
+                .map(|(index, writes)| async move {
+                    let worker = &self.workers[index];
+                    let Err(request) = worker
+                        .try_submit_request(WorkerRequest::BatchWrite(writes))
+                        .await
+                    else {
+                        return;
+                    };
+                    let WorkerRequest::BatchWrite(writes) = request else {
+                        unreachable!("the worker returns the request it was given");
+                    };
+                    for write in writes {
+                        write
+                            .sender
+                            .send(WorkerStoppedSnafu { id: worker.id }.fail());
+                    }
+                }),
+        )
+        .await;
+    }
+
     /// Returns true if the specific region exists.
     pub(crate) fn is_region_exists(&self, region_id: RegionId) -> bool {
         self.worker(region_id).is_region_exists(region_id)
@@ -351,6 +400,10 @@ impl WorkerGroup {
 
     pub(crate) fn gc_limiter(&self) -> GcLimiterRef {
         self.gc_limiter.clone()
+    }
+
+    pub(crate) fn node_lease(&self) -> &NodeLease {
+        &self.node_lease
     }
 
     /// Get worker for specific `region_id`.
@@ -457,6 +510,14 @@ impl WorkerGroup {
         let compaction_memory_manager =
             Arc::new(new_compaction_memory_manager(compaction_limit_bytes));
         let gc_limiter = Arc::new(GcLimiter::new(config.gc.max_concurrent_gc_job));
+        // A sweep waits for a permit while a GC job takes one without waiting, so
+        // sharing the GC limiter would fail GC jobs and report sweeps as GC jobs.
+        // A datanode that allows no concurrent GC job runs no sweep either: a
+        // limiter of zero would never hand out the permit the task waits for.
+        #[cfg(feature = "hdfs-object-store")]
+        let sweep_limiter = (config.gc.max_concurrent_gc_job > 0)
+            .then(|| Arc::new(Semaphore::new(config.gc.max_concurrent_gc_job)));
+        let node_lease = Arc::new(NodeLease::default());
         let workers = (0..config.num_workers)
             .map(|id| {
                 WorkerStarter {
@@ -484,6 +545,9 @@ impl WorkerGroup {
                     file_ref_manager: file_ref_manager.clone(),
                     partition_expr_fetcher: partition_expr_fetcher.clone(),
                     flush_semaphore: flush_semaphore.clone(),
+                    #[cfg(feature = "hdfs-object-store")]
+                    sweep_limiter: sweep_limiter.clone(),
+                    node_lease: node_lease.clone(),
                 }
                 .start()
             })
@@ -498,6 +562,7 @@ impl WorkerGroup {
             cache_manager,
             file_ref_manager,
             gc_limiter,
+            node_lease,
             object_store_manager,
             puffin_manager_factory,
             intermediate_manager,
@@ -594,6 +659,11 @@ struct WorkerStarter<S> {
     file_ref_manager: FileReferenceManagerRef,
     partition_expr_fetcher: PartitionExprFetcherRef,
     flush_semaphore: Arc<Semaphore>,
+    #[cfg(feature = "hdfs-object-store")]
+    /// Limiter for the temporary file sweeps, or `None` if the datanode allows
+    /// no concurrent GC job.
+    sweep_limiter: Option<Arc<Semaphore>>,
+    node_lease: Arc<NodeLease>,
 }
 
 impl<S: LogStore> WorkerStarter<S> {
@@ -694,6 +764,9 @@ impl<S: LogStore> WorkerStarter<S> {
             partition_expr_fetcher: self.partition_expr_fetcher,
             flush_semaphore: self.flush_semaphore,
             plugins: self.plugins,
+            #[cfg(feature = "hdfs-object-store")]
+            sweep_limiter: self.sweep_limiter,
+            node_lease: self.node_lease,
         };
         let handle = common_runtime::spawn_global(async move {
             worker_thread.run().await;
@@ -738,9 +811,23 @@ pub(crate) struct RegionWorker {
 impl RegionWorker {
     /// Submits request to background worker thread.
     async fn submit_request(&self, request: WorkerRequest) -> Result<()> {
-        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.id });
+        self.try_submit_request(request)
+            .await
+            .map_err(|_| WorkerStoppedSnafu { id: self.id }.build())
+    }
+
+    /// Submits request to background worker thread, or returns it if the worker is stopped.
+    async fn try_submit_request(
+        &self,
+        request: WorkerRequest,
+    ) -> std::result::Result<(), WorkerRequest> {
+        if !self.is_running() {
+            return Err(request);
+        }
         let request_with_time = WorkerRequestWithTime::new(request);
-        if self.sender.send(request_with_time).await.is_err() {
+        if let Err(mpsc::error::SendError(request_with_time)) =
+            self.sender.send(request_with_time).await
+        {
             warn!(
                 "Worker {} is already exited but the running flag is still true",
                 self.id
@@ -750,7 +837,7 @@ impl RegionWorker {
             if let Some(state) = &self.series_index_task_state {
                 state.stop();
             }
-            return WorkerStoppedSnafu { id: self.id }.fail();
+            return Err(request_with_time.request);
         }
 
         Ok(())
@@ -1007,6 +1094,11 @@ struct RegionWorkerLoop<S> {
     flush_semaphore: Arc<Semaphore>,
     /// Plugins for flush hooks.
     plugins: Plugins,
+    #[cfg(feature = "hdfs-object-store")]
+    /// Limiter for the temporary file sweeps, or `None` if the datanode allows
+    /// no concurrent GC job.
+    sweep_limiter: Option<Arc<Semaphore>>,
+    node_lease: Arc<NodeLease>,
 }
 
 impl<S: LogStore> RegionWorkerLoop<S> {
@@ -1057,6 +1149,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                             match request_with_time.request {
                                 WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                                WorkerRequest::BatchWrite(sender_reqs) => write_req_buffer.extend(sender_reqs),
                                 WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                                 WorkerRequest::BulkInserts(bulk_insert) => {
                                     bulk_insert_req_num += 1;
@@ -1110,6 +1203,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
                         match request_with_time.request {
                             WorkerRequest::Write(sender_req) => write_req_buffer.push(sender_req),
+                            WorkerRequest::BatchWrite(sender_reqs) => {
+                                write_req_buffer.extend(sender_reqs)
+                            }
                             WorkerRequest::Ddl(sender_req) => ddl_req_buffer.push(sender_req),
                             WorkerRequest::BulkInserts(bulk_insert) => {
                                 bulk_insert_req_num += 1;
@@ -1184,7 +1280,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     ) {
         for worker_req in general_requests.drain(..) {
             match worker_req {
-                WorkerRequest::Write(_) | WorkerRequest::Ddl(_) => {
+                WorkerRequest::Write(_) | WorkerRequest::BatchWrite(_) | WorkerRequest::Ddl(_) => {
                     // These requests are categorized before dispatching general requests.
                     continue;
                 }
@@ -1383,9 +1479,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             BackgroundNotify::IndexBuildStopped(req) => {
                 self.handle_index_build_stopped(region_id, req).await
             }
-            BackgroundNotify::IndexBuildFailed(req) => {
-                self.handle_index_build_failed(region_id, req).await
-            }
             BackgroundNotify::IndexBuildRetry(req) => {
                 self.handle_rebuild_index(req, OptionOutputTx::new(None))
                     .await
@@ -1417,6 +1510,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         sender: oneshot::Sender<SetRegionRoleStateResponse>,
     ) {
         if let Some(region) = self.regions.get_region(region_id) {
+            if matches!(
+                region_role_state,
+                SettableRegionRoleState::Follower | SettableRegionRoleState::DowngradingLeader
+            ) {
+                // Fence writes here: writes the worker handles later see
+                // Downgrading, and earlier ones have finished. This only
+                // changes a writable or staging leader.
+                region.set_role(RegionRole::DowngradingLeader);
+            }
+            #[cfg(feature = "hdfs-object-store")]
+            let sweep_older_than = self.config.gc.unknown_file_lingering_time;
+            #[cfg(feature = "hdfs-object-store")]
+            let sweep_limiter = self.sweep_limiter.clone();
             // We need to do this in background as we need the manifest lock.
             common_runtime::spawn_global(async move {
                 match region.set_role_state_gracefully(region_role_state).await {
@@ -1425,6 +1531,17 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         let _ = sender.send(SetRegionRoleStateResponse::success(
                             SetRegionRoleStateSuccess::mito(last_entry_id),
                         ));
+                        // Only a writable leader reclaims what a writer that died
+                        // before it renamed its temporary file left behind.
+                        #[cfg(feature = "hdfs-object-store")]
+                        if region_role_state == SettableRegionRoleState::Leader {
+                            temp_file_sweeper::spawn_region_sweep(
+                                region.access_layer(),
+                                region_id,
+                                sweep_older_than,
+                                sweep_limiter,
+                            );
+                        }
                     }
                     Err(e) => {
                         error!(e; "Failed to set region {} role state to {:?}", region_id, region_role_state);
@@ -1500,6 +1617,14 @@ impl WorkerListener {
         #[cfg(any(test, feature = "test"))]
         if let Some(listener) = &self.listener {
             listener.on_write_stall();
+        }
+    }
+
+    /// A batch of writes is appended to the WAL.
+    pub(crate) async fn on_write_wal_end(&self) {
+        #[cfg(any(test, feature = "test"))]
+        if let Some(listener) = &self.listener {
+            listener.on_write_wal_end().await;
         }
     }
 

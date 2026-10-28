@@ -23,10 +23,11 @@ use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::storage::{RegionId, SequenceNumber};
 
-use crate::error::{Error, Result, WriteGroupSnafu};
+use crate::error::{Error, Result, UnexpectedSnafu, WriteGroupSnafu};
 use crate::memtable::KeyValues;
 use crate::memtable::bulk::part::BulkPart;
 use crate::metrics;
+use crate::region::MitoRegionRef;
 use crate::region::version::{VersionControlData, VersionControlRef, VersionRef};
 use crate::request::OptionOutputTx;
 use crate::wal::{EntryId, WalWriter};
@@ -66,6 +67,15 @@ impl WriteNotify {
 
 impl Drop for WriteNotify {
     fn drop(&mut self) {
+        // A panic may have interrupted the write, so it must not be reported as written.
+        if self.err.is_none() && std::thread::panicking() {
+            self.err = Some(Arc::new(
+                UnexpectedSnafu {
+                    reason: "the write was interrupted by a panic",
+                }
+                .build(),
+            ));
+        }
         self.notify_result();
     }
 }
@@ -90,9 +100,9 @@ pub(crate) struct RegionWriteCtx {
     /// VersionControl of the region.
     version_control: VersionControlRef,
     /// Next sequence number to write.
-    ///
-    /// The context assigns a unique sequence number for each row.
     next_sequence: SequenceNumber,
+    /// Maximum sequence number allocated by this context.
+    max_sequence: Option<SequenceNumber>,
     /// Next entry id of WAL to write.
     next_entry_id: EntryId,
     /// Valid WAL entry to write.
@@ -122,6 +132,9 @@ pub(crate) struct RegionWriteCtx {
     pub(crate) delete_num: usize,
     /// The total bytes written to the region.
     pub(crate) written_bytes: Option<Arc<AtomicU64>>,
+    /// The region and its Leader deadline when the write was prepared, if the write needs a
+    /// lease.
+    pub(crate) lease: Option<(MitoRegionRef, u64)>,
 }
 
 impl RegionWriteCtx {
@@ -135,7 +148,7 @@ impl RegionWriteCtx {
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
-            committed_sequence,
+            last_sequence,
             last_entry_id,
             ..
         } = version_control.current();
@@ -146,7 +159,8 @@ impl RegionWriteCtx {
             region_id,
             version,
             version_control: version_control.clone(),
-            next_sequence: committed_sequence + 1,
+            next_sequence: last_sequence + 1,
+            max_sequence: None,
             next_entry_id: last_entry_id + 1,
             wal_entry: WalEntry::default(),
             memtable_mutations: Vec::new(),
@@ -158,6 +172,7 @@ impl RegionWriteCtx {
             delete_num: 0,
             bulk_parts: vec![],
             written_bytes,
+            lease: None,
         }
     }
 
@@ -194,8 +209,7 @@ impl RegionWriteCtx {
             self.wal_notifiers.push(notify);
         }
 
-        // Increase sequence number.
-        self.next_sequence += num_rows as u64;
+        self.advance_sequence(num_rows);
 
         // Update metrics.
         match OpType::try_from(op_type) {
@@ -210,6 +224,8 @@ impl RegionWriteCtx {
         &mut self,
         wal_writer: &mut WalWriter<S>,
     ) -> Result<()> {
+        // Reserve sequences before WAL writes to avoid reuse on failure.
+        self.reserve_sequences();
         wal_writer.add_entry(
             self.region_id,
             self.next_entry_id,
@@ -238,6 +254,14 @@ impl RegionWriteCtx {
 
     /// Sets error and marks all write operations are failed.
     pub(crate) fn set_error(&mut self, err: Arc<Error>) {
+        self.fail_waiters(err);
+
+        // Fail the whole write operation.
+        self.failed = true;
+    }
+
+    /// Sets error for all notifiers. The writes still go to the memtables.
+    pub(crate) fn fail_waiters(&mut self, err: Arc<Error>) {
         // Set error for all notifiers.
         for notify in self
             .wal_notifiers
@@ -249,9 +273,6 @@ impl RegionWriteCtx {
         for notify in &mut self.bulk_notifiers {
             notify.err = Some(err.clone());
         }
-
-        // Fail the whole write operation.
-        self.failed = true;
     }
 
     /// Returns whether the write operation is already marked as failed.
@@ -274,6 +295,10 @@ impl RegionWriteCtx {
     pub(crate) async fn write_memtables(&mut self) {
         if self.failed {
             return;
+        }
+        // Reserve sequences for WAL replay and skip-WAL writes.
+        if self.source == WriteSource::WalReplay || self.skip_wal() {
+            self.reserve_sequences();
         }
         // A failed installation may leave some rows in memory.
         if self.has_skip_wal_writes {
@@ -376,7 +401,7 @@ impl RegionWriteCtx {
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
 
-        self.next_sequence += bulk.num_rows() as u64;
+        self.advance_sequence(bulk.num_rows());
         self.bulk_parts.push(bulk);
         true
     }
@@ -434,6 +459,21 @@ impl RegionWriteCtx {
         }
     }
 
+    /// Advances the sequence number and records the maximum.
+    fn advance_sequence(&mut self, num_rows: usize) {
+        self.next_sequence += num_rows as u64;
+        if num_rows > 0 {
+            let sequence = self.next_sequence - 1;
+            self.max_sequence = Some(self.max_sequence.map_or(sequence, |max| max.max(sequence)));
+        }
+    }
+
+    fn reserve_sequences(&self) {
+        if let Some(sequence) = self.max_sequence {
+            self.version_control.update_last_sequence(sequence);
+        }
+    }
+
     /// Publishes the assigned sequences and entry id to the region's committed
     /// watermark. Only call after both [`write_mutations`](Self::write_mutations)
     /// and [`write_bulk`](Self::write_bulk) have completed; a failed context
@@ -442,8 +482,13 @@ impl RegionWriteCtx {
         if self.failed {
             return;
         }
-        self.version_control
-            .set_sequence_and_entry_id(self.next_sequence - 1, self.next_entry_id - 1);
+        if let Some(sequence) = self.max_sequence {
+            self.version_control
+                .set_sequence_and_entry_id(sequence, self.next_entry_id - 1);
+        } else {
+            // Empty entries only update the entry id.
+            self.version_control.set_entry_id(self.next_entry_id - 1);
+        }
     }
 }
 
@@ -470,13 +515,13 @@ pub(crate) mod test_hooks {
         release: watch::Sender<bool>,
     }
 
-    static ACTIVE_BARRIER: Mutex<Option<ActiveBarrier>> = Mutex::new(None);
+    static ACTIVE_BARRIERS: Mutex<Vec<ActiveBarrier>> = Mutex::new(Vec::new());
     static NEXT_BARRIER_ID: AtomicU64 = AtomicU64::new(1);
 
-    fn lock_active_barrier() -> std::sync::MutexGuard<'static, Option<ActiveBarrier>> {
+    fn lock_active_barriers() -> std::sync::MutexGuard<'static, Vec<ActiveBarrier>> {
         // Never let a poisoned mutex (e.g. a panic in another test while
         // holding the lock) hang or break unrelated tests.
-        ACTIVE_BARRIER
+        ACTIVE_BARRIERS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -513,8 +558,8 @@ pub(crate) mod test_hooks {
         }
     }
 
-    /// Arms the bulk-install barrier and returns the owning guard; any
-    /// previously armed barrier is replaced.
+    /// Arms a bulk-install barrier for the target and returns the owning
+    /// guard; barriers of concurrently running tests stay independent.
     pub(crate) fn arm_bulk_install_barrier(
         target_region_id: RegionId,
         target_version_control: VersionControlRef,
@@ -522,8 +567,7 @@ pub(crate) mod test_hooks {
         let (reached_tx, reached_rx) = watch::channel(false);
         let (release_tx, _release_rx) = watch::channel(false);
         let id = NEXT_BARRIER_ID.fetch_add(1, Ordering::Relaxed);
-        let mut active = lock_active_barrier();
-        *active = Some(ActiveBarrier {
+        lock_active_barriers().push(ActiveBarrier {
             id,
             target_region_id,
             target_version_control,
@@ -539,10 +583,7 @@ pub(crate) mod test_hooks {
     }
 
     fn disarm_barrier(id: u64) {
-        let mut active = lock_active_barrier();
-        if active.as_ref().is_some_and(|barrier| barrier.id == id) {
-            *active = None;
-        }
+        lock_active_barriers().retain(|barrier| barrier.id != id);
     }
 
     /// Pauses a bulk write before installing its parts until the barrier is
@@ -552,19 +593,14 @@ pub(crate) mod test_hooks {
         version_control: &VersionControlRef,
     ) {
         let (reached_tx, release_rx) = {
-            let active = lock_active_barrier();
-            match active.as_ref() {
-                Some(barrier)
-                    if barrier.target_region_id == region_id
-                        && std::sync::Arc::ptr_eq(
-                            &barrier.target_version_control,
-                            version_control,
-                        ) =>
-                {
-                    (barrier.reached.clone(), barrier.release.subscribe())
-                }
-                _ => return,
-            }
+            let active = lock_active_barriers();
+            let Some(barrier) = active.iter().find(|barrier| {
+                barrier.target_region_id == region_id
+                    && std::sync::Arc::ptr_eq(&barrier.target_version_control, version_control)
+            }) else {
+                return;
+            };
+            (barrier.reached.clone(), barrier.release.subscribe())
         };
         let _ = reached_tx.send(true);
         let mut release_rx = release_rx;
@@ -591,6 +627,18 @@ mod tests {
     use crate::error::UnexpectedSnafu;
     use crate::memtable::bulk::part::BulkPart;
     use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_write_notify_dropped_by_panic_reports_error() {
+        let (tx, rx) = oneshot::channel();
+        let notify = WriteNotify::new(OptionOutputTx::from(tx), 3);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _notify = notify;
+            panic!("interrupt the write");
+        }))
+        .unwrap_err();
+        assert!(rx.blocking_recv().unwrap().is_err());
+    }
 
     #[test]
     fn test_request_skip_wal_preserves_sequences_and_other_writes() {
@@ -991,5 +1039,161 @@ mod tests {
             timestamp_index: 0,
             raw_data: None,
         }
+    }
+
+    fn sequence_rows(num_rows: usize) -> Rows {
+        use api::v1::helper::{tag_column_schema, time_index_column_schema};
+        Rows {
+            schema: vec![
+                time_index_column_schema("ts", api::v1::ColumnDataType::TimestampMillisecond),
+                tag_column_schema("tag_0", api::v1::ColumnDataType::String),
+            ],
+            rows: (0..num_rows)
+                .map(|i| api::v1::Row {
+                    values: vec![
+                        crate::test_util::ts_ms_value(i as i64),
+                        api::v1::Value {
+                            value_data: Some(api::v1::value::ValueData::StringValue(
+                                "a".to_string(),
+                            )),
+                        },
+                    ],
+                })
+                .collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_replay_sequence_maximum_below_allocation_floor() {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let vc = Arc::new(builder.build());
+        vc.update_last_sequence(100);
+        let provider = Provider::raft_engine_provider(region_id.as_u64());
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &vc,
+            provider.clone(),
+            None,
+            WriteSource::WalReplay,
+        );
+        for (sequence, num_rows) in [(40, 2), (3, 1)] {
+            ctx.push_mutation(
+                OpType::Put as i32,
+                Some(sequence_rows(num_rows)),
+                None,
+                OptionOutputTx::none(),
+                Some(sequence),
+                false,
+            );
+        }
+        for sequence in [10, 2] {
+            let mut part = new_bulk_part();
+            part.fill_missing_columns(&ctx.version.metadata).unwrap();
+            assert!(ctx.push_bulk(OptionOutputTx::none(), part, Some(sequence), false));
+        }
+        assert_eq!(ctx.wal_entry.mutations[0].sequence, 40);
+        assert_eq!(ctx.bulk_parts[0].sequence, 10);
+        assert_eq!(ctx.bulk_parts[1].sequence, 2);
+        assert_eq!(vc.committed_sequence(), 0);
+        ctx.set_next_entry_id(8);
+        ctx.write_memtables().await;
+        assert_eq!(vc.committed_sequence(), 41);
+        assert_eq!(vc.current().last_sequence, 100);
+        assert_eq!(vc.current().last_entry_id, 7);
+
+        let mut ctx = RegionWriteCtx::new(region_id, &vc, provider, None, WriteSource::Request);
+        ctx.push_mutation(
+            OpType::Put as i32,
+            Some(sequence_rows(2)),
+            None,
+            OptionOutputTx::none(),
+            None,
+            true,
+        );
+        assert_eq!(ctx.memtable_mutations[0].0.sequence, 101);
+        ctx.write_memtables().await;
+        assert_eq!(vc.committed_sequence(), 102);
+        assert_eq!(vc.current().last_sequence, 102);
+        assert_eq!(vc.current().last_entry_id, 7);
+    }
+
+    #[tokio::test]
+    async fn test_empty_context_does_not_publish_allocation_floor() {
+        let builder = VersionControlBuilder::new();
+        let region_id = builder.region_id();
+        let vc = Arc::new(builder.build());
+        vc.update_last_sequence(100);
+        for empty_objects in [false, true] {
+            let mut ctx =
+                RegionWriteCtx::new(region_id, &vc, Provider::Noop, None, WriteSource::WalReplay);
+            if empty_objects {
+                ctx.push_mutation(
+                    OpType::Put as i32,
+                    Some(sequence_rows(0)),
+                    None,
+                    OptionOutputTx::none(),
+                    Some(500),
+                    false,
+                );
+                ctx.push_mutation(
+                    OpType::Put as i32,
+                    None,
+                    None,
+                    OptionOutputTx::none(),
+                    Some(600),
+                    false,
+                );
+                let mut part = new_bulk_part();
+                part.fill_missing_columns(&ctx.version.metadata).unwrap();
+                part.batch = part.batch.slice(0, 0);
+                assert!(ctx.push_bulk(OptionOutputTx::none(), part, Some(700), true));
+            }
+            ctx.set_next_entry_id(4);
+            ctx.write_memtables().await;
+            let current = vc.current();
+            assert_eq!(current.last_sequence, 100);
+            assert_eq!(current.committed_sequence, 0);
+            assert_eq!(current.last_entry_id, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_rejected_bulk_does_not_publish_sequence() {
+        use datatypes::arrow::array::StringDictionaryBuilder;
+        use datatypes::arrow::datatypes::Int32Type;
+
+        let builder = VersionControlBuilder::new();
+        let vc = Arc::new(builder.build());
+        vc.update_last_sequence(100);
+        let mut ctx = RegionWriteCtx::new(
+            builder.region_id(),
+            &vc,
+            Provider::Noop,
+            None,
+            WriteSource::Request,
+        );
+        let mut part = new_bulk_part();
+        let mut dictionary = StringDictionaryBuilder::<Int32Type>::new();
+        dictionary.append("a").unwrap();
+        dictionary.append("b").unwrap();
+        let dictionary = Arc::new(dictionary.finish()) as ArrayRef;
+        let mut fields = part.batch.schema().fields().to_vec();
+        fields.push(Arc::new(Field::new(
+            "tag_0",
+            dictionary.data_type().clone(),
+            true,
+        )));
+        part.batch = DfRecordBatch::try_new(
+            Arc::new(Schema::new(fields)),
+            vec![part.batch.column(0).clone(), dictionary],
+        )
+        .unwrap();
+        let (tx, rx) = oneshot::channel();
+        assert!(!ctx.push_bulk(OptionOutputTx::from(tx), part, Some(500), false));
+        assert!(rx.await.unwrap().is_err());
+        ctx.write_memtables().await;
+        assert_eq!(vc.committed_sequence(), 0);
+        assert_eq!(vc.current().last_sequence, 100);
     }
 }

@@ -1155,20 +1155,9 @@ impl PartToMerge {
             PartToMerge::Multi { part, .. } => {
                 Some((part.num_rows() as u64, part.estimated_size() as u64))
             }
-            PartToMerge::Encoded { part, .. } => part
-                .metadata()
-                .parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|row_group| {
-                    let uncompressed_bytes = row_group
-                        .columns()
-                        .iter()
-                        .map(|column| column.uncompressed_size() as u64)
-                        .sum();
-                    (row_group.num_rows() as u64, uncompressed_bytes)
-                })
-                .max_by_key(|(_, uncompressed_bytes)| *uncompressed_bytes),
+            PartToMerge::Encoded { part, .. } => {
+                crate::batch_size::largest_row_group_statistic(&part.metadata().parquet_metadata)
+            }
         }
     }
 
@@ -1692,9 +1681,10 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
-    use parquet::basic::{Encoding, Type as PhysicalType};
+    use parquet::basic::{Compression, Encoding, Type as PhysicalType};
     use serde_json::json;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
+    use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
@@ -3057,6 +3047,45 @@ mod tests {
                 .encodings()
                 .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_matches_sst_writer_internal_encodings() -> WhateverResult<()> {
+        let metadata = metadata_for_test();
+        let bulk_part = create_bulk_part_with_converter(
+            "key",
+            0,
+            vec![1000, 2000, 3000],
+            vec![Some(1.0), Some(2.0), Some(3.0)],
+            100,
+        )?;
+        let encoder = BulkPartEncoder::new(metadata, DEFAULT_ROW_GROUP_SIZE)?;
+        let encoded_part = encoder.encode_part(&bulk_part)?.unwrap();
+        let columns = encoded_part
+            .metadata()
+            .parquet_metadata
+            .row_group(0)
+            .columns();
+
+        for name in ["ts", SEQUENCE_COLUMN_NAME] {
+            let column = columns
+                .iter()
+                .find(|column| column.column_path().string() == name)
+                .unwrap();
+            assert!(
+                column
+                    .encodings()
+                    .any(|encoding| encoding == Encoding::DELTA_BINARY_PACKED),
+                "{name}"
+            );
+            assert!(column.dictionary_page_offset().is_none(), "{name}");
+        }
+        let op_type = columns
+            .iter()
+            .find(|column| column.column_path().string() == OP_TYPE_COLUMN_NAME)
+            .unwrap();
+        assert_eq!(Compression::UNCOMPRESSED, op_type.compression());
         Ok(())
     }
 

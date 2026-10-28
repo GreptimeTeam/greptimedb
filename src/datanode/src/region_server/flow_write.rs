@@ -129,6 +129,7 @@ fn response(reply: Reply) -> ServerResult<api::v1::region::RegionResponse> {
         affected_rows: 0,
         extensions,
         metadata: Vec::new(),
+        failures: Vec::new(),
     })
 }
 
@@ -428,6 +429,15 @@ mod tests {
             role: store_api::region_engine::RegionRole,
         ) -> Result<(), common_error::ext::BoxedError> {
             self.inner.set_region_role(id, role)
+        }
+
+        fn set_region_role_with_lease(
+            &self,
+            id: RegionId,
+            role: store_api::region_engine::RegionRole,
+            deadline: std::time::Instant,
+        ) -> Result<(), common_error::ext::BoxedError> {
+            self.inner.set_region_role_with_lease(id, role, deadline)
         }
         async fn sync_region(
             &self,

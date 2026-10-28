@@ -22,6 +22,7 @@ use api::v1::SemanticType;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
+use common_recordbatch::QueryMemoryTracker;
 use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
@@ -226,9 +227,17 @@ pub struct ParquetReaderBuilder {
     defer_optional_page_index: bool,
     /// Scan-wide hint for rows in a decoded batch.
     batch_size: usize,
+    /// Optional shared quota for projected row-group decoding.
+    memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl ParquetReaderBuilder {
+    /// Sets the quota used while decoding row groups.
+    pub(crate) fn memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
+        self.memory_tracker = tracker;
+        self
+    }
+
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
     pub fn new(
         table_dir: String,
@@ -238,6 +247,7 @@ impl ParquetReaderBuilder {
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
             series_index: None,
+            memory_tracker: None,
             table_dir,
             path_type,
             file_handle,
@@ -645,6 +655,14 @@ impl ParquetReaderBuilder {
         let json2_rewrite_targets = self
             .json2_rewrite_targets
             .iter()
+            // Global compaction targets may include JSON2 columns added after this SST was written.
+            // Rewrite only projected columns present in this SST; schema compatibility fills
+            // missing columns with NULL later, without looking them up in this SST's metadata.
+            .filter(|(column_id, _)| {
+                read_format
+                    .parquet_projected_index_by_id(**column_id)
+                    .is_some()
+            })
             .map(|(column_id, layout)| {
                 let column = region_meta
                     .column_by_id(*column_id)
@@ -656,6 +674,7 @@ impl ParquetReaderBuilder {
             .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
+            memory_tracker: self.memory_tracker.clone(),
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
@@ -1768,6 +1787,8 @@ pub(crate) struct RowGroupReaderBuilder {
     prefilter_builder: Option<PrefilterContextBuilder>,
     /// Hint for rows in a decoded batch.
     batch_size: usize,
+    /// Optional shared quota for projected row-group decoding.
+    memory_tracker: Option<QueryMemoryTracker>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1956,7 +1977,8 @@ impl RowGroupReaderBuilder {
             self.cache_strategy.clone(),
             row_group_idx,
             fetch_metrics.cloned(),
-        );
+        )
+        .with_memory_tracker(self.memory_tracker.clone());
 
         build_sst_parquet_record_batch_stream(
             self.arrow_metadata.clone(),
@@ -2575,6 +2597,7 @@ mod tests {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), ArrowReaderOptions::new()).unwrap();
         (
             RowGroupReaderBuilder {
+                memory_tracker: None,
                 file_handle: file_handle.clone(),
                 file_path,
                 parquet_meta,

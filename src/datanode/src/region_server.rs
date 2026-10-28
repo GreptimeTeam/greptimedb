@@ -27,14 +27,14 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use api::region::RegionResponse;
+use api::region::{BatchRegionResponse, RegionResponse};
 use api::v1::meta::TopicStat;
 use api::v1::region::sync_request::ManifestInfo;
 use api::v1::region::{
-    ListMetadataRequest, RegionRequest as RegionRequestV1, RegionResponse as RegionResponseV1,
-    SyncRequest, region_request,
+    ListMetadataRequest, RegionRequest as RegionRequestV1, RegionRequestFailure,
+    RegionResponse as RegionResponseV1, SyncRequest, region_request,
 };
 use api::v1::{ResponseHeader, Status};
 use arrow_flight::{FlightData, Ticket};
@@ -49,7 +49,7 @@ use common_query::OutputData;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
-use common_runtime::Runtime;
+use common_runtime::{JoinHandle, Runtime};
 use common_telemetry::tracing::{self, info_span};
 use common_telemetry::tracing_context::{FutureExt, TracingContext};
 use common_telemetry::{debug, error, info, warn};
@@ -58,7 +58,7 @@ use datafusion::datasource::TableProvider;
 use datafusion_common::tree_node::TreeNode;
 use datatypes::schema::SchemaRef;
 use either::Either;
-use futures_util::future::try_join_all;
+use futures_util::stream::FuturesUnordered;
 use futures_util::{Stream, StreamExt};
 use metric_engine::engine::MetricEngine;
 use mito2::engine::{MITO_ENGINE_NAME, MitoEngine};
@@ -81,7 +81,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
 };
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
 };
@@ -91,8 +91,8 @@ use store_api::region_engine::{
     SyncRegionFromRequest,
 };
 use store_api::region_request::{
-    AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionCloseRequest,
-    RegionOpenRequest, RegionRequest,
+    self as store_region_request, AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest,
+    RegionCloseRequest, RegionOpenRequest, RegionRequest,
 };
 use store_api::storage::RegionId;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
@@ -250,11 +250,10 @@ impl RegionServer {
         if RegionServerInner::is_ingest_request(&request) {
             let inner = self.inner.clone();
             let request_type = request.request_type();
-            return common_runtime::spawn_ingest(async move {
+            let task = common_runtime::spawn_ingest(async move {
                 inner.handle_request(region_id, request).await
-            })
-            .await
-            .context(RuntimeJoinSnafu { request_type })?;
+            });
+            return join_ingest_task(task, request_type).await?;
         }
 
         self.inner.handle_request(region_id, request).await
@@ -308,6 +307,17 @@ impl RegionServer {
         };
 
         let region_id = RegionId::from_u64(request.region_id);
+        let engine_ctx = self
+            .inner
+            .query_engine
+            .engine_context(query_ctx)
+            .map_err(|error| {
+                crate::error::InvalidQueryContextSnafu {
+                    reason: error.to_string(),
+                }
+                .build()
+            })?;
+        let query_ctx = engine_ctx.query_ctx();
         let catalog_list = Arc::new(NameAwareCatalogList::new(
             self.clone(),
             region_id,
@@ -318,12 +328,7 @@ impl RegionServer {
             common_telemetry::info!("Handle remote read for region: {}", region_id);
         }
 
-        let decoder = self
-            .inner
-            .query_engine
-            .engine_context(query_ctx.clone())
-            .new_plan_decoder()
-            .context(NewPlanDecoderSnafu)?;
+        let decoder = engine_ctx.new_plan_decoder().context(NewPlanDecoderSnafu)?;
 
         let plan = decoder
             .decode(Bytes::from(request.plan), catalog_list, false)
@@ -466,6 +471,23 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`.
+    pub fn set_region_role_with_lease(
+        &self,
+        region_id: RegionId,
+        role: RegionRole,
+        deadline: std::time::Instant,
+    ) -> Result<()> {
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .with_context(|| RegionNotFoundSnafu { region_id })?;
+        engine
+            .set_region_role_with_lease(region_id, role, deadline)
+            .with_context(|_| HandleRegionRequestSnafu { region_id })
+    }
+
     /// Set region role state gracefully.
     ///
     /// For [SettableRegionRoleState::Follower]:
@@ -480,7 +502,14 @@ impl RegionServer {
         region_id: RegionId,
         state: SettableRegionRoleState,
     ) -> Result<SetRegionRoleStateResponse> {
-        match self.inner.region_map.get(&region_id) {
+        // Cloning releases the DashMap guard before awaiting the engine operation.
+        let engine = self
+            .inner
+            .region_map
+            .get(&region_id)
+            .map(|entry| entry.value().clone());
+
+        match engine {
             Some(engine) => Ok(engine
                 .set_region_role_state_gracefully(region_id, state)
                 .await
@@ -533,7 +562,7 @@ impl RegionServer {
 
         let span = tracing_context.attach(info_span!("RegionServer::handle_batch_ddl_requests"));
         self.inner
-            .handle_batch_request(batch_request)
+            .handle_batch_ddl_requests(batch_request)
             .trace(span)
             .await
     }
@@ -541,49 +570,50 @@ impl RegionServer {
     async fn handle_requests_in_parallel(
         &self,
         request: region_request::Body,
-    ) -> Result<RegionResponse> {
-        let requests =
-            RegionRequest::try_from_request_body(request).context(BuildRegionRequestsSnafu)?;
-
-        // Try to optimize batch Put requests for metric engine
-        // Returns either Some(response) or None(requests_back)
-        match self.try_handle_metric_batch_puts(requests).await? {
-            Either::Left(response) => Ok(response),
-            Either::Right(requests) => {
-                // Fallback: original parallel processing
-                let tracing_context = TracingContext::from_current_span();
-                let join_tasks =
-                    requests
-                        .into_iter()
-                        .map(|(region_id, req): (RegionId, RegionRequest)| {
-                            let self_to_move = self;
-                            let span = tracing_context.attach(info_span!(
-                                "RegionServer::handle_region_request",
-                                region_id = region_id.to_string()
-                            ));
-                            async move {
-                                self_to_move
-                                    .handle_request(region_id, req)
-                                    .trace(span)
-                                    .await
-                            }
-                        });
-
-                let results = try_join_all(join_tasks).await?;
-                let mut affected_rows = 0;
-                let mut extensions = HashMap::new();
-                for result in results {
-                    affected_rows += result.affected_rows;
-                    extensions.extend(result.extensions);
+    ) -> Result<BatchRegionResponse<error::Error>> {
+        let requests = prepare_batch_write_requests(request);
+        let requests = match self.try_handle_mito_batch_puts(requests).await? {
+            Either::Left(response) => return Ok(response),
+            Either::Right(requests) => requests,
+        };
+        let requests = match self.try_handle_metric_batch_puts(requests).await? {
+            Either::Left(response) => return Ok(response),
+            Either::Right(requests) => requests,
+        };
+        let tracing_context = TracingContext::from_current_span();
+        let results = futures::future::join_all(requests.into_iter().map(|request| {
+            let span = tracing_context.attach(info_span!(
+                "RegionServer::handle_region_request",
+                region_id = request.region_id.to_string()
+            ));
+            async move {
+                (
+                    request.index,
+                    self.handle_request(request.region_id, request.request)
+                        .trace(span)
+                        .await,
+                )
+            }
+        }))
+        .await;
+        let mut response = BatchRegionResponse {
+            affected_rows: 0,
+            extensions: HashMap::new(),
+            failures: Vec::new(),
+        };
+        for (index, result) in results {
+            match result {
+                Ok(result) => {
+                    response.affected_rows += result.affected_rows;
+                    response.extensions.extend(result.extensions);
                 }
-
-                Ok(RegionResponse {
-                    affected_rows,
-                    extensions,
-                    metadata: Vec::new(),
-                })
+                Err(error) => {
+                    log_batch_write_error(&error, index);
+                    response.failures.push((index, error));
+                }
             }
         }
+        Ok(response)
     }
 
     async fn handle_requests_in_serial(
@@ -614,65 +644,35 @@ impl RegionServer {
         })
     }
 
-    /// Attempts to optimize batch Put requests for metric engine.
-    ///
-    /// Returns Either::Left(response) if optimization succeeded,
-    /// or Either::Right(original_requests) to fall back to parallel processing.
-    ///
-    /// This avoids cloning requests when optimization cannot be applied.
+    /// Attempts metric batch writes, returning the requests when ordinary execution is needed.
     async fn try_handle_metric_batch_puts(
         &self,
-        requests: Vec<(RegionId, RegionRequest)>,
-    ) -> Result<Either<RegionResponse, Vec<(RegionId, RegionRequest)>>> {
-        if requests.is_empty() {
+        requests: Vec<IndexedRegionRequest>,
+    ) -> Result<Either<BatchRegionResponse<error::Error>, Vec<IndexedRegionRequest>>> {
+        let Some(first) = requests.first() else {
             return Ok(Either::Right(requests));
-        }
-
-        // Quick check: verify first request is Put and is metric engine
-        if !matches!(requests[0].1, RegionRequest::Put(_)) {
-            return Ok(Either::Right(requests));
-        }
-        let first_region_id = requests[0].0;
-        let request_type = requests[0].1.request_type();
-
-        // SAFETY: If the first request belongs to metric engine, then ALL requests
-        // in this batch are guaranteed to belong to metric engine. This invariant
-        // is maintained by the request batching logic upstream.
-        let engine = match self
-            .inner
-            .get_engine(first_region_id, &RegionChange::None)?
-        {
-            CurrentEngine::Engine(e) => e,
-            _ => return Ok(Either::Right(requests)),
         };
-
-        if engine.name() != METRIC_ENGINE_NAME {
+        if !matches!(first.request, RegionRequest::Put(_)) {
             return Ok(Either::Right(requests));
         }
 
-        // Check if ALL requests are Put (now we know it's worth checking)
-        let mut all_puts = true;
-        for (_, req) in &requests {
-            if !matches!(req, RegionRequest::Put(_)) {
-                all_puts = false;
-                break;
-            }
-        }
+        let first_region_id = first.region_id;
+        let request_type = first.request.request_type();
 
-        if !all_puts {
+        // Upstream batching keeps requests from the same engine together.
+        // Ordinary execution reports engine lookup failures per entry.
+        let Ok(CurrentEngine::Engine(engine)) =
+            self.inner.get_engine(first_region_id, &RegionChange::None)
+        else {
+            return Ok(Either::Right(requests));
+        };
+        if engine.name() != METRIC_ENGINE_NAME
+            || !requests
+                .iter()
+                .all(|request| matches!(request.request, RegionRequest::Put(_)))
+        {
             return Ok(Either::Right(requests));
         }
-
-        // Now extract Put requests by consuming ownership (zero clone!)
-        let put_requests = requests.into_iter().map(|(region_id, req)| {
-            if let RegionRequest::Put(put) = req {
-                (region_id, put)
-            } else {
-                unreachable!("Already checked all are Put")
-            }
-        });
-
-        // Downcast to MetricEngine and call batch API
         let metric_engine = engine
             .as_any()
             .downcast_ref::<MetricEngine>()
@@ -681,38 +681,167 @@ impl RegionServer {
             })?
             .clone();
 
+        let indices: Vec<_> = requests
+            .iter()
+            .map(|request| (request.index, request.region_id))
+            .collect();
+        let put_requests = requests.into_iter().map(|request| match request.request {
+            RegionRequest::Put(put) => (request.region_id, put),
+            _ => unreachable!("Already checked all are Put"),
+        });
         let tracing_context = TracingContext::from_current_span();
         let batch_size = put_requests.len();
         let span = tracing_context.attach(info_span!(
             "RegionServer::handle_metric_batch_puts",
-            batch_size = batch_size,
+            batch_size = batch_size
         ));
-        let result = common_runtime::spawn_ingest(async move {
+        let task = common_runtime::spawn_ingest(async move {
             metric_engine
                 .put_regions_batch(put_requests)
                 .trace(span)
                 .await
-        })
-        .await
-        .context(RuntimeJoinSnafu { request_type })?
-        .map_err(BoxedError::new)
-        .context(HandleRegionRequestSnafu {
-            region_id: first_region_id,
         });
+        let results = join_ingest_task(task, request_type).await?;
+        let mut response = BatchRegionResponse {
+            affected_rows: 0,
+            extensions: HashMap::new(),
+            failures: Vec::new(),
+        };
+        for group in results {
+            let region_id = indices[group.request_indices[0]].1;
+            let result = group
+                .result
+                .map_err(BoxedError::new)
+                .context(HandleRegionRequestSnafu { region_id })
+                .map(RegionResponse::new);
+            record_ingest_result(request_type, group.request_indices.len(), &result);
+            match result {
+                Ok(result) => {
+                    response.affected_rows += result.affected_rows;
+                }
+                Err(error) => {
+                    log_batch_write_error(&error, indices[group.request_indices[0]].0);
+                    let error = Arc::new(error);
+                    response
+                        .failures
+                        .extend(group.request_indices.into_iter().map(|index| {
+                            (
+                                indices[index].0,
+                                error::BatchWriteSnafu.into_error(Arc::clone(&error)),
+                            )
+                        }));
+                }
+            }
+        }
+        Ok(Either::Left(response))
+    }
 
-        match result {
-            Ok(total_affected) => {
-                crate::metrics::REGION_CHANGED_ROW_COUNT
-                    .with_label_values(&[request_type])
-                    .inc_by(total_affected as u64);
-                Ok(Either::Left(RegionResponse::new(total_affected)))
+    /// Batches puts into ready mito regions and retains every entry's outcome.
+    async fn try_handle_mito_batch_puts(
+        &self,
+        requests: Vec<IndexedRegionRequest>,
+    ) -> Result<Either<BatchRegionResponse<error::Error>, Vec<IndexedRegionRequest>>> {
+        let Some(engine) = self.mito_engine_for_batch_puts(&requests) else {
+            return Ok(Either::Right(requests));
+        };
+        let request_type = requests[0].request.request_type();
+        let mut indices: HashMap<RegionId, std::collections::VecDeque<usize>> = HashMap::new();
+        let puts = requests
+            .into_iter()
+            .map(|request| {
+                indices
+                    .entry(request.region_id)
+                    .or_default()
+                    .push_back(request.index);
+                match request.request {
+                    RegionRequest::Put(put) => (request.region_id, put),
+                    _ => unreachable!("Already checked all are Put"),
+                }
+            })
+            .collect();
+        let started = Instant::now();
+        let tracing_context = TracingContext::from_current_span();
+        let task = common_runtime::spawn_ingest(async move {
+            let mut pending = engine
+                .handle_batch_put_requests(puts)
+                .into_iter()
+                .map(|(region_ids, response)| {
+                    let request_indices = region_ids
+                        .iter()
+                        .filter_map(|region_id| {
+                            indices
+                                .get_mut(region_id)
+                                .and_then(|indices| indices.pop_front())
+                        })
+                        .collect::<Vec<_>>();
+                    let span = tracing_context.attach(info_span!(
+                        "RegionServer::handle_region_request",
+                        region_id = region_ids[0].to_string()
+                    ));
+                    async move { (region_ids, request_indices, response.await) }.trace(span)
+                })
+                .collect::<FuturesUnordered<_>>();
+            let histogram =
+                crate::metrics::HANDLE_REGION_REQUEST_ELAPSED.with_label_values(&[request_type]);
+            let mut response = BatchRegionResponse {
+                affected_rows: 0,
+                extensions: HashMap::new(),
+                failures: Vec::new(),
+            };
+            while let Some((region_ids, request_indices, result)) = pending.next().await {
+                let elapsed = started.elapsed().as_secs_f64();
+                for _ in &region_ids {
+                    histogram.observe(elapsed);
+                }
+                let result = result.context(HandleRegionRequestSnafu {
+                    region_id: region_ids[0],
+                });
+                record_ingest_result(request_type, region_ids.len(), &result);
+                match result {
+                    Ok(result) => {
+                        response.affected_rows += result.affected_rows;
+                        response.extensions.extend(result.extensions);
+                    }
+                    Err(error) => {
+                        log_batch_write_error(&error, request_indices[0]);
+                        let error = Arc::new(error);
+                        response
+                            .failures
+                            .extend(request_indices.into_iter().map(|index| {
+                                (index, error::BatchWriteSnafu.into_error(Arc::clone(&error)))
+                            }));
+                    }
+                }
             }
-            Err(err) => {
-                crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                    .with_label_values(&[request_type, err.status_code().as_ref()])
-                    .inc_by(batch_size as u64);
-                Err(err)
-            }
+            response.failures.sort_unstable_by_key(|(index, _)| *index);
+            response
+        });
+        join_ingest_task(task, request_type).await.map(Either::Left)
+    }
+
+    /// Returns the mito engine when there are at least two requests, every one a put into a ready
+    /// mito region.
+    fn mito_engine_for_batch_puts(
+        &self,
+        requests: &[IndexedRegionRequest],
+    ) -> Option<RegionEngineRef> {
+        if requests.len() < 2 {
+            return None;
+        }
+        let first_region_id = requests[0].region_id;
+        let all_puts_to_ready_mito_regions = requests.iter().all(|request| {
+            matches!(request.request, RegionRequest::Put(_))
+                && matches!(
+                    self.inner.region_map.get(&request.region_id).as_deref(),
+                    Some(RegionEngineWithStatus::Ready(engine)) if engine.name() == MITO_ENGINE_NAME
+                )
+        });
+        if !all_puts_to_ready_mito_regions {
+            return None;
+        }
+        match self.inner.region_map.get(&first_region_id).as_deref() {
+            Some(RegionEngineWithStatus::Ready(engine)) => Some(engine.clone()),
+            _ => None,
         }
     }
 
@@ -949,22 +1078,45 @@ impl RegionServerHandler for RegionServer {
         {
             return self.handle_flow_write_request(request).await;
         }
+        let accept_partial_result = request
+            .header
+            .as_ref()
+            .and_then(|header| header.query_context.as_ref())
+            .and_then(|context| context.extensions.get(api::region::ACCEPT_PARTIAL_RESULT))
+            .is_some_and(|value| value == "true");
         let body = request.body.context(servers_error::InvalidQuerySnafu {
             reason: "Expecting non-empty region request body.",
         })?;
-        self.handle(body).await
+        self.handle_inner(body, accept_partial_result).await
     }
 
     async fn handle(&self, request: region_request::Body) -> ServerResult<RegionResponseV1> {
+        self.handle_inner(request, false).await
+    }
+}
+
+impl RegionServer {
+    async fn handle_inner(
+        &self,
+        request: region_request::Body,
+        accept_partial_result: bool,
+    ) -> ServerResult<RegionResponseV1> {
+        let request_count = match &request {
+            region_request::Body::Inserts(requests) => Some(requests.requests.len()),
+            region_request::Body::Deletes(requests) => Some(requests.requests.len()),
+            _ => None,
+        };
+        if let Some(request_count) = request_count {
+            return self
+                .handle_write_request(request, request_count, accept_partial_result)
+                .await;
+        }
         let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
             .with_label_values(&[request.as_ref()]);
         let response = match &request {
             region_request::Body::Creates(_)
             | region_request::Body::Drops(_)
             | region_request::Body::Alters(_) => self.handle_batch_ddl_requests(request).await,
-            region_request::Body::Inserts(_) | region_request::Body::Deletes(_) => {
-                self.handle_requests_in_parallel(request).await
-            }
             region_request::Body::Sync(sync_request) => {
                 self.handle_sync_region_request(sync_request).await
             }
@@ -979,11 +1131,8 @@ impl RegionServerHandler for RegionServer {
             _ => self.handle_requests_in_serial(request).await,
         }
         .map_err(BoxedError::new)
-        .inspect_err(|_| {
-            failed_requests_cnt.inc();
-        })
+        .inspect_err(|_| failed_requests_cnt.inc())
         .context(ExecuteGrpcRequestSnafu)?;
-
         Ok(RegionResponseV1 {
             header: Some(ResponseHeader {
                 status: Some(Status {
@@ -994,7 +1143,34 @@ impl RegionServerHandler for RegionServer {
             affected_rows: response.affected_rows as _,
             extensions: response.extensions,
             metadata: response.metadata,
+            failures: Vec::new(),
         })
+    }
+
+    async fn handle_write_request(
+        &self,
+        request: region_request::Body,
+        entry_count: usize,
+        accept_partial_result: bool,
+    ) -> ServerResult<RegionResponseV1> {
+        let failed_requests_cnt = crate::metrics::REGION_SERVER_REQUEST_FAILURE_COUNT
+            .with_label_values(&[request.as_ref()]);
+        let mut result = self
+            .handle_requests_in_parallel(request)
+            .await
+            .map_err(BoxedError::new)
+            .inspect_err(|_| failed_requests_cnt.inc())
+            .context(ExecuteGrpcRequestSnafu)?;
+        if !result.failures.is_empty() {
+            failed_requests_cnt.inc();
+            // Old clients and single-entry writes retain tonic errors and retry metadata.
+            if (!accept_partial_result || entry_count == 1)
+                && let Some((_, error)) = result.failures.drain(..).min_by_key(|(index, _)| *index)
+            {
+                return Err(BoxedError::new(error)).context(ExecuteGrpcRequestSnafu);
+            }
+        }
+        Ok(encode_batch_write_response(result))
     }
 }
 
@@ -1050,6 +1226,97 @@ impl FlightCraft for RegionServer {
             query_ctx,
         ));
         Ok(Response::new(stream))
+    }
+}
+
+/// A decoded write retains its protobuf entry index even when preceding entries are empty.
+struct IndexedRegionRequest {
+    index: usize,
+    region_id: RegionId,
+    request: RegionRequest,
+}
+
+fn prepare_batch_write_requests(body: region_request::Body) -> Vec<IndexedRegionRequest> {
+    match body {
+        region_request::Body::Inserts(inserts) => inserts
+            .requests
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, request)| {
+                store_region_request::make_region_put(request).map(|(region_id, request)| {
+                    IndexedRegionRequest {
+                        index,
+                        region_id,
+                        request: RegionRequest::Put(request),
+                    }
+                })
+            })
+            .collect(),
+        region_request::Body::Deletes(deletes) => deletes
+            .requests
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, request)| {
+                store_region_request::make_region_delete(request).map(|(region_id, request)| {
+                    IndexedRegionRequest {
+                        index,
+                        region_id,
+                        request: RegionRequest::Delete(request),
+                    }
+                })
+            })
+            .collect(),
+        _ => unreachable!("Only inserts/deletes are prepared as batch writes"),
+    }
+}
+
+fn encode_batch_write_response(result: BatchRegionResponse<error::Error>) -> RegionResponseV1 {
+    RegionResponseV1 {
+        header: Some(ResponseHeader {
+            status: Some(Status {
+                status_code: if result.failures.is_empty() {
+                    StatusCode::Success
+                } else {
+                    StatusCode::PartialFailure
+                } as u32,
+                err_msg: if let Some((index, error)) = result.first_failure() {
+                    format!(
+                        "{} region requests failed; entry {index}: {}",
+                        result.failures.len(),
+                        error.output_msg()
+                    )
+                } else {
+                    String::new()
+                },
+                ..Default::default()
+            }),
+        }),
+        metadata: Vec::new(),
+        affected_rows: result.affected_rows as _,
+        extensions: result.extensions,
+        failures: result
+            .failures
+            .into_iter()
+            .map(|(index, error)| RegionRequestFailure {
+                request_index: index as u32,
+                status: Some(Status {
+                    status_code: error.status_code() as u32,
+                    err_msg: error.output_msg(),
+                    retry_hint: error.retry_hint().as_str().to_string(),
+                }),
+            })
+            .collect(),
+    }
+}
+
+fn log_batch_write_error(error: &error::Error, index: usize) {
+    if error.status_code().should_log_error() {
+        error!(error; "Failed to handle batch entry, request_index: {}", index);
+    } else {
+        debug!(
+            "Failed to handle batch entry, request_index: {}, err: {}",
+            index, error
+        );
     }
 }
 
@@ -1566,7 +1833,7 @@ impl RegionServerInner {
     // Handle requests in batch.
     //
     // limitation: all create requests must be in the same engine.
-    pub async fn handle_batch_request(
+    pub async fn handle_batch_ddl_requests(
         &self,
         batch_request: BatchRegionDdlRequest,
     ) -> Result<RegionResponse> {
@@ -1692,18 +1959,15 @@ impl RegionServerInner {
         // Sets corresponding region status to registering/deregistering before the operation.
         self.set_region_status_not_ready(region_id, &engine, &region_change);
 
-        match engine
+        let result = engine
             .handle_request(region_id, request)
             .await
-            .with_context(|_| HandleRegionRequestSnafu { region_id })
-        {
+            .with_context(|_| HandleRegionRequestSnafu { region_id });
+        if matches!(region_change, RegionChange::Ingest) {
+            record_ingest_result(request_type, 1, &result);
+        }
+        match result {
             Ok(result) => {
-                // Update metrics
-                if matches!(region_change, RegionChange::Ingest) {
-                    crate::metrics::REGION_CHANGED_ROW_COUNT
-                        .with_label_values(&[request_type])
-                        .inc_by(result.affected_rows as u64);
-                }
                 // Sets corresponding region status to ready.
                 self.set_region_status_ready(region_id, engine.clone(), region_change)
                     .await?;
@@ -1715,11 +1979,6 @@ impl RegionServerInner {
                 })
             }
             Err(err) => {
-                if matches!(region_change, RegionChange::Ingest) {
-                    crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type, err.status_code().as_ref()])
-                        .inc();
-                }
                 // Removes the region status if the operation fails.
                 self.unset_region_status(region_id, &engine, region_change);
                 Err(err)
@@ -1980,6 +2239,7 @@ impl RegionServerInner {
             .collect::<Vec<_>>();
         let num_regions = regions.len();
 
+        let mut first_error = None;
         for (region_id, engine) in regions {
             let closed = engine
                 .handle_request(
@@ -1989,7 +2249,15 @@ impl RegionServerInner {
                 .await;
             match closed {
                 Ok(_) => debug!("Region {region_id} is closed"),
-                Err(e) => warn!("Failed to close region {region_id}, err: {e}"),
+                Err(e) => {
+                    // A close that failed may not have flushed writes that
+                    // skipped the WAL, which nothing replays.
+                    error!(e; "Failed to close region {region_id}; writes that skipped the WAL may be lost");
+                    record_shutdown_error(
+                        &mut first_error,
+                        Err(e).context(HandleRegionRequestSnafu { region_id }),
+                    );
+                }
             }
         }
         self.region_map.clear();
@@ -1997,7 +2265,6 @@ impl RegionServerInner {
 
         drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
-        let mut first_error = None;
         for (engine_name, engine) in engines {
             let result = engine
                 .stop()
@@ -2036,6 +2303,35 @@ fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usi
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
         .with_label_values(&[engine, status_code.as_ref()])
         .inc_by(count as u64);
+}
+
+/// Awaits an ingest task without treating a join failure as an entry-level write result.
+async fn join_ingest_task<T>(task: JoinHandle<T>, request_type: &'static str) -> Result<T> {
+    task.await
+        .inspect_err(|error| {
+            let reason = if error.is_panic() {
+                "panic"
+            } else {
+                "cancelled"
+            };
+            crate::metrics::INGEST_TASK_FAILURES_TOTAL
+                .with_label_values(&[request_type, reason])
+                .inc();
+        })
+        .context(RuntimeJoinSnafu { request_type })
+}
+
+/// Records the result of `count` ingest requests answered by one response: the rows they
+/// changed, or their failures.
+fn record_ingest_result(request_type: &str, count: usize, result: &Result<RegionResponse>) {
+    match result {
+        Ok(response) => crate::metrics::REGION_CHANGED_ROW_COUNT
+            .with_label_values(&[request_type])
+            .inc_by(response.affected_rows as u64),
+        Err(err) => crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
+            .with_label_values(&[request_type, err.status_code().as_ref()])
+            .inc_by(count as u64),
+    }
 }
 
 fn parse_region_attribute(
@@ -2080,15 +2376,22 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use api::v1::{Rows, SemanticType};
+    use api::v1::region::{InsertRequest, InsertRequests};
+    use api::v1::{PartitionExprVersion, Rows, SemanticType};
     use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+    use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
     use futures_util::StreamExt;
-    use mito2::test_util::CreateRequestBuilder;
+    use log_store::ObjectStoreLogStore;
+    use mito2::config::MitoConfig;
+    use mito2::test_util::{CreateRequestBuilder, TestEnv, build_rows, rows_schema};
+    use object_store::ObjectStore;
+    use object_store::services::Memory;
     use query::options::FLOW_RETURN_REGION_SEQ;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_engine::RegionEngine;
@@ -2484,6 +2787,170 @@ mod tests {
         assert_eq!(err.status_code(), StatusCode::RegionNotReady);
     }
 
+    #[test]
+    fn test_batch_write_summary_uses_first_input_failure() {
+        let first = error::RegionNotFoundSnafu {
+            region_id: RegionId::new(1, 0),
+        }
+        .build();
+        let expected = format!("2 region requests failed; entry 0: {}", first.output_msg());
+        let later = error::RegionBusySnafu {
+            region_id: RegionId::new(1, 1),
+        }
+        .build();
+        let response = encode_batch_write_response(BatchRegionResponse {
+            affected_rows: 0,
+            extensions: HashMap::new(),
+            failures: vec![(1, later), (0, first)],
+        });
+        let status = response.header.unwrap().status.unwrap();
+        assert_eq!(status.status_code, StatusCode::PartialFailure as u32);
+        assert_eq!(status.err_msg, expected);
+        assert_eq!(response.failures[0].request_index, 1);
+        assert_eq!(response.failures[1].request_index, 0);
+    }
+
+    #[tokio::test]
+    async fn test_write_failure_response_compatibility() {
+        let server = mock_region_server();
+        let missing = RegionId::new(1, 1);
+        let registering = RegionId::new(1, 2);
+        let (engine, _receiver) = MockRegionEngine::new(MITO_ENGINE_NAME);
+        server
+            .inner
+            .region_map
+            .insert(registering, RegionEngineWithStatus::Registering(engine));
+        for (region_id, code) in [
+            (missing, StatusCode::RegionNotFound),
+            (registering, StatusCode::RegionNotReady),
+        ] {
+            for delete in [false, true] {
+                for accept_partial in [false, true] {
+                    // A preceding empty entry must still count toward the original envelope size.
+                    for with_empty_entry in [false, true] {
+                        let rows = Some(Rows {
+                            schema: Vec::new(),
+                            rows: Vec::new(),
+                        });
+                        let body = if delete {
+                            let request = api::v1::region::DeleteRequest {
+                                region_id: region_id.as_u64(),
+                                rows,
+                                ..Default::default()
+                            };
+                            region_request::Body::Deletes(api::v1::region::DeleteRequests {
+                                requests: if with_empty_entry {
+                                    vec![Default::default(), request]
+                                } else {
+                                    vec![request]
+                                },
+                            })
+                        } else {
+                            let request = InsertRequest {
+                                region_id: region_id.as_u64(),
+                                rows,
+                                ..Default::default()
+                            };
+                            region_request::Body::Inserts(InsertRequests {
+                                requests: if with_empty_entry {
+                                    vec![Default::default(), request]
+                                } else {
+                                    vec![request]
+                                },
+                            })
+                        };
+                        let mut header = api::v1::region::RegionRequestHeader::default();
+                        if accept_partial {
+                            header
+                                .query_context
+                                .get_or_insert_with(Default::default)
+                                .extensions
+                                .insert(
+                                    api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                                    "true".to_string(),
+                                );
+                        }
+                        let result = server
+                            .handle_region_request(RegionRequestV1 {
+                                header: Some(header),
+                                body: Some(body),
+                            })
+                            .await;
+                        if accept_partial && with_empty_entry {
+                            let response = result.unwrap();
+                            assert_eq!(
+                                StatusCode::PartialFailure as u32,
+                                response.header.unwrap().status.unwrap().status_code
+                            );
+                            assert_eq!(1, response.failures.len());
+                            assert_eq!(1, response.failures[0].request_index);
+                            let status = response.failures[0].status.as_ref().unwrap();
+                            assert_eq!(code as u32, status.status_code);
+                            assert_eq!(
+                                RetryHint::RetryAfterRouteRefresh.as_str(),
+                                status.retry_hint
+                            );
+                        } else {
+                            let status: tonic::Status = result.unwrap_err().into();
+                            assert_eq!(
+                                common_error::status_code::status_to_tonic_code(code),
+                                status.code()
+                            );
+                            assert_eq!(
+                                (code as u32).to_string(),
+                                status
+                                    .metadata()
+                                    .get(common_error::GREPTIME_DB_HEADER_ERROR_CODE)
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                            );
+                            assert_eq!(
+                                RetryHint::RetryAfterRouteRefresh.as_str(),
+                                status
+                                    .metadata()
+                                    .get(common_error::GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_legacy_batch_returns_first_input_error() {
+        let server = mock_region_server();
+        let first = RegionId::new(1, 1);
+        let second = RegionId::new(1, 2);
+        let (engine, _receiver) = MockRegionEngine::with_custom_apply_fn("mock", |engine| {
+            engine.handle_request_delay = Some(Duration::from_millis(10));
+            engine.handle_request_mock_fn = Some(Box::new(|region_id, _| {
+                error::RegionBusySnafu { region_id }.fail()
+            }));
+        });
+        server.register_test_region(first, engine);
+        let requests = [first, second]
+            .map(|region_id| InsertRequest {
+                region_id: region_id.as_u64(),
+                rows: Some(Rows::default()),
+                ..Default::default()
+            })
+            .to_vec();
+        let error = server
+            .handle_region_request(RegionRequestV1 {
+                header: Some(Default::default()),
+                body: Some(region_request::Body::Inserts(InsertRequests { requests })),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(StatusCode::RegionBusy, error.status_code());
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+    }
+
     #[tokio::test]
     async fn test_region_request_failed() {
         common_telemetry::init_default_ut_logging();
@@ -2509,8 +2976,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        let status = mock_region_server.inner.region_map.get(&region_id);
-        assert!(status.is_none());
+        assert!(!mock_region_server.inner.region_map.contains_key(&region_id));
 
         mock_region_server
             .inner
@@ -2529,8 +2995,120 @@ mod tests {
             .await
             .unwrap_err();
 
-        let status = mock_region_server.inner.region_map.get(&region_id);
-        assert!(status.is_some());
+        assert!(mock_region_server.inner.region_map.contains_key(&region_id));
+
+        let insert = api::v1::region::InsertRequest {
+            region_id: region_id.as_u64(),
+            rows: Some(Rows {
+                schema: Vec::new(),
+                rows: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let success_region = RegionId::new(1, 2);
+        let (success_engine, _receiver) =
+            MockRegionEngine::with_custom_apply_fn("mock", |engine| {
+                engine.handle_request_delay = Some(std::time::Duration::from_millis(10));
+                engine.handle_request_mock_fn = Some(Box::new(|_, _| Ok(5)));
+            });
+        mock_region_server.register_test_region(success_region, success_engine);
+        let successful_insert = api::v1::region::InsertRequest {
+            region_id: success_region.as_u64(),
+            ..insert.clone()
+        };
+        let response = mock_region_server
+            .handle_region_request(RegionRequestV1 {
+                header: Some(api::v1::region::RegionRequestHeader {
+                    query_context: Some(api::v1::QueryContext {
+                        extensions: HashMap::from([(
+                            api::region::ACCEPT_PARTIAL_RESULT.to_string(),
+                            "true".to_string(),
+                        )]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::Inserts(InsertRequests {
+                    requests: vec![
+                        Default::default(),
+                        insert.clone(),
+                        successful_insert,
+                        insert,
+                    ],
+                })),
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.affected_rows, 5);
+        assert_eq!(
+            response
+                .header
+                .as_ref()
+                .unwrap()
+                .status
+                .as_ref()
+                .unwrap()
+                .status_code,
+            StatusCode::PartialFailure as u32
+        );
+        assert_eq!(
+            response
+                .failures
+                .iter()
+                .map(|error| error.request_index)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert!(
+            response
+                .failures
+                .iter()
+                .all(|error| error.status.as_ref().is_some_and(|status| {
+                    status.status_code == StatusCode::Unexpected as u32
+                        && status.retry_hint == RetryHint::NonRetryable.as_str()
+                }))
+        );
+    }
+
+    /// A region that fails to close is reported in the result of the stop,
+    /// which still closes the other regions.
+    #[tokio::test]
+    async fn test_stop_reports_a_region_that_failed_to_close() {
+        common_telemetry::init_default_ut_logging();
+
+        let mut mock_region_server = mock_region_server();
+        let failing = RegionId::new(1, 1);
+        let closing = RegionId::new(1, 2);
+        let closed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(MITO_ENGINE_NAME, {
+            let closed = closed.clone();
+            Box::new(move |region_id, request| {
+                if matches!(request, RegionRequest::Close(_)) {
+                    closed.lock().unwrap().push(region_id);
+                    if region_id == failing {
+                        return error::UnexpectedSnafu {
+                            violated: "close failed".to_string(),
+                        }
+                        .fail();
+                    }
+                }
+                Ok(0)
+            })
+        });
+        mock_region_server.register_engine(engine.clone());
+        for region_id in [failing, closing] {
+            mock_region_server
+                .inner
+                .region_map
+                .insert(region_id, RegionEngineWithStatus::Ready(engine.clone()));
+        }
+
+        let err = mock_region_server.stop().await.unwrap_err();
+
+        assert_matches!(err, error::Error::HandleRegionRequest { region_id, .. } if region_id == failing);
+        let mut closed = closed.lock().unwrap().clone();
+        closed.sort();
+        assert_eq!(vec![failing, closing], closed);
     }
 
     #[tokio::test]
@@ -3003,5 +3581,494 @@ mod tests {
             .handle_list_metadata_request(&list_metadata_request)
             .await
             .unwrap_err();
+    }
+
+    /// Returns a region server with a Mito engine on a durable object store WAL, the WAL, and the
+    /// WAL options of a region on it.
+    async fn region_server_on_object_store_wal(
+        env: &mut TestEnv,
+        config: MitoConfig,
+    ) -> (RegionServer, Arc<ObjectStoreLogStore>, String) {
+        let wal_config = ObjectStoreWalConfig::default();
+        let log_store = ObjectStoreLogStore::try_new(
+            ObjectStore::new(Memory::default()).unwrap(),
+            &wal_config,
+            0,
+            STANDALONE_GENERATION,
+        )
+        .await
+        .unwrap();
+        let engine = env
+            .create_engine_with_log_store(config, log_store.clone())
+            .await;
+        let mut region_server = mock_region_server();
+        region_server.register_engine(Arc::new(engine));
+        let wal_options = serde_json::to_string(&WalOptions::ObjectStore(
+            ObjectStoreWalOptions::new(wal_config.node_prefix(0, STANDALONE_GENERATION)),
+        ))
+        .unwrap();
+        (region_server, log_store, wal_options)
+    }
+
+    /// Creates a region with `wal_options` and returns an insert of three rows into it.
+    async fn create_region(
+        region_server: &RegionServer,
+        region_id: RegionId,
+        wal_options: &str,
+    ) -> InsertRequest {
+        let request = CreateRequestBuilder::new()
+            .insert_option(WAL_OPTIONS_KEY, wal_options)
+            .build();
+        let rows = Rows {
+            schema: rows_schema(&request),
+            rows: build_rows(0, 3),
+        };
+        region_server
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        InsertRequest {
+            region_id: region_id.as_u64(),
+            rows: Some(rows),
+            partition_expr_version: None,
+            skip_wal: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metric_batch_failure_indices() {
+        let mut env = TestEnv::with_prefix("region-server-metric-results").await;
+        let mito = env.create_engine(MitoConfig::default()).await;
+        let metric = Arc::new(
+            MetricEngine::try_new(mito, metric_engine::config::EngineConfig::default()).unwrap(),
+        );
+        let mut server = mock_region_server();
+        server.register_engine(metric.clone());
+        let mut inserts = Vec::new();
+        for table in [10, 20] {
+            let physical = RegionId::new(table, 0);
+            let logical = RegionId::new(table + 1, 0);
+            let mut create = CreateRequestBuilder::new().build();
+            create.engine = METRIC_ENGINE_NAME.to_string();
+            create.column_metadatas = vec![
+                store_api::metadata::ColumnMetadata {
+                    column_id: 0,
+                    semantic_type: SemanticType::Timestamp,
+                    column_schema: ColumnSchema::new(
+                        "greptime_timestamp",
+                        ConcreteDataType::timestamp_millisecond_datatype(),
+                        false,
+                    ),
+                },
+                store_api::metadata::ColumnMetadata {
+                    column_id: 1,
+                    semantic_type: SemanticType::Field,
+                    column_schema: ColumnSchema::new(
+                        "greptime_value",
+                        ConcreteDataType::float64_datatype(),
+                        false,
+                    ),
+                },
+            ];
+            create.primary_key.clear();
+            create.table_dir = format!("metric-results/{table}/");
+            create.options = HashMap::from([(
+                store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY.to_string(),
+                String::new(),
+            )]);
+            server
+                .handle_request(physical, RegionRequest::Create(create.clone()))
+                .await
+                .unwrap();
+            create.table_dir = format!("metric-results/{}/", table + 1);
+            create.options = HashMap::from([(
+                store_api::metric_engine_consts::LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical.as_u64().to_string(),
+            )]);
+            server
+                .handle_request(logical, RegionRequest::Create(create.clone()))
+                .await
+                .unwrap();
+            inserts.push(InsertRequest {
+                region_id: logical.as_u64(),
+                rows: Some(Rows {
+                    schema: rows_schema(&create),
+                    rows: vec![api::v1::Row {
+                        values: vec![
+                            api::v1::Value {
+                                value_data: Some(
+                                    api::v1::value::ValueData::TimestampMillisecondValue(1),
+                                ),
+                            },
+                            api::v1::Value {
+                                value_data: Some(api::v1::value::ValueData::F64Value(1.0)),
+                            },
+                        ],
+                    }],
+                }),
+                ..Default::default()
+            });
+        }
+        // Both entries of the second physical group fail at write_data.
+        metric
+            .set_region_role(RegionId::new(20, 0), RegionRole::Follower)
+            .unwrap();
+        let response = server
+            .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                requests: vec![
+                    Default::default(),
+                    inserts[0].clone(),
+                    inserts[1].clone(),
+                    inserts[1].clone(),
+                ],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(1, response.affected_rows);
+        let mut failures = response.failures;
+        failures.sort_unstable_by_key(|(index, _)| *index);
+        assert_eq!(
+            vec![2, 3],
+            failures.iter().map(|(index, _)| *index).collect::<Vec<_>>()
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|(_, error)| error.status_code() == StatusCode::RegionNotReady)
+        );
+        assert!(
+            failures
+                .iter()
+                .all(|(_, error)| error.retry_hint() == RetryHint::RetryAfterRouteRefresh)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mito_puts_of_one_request_share_a_wal_append() {
+        // One worker that takes one message at a time, so that only puts that
+        // arrive in one message share a WAL append.
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts").await;
+        let config = MitoConfig {
+            num_workers: 1,
+            worker_request_batch_size: 1,
+            ..Default::default()
+        };
+        let (region_server, log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, config).await;
+        let mut requests = Vec::new();
+        for region_number in 1..=2 {
+            let region_id = RegionId::new(1, region_number);
+            requests.push(create_region(&region_server, region_id, &wal_options).await);
+        }
+
+        let response = region_server
+            .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests { requests }))
+            .await
+            .unwrap();
+
+        assert_eq!(6, response.affected_rows);
+        // The worker got both puts at once and appended them together.
+        log_store.wait_for_admitted_appends(1).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::ZERO, log_store.wait_for_admitted_appends(2))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mito_puts_to_one_region_share_a_wal_append() {
+        // As above: only puts that arrive in one message share a WAL append.
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-one-region").await;
+        let config = MitoConfig {
+            num_workers: 1,
+            worker_request_batch_size: 1,
+            ..Default::default()
+        };
+        let (region_server, log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, config).await;
+        let insert = create_region(&region_server, RegionId::new(1, 1), &wal_options).await;
+        let requests = vec![insert.clone(), insert];
+
+        let response = region_server
+            .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests { requests }))
+            .await
+            .unwrap();
+
+        assert_eq!(6, response.affected_rows);
+        log_store.wait_for_admitted_appends(1).await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::ZERO, log_store.wait_for_admitted_appends(2))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mito_batch_failure_indices_for_same_region() {
+        for failed_index in [0, 1] {
+            let mut env = TestEnv::with_prefix("region-server-mito-same-region-failure").await;
+            let (server, _log_store, wal_options) =
+                region_server_on_object_store_wal(&mut env, MitoConfig::default()).await;
+            let region_id = RegionId::new(1, 1);
+            let insert = create_region(&server, region_id, &wal_options).await;
+            let mut requests = vec![insert.clone(), insert];
+            requests[failed_index].partition_expr_version = Some(PartitionExprVersion { value: 1 });
+            let response = server
+                .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                    requests,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(response.affected_rows, 3);
+            assert_eq!(response.failures.len(), 1);
+            assert_eq!(response.failures[0].0, failed_index);
+            assert_eq!(
+                response.failures[0].1.status_code(),
+                StatusCode::InvalidArguments
+            );
+            let engine = server
+                .inner
+                .region_map
+                .get(&region_id)
+                .unwrap()
+                .clone()
+                .into_engine();
+            let mito = engine.as_any().downcast_ref::<MitoEngine>().unwrap();
+            let stream = mito
+                .scan_to_stream(region_id, Default::default())
+                .await
+                .unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                3
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mito_batch_puts_retain_successful_regions() {
+        for accept_partial_result in [false, true] {
+            let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-error").await;
+            let config = MitoConfig {
+                num_workers: 2,
+                ..Default::default()
+            };
+            let (region_server, log_store, wal_options) =
+                region_server_on_object_store_wal(&mut env, config).await;
+            // Regions 1 and 2 of table 1 belong to different workers. The put to region 1 waits for a
+            // WAL object whose create is held; Mito does not know region 2, so its put fails at once.
+            let held = RegionId::new(1, 1);
+            let unknown = RegionId::new(1, 2);
+            let held_insert = create_region(&region_server, held, &wal_options).await;
+            let unknown_insert = InsertRequest {
+                region_id: unknown.as_u64(),
+                ..held_insert.clone()
+            };
+            let mito = region_server
+                .inner
+                .region_map
+                .get(&held)
+                .unwrap()
+                .clone()
+                .into_engine();
+            region_server
+                .inner
+                .region_map
+                .insert(unknown, RegionEngineWithStatus::Ready(mito.clone()));
+            log_store.hold_creates();
+
+            let requests = vec![Default::default(), held_insert, unknown_insert];
+            let mut header = api::v1::region::RegionRequestHeader::default();
+            if accept_partial_result {
+                api::region::set_accept_partial_result(&mut header);
+            }
+            let write = region_server.handle_region_request(RegionRequestV1 {
+                header: Some(header),
+                body: Some(region_request::Body::Inserts(InsertRequests { requests })),
+            });
+            tokio::pin!(write);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut write)
+                    .await
+                    .is_err()
+            );
+            log_store.release_creates();
+            let result = tokio::time::timeout(Duration::from_secs(10), write)
+                .await
+                .unwrap();
+            if accept_partial_result {
+                let response = result.unwrap();
+                assert_eq!(3, response.affected_rows);
+                assert_eq!(
+                    StatusCode::PartialFailure as u32,
+                    response.header.unwrap().status.unwrap().status_code
+                );
+                assert_eq!(1, response.failures.len());
+                assert_eq!(2, response.failures[0].request_index);
+                assert_eq!(
+                    StatusCode::RegionNotFound as u32,
+                    response.failures[0].status.as_ref().unwrap().status_code
+                );
+            } else {
+                assert_eq!(
+                    StatusCode::RegionNotFound,
+                    result.unwrap_err().status_code()
+                );
+            }
+            let mito = mito.as_any().downcast_ref::<MitoEngine>().unwrap();
+            let stream = mito.scan_to_stream(held, Default::default()).await.unwrap();
+            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                3
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mito_batch_puts_to_a_stopped_worker_fail_as_a_single_put_does() {
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-stopped").await;
+        let (region_server, _log_store, wal_options) =
+            region_server_on_object_store_wal(&mut env, MitoConfig::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let insert = create_region(&region_server, region_id, &wal_options).await;
+        let mito = region_server
+            .inner
+            .region_map
+            .get(&region_id)
+            .unwrap()
+            .clone()
+            .into_engine();
+        mito.stop().await.unwrap();
+
+        // One put takes the per-region path and two take the batch path.
+        for requests in [vec![insert.clone()], vec![insert.clone(), insert]] {
+            let count = requests.len();
+            let response = region_server
+                .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                    requests,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(0, response.affected_rows);
+            assert_eq!(count, response.failures.len());
+            for (index, (request_index, error)) in response.failures.iter().enumerate() {
+                assert_eq!(index, *request_index);
+                assert!(format!("{error:?}").contains("is stopped"), "{error:?}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_batch_puts_handle_each_put_as_a_request() {
+        let failing = RegionId::new(1, 2);
+        let (engine, _receiver) = MockRegionEngine::with_mock_fn(
+            "mock",
+            Box::new(move |region_id, request| {
+                assert!(matches!(request, RegionRequest::Put(_)));
+                if region_id == failing {
+                    return error::UnexpectedSnafu {
+                        violated: "test".to_string(),
+                    }
+                    .fail();
+                }
+                Ok(region_id.region_number() as usize)
+            }),
+        );
+        let region_ids = [1, 2, 3].map(|n| RegionId::new(1, n));
+        let puts = region_ids
+            .iter()
+            .map(|region_id| {
+                let request = RegionPutRequest {
+                    rows: Rows {
+                        schema: Vec::new(),
+                        rows: Vec::new(),
+                    },
+                    hint: None,
+                    skip_wal: false,
+                    partition_expr_version: None,
+                };
+                (*region_id, request)
+            })
+            .collect();
+
+        let (answered, responses): (Vec<_>, Vec<_>) =
+            engine.handle_batch_put_requests(puts).into_iter().unzip();
+        let responses = futures_util::future::join_all(responses).await;
+
+        let answered_regions = region_ids.map(|region_id| vec![region_id]);
+        assert_eq!(answered_regions.to_vec(), answered);
+        assert_eq!(1, responses[0].as_ref().unwrap().affected_rows);
+        assert!(responses[1].is_err());
+        assert_eq!(3, responses[2].as_ref().unwrap().affected_rows);
+    }
+
+    #[tokio::test]
+    async fn test_only_several_puts_into_ready_mito_regions_are_batched() {
+        let mut env = TestEnv::with_prefix("region-server-mito-batch-puts-guard").await;
+        let mito: RegionEngineRef = Arc::new(env.create_engine(MitoConfig::default()).await);
+        let (other, _receiver) = MockRegionEngine::new("mock");
+        let region_server = mock_region_server();
+        let [mito_a, mito_b, registering, other_region] = [1, 2, 3, 4].map(|n| RegionId::new(1, n));
+        let region_map = &region_server.inner.region_map;
+        region_map.insert(mito_a, RegionEngineWithStatus::Ready(mito.clone()));
+        region_map.insert(mito_b, RegionEngineWithStatus::Ready(mito.clone()));
+        region_map.insert(registering, RegionEngineWithStatus::Registering(mito));
+        region_map.insert(other_region, RegionEngineWithStatus::Ready(other));
+        let rows = || Rows {
+            schema: Vec::new(),
+            rows: Vec::new(),
+        };
+        let put = |region_id| {
+            let request = RegionPutRequest {
+                rows: rows(),
+                hint: None,
+                skip_wal: false,
+                partition_expr_version: None,
+            };
+            IndexedRegionRequest {
+                index: 0,
+                region_id,
+                request: RegionRequest::Put(request),
+            }
+        };
+        let delete = |region_id| {
+            let request = RegionDeleteRequest {
+                rows: rows(),
+                hint: None,
+                partition_expr_version: None,
+            };
+            IndexedRegionRequest {
+                index: 0,
+                region_id,
+                request: RegionRequest::Delete(request),
+            }
+        };
+
+        for requests in [
+            vec![put(mito_a), put(mito_b)],
+            vec![put(mito_a), put(mito_a)],
+        ] {
+            assert!(
+                region_server
+                    .mito_engine_for_batch_puts(&requests)
+                    .is_some()
+            );
+        }
+        for requests in [
+            vec![put(mito_a)],
+            vec![put(mito_a), delete(mito_b)],
+            vec![put(mito_a), put(registering)],
+            vec![put(mito_a), put(other_region)],
+            vec![put(other_region), put(mito_a)],
+        ] {
+            assert!(
+                region_server
+                    .mito_engine_for_batch_puts(&requests)
+                    .is_none()
+            );
+        }
     }
 }

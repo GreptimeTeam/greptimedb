@@ -145,3 +145,29 @@ pub(crate) fn assert_parquet_metadata_equal(x: Arc<ParquetMetaData>, y: Arc<Parq
     let y = normalize_statistics(Arc::unwrap_or_clone(y));
     assert_eq!(x, y);
 }
+
+/// A file-only range key shared by cache and SST-lifecycle regression tests.
+pub(crate) fn range_cache_key(
+    files: &[store_api::storage::FileId],
+) -> crate::read::range_cache::RangeScanCacheKey {
+    use crate::read::range_cache::{RangeScanCacheKey, ScanRequestFingerprintBuilder};
+    use crate::read::read_columns::ReadColumns;
+
+    RangeScanCacheKey {
+        region_id: store_api::storage::RegionId::new(1, 1),
+        row_groups: files.iter().map(|file| (*file, 0)).collect(),
+        scan: ScanRequestFingerprintBuilder {
+            read_columns: ReadColumns::new(std::iter::empty()),
+            read_column_types: vec![],
+            filters: vec![],
+            time_filters: vec![],
+            series_row_selector: None,
+            append_mode: false,
+            filter_deleted: true,
+            merge_mode: crate::region::options::MergeMode::LastRow,
+            sequence_range: None,
+            partition_expr_version: 0,
+        }
+        .build(),
+    }
+}

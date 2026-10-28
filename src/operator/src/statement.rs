@@ -100,7 +100,7 @@ use crate::error::{
 };
 use crate::insert::InserterRef;
 use crate::statement::copy_database::{COPY_DATABASE_TIME_END_KEY, COPY_DATABASE_TIME_START_KEY};
-use crate::statement::set::set_allow_query_fallback;
+use crate::statement::set::set_query_option;
 
 /// A configurator that customizes or enhances a [`StatementExecutor`].
 #[async_trait::async_trait]
@@ -421,6 +421,7 @@ impl StatementExecutor {
                 .await
             }
             Statement::TruncateTable(stmt) => {
+                let ddl_options = ddl::parse_ddl_options(stmt.options())?;
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)
                         .map_err(BoxedError::new)
@@ -429,7 +430,7 @@ impl StatementExecutor {
                 let time_ranges = self
                     .convert_truncate_time_ranges(&table_name, stmt.time_ranges(), &query_ctx)
                     .await?;
-                self.truncate_table(table_name, time_ranges, query_ctx)
+                self.truncate_table_with_options(table_name, time_ranges, ddl_options, query_ctx)
                     .await
             }
             Statement::CreateDatabase(stmt) => {
@@ -527,7 +528,8 @@ impl StatementExecutor {
     }
 
     fn set_variables(&self, set_var: SetVariables, query_ctx: QueryContextRef) -> Result<Output> {
-        let var_name = set_var.variable.to_string().to_uppercase();
+        let variable = sql::ast::object_name_to_string_unquoted(&set_var.variable);
+        let var_name = variable.to_uppercase();
 
         debug!(
             "Trying to set {}={} for session: {} ",
@@ -535,6 +537,10 @@ impl StatementExecutor {
             set_var.value.iter().map(|e| e.to_string()).join(", "),
             query_ctx.conn_info()
         );
+
+        if set_query_option(&variable, set_var.value.clone(), query_ctx.clone())? {
+            return Ok(Output::new_with_affected_rows(0));
+        }
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
@@ -551,9 +557,6 @@ impl StatementExecutor {
             // The tracked issue is https://github.com/GreptimeTeam/greptimedb/issues/3442.
             "DATESTYLE" => set_datestyle(set_var.value, query_ctx)?,
             "INTERVALSTYLE" => set_intervalstyle(set_var.value, query_ctx)?,
-
-            // Allow query to fallback when failed to push down.
-            "ALLOW_QUERY_FALLBACK" => set_allow_query_fallback(set_var.value, query_ctx)?,
 
             "CLIENT_ENCODING" => validate_client_encoding(set_var)?,
             "@@SESSION.MAX_EXECUTION_TIME" | "MAX_EXECUTION_TIME" => match query_ctx.channel() {

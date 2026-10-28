@@ -28,6 +28,8 @@ use crate::region::MitoRegion;
 use crate::region::catchup::RegionCatchupTask;
 use crate::region::opener::RegionOpener;
 use crate::request::OptionOutputTx;
+#[cfg(feature = "hdfs-object-store")]
+use crate::temp_file_sweeper;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::RegionWorkerLoop;
 
@@ -69,6 +71,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         let catchup_regions = self.catchup_regions.clone();
         let wal = self.wal.clone();
         let allow_stale_entries = self.config.allow_stale_entries;
+        #[cfg(feature = "hdfs-object-store")]
+        let sweep_older_than = self.config.gc.unknown_file_lingering_time;
+        #[cfg(feature = "hdfs-object-store")]
+        let sweep_limiter = self.sweep_limiter.clone();
+        let node_lease = self.node_lease.clone();
         common_runtime::spawn_global(async move {
             let mut task = RegionCatchupTask::new(region.clone(), wal, allow_stale_entries)
                 .with_entry_receiver(entry_receiver)
@@ -78,13 +85,27 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             match task.run().await {
                 Ok(_) => {
                     if request.set_writable {
+                        // The region takes writes under the node lease until its next Leader
+                        // grant.
+                        node_lease.seed(&region.leader_deadline);
                         region.set_role(RegionRole::Leader);
                         // Finalize leadership: persist backfilled metadata.
-                        if let Err(err) = region
+                        match region
                             .set_role_state_gracefully(SettableRegionRoleState::Leader)
                             .await
                         {
-                            error!(err; "Failed to set region {region_id} to leader");
+                            Ok(()) => {
+                                #[cfg(feature = "hdfs-object-store")]
+                                temp_file_sweeper::spawn_region_sweep(
+                                    region.access_layer(),
+                                    region_id,
+                                    sweep_older_than,
+                                    sweep_limiter,
+                                );
+                            }
+                            Err(err) => {
+                                error!(err; "Failed to set region {region_id} to leader");
+                            }
                         }
                     }
                     catchup_regions.remove_region(region_id);
@@ -132,6 +153,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .open(&self.config, &self.wal)
         .await?;
         debug_assert!(!reopened_region.is_writable());
+        // Preserve allocated sequences without publishing the old memtables.
+        reopened_region
+            .version_control
+            .update_last_sequence(region.version_control.current().last_sequence);
         self.register_region(reopened_region.clone());
         if let Some(state) = &self.series_index_task_state {
             state.wake();

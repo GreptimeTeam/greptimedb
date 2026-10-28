@@ -356,11 +356,13 @@ pub mod mock {
                     status: Some(PbStatus {
                         status_code: 0,
                         err_msg: String::default(),
+                        ..Default::default()
                     }),
                 }),
                 affected_rows: 0,
                 extensions: Default::default(),
                 metadata: Vec::new(),
+                failures: Vec::new(),
             })
         }
     }

@@ -12,18 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
 use auth::{
-    BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider, UserProviderRef,
-    format_pg_scram_sha256_password_verifier, user_provider_from_option,
+    BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
+    UserProvider, UserProviderRef, format_pg_scram_sha256_password_verifier,
+    user_provider_from_option,
 };
+use common_base::secrets::ExposeSecret;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
@@ -40,6 +44,9 @@ use servers::server::Server;
 use servers::tls::{ReloadableTlsServerConfig, TlsOption};
 use table::TableRef;
 use table::test_util::MemTable;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
@@ -89,6 +96,116 @@ impl UserProvider for BearerProvider {
     }
 }
 
+const MIXED_AUTH_SCRAM_USER: &str = "scram_user";
+const MIXED_AUTH_SCRAM_PASSWORD: &[u8] = b"scram-password";
+const MIXED_AUTH_CLEARTEXT_USER: &str = "clear_user";
+const MIXED_AUTH_CLEARTEXT_PASSWORD: &str = "clear-password";
+const MIXED_AUTH_DENIED_USER: &str = "denied_user";
+
+/// Selects SCRAM-SHA-256 for [`MIXED_AUTH_SCRAM_USER`] and
+/// [`MIXED_AUTH_DENIED_USER`] (whose authorization is denied) and cleartext
+/// for everyone else, so one endpoint serves both mechanisms.
+struct MixedAuthProvider {
+    scram_verifier: PgScramSha256Verifier,
+    selections: Mutex<HashMap<String, &'static str>>,
+    authorize_calls: Mutex<HashMap<String, usize>>,
+}
+
+#[async_trait]
+impl UserProvider for MixedAuthProvider {
+    fn name(&self) -> &str {
+        "mixed-auth-test"
+    }
+
+    async fn authenticate(
+        &self,
+        id: Identity<'_>,
+        password: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        let Identity::UserId(username, _) = id;
+        let Password::PlainText(password) = password else {
+            return auth::error::UnsupportedPasswordTypeSnafu {
+                password_type: "plain_text",
+            }
+            .fail();
+        };
+
+        let verified = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
+            self.scram_verifier
+                .verify_plain_password(password.expose_secret().as_bytes())?
+        } else if username == MIXED_AUTH_CLEARTEXT_USER {
+            password.expose_secret() == MIXED_AUTH_CLEARTEXT_PASSWORD
+        } else {
+            return auth::error::UserNotFoundSnafu {
+                username: username.to_string(),
+            }
+            .fail();
+        };
+
+        if verified {
+            Ok(auth::userinfo_by_name(Some(username.to_string())))
+        } else {
+            auth::error::UserPasswordMismatchSnafu {
+                username: username.to_string(),
+            }
+            .fail()
+        }
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        *self
+            .authorize_calls
+            .lock()
+            .unwrap()
+            .entry(user_info.username().to_string())
+            .or_insert(0) += 1;
+
+        if user_info.username() == MIXED_AUTH_DENIED_USER {
+            return auth::error::AccessDeniedSnafu {
+                catalog: catalog.to_string(),
+                schema: schema.to_string(),
+                username: user_info.username().to_string(),
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
+    async fn postgres_auth_info(
+        &self,
+        id: Identity<'_>,
+        _catalog: &str,
+    ) -> auth::error::Result<PgAuthInfo> {
+        let Identity::UserId(username, _) = id;
+        let auth_info = if username == MIXED_AUTH_SCRAM_USER || username == MIXED_AUTH_DENIED_USER {
+            PgAuthInfo::ScramSha256 {
+                verifier: self.scram_verifier.clone(),
+                user_info: Some(auth::userinfo_by_name(Some(username.to_string()))),
+            }
+        } else {
+            PgAuthInfo::Cleartext
+        };
+
+        // Record the mechanism from the returned variant, so the map can
+        // never claim a mechanism the provider did not hand out.
+        let method = match &auth_info {
+            PgAuthInfo::ScramSha256 { .. } => "scram",
+            PgAuthInfo::Cleartext => "cleartext",
+        };
+        self.selections
+            .lock()
+            .unwrap()
+            .insert(username.to_string(), method);
+
+        Ok(auth_info)
+    }
+}
+
 fn create_postgres_server(
     table: TableRef,
     check_pwd: bool,
@@ -112,7 +229,18 @@ fn create_postgres_server_with_user_provider(
     tls: TlsOption,
     user_provider: Option<UserProviderRef>,
 ) -> Result<Box<dyn Server>> {
+    create_postgres_server_inner(table, tls, user_provider).map(|(server, _)| server)
+}
+
+fn create_postgres_server_inner(
+    table: TableRef,
+    tls: TlsOption,
+    user_provider: Option<UserProviderRef>,
+) -> Result<(Box<dyn Server>, Arc<crate::RecordingCopyInHandler>)> {
     let instance = Arc::new(create_testing_instance(table));
+    let copy_in_handler = Arc::new(crate::RecordingCopyInHandler::new(
+        instance.catalog_manager(),
+    ));
     let io_runtime = RuntimeBuilder::default()
         .worker_threads(4)
         .thread_name("postgres-io-handlers")
@@ -124,15 +252,19 @@ fn create_postgres_server_with_user_provider(
             .expect("Failed to load certificates and keys"),
     );
 
-    Ok(Box::new(PostgresServer::new(
-        instance,
-        tls.should_force_tls(),
-        tls_server_config,
-        0,
-        io_runtime,
-        user_provider,
-        None,
-    )))
+    Ok((
+        Box::new(PostgresServer::new(
+            instance,
+            copy_in_handler.clone(),
+            tls.should_force_tls(),
+            tls_server_config,
+            0,
+            io_runtime,
+            user_provider,
+            None,
+        )),
+        copy_in_handler,
+    ))
 }
 
 async fn start_test_server_with_user_provider(
@@ -245,6 +377,92 @@ async fn test_pg_scram_sha256_auth() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_scram_rejects_channel_binding_request() -> Result<()> {
+    // The server supports no channel binding (no certificate configured),
+    // so RFC 5802 §6 requires rejecting a client-first with a "p" flag.
+    let verifier =
+        format_pg_scram_sha256_password_verifier(b"greptime", b"pg-scram-salt", 4096).unwrap();
+    let user_provider =
+        user_provider_from_option(&format!("static_user_provider:cmd:greptime={verifier}"))
+            .unwrap();
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(user_provider, Default::default()).await?;
+
+    // "p" flag: rejected with an error
+    let response = raw_scram_client_first(
+        server_port,
+        b"p=tls-server-end-point,,n=greptime,r=clientnonce",
+    )
+    .await?;
+    assert_eq!(
+        b'E', response,
+        "expected an ErrorResponse for a p-flag client-first"
+    );
+
+    // "n" flag (tokio_postgres sends this): handshake continues normally
+    let response = raw_scram_client_first(server_port, b"n,,n=greptime,r=clientnonce").await?;
+    assert_eq!(
+        b'R', response,
+        "expected a SASLContinue for an n-flag client-first"
+    );
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+/// A minimal raw SCRAM client: sends the startup message and a
+/// SASLInitialResponse carrying `client_first`, returns the message type
+/// byte of the server's answer ('R' for Authentication::SASL*, 'E' for
+/// ErrorResponse).
+async fn raw_scram_client_first(port: u16, client_first: &[u8]) -> Result<u8> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+
+    fn put_i32(buf: &mut Vec<u8>, v: i32) {
+        buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    async fn read_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+        let mut header = [0u8; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        let len = i32::from_be_bytes(header[1..].try_into().unwrap()) as usize - 4;
+        let mut body = vec![0u8; len];
+        stream.read_exact(&mut body).await.unwrap();
+        (header[0], body)
+    }
+
+    // startup message: i32 len | i32 196608 | user/database params
+    let mut body = Vec::new();
+    put_i32(&mut body, 196608);
+    body.extend_from_slice(b"user\0greptime\0database\0public\0\0");
+    let mut message = Vec::new();
+    put_i32(&mut message, (body.len() + 4) as i32);
+    message.extend_from_slice(&body);
+    stream.write_all(&message).await.unwrap();
+
+    // Authentication::SASL advertisement: 'R' | len | i32 10 | mechanism cstrings
+    let (typ, body) = read_message(&mut stream).await;
+    assert_eq!(b'R', typ, "expected the SASL mechanism advertisement");
+    assert_eq!(10, i32::from_be_bytes(body[..4].try_into().unwrap()));
+    assert!(
+        body.windows(b"SCRAM-SHA-256".len())
+            .any(|w| w == b"SCRAM-SHA-256")
+    );
+
+    // SASLInitialResponse: 'p' | len | "SCRAM-SHA-256"\0 | i32 len | client-first
+    let mut body = Vec::new();
+    body.extend_from_slice(b"SCRAM-SHA-256\0");
+    put_i32(&mut body, client_first.len() as i32);
+    body.extend_from_slice(client_first);
+    let mut message = Vec::new();
+    message.push(b'p');
+    put_i32(&mut message, (body.len() + 4) as i32);
+    message.extend_from_slice(&body);
+    stream.write_all(&message).await.unwrap();
+
+    Ok(read_message(&mut stream).await.0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_pg_cleartext_auth_fallback() -> Result<()> {
     common_telemetry::init_default_ut_logging();
     let table = MemTable::default_numbers_table();
@@ -264,6 +482,103 @@ async fn test_pg_cleartext_auth_fallback() -> Result<()> {
     let wrong_password =
         create_plain_connection_with_credentials(server_port, "greptime", "wrong").await;
     assert!(wrong_password.is_err());
+
+    postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_pg_mixed_auth_scram_and_cleartext() -> Result<()> {
+    let provider = Arc::new(MixedAuthProvider {
+        scram_verifier: PgScramSha256Verifier::from_password(
+            MIXED_AUTH_SCRAM_PASSWORD,
+            b"mixed-auth-salt",
+            4096,
+        )
+        .unwrap(),
+        selections: Mutex::new(HashMap::new()),
+        authorize_calls: Mutex::new(HashMap::new()),
+    });
+    let (postgres_server, server_port) =
+        start_test_server_with_user_provider(provider.clone(), Default::default()).await?;
+
+    // SCRAM-selected user
+    let client = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_SCRAM_USER,
+        "scram-password",
+    )
+    .await
+    .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+
+    assert!(
+        create_plain_connection_with_credentials(server_port, MIXED_AUTH_SCRAM_USER, "wrong")
+            .await
+            .is_err()
+    );
+
+    // cleartext-selected user
+    let client = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_CLEARTEXT_USER,
+        MIXED_AUTH_CLEARTEXT_PASSWORD,
+    )
+    .await
+    .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+
+    assert!(
+        create_plain_connection_with_credentials(server_port, MIXED_AUTH_CLEARTEXT_USER, "wrong",)
+            .await
+            .is_err()
+    );
+
+    // unknown user falls back to cleartext and fails authentication
+    assert!(
+        create_plain_connection_with_credentials(server_port, "nobody", "whatever")
+            .await
+            .is_err()
+    );
+
+    // SCRAM-selected user denied by authorization: the client proof
+    // verifies, authorize rejects, and the failure reaches the client as
+    // 28P01 before SASLFinal/AuthenticationOk/ReadyForQuery were sent —
+    // had the completion fired first, this connection would succeed.
+    let denied = create_plain_connection_with_credentials(
+        server_port,
+        MIXED_AUTH_DENIED_USER,
+        "scram-password",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(Some(&SqlState::INVALID_PASSWORD), denied.code());
+
+    // both mechanisms were served by the same endpoint
+    let selections = provider.selections.lock().unwrap().clone();
+    assert_eq!(Some(&"scram"), selections.get(MIXED_AUTH_SCRAM_USER));
+    assert_eq!(Some(&"scram"), selections.get(MIXED_AUTH_DENIED_USER));
+    assert_eq!(
+        Some(&"cleartext"),
+        selections.get(MIXED_AUTH_CLEARTEXT_USER)
+    );
+
+    // authorize ran exactly once for every password-verified user —
+    // including the denied one, proving it was rejected by authorization
+    // after successful SCRAM verification, not by authentication
+    let authorize_calls = provider.authorize_calls.lock().unwrap().clone();
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_SCRAM_USER));
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_DENIED_USER));
+    assert_eq!(Some(&1), authorize_calls.get(MIXED_AUTH_CLEARTEXT_USER));
+    assert!(!authorize_calls.contains_key("nobody"));
 
     postgres_server.shutdown().await.unwrap();
     Ok(())
@@ -848,4 +1163,238 @@ async fn do_simple_query_with_secure_server(
     };
 
     do_simple_query(server_tls, client_tls).await
+}
+
+// ---------------------------------------------------------------------------
+// COPY FROM STDIN tests
+// ---------------------------------------------------------------------------
+
+use futures::SinkExt;
+
+fn copy_in_test_table() -> TableRef {
+    use common_recordbatch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::schema::ColumnSchema;
+    use datatypes::types::TimestampType;
+    use datatypes::vectors::{Float64Vector, StringVector, TimestampMillisecondVector, VectorRef};
+
+    let column_schemas = vec![
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::Timestamp(TimestampType::Millisecond(Default::default())),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+        ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+    ];
+    let schema = Arc::new(datatypes::schema::Schema::new(column_schemas));
+    let columns: Vec<VectorRef> = vec![
+        Arc::new(TimestampMillisecondVector::from_slice([0i64])),
+        Arc::new(StringVector::from_slice(&["localhost"])),
+        Arc::new(Float64Vector::from_slice([1.0f64])),
+        Arc::new(StringVector::from_slice(&["seed"])),
+    ];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    MemTable::table("metrics", recordbatch)
+}
+
+async fn start_copy_in_test_server(
+    table: TableRef,
+) -> Result<(Box<dyn Server>, u16, Arc<crate::RecordingCopyInHandler>)> {
+    common_telemetry::init_default_ut_logging();
+    let _ = install_default_crypto_provider();
+    let (mut server, handler) = create_postgres_server_inner(table, Default::default(), None)?;
+    let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
+    server.start(listening).await.unwrap();
+    let port = server.bind_addr().unwrap().port();
+    Ok((server, port, handler))
+}
+
+fn recorded_rows(handler: &crate::RecordingCopyInHandler) -> Vec<api::v1::Row> {
+    handler
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|request| {
+            request.inserts.iter().flat_map(|insert| {
+                insert
+                    .rows
+                    .clone()
+                    .map(|rows| rows.rows)
+                    .unwrap_or_default()
+            })
+        })
+        .collect()
+}
+
+async fn feed_copy_in(
+    client: &Client,
+    sql: &str,
+    chunks: Vec<bytes::Bytes>,
+) -> std::result::Result<u64, PgError> {
+    let mut sink = Box::pin(client.copy_in(sql).await?);
+    for chunk in chunks {
+        sink.as_mut().send(chunk).await?;
+    }
+    sink.as_mut().finish().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_csv() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let rows = feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN WITH (FORMAT csv)",
+        vec![bytes::Bytes::from_static(
+            b"2023-11-14 22:13:20,host1,1.5,hello\n2023-11-14 22:13:21,host2,,\"quoted, comma\"\n",
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 2);
+
+    let rows = recorded_rows(&handler);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[0].values[1].value_data,
+        Some(api::v1::value::ValueData::StringValue("host1".to_string()))
+    );
+    assert_eq!(
+        rows[0].values[2].value_data,
+        Some(api::v1::value::ValueData::F64Value(1.5))
+    );
+    // Unquoted empty field is NULL, quoted field keeps its content.
+    assert_eq!(rows[1].values[2].value_data, None);
+    assert_eq!(
+        rows[1].values[3].value_data,
+        Some(api::v1::value::ValueData::StringValue(
+            "quoted, comma".to_string()
+        ))
+    );
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_column_list_and_batches() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let mut chunks = Vec::new();
+    let mut payload = String::new();
+    for i in 0..70000u64 {
+        payload.push_str(&format!("{i},2023-11-14 22:13:20,host{i},0.5\n"));
+        if (i + 1) % 100 == 0 {
+            chunks.push(bytes::Bytes::from(std::mem::take(&mut payload)));
+        }
+    }
+    let rows = feed_copy_in(
+        &client,
+        "COPY metrics (note, ts, host, val) FROM STDIN (FORMAT csv)",
+        chunks,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 70000);
+
+    let recorded = handler.requests.lock().unwrap().clone();
+    // The 70000 rows must have been flushed in multiple batches of at
+    // most COPY_IN_FLUSH_ROWS.
+    assert!(recorded.len() > 1);
+    let total: usize = recorded
+        .iter()
+        .map(|request| {
+            request.inserts[0]
+                .rows
+                .as_ref()
+                .map(|rows| rows.rows.len())
+                .unwrap_or(0)
+        })
+        .sum();
+    assert_eq!(total, 70000);
+
+    let rows = recorded_rows(&handler);
+    // The column list reorders the fields: first field lands in `note`.
+    assert_eq!(
+        rows[0].values[0].value_data,
+        Some(api::v1::value::ValueData::StringValue("0".to_string()))
+    );
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_unknown_table() -> Result<()> {
+    let (server, port, _handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match client
+        .copy_in::<_, bytes::Bytes>("COPY not_exist FROM STDIN WITH (FORMAT csv)")
+        .await
+    {
+        Ok(_) => panic!("expected COPY to unknown table to fail"),
+        Err(e) => e,
+    };
+    let message = err.as_db_error().expect("expected db error").message();
+    assert!(message.contains("does not exist"), "{message}");
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_bad_value() -> Result<()> {
+    let (server, port, handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN WITH (FORMAT csv)",
+        vec![bytes::Bytes::from_static(b"not_a_timestamp,host1,1.5,x\n")],
+    )
+    .await
+    {
+        Ok(_) => panic!("expected COPY to fail"),
+        Err(e) => e,
+    };
+    let message = err.as_db_error().expect("expected db error").message();
+    assert!(message.contains("failed to parse"), "{message}");
+    // The failed batch must not be written.
+    assert!(handler.requests.lock().unwrap().is_empty());
+
+    server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_copy_in_multi_statement_rejected() -> Result<()> {
+    let (server, port, _handler) = start_copy_in_test_server(copy_in_test_table()).await?;
+    let client = create_plain_connection(port, false).await.unwrap();
+
+    let err = match feed_copy_in(
+        &client,
+        "COPY metrics FROM STDIN WITH (FORMAT csv); SELECT 1",
+        vec![bytes::Bytes::from_static(b"1,2,3,4\n")],
+    )
+    .await
+    {
+        Ok(_) => panic!("expected multi-statement COPY to fail"),
+        Err(e) => e,
+    };
+    let message = err
+        .as_db_error()
+        .expect("expected db error")
+        .message()
+        .to_string();
+    assert!(message.contains("alone"), "{message}");
+
+    server.shutdown().await.unwrap();
+    Ok(())
 }

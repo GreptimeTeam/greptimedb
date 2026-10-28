@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::time::Duration;
+
 use common_base::readable_size::ReadableSize;
 use common_config::{Configurable, KvBackendConfig};
 use common_event_recorder::EventRecorderOptions;
@@ -73,6 +75,13 @@ pub struct StandaloneOptions {
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
     pub init_regions_parallelism: usize,
+    /// Maximum concurrent region-read streams. Zero means unlimited.
+    /// A single query can consume multiple permits.
+    pub max_concurrent_queries: usize,
+    /// Timeout to acquire a permit when `max_concurrent_queries` is reached.
+    /// Only effective when the limiter is enabled.
+    #[serde(with = "humantime_serde")]
+    pub concurrent_query_limiter_timeout: Duration,
     pub slow_query: SlowQueryOptions,
     pub query: QueryOptions,
     pub memory: MemoryOptions,
@@ -117,6 +126,8 @@ impl Default for StandaloneOptions {
             tracing: TracingOptions::default(),
             init_regions_in_background: false,
             init_regions_parallelism: 16,
+            max_concurrent_queries: 0,
+            concurrent_query_limiter_timeout: Duration::from_millis(100),
             slow_query: SlowQueryOptions::default(),
             query: QueryOptions::default(),
             memory: MemoryOptions::default(),
@@ -136,6 +147,10 @@ impl Configurable for StandaloneOptions {
             "pending_rows_batcher.protocols",
             "pending_rows_batcher.logical_table.protocols",
         ])
+    }
+
+    fn env_tagged_seq_keys() -> Option<&'static [&'static str]> {
+        Some(&["region_engine"])
     }
 }
 
@@ -195,6 +210,8 @@ impl StandaloneOptions {
             grpc: cloned_opts.grpc,
             init_regions_in_background: cloned_opts.init_regions_in_background,
             init_regions_parallelism: cloned_opts.init_regions_parallelism,
+            max_concurrent_queries: cloned_opts.max_concurrent_queries,
+            concurrent_query_limiter_timeout: cloned_opts.concurrent_query_limiter_timeout,
             query: cloned_opts.query,
             heartbeat_env_vars: cloned_opts.heartbeat_env_vars,
             ..Default::default()
@@ -221,6 +238,74 @@ mod tests {
     use servers::batcher::BatchingProtocol;
 
     use crate::options::*;
+
+    #[test]
+    fn test_concurrent_query_limiter_options() {
+        let defaults: StandaloneOptions = toml::from_str("").unwrap();
+        let datanode_defaults = DatanodeOptions::default();
+        assert_eq!(defaults.max_concurrent_queries, 0);
+        assert_eq!(
+            defaults.concurrent_query_limiter_timeout,
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            defaults.max_concurrent_queries,
+            datanode_defaults.max_concurrent_queries
+        );
+        assert_eq!(
+            defaults.concurrent_query_limiter_timeout,
+            datanode_defaults.concurrent_query_limiter_timeout
+        );
+
+        let options: StandaloneOptions = toml::from_str(
+            r#"max_concurrent_queries = 8
+concurrent_query_limiter_timeout = "250ms""#,
+        )
+        .unwrap();
+        let restored: StandaloneOptions =
+            toml::from_str(&toml::to_string(&options).unwrap()).unwrap();
+        for options in [options, restored] {
+            assert_eq!(options.max_concurrent_queries, 8);
+            assert_eq!(
+                options.concurrent_query_limiter_timeout,
+                Duration::from_millis(250)
+            );
+            let datanode = options.datanode_options();
+            assert_eq!(datanode.max_concurrent_queries, 8);
+            assert_eq!(
+                datanode.concurrent_query_limiter_timeout,
+                Duration::from_millis(250)
+            );
+        }
+        assert!(
+            toml::from_str::<StandaloneOptions>("concurrent_query_limiter_timeout = 'invalid'")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_concurrent_query_limiter_options_from_env() {
+        temp_env::with_vars(
+            [
+                ("STANDALONE_LIMITER_TEST__MAX_CONCURRENT_QUERIES", Some("4")),
+                (
+                    "STANDALONE_LIMITER_TEST__CONCURRENT_QUERY_LIMITER_TIMEOUT",
+                    Some("2s"),
+                ),
+            ],
+            || {
+                let options =
+                    StandaloneOptions::load_layered_options(None, "STANDALONE_LIMITER_TEST")
+                        .unwrap();
+                let datanode = options.datanode_options();
+                assert_eq!(datanode.max_concurrent_queries, 4);
+                assert_eq!(
+                    datanode.concurrent_query_limiter_timeout,
+                    Duration::from_secs(2)
+                );
+            },
+        );
+    }
 
     #[test]
     fn test_pipeline_host_access_config_forwarding() {

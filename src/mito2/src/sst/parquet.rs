@@ -20,13 +20,15 @@ use std::sync::Arc;
 use api::v1::SemanticType;
 use common_base::readable_size::ReadableSize;
 use datatypes::json::JsonSettings;
-use parquet::basic::{Compression, ZstdLevel};
+use datatypes::schema::ColumnEncoding;
+use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::properties::{DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT, WriterPropertiesBuilder};
 use parquet::schema::types::ColumnPath;
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
+use store_api::storage::consts::{OP_TYPE_COLUMN_NAME, SEQUENCE_COLUMN_NAME};
 use store_api::storage::{ColumnId, FileId};
 
 use crate::error::{CompressionOptionsSnafu, Result, WriteParquetSnafu};
@@ -92,6 +94,24 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
     parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
 
+/// Applies the encodings of the time index and internal columns shared by every SST writer.
+pub(crate) fn apply_internal_column_encoding(
+    builder: WriterPropertiesBuilder,
+    metadata: &RegionMetadataRef,
+) -> WriterPropertiesBuilder {
+    let ts_col = ColumnPath::new(vec![
+        metadata.time_index_column().column_schema.name.clone(),
+    ]);
+    let seq_col = ColumnPath::new(vec![SEQUENCE_COLUMN_NAME.to_string()]);
+    let op_type_col = ColumnPath::new(vec![OP_TYPE_COLUMN_NAME.to_string()]);
+    builder
+        .set_column_encoding(seq_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(seq_col, false)
+        .set_column_encoding(ts_col.clone(), Encoding::DELTA_BINARY_PACKED)
+        .set_column_dictionary_enabled(ts_col, false)
+        .set_column_compression(op_type_col, Compression::UNCOMPRESSED)
+}
+
 /// Applies the per-column options declared with `COMPRESSION WITH (...)`.
 pub(crate) fn apply_column_compression(
     mut builder: WriterPropertiesBuilder,
@@ -109,6 +129,15 @@ pub(crate) fn apply_column_compression(
             continue;
         };
         let path = ColumnPath::new(vec![column.column_schema.name.clone()]);
+        if let Some(encoding) = options.encoding {
+            let encoding = match encoding {
+                ColumnEncoding::Plain => Encoding::PLAIN,
+                ColumnEncoding::DeltaBinaryPacked => Encoding::DELTA_BINARY_PACKED,
+            };
+            builder = builder
+                .set_column_dictionary_enabled(path.clone(), false)
+                .set_column_encoding(path.clone(), encoding);
+        }
         if let Some(level) = options.level {
             let level = ZstdLevel::try_new(level).context(WriteParquetSnafu)?;
             builder = builder.set_column_compression(path.clone(), Compression::ZSTD(level));
@@ -883,7 +912,7 @@ mod tests {
         async fn write(
             values: &[Vec<u8>],
             compression: Option<CompressionOptions>,
-        ) -> (usize, usize) {
+        ) -> (usize, usize, bool) {
             let mut metadata = (*build_test_binary_test_region_metadata()).clone();
             if let Some(options) = compression {
                 let column = &mut metadata.column_metadatas[1];
@@ -961,16 +990,16 @@ mod tests {
             let pages = builder.metadata().offset_index().unwrap()[0][field]
                 .page_locations()
                 .len();
-            let size = builder
-                .metadata()
-                .row_group(0)
-                .column(field)
-                .compressed_size() as usize;
-            (size, pages)
+            let chunk = builder.metadata().row_group(0).column(field);
+            (
+                chunk.compressed_size() as usize,
+                pages,
+                chunk.dictionary_page_offset().is_some(),
+            )
         }
 
-        let (default_size, default_pages) = write(&values, None).await;
-        let (level_size, level_pages) = write(
+        let (default_size, default_pages, default_dict) = write(&values, None).await;
+        let (level_size, level_pages, _) = write(
             &values,
             Some(CompressionOptions {
                 level: Some(19),
@@ -978,10 +1007,18 @@ mod tests {
             }),
         )
         .await;
-        let (_, pages) = write(
+        let (_, pages, _) = write(
             &values,
             Some(CompressionOptions {
                 page_size: Some(ReadableSize::kb(64)),
+                ..Default::default()
+            }),
+        )
+        .await;
+        let (_, _, plain_dict) = write(
+            &values,
+            Some(CompressionOptions {
+                encoding: Some(ColumnEncoding::Plain),
                 ..Default::default()
             }),
         )
@@ -991,6 +1028,8 @@ mod tests {
         assert_eq!(default_pages, level_pages);
         assert!(level_size < default_size, "{level_size} >= {default_size}");
         assert!(pages > default_pages, "{pages} <= {default_pages}");
+        assert!(default_dict);
+        assert!(!plain_dict);
     }
 
     #[tokio::test]

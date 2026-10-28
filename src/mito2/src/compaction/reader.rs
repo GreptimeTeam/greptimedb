@@ -242,3 +242,81 @@ fn ts_to_lit(ts: Timestamp, ts_col_unit: TimeUnit) -> Result<Expr> {
     };
     Ok(datafusion_expr::lit(scalar_value))
 }
+
+#[cfg(test)]
+mod tests {
+    use api::v1::Rows;
+    use store_api::region_engine::RegionEngine;
+    use store_api::region_request::{RegionFlushRequest, RegionRequest};
+    use store_api::storage::RegionId;
+
+    use super::*;
+    use crate::test_util::{
+        CreateRequestBuilder, TestEnv, build_rows_for_key, put_rows, rows_schema,
+    };
+
+    #[tokio::test]
+    async fn test_compaction_reader_keeps_short_series_batches_whole() {
+        let mut env = TestEnv::new().await;
+        let engine = env.create_engine(Default::default()).await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new().build();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        // Each file has 100 short series, which queries split for merging.
+        for file in 0..2 {
+            let rows = (0..100)
+                .flat_map(|series| {
+                    build_rows_for_key(&format!("key-{series:03}"), file * 10, file * 10 + 10, 0)
+                })
+                .collect();
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows,
+                },
+            )
+            .await;
+            engine
+                .handle_request(
+                    region_id,
+                    RegionRequest::Flush(RegionFlushRequest::default()),
+                )
+                .await
+                .unwrap();
+        }
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version();
+        let inputs: Vec<_> = version.ssts.levels()[0].files().cloned().collect();
+        assert_eq!(2, inputs.len());
+
+        let mut source = CompactionSstReaderBuilder {
+            metadata: version.metadata.clone(),
+            sst_layer: region.access_layer.clone(),
+            cache: engine.cache_manager(),
+            inputs: &inputs,
+            append_mode: false,
+            filter_deleted: true,
+            time_range: None,
+            merge_mode: MergeMode::LastRow,
+        }
+        .build_flat_sst_reader()
+        .await
+        .unwrap();
+        let mut num_batches = 0;
+        let mut num_rows = 0;
+        while let Some(batch) = source.next_batch().await.unwrap() {
+            num_batches += 1;
+            num_rows += batch.num_rows();
+        }
+
+        // Splitting by series would yield a batch per series and file, 200 in total.
+        assert_eq!(2000, num_rows);
+        assert!(num_batches < 20, "got {num_batches} batches");
+    }
+}
