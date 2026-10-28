@@ -1624,17 +1624,24 @@ mod tests {
                 "`{query}`: the split route was handed a tree it cannot cut:\n{routed}"
             );
 
-            // What the pass would have done to this tree is exactly what takes the split away: with
-            // it, no placement is a split any more, so the route could not offer one.
+            // The pass leaves a split shape split: a `Complete` aggregate folds its input one
+            // point at a time and needs no merge (see `canonicalize`'s module documentation), so
+            // nothing the pass inserts can sit below the cut and turn the prefix into
+            // `Merge(Window(..))`, which `admit_prefix` would refuse.
             let passed = passed_tree(query, 1);
-            assert!(
-                !AggregateFinalize::can_split(&passed, &fields, "ts"),
-                "`{query}`: the pass left the split intact, so this test no longer guards the order:\n{passed}"
+            assert_eq!(
+                compiled.to_string(),
+                passed.to_string(),
+                "`{query}`: the pass changed a split's tree:\n{passed}"
             );
-            assert_ne!(
+            assert!(
+                AggregateFinalize::can_split(&passed, &fields, "ts"),
+                "`{query}`: the pass left a tree the split cannot cut:\n{passed}"
+            );
+            assert_eq!(
                 Some(NativePlacement::SplitAggregate),
                 placement_of(&passed, 1),
-                "`{query}`: a passed tree still reads as a split"
+                "`{query}`: a passed tree no longer reads as a split"
             );
         }
     }
@@ -1648,10 +1655,11 @@ mod tests {
     /// as a canonical series - so the tree is handed over as compiled and cross-partition aliasing
     /// stays unsolved until a repartition node exists.
     ///
-    /// What that costs is not the placement: the pass wraps these trees (the second half of each
-    /// case), and the route refuses to hand a merge over here instead of collapsing the node to one
-    /// execution to serve it. The tree it does hand over is the compiled one, which carries no merge
-    /// for this execution to be unable to place.
+    /// What that costs is not the placement, and it is not even a tree the route has to decline: the
+    /// pass inserts nothing into these shapes either (the second half of each case), because a
+    /// per-series consumer reads its input one contribution at a time. The tree the route hands over
+    /// is therefore the compiled one, and the pass is invisible to this placement rather than a
+    /// rewrite it has to refuse.
     #[test]
     fn the_insertion_pass_does_not_take_a_per_series_tree_off_the_route() {
         for query in ["rate(x[5m])", "x", "abs(x)", "x * 2"] {
@@ -1678,32 +1686,39 @@ mod tests {
                 "`{query}`: the per-partition route was handed a tree that reads across series:\n{routed}"
             );
 
-            // And the pass would take this tree off the per-partition placement, which is the other
-            // half of why the order matters: a merge reads across series.
+            // And the pass inserts nothing into this tree either, so the placement it reads off
+            // the compiled tree is the placement of the passed one: a per-series consumer needs no
+            // unified series, and merging one at the root is not done by default.
             let passed = passed_tree(query, 1);
-            assert_ne!(
+            assert_eq!(
+                compiled.to_string(),
+                passed.to_string(),
+                "`{query}`: the pass changed a per-series tree:\n{passed}"
+            );
+            assert_eq!(
                 Some(NativePlacement::PerPartition),
                 placement_of(&passed, 1),
-                "`{query}`: a passed tree still reads as per-partition:\n{passed}"
+                "`{query}`: a passed tree no longer reads as per-partition:\n{passed}"
             );
         }
     }
 
-    /// A tree whose single execution reads every input partition is the one placement the pass
-    /// inserts into, and no shape the route plans today gets that far.
+    /// A tree whose single execution reads every input partition is the placement the pass runs
+    /// on, and it finds nothing to insert into the shapes the route decides it for.
     ///
     /// `topk`, `sort`, `absent` and an aggregate the split refuses all read the whole vector, so the
-    /// route decides a single execution for them and runs the pass, which puts a merge below every
-    /// consumer that needs a whole canonical series - here under the vector operation and again at
-    /// the root. The tree stays a single execution holding the labels it held, so the placement and
-    /// the shape survive the rewrite.
+    /// route decides a single execution for them and runs the pass. None of them needs a merge:
+    /// `topk`, `sort` and `absent` answer their input one contribution at a time (see
+    /// `canonicalize`'s per-consumer table, which has one line per vector kernel), a `Complete`
+    /// aggregate folds a group point by point, and the root is not canonicalized by default. The
+    /// tree is therefore handed over exactly as compiled.
     ///
-    /// The route then declines the tree anyway, and for a reason the pass cannot reach: the labels
-    /// the fused node must declare are derived by [`fused_output_tags`], which names none for an
-    /// aggregate or a vector root. So the merge is inserted into a tree that is then not built, which
-    /// is why no plan the route produces today carries one.
+    /// The route declines it anyway, and for a reason the pass cannot reach: the labels the fused
+    /// node must declare are derived by [`fused_output_tags`], which names none for an aggregate or
+    /// a vector root. So even a tree carrying a merge would not be built, which is why no plan the
+    /// route produces today carries one.
     #[test]
-    fn a_single_execution_tree_gains_a_merge_and_the_route_declines_it() {
+    fn a_single_execution_tree_gains_no_merge_and_the_route_declines_it() {
         for query in ["topk(1, x)", "sort(x)", "absent(x)", "quantile(0.9, x)"] {
             let compiled = compiled_test_tree(query);
             assert_eq!(
@@ -1715,24 +1730,24 @@ mod tests {
                 needs_single_execution(compiled.root()),
                 "`{query}`: the placement and the tree disagree"
             );
-            // The pass runs for this placement, which is the only one that can place its merges.
-            let routed = routed_tree(query).expect("a single execution places every merge");
-            assert!(
-                routed.to_string().matches("Merge").count() >= 2,
-                "`{query}`: the single-execution tree gained no merge:\n{routed}"
+            // The pass runs for this placement, which is the only one that can place a merge, and
+            // it inserts none: no consumer here needs one unified series.
+            let routed = routed_tree(query).expect("a single execution places any merge");
+            assert_eq!(
+                0,
+                routed.to_string().matches("Merge").count(),
+                "`{query}`: the single-execution tree gained a merge:\n{routed}"
             );
-            assert_ne!(
+            assert_eq!(
                 compiled.to_string(),
                 routed.to_string(),
-                "`{query}`: the route handed over the tree as compiled"
+                "`{query}`: the route rewrote a tree the pass left alone"
             );
-            // The insertion leaves the placement and the labels alone. What still needs one
-            // execution is the vector operation under the merge's input, and not the merge itself:
-            // a merge inherits what its input needs and demands nothing of its own, so the
-            // placement survives an insertion that adds one above it.
+            // The single execution is still what the tree needs: it is the vector operation or the
+            // aggregate that reads the whole vector, and the pass added nothing that changes it.
             assert!(
                 needs_single_execution(routed.root()),
-                "`{query}`: the insertion took the single execution away:\n{routed}"
+                "`{query}`: the route lost the single execution:\n{routed}"
             );
             assert_eq!(
                 fused_output_tags(compiled.root(), &one_source_tags()),
@@ -1858,17 +1873,18 @@ mod tests {
         ]
     }
 
-    /// The one shape that carries an inserted merge answers the rows the unmerged tree answered.
+    /// A merge over a tree whose operation keeps its series' labels answers the rows the unmerged
+    /// tree answered - including when the series arrived as two fragments.
     ///
-    /// [`NativePlacement::SingleExecution`] is the only placement the insertion pass runs on, and
-    /// `topk(1, x)` is that placement: one execution reads every scan partition, so the pieces of
-    /// one label set arrive together and a merge can collect them. What it may not do is change the
-    /// answer, so both trees are executed here over the same input - a series arriving as two
-    /// fragments, which is what one partition's pieces of it look like - and the rows are compared.
-    /// A merge collects pieces by canonical label set; the operation above it then reads one series
-    /// where the unmerged tree read two, and the value at each grid position is the same.
+    /// `topk(1, x)` is a [`NativePlacement::SingleExecution`] tree, and it is one a merge may sit
+    /// over: `topk` keeps the labels of the series it picks, so collecting its pieces first leaves
+    /// one series per grid position where the unmerged tree had two fragments. What the merge may
+    /// not do is change the answer, so both trees are executed here over the same input - a series
+    /// arriving as two fragments, which is what one partition's pieces of it look like - and the
+    /// rows are compared. The merged tree is built by hand: the insertion pass inserts no merge
+    /// here, because a `topk` reads its input one contribution at a time.
     #[test]
-    fn a_single_execution_merge_answers_the_rows_the_unmerged_tree_answered() {
+    fn a_merge_over_a_series_keeping_tree_answers_the_rows_it_answered() {
         let query = "topk(1, x)";
         let compiled = compiled_test_tree(query);
         assert_eq!(
@@ -1876,17 +1892,22 @@ mod tests {
             placement_of(&compiled, 1),
             "{compiled}"
         );
-        let inserted = routed_tree(query).expect("a single execution places every merge");
-        assert!(
-            inserted.to_string().matches("Merge").count() > 0,
-            "the single execution did not gain a merge:\n{inserted}"
+        // The pass leaves this tree alone, and the merge this test is about is the one a caller
+        // that wants the answer collected would put over it.
+        let routed = routed_tree(query).expect("a single execution places any merge");
+        assert_eq!(
+            compiled.to_string(),
+            routed.to_string(),
+            "the pass inserted a merge a `topk` does not need:\n{routed}"
         );
+        let inserted = NativeTree::try_new(merge_of(compiled.root()))
+            .expect("a merge over a `topk` is a legal tree");
 
         let without = native_rows(&compiled, fragmented_single_execution_input());
         let with = native_rows(&inserted, fragmented_single_execution_input());
         assert_eq!(
             without, with,
-            "`{query}`: the inserted merge answered different rows:\n{inserted}"
+            "`{query}`: the merge over the tree answered different rows:\n{inserted}"
         );
         // The fixture's point: `topk(1, x)` keeps the whole of the one series it picks and drops the
         // other, so the answer is that series' three values.
@@ -1958,23 +1979,22 @@ mod tests {
                 .as_ref()
                 .map(|routed| routed.to_string().matches("Merge").count())
                 .unwrap_or(0);
+            // No shape here needs a merge: per-series work reads its input one contribution at a
+            // time, the aggregate split folds a group point by point, and `topk` ranks series
+            // against each other without needing one collected. The pass runs only on a single
+            // execution, and even there it inserts nothing.
+            assert_eq!(
+                0, merges,
+                "`{query}`: the {placement:?} placement inserted a merge:\n{routed:?}"
+            );
             let answer = route_answer(&compiled, selectors, &sources);
             if placement == NativePlacement::SingleExecution {
-                // The only placement that inserts, and it is not built.
-                assert!(
-                    merges > 0,
-                    "`{query}`: a single execution gained no merge:\n{routed:?}"
-                );
                 assert_eq!(
                     "legacy plan", answer,
                     "`{query}`: a single execution is planned, so a plan can carry an inserted \
                      merge"
                 );
             } else {
-                assert_eq!(
-                    0, merges,
-                    "`{query}`: the {placement:?} placement inserted a merge:\n{routed:?}"
-                );
                 assert_ne!(
                     "legacy plan", answer,
                     "`{query}`: the route builds no plan, so the table row above is vacuous"
@@ -1983,15 +2003,15 @@ mod tests {
         }
     }
 
-    /// The pass's own insertion, kept in view from the planner's side: the window still reads its
-    /// raw input and what the pass adds above it is one merge, but a per-partition placement does not
-    /// run the pass, so the route hands over the window - and refuses the wrapped tree, because that
-    /// merge has no co-location proof in this execution.
+    /// The pass leaves a per-series tree alone, so what the route hands over is the compiled tree and
+    /// the placement it read is the placement of that tree.
     ///
-    /// A merge writes no label of its own, so the shape the pass would produce declares the same tags
-    /// the compiled tree declares - which is what lets the walk above stay a function of the tree.
+    /// The window folds one series at a time and the runtime supplies the collection it needs
+    /// (`RuntimeNode::build`'s `Window` arm), so the pass adds no merge above it and none below it.
+    /// A merge writes no label of its own either way, so the tags the fused node declares are the
+    /// compiled tree's.
     #[test]
-    fn the_insertion_pass_wraps_a_per_series_tree_and_keeps_its_tags() {
+    fn the_insertion_pass_leaves_a_per_series_tree_and_its_tags_alone() {
         let query = "rate(x[5m])";
         let unpassed = compiled_test_tree(query);
         // The compiled shape: one window reading the scan directly.
@@ -2001,14 +2021,10 @@ mod tests {
         assert!(matches!(input.expr, NativeExpr::Input(_)), "{unpassed}");
 
         let passed = passed_tree(query, 1);
-        let NativeExpr::Merge { input } = &passed.root().expr else {
-            panic!("the pass left the window at the root: {passed}");
-        };
-        // One merge, at the root: the window merges the label sets it can make coincide itself, and
-        // the pass has no reason to collect the raw samples a window folds one series at a time.
-        assert_eq!(1, passed.to_string().matches("Merge").count(), "{passed}");
-        let NativeExpr::Window { input, .. } = &input.expr else {
-            panic!("the merge does not sit over the window: {passed}");
+        // No merge anywhere: the window is the root, and the root is not canonicalized by default.
+        assert_eq!(0, passed.to_string().matches("Merge").count(), "{passed}");
+        let NativeExpr::Window { input, .. } = &passed.root().expr else {
+            panic!("the pass wrapped the window at the root: {passed}");
         };
         assert!(matches!(input.expr, NativeExpr::Input(_)), "{passed}");
 
@@ -2018,9 +2034,7 @@ mod tests {
             fused_output_tags(passed.root(), &sources),
             "`{query}`: the pass changed the labels the node declares"
         );
-        // What the route hands over is the window, not the wrapped tree: a per-partition execution
-        // would present one partition's fragments as a canonical series. The wrapped tree is the
-        // shape the route declines rather than one it answers.
+        // What the route hands over is the compiled tree, which the pass did not change.
         assert_eq!(
             unpassed.to_string(),
             routed_tree(query)
@@ -2028,9 +2042,11 @@ mod tests {
                 .to_string(),
             "`{query}`: the route handed over a passed tree"
         );
+        // A merge *would* still be declined here, which the next test asserts: the tree the pass
+        // produces carries none, so the route has nothing to decline.
         assert!(
-            handed_over(&passed, 1).is_none(),
-            "`{query}`: the route answered the merge it cannot place"
+            handed_over(&passed, 1).is_some(),
+            "`{query}`: the route declined a tree the pass left alone"
         );
     }
 
@@ -2085,8 +2101,8 @@ mod tests {
     }
 
     /// A canonical merge collects the pieces one label set arrived in and writes no label of its
-    /// own, so a tree the insertion pass wrapped in one reports the labels it reported before: the
-    /// pass inserts merges, it does not rename the columns the node's schema declares.
+    /// own, so a tree that carries one reports the labels it reported before: a merge forwards its
+    /// input's tags, it does not rename the columns the node's schema declares.
     #[test]
     fn a_merge_forwards_its_input_tags() {
         let sources = [

@@ -56,7 +56,7 @@ use crate::native::metrics::{NodeMetric, NodeMetrics};
 use crate::native::plan::{
     AggregateKind, AggregateStage, AggregateStateSchema, BoundAggregate, BoundInput, BoundInstant,
     BoundMap, BoundScalar, BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeTree, NativeType,
+    NativeExpr, NativeNode, NativeTree, NativeType, unifies_its_own_contributions,
 };
 use crate::range_eval::{RangeEvaluator, RangeFunction, RangeWindow};
 use crate::select::SortOrder;
@@ -10792,4 +10792,206 @@ fn a_chunk_pushed_after_the_input_ended_is_refused() {
     );
     assert_eq!(execution.state().reserved_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// The one rule the runtime and the tree rewrite share.
+// ---------------------------------------------------------------------------
+
+/// `timestamp(inner)`, which reports a position under the metric name dropped.
+fn timestamp_of(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
+/// The `shared` flag [`RuntimeNode::build`] answers is [`unifies_its_own_contributions`]'s answer,
+/// node for node: `shared` holds exactly when the plan-level function says the node may hand over
+/// several contributions of one canonical label set.
+///
+/// That flag is what the runtime collects on - a window builds its `MergeInput` from its child's,
+/// and a `limitk` sets `vector.merge_input` from its input's - so this is the assertion that the
+/// insertion pass asks the runtime's own question when it decides where a merge goes. It is made
+/// here, on `build`'s return value, because `shared` is not reachable from the tree: `RuntimeNode`
+/// and `RuntimeOp` are private to this module.
+///
+/// The `false` the flag reports is not one fact but two, and the plan-level function is what tells
+/// them apart: a node that has unified and a leaf that claims nothing both report `false` (a
+/// `MergeInput` cannot be placed over a leaf's raw samples), while only the second is collected by
+/// the pass. The rows below cover both: `None` for the two boundary shapes and the nodes that pass
+/// that answer on, `Some(true)` for the nodes that have established one series per label set, and
+/// `Some(false)` for the nodes that report their own fragments.
+#[test]
+fn the_predicate_and_the_runtime_agree() {
+    let g = grid(0, 60_000, 4);
+    let by_job = || Grouping::By(Arc::from([Arc::from("job")]));
+    // A window over the scan, evaluated on `g`.
+    let over_scan = |function| window_with(input(), function, 300_000, None, Arc::clone(&g));
+    // A window over an already-evaluated boundary, on the same grid.
+    let over_boundary = |function| {
+        window_with(
+            evaluated_input(Arc::clone(&g)),
+            function,
+            300_000,
+            Some(Arc::clone(&g)),
+            Arc::clone(&g),
+        )
+    };
+    let nodes: Vec<(&str, NativeNode)> = vec![
+        // Nothing is claimed: a raw scan and a fused evaluated boundary.
+        ("`x` - a raw scan", input()),
+        (
+            "an already-evaluated boundary",
+            evaluated_input(Arc::clone(&g)),
+        ),
+        // Labels rewritten or fragments reported: what the runtime collects itself.
+        (
+            "`last_over_time(x[5m])` - a window that keeps the metric name",
+            over_scan(RangeFunction::LastOverTime),
+        ),
+        (
+            "`rate(x[5m])` - a window that drops it",
+            over_scan(RangeFunction::Rate),
+        ),
+        (
+            "`abs(last_over_time(x[5m]))` - a map",
+            map(over_scan(RangeFunction::LastOverTime), vec![MathOp::Abs]),
+        ),
+        (
+            "`timestamp(last_over_time(x[5m]))`",
+            timestamp_of(over_scan(RangeFunction::LastOverTime)),
+        ),
+        (
+            "`rate(x[5m]) * 2` - a broadcast that drops the metric name",
+            broadcast_of(
+                over_scan(RangeFunction::Rate),
+                scalar(2.0, Arc::clone(&g)),
+                binary_matching(BinaryOp::Mul),
+            ),
+        ),
+        (
+            "`rate(x[5m]) > 0` - a filtering comparison",
+            broadcast_of(
+                over_scan(RangeFunction::Rate),
+                scalar(0.0, Arc::clone(&g)),
+                binary_matching(BinaryOp::Gt),
+            ),
+        ),
+        (
+            "`topk(1, x)` - a `Vector` that keeps the series it read, over a window",
+            vector_op(
+                over_boundary(RangeFunction::Rate),
+                BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: by_job(),
+                },
+            ),
+        ),
+        (
+            "`topk(1, x)` over a report of fragments",
+            vector_op(
+                map(over_boundary(RangeFunction::Rate), vec![MathOp::Abs]),
+                BoundVectorOp::TopK {
+                    k: 1.0,
+                    top: true,
+                    group: by_job(),
+                },
+            ),
+        ),
+        (
+            "`limit_ratio(0.5, x)` over a report of fragments",
+            vector_op(
+                map(over_boundary(RangeFunction::Rate), vec![MathOp::Abs]),
+                BoundVectorOp::LimitRatio { ratio: 0.5 },
+            ),
+        ),
+        (
+            "`limitk(1, x)` - it counts series, so it reads the whole vector",
+            vector_op(
+                over_boundary(RangeFunction::Rate),
+                BoundVectorOp::LimitK {
+                    k: 1.0,
+                    group: by_job(),
+                },
+            ),
+        ),
+        (
+            "`absent(x)` - it reads presence over the whole vector",
+            vector_op(
+                over_boundary(RangeFunction::Rate),
+                BoundVectorOp::Absent {
+                    labels: SeriesLabels::try_new(None, Vec::new()).unwrap(),
+                },
+            ),
+        ),
+        // What has already unified.
+        ("a merge", merge(evaluated_input(Arc::clone(&g)))),
+        ("`sum without() (rate(x[5m]))`", {
+            let inner = over_scan(RangeFunction::Rate);
+            aggregate(inner, sum_grouping(Grouping::By(Arc::from([]))))
+        }),
+        (
+            "`rate(x[5m]) + rate(x[5m])` - two vectors, matched by the kernel",
+            binary_of(
+                over_scan(RangeFunction::Rate),
+                over_boundary(RangeFunction::Rate),
+                binary_matching(BinaryOp::Add),
+            ),
+        ),
+        (
+            "`and(rate(x[5m]), rate(x[5m]))` - a set operation",
+            set_of(
+                over_scan(RangeFunction::Rate),
+                over_boundary(RangeFunction::Rate),
+                SetOp::And,
+                MatchingLabels::Ignoring(Vec::new()),
+            ),
+        ),
+        ("a constant", scalar(1.0, Arc::clone(&g))),
+        (
+            "`x` selected at each grid point",
+            instant(input(), 300_000, 0, Arc::clone(&g)),
+        ),
+    ];
+    for (what, node) in nodes {
+        let mut inputs = Vec::new();
+        let (_, shared) = RuntimeNode::build(&node, &pool(), &mut inputs, "test".to_string())
+            .unwrap_or_else(|error| panic!("{what}: the runtime refuses this node: {error}"));
+        assert_eq!(
+            shared,
+            matches!(unifies_its_own_contributions(&node), Some(false)),
+            "{what}: the runtime's `shared` flag and the plan-level answer disagree"
+        );
+    }
+    // The two `false`s the plan-level answer has to tell apart, stated once here so the loop above
+    // cannot pass by answering `Some(true)` everywhere: a boundary claims nothing, a merge claims
+    // what it performed, and a node that hands its input's series back unchanged passes the
+    // boundary's answer on.
+    assert_eq!(
+        None,
+        unifies_its_own_contributions(&evaluated_input(Arc::clone(&g))),
+        "a boundary claimed a proof"
+    );
+    assert_eq!(
+        Some(true),
+        unifies_its_own_contributions(&merge(evaluated_input(Arc::clone(&g)))),
+        "a merge did not claim what it performed"
+    );
+    assert_eq!(
+        None,
+        unifies_its_own_contributions(&vector_op(
+            evaluated_input(Arc::clone(&g)),
+            BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: by_job(),
+            },
+        )),
+        "a `Vector` over a boundary claimed a proof it cannot have"
+    );
 }
