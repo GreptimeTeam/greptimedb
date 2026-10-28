@@ -312,7 +312,11 @@ impl Indexer {
         let requested: HashSet<_> = self
             .inverted_indexer
             .iter()
-            .flat_map(|indexer| indexer.indexed_column_ids())
+            .flat_map(|indexer| indexer.indexed_targets())
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(col_id) => Some(*col_id),
+                IndexTarget::JsonPath(_) => None,
+            })
             .chain(
                 self.bloom_filter_indexer
                     .iter()
