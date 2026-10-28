@@ -140,3 +140,11 @@ paths = [
   "docs/readme.md",
 ]
 suites = []
+
+[[case]]
+name = "kind registry setup: every suite"
+note = "The distributed and chaos fuzz jobs start their cluster with this script."
+paths = [
+  ".github/scripts/kind-with-registry.sh",
+]
+suites = ["*"]
