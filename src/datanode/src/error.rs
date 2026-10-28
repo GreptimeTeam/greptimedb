@@ -14,6 +14,7 @@
 
 use std::any::Any;
 use std::sync::Arc;
+use std::time::Duration;
 
 use common_error::define_into_tonic_status;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
@@ -472,6 +473,24 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to run object storage probe for provider '{name}' at step '{step}'"))]
+    ObjectStoreProbe {
+        name: String,
+        step: &'static str,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object storage probe for provider '{name}' timed out after {timeout:?}"))]
+    ObjectStoreProbeTimeout {
+        name: String,
+        timeout: Duration,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Not yet implemented: {what}"))]
     NotYetImplemented { what: String },
 }
@@ -554,6 +573,9 @@ impl ErrorExt for Error {
             SerializeJson { .. } => StatusCode::Internal,
 
             ObjectStore { source, .. } => source.status_code(),
+            ObjectStoreProbe { .. } | ObjectStoreProbeTimeout { .. } => {
+                StatusCode::StorageUnavailable
+            }
         }
     }
 
@@ -569,7 +591,8 @@ impl ErrorExt for Error {
             RegionNotReady { .. } | RegionNotFound { .. } => RetryHint::RetryAfterRouteRefresh,
             RegionBusy { .. }
             | ConcurrentQueryLimiterClosed { .. }
-            | ConcurrentQueryLimiterTimeout { .. } => RetryHint::Retryable,
+            | ConcurrentQueryLimiterTimeout { .. }
+            | ObjectStoreProbeTimeout { .. } => RetryHint::Retryable,
             NewPlanDecoder { source, .. } | ExecuteLogicalPlan { source, .. } => {
                 source.retry_hint()
             }
@@ -593,6 +616,9 @@ impl ErrorExt for Error {
             BuildMetricEngine { source, .. } => source.retry_hint(),
             ListStorageSsts { source, .. } => source.retry_hint(),
             ObjectStore { source, .. } => source.retry_hint(),
+            ObjectStoreProbe { error, .. } => {
+                object_store::error::retry_hint_from_opendal_error(error)
+            }
             _ => RetryHint::NonRetryable,
         }
     }

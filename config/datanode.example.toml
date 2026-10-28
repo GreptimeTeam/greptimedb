@@ -375,6 +375,14 @@ memory_pool_size = "50%"
 ## The working home directory.
 data_home = "./greptimedb_data"
 
+## Whether to probe every remote object storage when the datanode starts.
+## The probe writes, reads, overwrites, lists and deletes an object under
+## `.greptime_probe/`, and a failure aborts startup. The probe lives at the storage
+## root, so the credentials must allow writes and deletes below the root. Disable it
+## when the credentials are scoped to narrower prefixes or when the storage may be
+## unavailable at startup.
+probe_on_startup = true
+
 ## The storage type used to store the data.
 ## - `File`: the data is stored in the local file system.
 ## - `S3`: the data is stored in the S3 object storage.
