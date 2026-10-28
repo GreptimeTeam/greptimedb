@@ -66,7 +66,8 @@ fn build_metadata(num_tags: u32) -> RegionMetadataRef {
             column_id,
         });
     }
-    for column_id in 0..num_tags {
+    for index in 0..num_tags {
+        let column_id = index * 17 % num_tags;
         builder.push_column_metadata(ColumnMetadata {
             column_schema: ColumnSchema::new(
                 format!("tag_{column_id}"),
@@ -98,15 +99,22 @@ fn build_metadata(num_tags: u32) -> RegionMetadataRef {
     Arc::new(builder.build().unwrap())
 }
 
-fn build_keys(num_series: usize, num_tags: u32, value_bytes: usize) -> Vec<Vec<u8>> {
+fn build_keys(num_series: usize, num_tags: u32, value_bytes: usize, unicode: bool) -> Vec<Vec<u8>> {
     let codec = SparsePrimaryKeyCodec::schemaless();
     (0..num_series)
         .map(|series| {
             let tags: Vec<_> = (0..num_tags)
-                .map(|column_id| {
+                .map(|index| {
+                    // Label name order need not match physical column ID order.
+                    let column_id = index * 17 % num_tags;
                     let mut value = format!("{series:08x}{column_id:08x}").into_bytes();
                     assert!(value.len() <= value_bytes);
                     value.resize(value_bytes, b'x');
+                    if unicode {
+                        // The code point crosses an eight-byte encoding chunk boundary.
+                        let start = value_bytes - 9;
+                        value[start..start + 4].copy_from_slice("🦀".as_bytes());
+                    }
                     (column_id, value)
                 })
                 .collect();
@@ -300,7 +308,13 @@ fn bench_sparse_write(c: &mut Criterion) {
     let mut group = c.benchmark_group("sparse_write");
     group.throughput(Throughput::Elements(ROWS_PER_BATCH as u64));
 
-    for (num_tags, value_bytes) in [(8, 16), (32, 16), (32, 128)] {
+    for (num_tags, value_bytes, unicode) in [
+        (8, 16, false),
+        (32, 16, false),
+        (32, 128, false),
+        (32, 128, true),
+        (512, 16, true),
+    ] {
         let metadata = build_metadata(num_tags);
         let codec = row_converter::build_primary_key_codec(&metadata);
         let schema = sst::to_flat_sst_arrow_schema(
@@ -308,8 +322,9 @@ fn bench_sparse_write(c: &mut Criterion) {
             &FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
         );
         for num_series in [64, ROWS_PER_BATCH] {
-            let name = format!("{num_tags}tags_{value_bytes}bytes_{num_series}series");
-            let keys = build_keys(num_series, num_tags, value_bytes);
+            let suffix = if unicode { "_unicode" } else { "" };
+            let name = format!("{num_tags}tags_{value_bytes}bytes_{num_series}series{suffix}");
+            let keys = build_keys(num_series, num_tags, value_bytes, unicode);
             let rows = build_rows(&metadata, &keys);
             let new_converter = || {
                 BulkPartConverter::new(

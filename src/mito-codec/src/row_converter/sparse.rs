@@ -151,7 +151,7 @@ const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// Scratch buffers retain capacity between keys; validation does not depend on region metadata.
 #[derive(Default)]
 pub struct SparsePrimaryKeyValidator {
-    column_ids: HashSet<ColumnId>,
+    column_ids: Vec<ColumnId>,
     label_buf: Vec<u8>,
 }
 
@@ -174,18 +174,13 @@ impl SparsePrimaryKeyValidator {
                     reason: "reserved column id in sparse labels",
                 }
             );
-            ensure!(
-                self.column_ids.insert(column_id),
-                InvalidSparsePrimaryKeySnafu {
-                    reason: "duplicate column id in sparse key",
-                }
-            );
+            self.column_ids.push(column_id);
             let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
-            let length =
-                crate::row_converter::encoded_string_len(encoded).context(DeserializeFieldSnafu)?;
+            let (length, ascii) = crate::row_converter::encoded_string_info::<true>(encoded)
+                .context(DeserializeFieldSnafu)?;
             let encoded = &encoded[..length];
             // Framing is already checked; ASCII needs no unchunking to establish valid UTF-8.
-            if encoded[0] != 0 && !encoded.is_ascii() {
+            if !ascii {
                 self.label_buf.clear();
                 self.label_buf.reserve(length);
                 Deserializer::new(&encoded[1..])
@@ -200,6 +195,13 @@ impl SparsePrimaryKeyValidator {
             }
             remaining = &remaining[COLUMN_ID_ENCODE_SIZE + length..];
         }
+        self.column_ids.sort_unstable();
+        ensure!(
+            !self.column_ids.windows(2).any(|pair| pair[0] == pair[1]),
+            InvalidSparsePrimaryKeySnafu {
+                reason: "duplicate column id in sparse key",
+            }
+        );
         Ok(())
     }
 }
@@ -1099,7 +1101,15 @@ mod tests {
             .unwrap();
         cases.push(max_prefix);
 
-        for label in ["", "a", "12345678", "123456789", "1234567🦀末尾", "日本語"] {
+        for label in ["", "a", "12345678", "123456789", "1234567🦀末尾", "日本語"]
+            .into_iter()
+            .map(String::from)
+            .chain([
+                "a".repeat(128),
+                format!("{}🦀", "a".repeat(127)),
+                format!("🦀{}", "a".repeat(127)),
+            ])
+        {
             let mut key = prefix.clone();
             codec
                 .encode_raw_tag_value([(37, label.as_bytes())].into_iter(), &mut key)
@@ -1178,6 +1188,29 @@ mod tests {
                     compare(&mutated);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_sparse_validator_reuses_state_for_unordered_columns() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut validator = SparsePrimaryKeyValidator::default();
+        for num_tags in [512, 32, 1] {
+            let mut key = Vec::new();
+            codec.encode_internal(0, 0, &mut key).unwrap();
+            codec
+                .encode_raw_tag_value(
+                    (0..num_tags).map(|index| (index * 17 % num_tags, "1234567🦀".as_bytes())),
+                    &mut key,
+                )
+                .unwrap();
+            assert!(validator.validate(&key).is_ok());
+
+            let mut duplicate = key.clone();
+            duplicate.extend_from_slice(&0_u32.to_be_bytes());
+            duplicate.push(0);
+            assert!(validator.validate(&duplicate).is_err());
+            assert!(validator.validate(&key).is_ok());
         }
     }
 
