@@ -224,11 +224,11 @@ impl PromPlanner {
             return Ok(None);
         };
         let mut selectors = Vec::new();
-        if !collect_selectors(&stmt, prom_expr, &mut selectors) || selectors.len() > 2 {
+        if !collect_selectors(&stmt, prom_expr, &mut selectors) {
             return Ok(None);
         }
         // Preserve the original single-selector admission allowlist. Broader binary syntax is only
-        // considered for a two-occurrence root, where the compiled-tree proof below constrains it.
+        // considered for a multi-occurrence root, where the compiled-tree proof below constrains it.
         if selectors.len() == 1 && !admitted_single_selector(prom_expr) {
             return Ok(None);
         }
@@ -376,7 +376,7 @@ impl PromPlanner {
                 // default `None`. A metric-engine table is served only through the logical rewrite
                 // recognised above, which is what makes its series the table's own.
                 if !supports_native_raw_series(&table_meta.engine)
-                    || (selectors.len() == 2
+                    || (selectors.len() > 1
                         && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
@@ -406,10 +406,10 @@ impl PromPlanner {
                 {
                     return Ok(None);
                 }
-                // A two-scan plan has no placement over a table split into several regions: the
+                // A multi-scan plan has no placement over a table split into several regions: the
                 // dist analyzer refuses a multi-child node there, so such a query keeps the
                 // existing plan instead of failing.
-                if selectors.len() == 2 && table_meta.partition_column_names().next().is_some() {
+                if selectors.len() > 1 && table_meta.partition_column_names().next().is_some() {
                     return Ok(None);
                 }
                 // The region's columnar series-index samples, one of the readers this scan may be
@@ -450,10 +450,10 @@ impl PromPlanner {
         let Some((mut prepared, single_input_context)) = preparation? else {
             return Ok(None);
         };
-        // Two selectors over one table share one region, so the node runs there over both scans.
-        // Over two tables each scan answers from its own region and the node runs above them; see
-        // `RawSeriesSource`.
-        let cross_table = prepared.len() == 2 && !same_table_scan(&prepared[0].0, &prepared[1].0);
+        // Selectors over one table share one region, so the node runs there over every scan. When
+        // they read more than one table, each scan answers from its own region and the node runs
+        // above them; see `RawSeriesSource`.
+        let cross_table = !same_table_scans(prepared.iter().map(|(scan, ..)| scan));
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
@@ -579,12 +579,12 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
-        // Ordinary pointwise trees and two-occurrence pairs, on one table or across two, are
-        // answered per partition. Aggregate splits are restricted to one raw scan child.
+        // Ordinary pointwise trees and trees of one-to-one matches, on one table or across
+        // several, are answered per partition. Aggregate splits are restricted to one raw scan
+        // child.
         let root = compiled.tree.root();
-        let per_partition = !reads_across_series(root)
-            || pointwise_operand(root)
-            || (selectors.len() == 2 && independent_scan_pair(root));
+        let per_partition =
+            !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
         if !per_partition {
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
@@ -660,7 +660,7 @@ impl PromPlanner {
             return Ok(None);
         }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
-        // Over two tables the region scans are bound by their `RawSeriesSource` children.
+        // Across tables the region scans are bound by their `RawSeriesSource` children.
         let (tags, metric) = if cross_table {
             (Vec::new(), None)
         } else {
@@ -772,14 +772,16 @@ fn scan_time_filter(start: i64, end: i64, inclusive: bool, time_column: &str) ->
     lower.and(column.lt_eq(upper))
 }
 
-/// Whether `root` is a supported one-to-one match, set operation or `info` between two independent
-/// scan occurrences, under any number of point-wise wrappers.
+/// Whether `root` is a supported one-to-one match, set operation or `info` over independent scan
+/// occurrences, under any number of point-wise wrappers.
 ///
 /// Any arithmetic or comparison operator qualifies: they pair series by the same matching rules,
 /// and a comparison only changes which value a matched pair keeps.
 ///
 /// A wrapper, a function of each value or an operation with a constant as in `100 * (1 - a / b)`,
-/// maps each series of the match on its own, so the tree still reads both scans whole exactly once.
+/// maps each series of the match on its own, so the tree still reads every scan whole exactly once.
+/// An operand may itself be such a match, as in `(a - b) / c`: the inner match is answered whole
+/// before the outer one reads it.
 pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     let (left, right, matching) = match &root.expr {
         NativeExpr::Binary {
@@ -794,7 +796,7 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
         },
         NativeExpr::Map { input, .. } => return independent_scan_pair(input),
         NativeExpr::Set { left, right, .. } => {
-            return pointwise_operand(left) && pointwise_operand(right);
+            return scan_operand(left) && scan_operand(right);
         }
         NativeExpr::Info { base, info, .. } => {
             return pointwise_operand(base) && pointwise_operand(info);
@@ -808,17 +810,24 @@ pub(crate) fn independent_scan_pair(root: &NativeNode) -> bool {
     };
     matching.cardinality == Cardinality::OneToOne
         && supported_labels
-        && pointwise_operand(left)
-        && pointwise_operand(right)
+        && scan_operand(left)
+        && scan_operand(right)
 }
 
-/// Whether two prepared plans scan the same table. Filters, projections and bounds are
+fn scan_operand(node: &NativeNode) -> bool {
+    pointwise_operand(node) || independent_scan_pair(node)
+}
+
+/// Whether every plan is a scan of one table. Filters, projections and bounds are
 /// occurrence-specific and deliberately do not participate in this check.
-pub(crate) fn same_table_scan(left: &LogicalPlan, right: &LogicalPlan) -> bool {
-    let (LogicalPlan::TableScan(left), LogicalPlan::TableScan(right)) = (left, right) else {
-        return false;
-    };
-    left.table_name == right.table_name
+pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPlan>) -> bool {
+    let mut table = None;
+    plans.into_iter().all(|plan| {
+        let LogicalPlan::TableScan(scan) = plan else {
+            return false;
+        };
+        *table.get_or_insert(&scan.table_name) == &scan.table_name
+    })
 }
 
 /// The label columns `node` reports, from the tags of the scan each input reads.
@@ -1244,6 +1253,37 @@ mod tests {
         ));
     }
 
+    /// A match whose operand is itself a match reads every scan whole; a nested operand that folds
+    /// or matches many-to-one does not.
+    #[test]
+    fn independent_scan_pair_admits_nested_one_to_one_matches() {
+        for query in [
+            "x + y + z",
+            "(x - y) / on(host) z",
+            "x / on(host) y * on(host) z",
+            "abs(x - y) + 2 * z",
+            "(x and y) or z",
+            "(x + y) unless on(host) z",
+            "(x == on(host) y) + z",
+            "x > bool y + z",
+        ] {
+            let tree = compiled_test_tree(query);
+            assert_eq!(input_sources(tree.root()), vec![0, 1, 2], "{query}");
+            assert!(independent_scan_pair(tree.root()), "{query}");
+        }
+        for query in [
+            "x + y + sum(z)",
+            "(x * on(host) group_left y) + z",
+            "(x + on() y) + z",
+            "(x > on() y) + z",
+        ] {
+            assert!(
+                !independent_scan_pair(compiled_test_tree(query).root()),
+                "{query}"
+            );
+        }
+    }
+
     #[test]
     fn match_output_tags_follow_promql_vector_matching() {
         let tags = vec!["host".to_string(), "kind".to_string()];
@@ -1304,6 +1344,23 @@ mod tests {
             Some(vec!["host".to_string()]),
             fused_output_tags(fill_on.root(), &sources)
         );
+        // An outer match narrows the labels the inner one already narrowed.
+        let sources = [
+            vec!["host".to_string(), "kind".to_string(), "zone".to_string()],
+            vec!["host".to_string(), "kind".to_string()],
+            vec!["host".to_string(), "az".to_string()],
+        ];
+        for (query, expected) in [
+            ("(x - y) / on(host) z", vec!["host"]),
+            ("x + ignoring(zone) y + ignoring(kind) z", vec!["host"]),
+            ("x / on(host, kind) y or z", vec!["host", "kind", "az"]),
+        ] {
+            assert_eq!(
+                Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
+                fused_output_tags(compiled_test_tree(query).root(), &sources),
+                "{query}"
+            );
+        }
         // An aggregate's labels are its groups, which this walk does not derive.
         let aggregate = compiled_test_tree("sum by (host) (x)");
         assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
