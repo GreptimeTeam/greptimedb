@@ -4186,12 +4186,12 @@ async fn a_recorded_failure_reaches_every_output_once() {
         .flat_map(|(zero, one)| [zero, one].map(|metric| Step::chunk(chunk(metric, 0, 1, true))))
         .collect::<Vec<_>>();
     steps.push(Step::ErrorSaying(MESSAGE));
+    // The producer is gated so it cannot reach its error before this test owns both queues. A
+    // failure drains every queue nobody has claimed yet, so a producer that ran first would release
+    // the very charges this test reads, and the retention assertion below could never hold.
+    let switch = Arc::new(Switch::default());
     let plan = node(
-        Fragile::plan(
-            vec![Behaviour::OneAtATime(steps)],
-            Arc::new(Switch::default()),
-        )
-        .plan,
+        Fragile::plan(vec![Behaviour::Gated(steps)], Arc::clone(&switch)).plan,
         2,
     );
     let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
@@ -4216,16 +4216,21 @@ async fn a_recorded_failure_reaches_every_output_once() {
     }
     let execution = shared;
 
+    // Both queues are claimed, so the gates below are the only thing between the queued prefix and
+    // the failure: what is retained now is retained until this test drains it.
+    assert!(
+        !switch.is_open(),
+        "the producer is held before its error, so nothing drained the queues yet"
+    );
+    wait_until("queued output chains retain memory before drain", || {
+        pool.reserved() > 0
+    })
+    .await;
+    switch.open();
     wait_until(
         "the read records its failure while no output is drained",
         || matches!(execution.ending(), Ending::Failed(_)),
     )
-    .await;
-    // The producer records the failure before its queued chains are all visible, so wait for the
-    // retention this assertion is about instead of reading the pool once.
-    wait_until("queued output chains retain memory before drain", || {
-        pool.reserved() > 0
-    })
     .await;
     let outputs = tokio::time::timeout(
         Duration::from_secs(10),
