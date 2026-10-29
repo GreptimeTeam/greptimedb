@@ -21,7 +21,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
-use store_api::storage::{ColumnId, FileId, IndexVersion};
+use index::target::IndexTarget;
+use store_api::storage::{FileId, IndexVersion};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -35,7 +36,7 @@ pub enum Tag {
     Fulltext,
 }
 
-pub type BloomFilterIndexKey = (FileId, IndexVersion, ColumnId, Tag);
+pub type BloomFilterIndexKey = (FileId, IndexVersion, Arc<IndexTarget>, Tag);
 
 /// Cache for bloom filter index.
 pub type BloomFilterIndexCache = IndexCache<BloomFilterIndexKey, BloomFilterMeta>;
@@ -64,7 +65,7 @@ impl BloomFilterIndexCache {
 fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomFilterMeta>) -> u32 {
     let base = k.0.as_bytes().len()
         + std::mem::size_of::<IndexVersion>()
-        + std::mem::size_of::<ColumnId>()
+        + k.2.approx_mem_size()
         + std::mem::size_of::<Tag>()
         + std::mem::size_of::<BloomFilterMeta>();
 
@@ -76,14 +77,14 @@ fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomF
 
 /// Calculates weight for bloom filter index content.
 fn bloom_filter_index_content_weight((k, _): &(BloomFilterIndexKey, PageKey), v: &Bytes) -> u32 {
-    (k.0.as_bytes().len() + std::mem::size_of::<ColumnId>() + v.len()) as u32
+    (k.0.as_bytes().len() + k.2.approx_mem_size() + v.len()) as u32
 }
 
 /// Bloom filter index blob reader with cache.
 pub struct CachedBloomFilterIndexBlobReader<R> {
     file_id: FileId,
     index_version: IndexVersion,
-    column_id: ColumnId,
+    target: Arc<IndexTarget>,
     tag: Tag,
     blob_size: u64,
     inner: R,
@@ -95,7 +96,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
     pub fn new(
         file_id: FileId,
         index_version: IndexVersion,
-        column_id: ColumnId,
+        target: IndexTarget,
         tag: Tag,
         blob_size: u64,
         inner: R,
@@ -104,7 +105,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
         Self {
             file_id,
             index_version,
-            column_id,
+            target: Arc::new(target),
             tag,
             blob_size,
             inner,
@@ -126,7 +127,12 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let (result, cache_metrics) = self
             .cache
             .get_or_load(
-                (self.file_id, self.index_version, self.column_id, self.tag),
+                (
+                    self.file_id,
+                    self.index_version,
+                    self.target.clone(),
+                    self.tag,
+                ),
                 self.blob_size,
                 offset,
                 size,
@@ -158,7 +164,12 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         let (pages, total_cache_metrics) = self
             .cache
             .get_or_load_vec(
-                (self.file_id, self.index_version, self.column_id, self.tag),
+                (
+                    self.file_id,
+                    self.index_version,
+                    self.target.clone(),
+                    self.tag,
+                ),
                 self.blob_size,
                 ranges,
                 move |ranges| async move { inner.read_vec(&ranges, None).await },
@@ -182,10 +193,12 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         &self,
         metrics: Option<&mut BloomFilterReadMetrics>,
     ) -> Result<Arc<BloomFilterMeta>> {
-        if let Some(cached) =
-            self.cache
-                .get_metadata((self.file_id, self.index_version, self.column_id, self.tag))
-        {
+        if let Some(cached) = self.cache.get_metadata((
+            self.file_id,
+            self.index_version,
+            self.target.clone(),
+            self.tag,
+        )) {
             CACHE_HIT.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             if let Some(m) = metrics {
                 m.cache_hit += 1;
@@ -194,7 +207,12 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
         } else {
             let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(
-                (self.file_id, self.index_version, self.column_id, self.tag),
+                (
+                    self.file_id,
+                    self.index_version,
+                    self.target.clone(),
+                    self.tag,
+                ),
                 meta.clone(),
             );
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
@@ -206,10 +224,48 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
 #[cfg(test)]
 mod test {
     use rand::{Rng, RngCore};
+    use store_api::storage::ColumnId;
 
     use super::*;
 
     const FUZZ_REPEAT_TIMES: usize = 100;
+
+    #[test]
+    fn json_paths_have_independent_cache_entries() {
+        let cache = BloomFilterIndexCache::new(1024 * 1024, 1024 * 1024, 1024);
+        let file_id = FileId::random();
+        let first = (
+            file_id,
+            0,
+            Arc::new(IndexTarget::new_json_path(1, vec!["a".into(), "b".into()]).unwrap()),
+            Tag::Skipping,
+        );
+        let second = (
+            file_id,
+            0,
+            Arc::new(IndexTarget::new_json_path(1, vec!["a.b".into()]).unwrap()),
+            Tag::Skipping,
+        );
+        cache.put_metadata(
+            first.clone(),
+            Arc::new(BloomFilterMeta {
+                row_count: 1,
+                ..Default::default()
+            }),
+        );
+        cache.put_metadata(
+            second.clone(),
+            Arc::new(BloomFilterMeta {
+                row_count: 2,
+                ..Default::default()
+            }),
+        );
+        assert_eq!(cache.get_metadata(first.clone()).unwrap().row_count, 1);
+        assert_eq!(cache.get_metadata(second.clone()).unwrap().row_count, 2);
+        cache.invalidate_file(file_id);
+        assert!(cache.get_metadata(first).is_none());
+        assert!(cache.get_metadata(second).is_none());
+    }
 
     #[test]
     fn bloom_filter_metadata_weight_counts_vec_contents() {
@@ -239,13 +295,18 @@ mod test {
         };
 
         let weight = bloom_filter_index_metadata_weight(
-            &(file_id, version, column_id, tag),
+            &(
+                file_id,
+                version,
+                Arc::new(IndexTarget::ColumnId(column_id)),
+                tag,
+            ),
             &Arc::new(meta.clone()),
         );
 
         let base = file_id.as_bytes().len()
             + std::mem::size_of::<IndexVersion>()
-            + std::mem::size_of::<ColumnId>()
+            + std::mem::size_of::<IndexTarget>()
             + std::mem::size_of::<Tag>()
             + std::mem::size_of::<BloomFilterMeta>();
         let expected_dynamic = meta.segment_loc_indices.len() * std::mem::size_of::<u64>()

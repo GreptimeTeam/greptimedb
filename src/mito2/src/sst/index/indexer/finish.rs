@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::{debug, warn};
+use index::target::IndexTarget;
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 use store_api::storage::ColumnId;
 
@@ -126,7 +127,13 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.indexed_column_ids().collect();
+        let column_ids = indexer
+            .indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_inverted_index_output(
@@ -203,7 +210,13 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
+        let column_ids = indexer
+            .indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_bloom_filter_output(

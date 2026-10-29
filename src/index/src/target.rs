@@ -64,6 +64,19 @@ impl JsonPathTarget {
 }
 
 impl IndexTarget {
+    /// Estimates the memory used by this target, including JSON path strings.
+    pub fn approx_mem_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::ColumnId(_) => 0,
+                Self::JsonPath(target) => target
+                    .path
+                    .iter()
+                    .map(|part| std::mem::size_of::<String>() + part.len())
+                    .sum::<usize>(),
+            }
+    }
+
     /// Creates an index target for a JSON object path.
     pub fn new_json_path(column_id: ColumnId, path: Vec<String>) -> Result<Self, TargetKeyError> {
         validate_json_path(&path)?;

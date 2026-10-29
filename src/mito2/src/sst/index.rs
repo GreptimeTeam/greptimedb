@@ -308,12 +308,16 @@ impl Indexer {
         let requested: HashSet<_> = self
             .inverted_indexer
             .iter()
-            .flat_map(|indexer| indexer.indexed_column_ids())
+            .flat_map(|indexer| indexer.indexed_targets())
             .chain(
                 self.bloom_filter_indexer
                     .iter()
-                    .flat_map(|indexer| indexer.column_ids()),
+                    .flat_map(|indexer| indexer.indexed_targets()),
             )
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
             .collect();
         if metadata.primary_key.iter().all(|id| requested.contains(id)) {
             self.dense_pk_decoder = Some(DensePrimaryKeyCodec::new(metadata));
@@ -590,6 +594,7 @@ impl IndexerBuilderImpl {
     /// Only flush and compaction builds collect these targets; manual and schema-change
     /// rebuilds return no JSON targets.
     fn collect_json_inverted_index_targets(&self) -> Vec<IndexTarget> {
+        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
         if !matches!(
             self.build_type,
             IndexBuildType::Flush | IndexBuildType::Compact
@@ -702,6 +707,7 @@ impl IndexerBuilderImpl {
             &self.metadata,
             self.intermediate_manager.clone(),
             mem_limit,
+            self.build_type.clone(),
         );
 
         let err = match indexer {
