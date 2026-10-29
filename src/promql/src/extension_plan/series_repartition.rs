@@ -463,6 +463,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
             Arc::clone(&self.series_schema),
             &context.runtime_env().memory_pool,
             self.input.properties().partitioning.partition_count(),
+            self.ordering,
         );
         let handoff = Arc::clone(&inner.handoff);
         let output: SendableRecordBatchStream = match self.content {
@@ -1596,17 +1597,27 @@ fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
                     .saturating_add(tag.value.len())
             }))
     });
+    // A histogram field is an index array naming rows of a shared table; both are held per sample.
     let mut fields_bytes = 0usize;
     for samples in chunk.fields.iter() {
         let field_bytes = match samples.dense() {
             Some(DenseSamplesRef::Float(values)) => values.to_data().get_slice_memory_size()?,
-            Some(DenseSamplesRef::Histogram(histograms)) => {
-                histogram_table_slice_bytes(histograms.batch())?
-            }
+            Some(DenseSamplesRef::Histogram(histograms)) => histograms
+                .indices()
+                .to_data()
+                .get_slice_memory_size()?
+                .saturating_add(histogram_table_slice_bytes(histograms.batch())?),
             Some(DenseSamplesRef::Mixed(mixed)) => mixed
                 .floats()
                 .to_data()
                 .get_slice_memory_size()?
+                .saturating_add(
+                    mixed
+                        .histograms()
+                        .indices()
+                        .to_data()
+                        .get_slice_memory_size()?,
+                )
                 .saturating_add(histogram_table_slice_bytes(mixed.histograms().batch())?),
             None => 0,
         };
@@ -1637,8 +1648,16 @@ struct PendingGroup {
     metadata: MemoryReservation,
 }
 
-/// Whether every input has either contributed its complete chain or reached normal EOF.
-fn group_ready(group: &PendingGroup, eof: &[bool]) -> bool {
+/// Whether this owner may publish `group` now.
+///
+/// A key-then-time raw frame promises its keys arrive in order, and this owner publishes in key
+/// order only when it publishes them together: an identity that is complete while a smaller one is
+/// still waiting would go out first and break that promise. Such a frame therefore waits for every
+/// input to end, which is when the scan over the owned keys can hand them all out in order.
+fn group_ready(group: &PendingGroup, eof: &[bool], ordering: SeriesOrdering) -> bool {
+    if ordering == SeriesOrdering::KeyThenTime {
+        return eof.iter().all(|eof| *eof);
+    }
     group
         .received
         .iter()
@@ -1668,6 +1687,8 @@ struct RepartitionStream {
     lease: OutputLease,
     schema: Arc<SeriesSchema>,
     pool: Arc<dyn MemoryPool>,
+    /// What the frame this stream emits declares about the order of its keys.
+    ordering: SeriesOrdering,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
     eof_metadata: Option<MemoryReservation>,
@@ -1740,11 +1761,13 @@ impl RepartitionStream {
         schema: Arc<SeriesSchema>,
         pool: &Arc<dyn MemoryPool>,
         inputs: usize,
+        ordering: SeriesOrdering,
     ) -> Self {
         Self {
             receiver,
             lease,
             schema,
+            ordering,
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
@@ -1922,10 +1945,10 @@ impl Stream for RepartitionStream {
                             std::ops::Bound::Unbounded,
                         ))
                         .find_map(|(key, group)| {
-                            group_ready(group, &this.eof).then(|| key.clone())
+                            group_ready(group, &this.eof, this.ordering).then(|| key.clone())
                         }),
                     None => this.groups.iter().find_map(|(key, group)| {
-                        group_ready(group, &this.eof).then(|| key.clone())
+                        group_ready(group, &this.eof, this.ordering).then(|| key.clone())
                     }),
                 };
                 match next {
@@ -2063,7 +2086,7 @@ impl Stream for RepartitionStream {
                             }
                         }
                     }
-                    if group_ready(group, &this.eof)
+                    if group_ready(group, &this.eof, this.ordering)
                         && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));

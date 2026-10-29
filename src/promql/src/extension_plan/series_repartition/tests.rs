@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
-use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray};
+use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray, UInt32Array};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::common::config::ConfigOptions;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
@@ -52,7 +52,6 @@ use datafusion::physical_plan::limit::LocalLimitExec;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::prelude::SessionContext;
 use datatypes::series::Label;
-use datatypes::series::frame::{FrameLabelMode, raw_series_frame_schema};
 use datatypes::series::histogram::{
     BucketSideView, CounterResetHint, HistogramBatchBuilder, HistogramView,
 };
@@ -625,9 +624,21 @@ struct RawScripted {
 
 impl RawScripted {
     fn plan(partitions: Vec<RawPartition>) -> Arc<dyn ExecutionPlan> {
+        Self::plan_with_ordering(partitions, SeriesOrdering::Contiguous)
+    }
+
+    /// The child over `partitions` declaring `ordering` for its keys.
+    fn plan_with_ordering(
+        partitions: Vec<RawPartition>,
+        ordering: SeriesOrdering,
+    ) -> Arc<dyn ExecutionPlan> {
         let series_schema = raw_schema();
-        let frame = raw_series_frame_schema(&series_schema, FrameLabelMode::Explicit)
-            .expect("a raw schema declares an explicit-label frame");
+        let frame = common_query::series_frame::raw_series_frame_schema_with_ordering(
+            &series_schema,
+            &store_api::region_engine::RawLabelSource::Explicit,
+            ordering,
+        )
+        .expect("a raw schema declares an explicit-label frame");
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(frame),
             Partitioning::UnknownPartitioning(partitions.len()),
@@ -2170,6 +2181,7 @@ async fn eof_readies_two_groups_but_poll_merges_one_at_a_time() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("both identities and EOF are queued", || {
         producer_stopped(&shared)
@@ -4198,6 +4210,7 @@ async fn a_recorded_failure_reaches_every_output_once() {
                 Arc::clone(&schema()),
                 &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                 2,
+                SeriesOrdering::Contiguous,
             ))),
         }) as SendableEvaluatedSeriesStream);
     }
@@ -4527,6 +4540,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
                         Arc::clone(&schema()),
                         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                         2,
+                        SeriesOrdering::Contiguous,
                     ))),
                 }),
                 Arc::clone(&series_schema),
@@ -4636,6 +4650,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
                     Arc::clone(&schema()),
                     &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
                     2,
+                    SeriesOrdering::Contiguous,
                 ))),
             }),
             Arc::clone(&schema()),
@@ -4795,6 +4810,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
             Arc::clone(&schema()),
             &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
             1,
+            SeriesOrdering::Contiguous,
         ))),
     });
     let future = route_partition(
@@ -5386,6 +5402,7 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     // Queue, EOF, and identity-group metadata are charged alongside the retained chunks; the
@@ -5682,6 +5699,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         Arc::clone(&schema()),
         &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
         1,
+        SeriesOrdering::Contiguous,
     );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)
@@ -6125,8 +6143,13 @@ async fn raw_chunks_of_one_batch_are_charged_their_own_slice() {
         .execute(0, Arc::clone(&context))
         .expect("partition 0 exists");
     // Everything the first input has is delivered; the second input has contributed nothing, so no
-    // group is publishable and every chunk charge of the first input is still held. Poll the stream
-    // and let the tasks run until it has been idle for a while, keeping the largest charge seen.
+    // group is publishable and every chunk charge of the first input is still held.
+    //
+    // Wait for the first charge before sampling: under load the input task may not have run yet,
+    // and a fixed number of idle ticks would then measure nothing.
+    wait_until("the first chunk is charged", || pool.reserved() > 0).await;
+    // Keep the largest charge seen while the rest of the partition is routed, so a charge that
+    // grows per chunk is measured rather than missed.
     let mut peak = 0usize;
     let mut idle = 0usize;
     while idle < 100 {
@@ -6148,6 +6171,154 @@ async fn raw_chunks_of_one_batch_are_charged_their_own_slice() {
     assert!(
         peak < SERIES * batch_timestamps / 2,
         "peak {peak} must stay well below the {SERIES}x over-charge of {batch_timestamps} bytes"
+    );
+}
+
+/// A histogram field is an index array naming rows of a shared table. A query over few distinct
+/// histograms holds mostly indices, and those are charged alongside the table rather than instead
+/// of it.
+#[tokio::test]
+async fn raw_histogram_index_arrays_are_charged() {
+    const ROWS: usize = 4096;
+    let side = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    let mut builder = HistogramBatchBuilder::new();
+    builder
+        .push(HistogramView {
+            schema: 1,
+            zero_threshold: 0.5,
+            sum: 1.0,
+            count: 1.0,
+            zero_count: 0.0,
+            reset_hint: CounterResetHint::Unknown,
+            start_timestamp: None,
+            custom_values: &[],
+            positive: side,
+            negative: side,
+        })
+        .expect("one histogram row");
+    // Every position names the same row, so the table stays small while the index array grows with
+    // the number of samples.
+    let samples = Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(0u32); ROWS]),
+        builder.finish().expect("the table is built"),
+    )
+    .expect("one row is referenced by every position");
+    let chunk = RawSeriesChunk::try_new(
+        &raw_schema(),
+        Buffer::from_slice_ref(b"k"),
+        Some(raw_metric("a")),
+        RawTimestamps::try_new(ScalarBuffer::from((0..ROWS as i64).collect::<Vec<_>>()))
+            .expect("ascending timestamps"),
+        SeriesFields::try_from_vec(vec![samples]).expect("one sample per timestamp"),
+        true,
+    )
+    .expect("one series' samples are a legal raw chunk");
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![chunk],
+            gate: None,
+            gate_chunks: false,
+        },
+        // An input that has contributed nothing keeps the group unpublished, which is what holds
+        // the first input's charges alive to be measured.
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition 0 exists");
+    // The chunk is charged as the input task routes it, which happens without this stream being
+    // polled; wait for the charge instead of sampling it for a fixed number of ticks.
+    wait_until("the routed chunk is charged", || pool.reserved() > 0).await;
+    let peak = pool.reserved();
+    switch.open();
+    drop(frames);
+    let timestamps = ROWS * std::mem::size_of::<i64>();
+    let indices = ROWS * std::mem::size_of::<u32>();
+    assert!(
+        peak >= timestamps + indices,
+        "peak {peak} must cover the {timestamps} timestamp bytes and the {indices} index bytes"
+    );
+}
+
+/// A key-then-time frame promises its keys arrive in order, so an identity that is complete while
+/// a smaller one still waits must not be handed out first.
+///
+/// Input 0 delivers A then B and ends; input 1 delivers B and stays open. B is complete while A is
+/// not, and publishing it there would put B before A.
+#[tokio::test]
+async fn a_key_then_time_frame_publishes_its_keys_in_order() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![
+                    raw_chunk("a", Some(raw_metric("a")), &[1], vec![Some(1.0)], true),
+                    raw_chunk("b", Some(raw_metric("b")), &[1], vec![Some(2.0)], true),
+                ],
+                gate: None,
+                gate_chunks: false,
+            },
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "b",
+                    Some(raw_metric("b")),
+                    &[2],
+                    vec![Some(3.0)],
+                    true,
+                )],
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: false,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition 0 exists");
+    // Read through the frame's own decoder, which is where a key-order violation is refused.
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), stream.next())
+            .await
+            .is_err(),
+        "b is complete but a is not, and a key-then-time frame cannot publish b first"
+    );
+    switch.open();
+    let mut keys = Vec::new();
+    let mut times = std::collections::BTreeMap::<Vec<u8>, Vec<i64>>::new();
+    while let Some(next) = stream.next().await {
+        let chunk = next.expect("the ordered identity arrives");
+        keys.push(chunk.primary_key.to_vec());
+        times
+            .entry(chunk.primary_key.to_vec())
+            .or_default()
+            .extend(chunk.time.as_buffer().iter().copied());
+    }
+    // The frame promises its keys arrive in order, and the decoder restates that promise: it splits
+    // one identity's rows across chunks, each closing exactly once.
+    assert!(
+        keys.windows(2).all(|pair| pair[0] <= pair[1]),
+        "keys arrive in non-decreasing order: {keys:?}"
+    );
+    assert_eq!(
+        std::collections::BTreeMap::from([(b"a".to_vec(), vec![1]), (b"b".to_vec(), vec![1, 2]),]),
+        times,
+        "each identity carries all of its inputs' samples"
     );
 }
 
