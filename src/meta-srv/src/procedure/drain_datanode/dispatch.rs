@@ -105,10 +105,14 @@ impl State for Dispatch {
                     );
                     ctx.forget_leader_region(region_id);
                 }
-                Err(error::Error::TableRouteNotFound { table_id, .. }) => {
+                Err(
+                    e @ (error::Error::TableRouteNotFound { .. }
+                    | error::Error::TableInfoNotFound { .. }),
+                ) => {
                     warn!(
-                        "Skipping region {} while draining datanode {}: table {} has no route",
-                        region_id, node_id, table_id
+                        e;
+                        "Skipping region {} while draining datanode {}: table metadata is missing",
+                        region_id, node_id
                     );
                     ctx.forget_leader_region(region_id);
                 }
@@ -192,8 +196,11 @@ mod tests {
     use api::v1::meta::heartbeat_request::NodeWorkloads;
     use common_meta::cluster::NodeInfo;
     use common_meta::error::Result as MetaResult;
-    use common_meta::key::TableMetadataManagerRef;
+    use common_meta::key::table_route::TableRouteKey;
+    use common_meta::key::{MetadataKey, TableMetadataManager, TableMetadataManagerRef};
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::peer::{Peer, PeerDiscovery, PeerDiscoveryRef};
+    use common_meta::rpc::store::BatchGetResponse;
     use common_procedure::{ProcedureId, ProcedureState, Status};
     use store_api::storage::RegionId;
 
@@ -208,7 +215,7 @@ mod tests {
     };
     use crate::procedure::drain_datanode::{DrainDatanodeStrategy, State, SubprocedureMeta};
     use crate::procedure::region_migration::manager::{
-        RegionMigrationProcedureTask, RegionMigrationTriggerReason,
+        RegionMigrationManager, RegionMigrationProcedureTask, RegionMigrationTriggerReason,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
 
@@ -346,6 +353,90 @@ mod tests {
         ) -> MetaResult<Vec<NodeInfo>> {
             self.inner.active_flownodes(filter).await
         }
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_route_read_fail_fast() {
+        assert_drop_after_route_read_is_skipped(DrainDatanodeStrategy::FailFast).await;
+    }
+
+    #[tokio::test]
+    async fn test_drop_after_route_read_try_all() {
+        assert_drop_after_route_read_is_skipped(DrainDatanodeStrategy::TryAll).await;
+    }
+
+    async fn assert_drop_after_route_read_is_skipped(strategy: DrainDatanodeStrategy) {
+        let env = TestEnv::new().await;
+        let region_id = RegionId::new(1024, 1);
+        env.create_table(vec![leader_region(region_id, 1)]).await;
+        let metadata = env.table_metadata_manager.clone();
+        // Only intercept the migration manager's reads. Return its route snapshot
+        // after deleting the table, so its following table-info read finds nothing.
+        let backend = MockKvBackendBuilder::default()
+            // This fixture has no node-address metadata to remap the route.
+            .batch_get_fn(Arc::new(|_| Ok(BatchGetResponse { kvs: vec![] })))
+            .range_async_fn(Arc::new(move |request| {
+                let metadata = metadata.clone();
+                Box::pin(async move {
+                    let response = metadata.kv_backend().range(request.clone()).await?;
+                    if request.key == TableRouteKey::new(region_id.table_id()).to_bytes() {
+                        let route = metadata
+                            .table_route_manager()
+                            .table_route_storage()
+                            .get_with_raw_bytes(region_id.table_id())
+                            .await?
+                            .unwrap();
+                        let info = metadata
+                            .table_info_manager()
+                            .get(region_id.table_id())
+                            .await?
+                            .unwrap();
+                        metadata
+                            .delete_table_metadata(
+                                region_id.table_id(),
+                                &info.table_name(),
+                                &route,
+                                &HashMap::new(),
+                                None,
+                            )
+                            .await?;
+                    }
+                    Ok(response)
+                })
+            }))
+            .build()
+            .unwrap();
+        let factory = env
+            .env
+            .context_factory_with_metadata(Arc::new(TableMetadataManager::new(Arc::new(backend))));
+        let manager = Arc::new(RegionMigrationManager::new(
+            env.procedure_manager().clone(),
+            factory,
+        ));
+        let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+        ctx.region_migration_manager = manager.clone();
+        seed_plan(&mut ctx, vec![region_id]);
+
+        let (next, status) = Dispatch
+            .next(&mut ctx, &TestingEnv::procedure_context())
+            .await
+            .unwrap();
+
+        assert!(next.as_any().is::<Dispatch>());
+        assert!(matches!(status, Status::Executing { persist: false, .. }));
+        assert!(leader_regions(&ctx).is_empty());
+        assert!(ctx.volatile_ctx.failed_regions.is_empty());
+        assert!(ctx.volatile_ctx.inflight_subprocedures.is_empty());
+        assert_eq!(0, ctx.volatile_ctx.migrated);
+        assert!(!manager.tracker().contains(region_id));
+        assert!(
+            env.table_metadata_manager
+                .table_info_manager()
+                .get(region_id.table_id())
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
