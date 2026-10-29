@@ -23,7 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pull-requests: read
+      # PR label mutations require pull-request write permission.
+      pull-requests: write
       issues: write
     concurrency:
       group: nightly-merge-label-${{ github.event.pull_request.number }}
@@ -36,7 +37,10 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = context.payload.pull_request.number;
             const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
-            const selected = /^- \[[xX]\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.test(pr.body || '');
+            const checkbox = /^- \[([ xX])\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.exec(pr.body || '');
+            // PRs without the template manage their opt-in through the label.
+            if (!checkbox) return;
+            const selected = checkbox[1].toLowerCase() === 'x';
             const label = 'merge nightly';
             const labeled = pr.labels.some(item => item.name === label);
             if (selected && !labeled) {
@@ -73,11 +77,10 @@ jobs:
               if (!candidate.pull_request || enqueued >= 5) continue;
               const number = candidate.number;
               try {
-                // Fetch current body/labels, not the earlier list snapshot.
+                // Fetch current labels and PR state, not the earlier list snapshot.
                 const { data: current } = await github.rest.pulls.get({ owner, repo, pull_number: number });
                 if (current.state !== 'open' || current.draft || current.base.ref !== 'main' ||
-                    !current.labels.some(label => label.name === 'merge nightly') ||
-                    !/^- \[[xX]\] Merge during the nightly window <!-- nightly-merge -->\s*$/m.test(current.body || '')) {
+                    !current.labels.some(label => label.name === 'merge nightly')) {
                   rows.push([String(number), 'Skipped: not opted in, draft, closed, or not targeting main']);
                   continue;
                 }
@@ -134,5 +137,6 @@ jobs:
                 core.setFailed('Some PRs could not be processed; see workflow logs.');
               }
             }
+            for (const [number, result] of rows) core.info(`PR #${number}: ${result}`);
             await core.summary.addHeading(dryRun ? 'Nightly merge (dry run)' : 'Nightly merge')
               .addTable([['PR', 'Result'], ...rows]).write();
