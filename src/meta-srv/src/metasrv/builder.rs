@@ -416,6 +416,8 @@ impl MetasrvBuilder {
             procedure_manager.clone(),
             table_metadata_manager.clone(),
             node_scheduling_manager.clone(),
+            region_migration_manager.clone(),
+            selector_ctx.clone(),
         ));
         drain_datanode_manager.try_start()?;
         let affinity_resolver = plugins
