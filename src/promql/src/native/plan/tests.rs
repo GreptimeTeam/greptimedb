@@ -21,15 +21,23 @@ use datatypes::series::time::{EvalGrid, GridSpec};
 
 use super::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping, InstantValue, MapOp,
-    NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType, merges_are_placeable_in,
-    needs_single_execution_in, reads_across_series,
+    BoundSetOp, BoundVectorOp, BoundWindow, CanonicalGrouping, CanonicalOwner, Grouping,
+    InstantValue, MapOp, NativeExpr, NativeNode, NativeProperties, NativeTree, NativeType,
+    merges_are_placeable_in, needs_single_execution, needs_single_execution_in, no_label_sets,
+    preserves_canonical_identity, reads_across_series,
 };
 use crate::extension_plan::{FusedSeries, FusedSeriesBinding};
+use crate::histogram_eval::NativeHistogramFunction;
 use crate::info::InfoSelector;
 use crate::map::MathOp;
+use crate::map_label::LabelRewrite;
 use crate::range_eval::{RangeFunction, RangeWindow};
-use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
+use crate::select::SortOrder;
+use crate::vector_match::{
+    BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels, SetOp,
+};
+
+// These builders are private to the plan tests; other test modules define their own fixtures.
 
 fn grid(start: i64, step: i64, len: u64) -> Arc<EvalGrid> {
     Arc::new(EvalGrid::try_new(GridSpec::try_new(start, step, len).unwrap()).unwrap())
@@ -63,11 +71,16 @@ fn raw() -> NativeType {
 }
 
 fn input() -> NativeNode {
+    raw_input_at(0)
+}
+
+/// A scan of raw samples bound to source `source_index`.
+fn raw_input_at(source_index: usize) -> NativeNode {
     let output = raw();
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
-            source_index: 0,
+            source_index,
             ordering: SeriesOrdering::KeyThenTime,
         }),
         output,
@@ -75,13 +88,21 @@ fn input() -> NativeNode {
 }
 
 fn input_on(grid: Arc<EvalGrid>) -> NativeNode {
+    input_on_at(0, grid)
+}
+
+/// A scan bound to source `source_index`, evaluated on `grid`.
+///
+/// Two of these are two sources, and the boundary holds one fact for each of them: what tells them
+/// apart is the index on the binding, not the order the tree is walked in.
+fn input_on_at(source_index: usize, grid: Arc<EvalGrid>) -> NativeNode {
     // One schema allocation shared by the binding and the output: `validate` checks that the output
     // is the binding it was bound to, which is about the binding itself, not the grid's spec.
     let output = evaluated(Arc::new([]), grid);
     NativeNode {
         expr: NativeExpr::Input(BoundInput {
             output: output.clone(),
-            source_index: 0,
+            source_index,
             ordering: SeriesOrdering::Contiguous,
         }),
         output,
@@ -203,22 +224,80 @@ fn window_on(
     input_grid: Option<Arc<EvalGrid>>,
     out: Arc<EvalGrid>,
 ) -> NativeNode {
+    window_with(inner, RangeFunction::Rate, input_grid, out)
+}
+
+/// A window of `range_ms` with no offset, anchor or modifier: the shape a selector's range takes.
+fn range(range_ms: i64) -> RangeWindow {
+    RangeWindow {
+        range_ms,
+        offset_ms: 0,
+        anchor_ms: None,
+        modifier: None,
+    }
+}
+
+/// A window running `function` over `inner`, evaluated on `out`.
+///
+/// Which function it runs is what decides whether the output keeps the label set it read, so a test
+/// about the facts a window hands on picks the function it means.
+fn window_with(
+    inner: NativeNode,
+    function: RangeFunction,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
+    window_of_range(inner, function, 300_000, input_grid, out)
+}
+
+/// The same, over a window `range_ms` wide.
+fn window_of_range(
+    inner: NativeNode,
+    function: RangeFunction,
+    range_ms: i64,
+    input_grid: Option<Arc<EvalGrid>>,
+    out: Arc<EvalGrid>,
+) -> NativeNode {
     NativeNode {
         expr: NativeExpr::Window {
             input: Box::new(inner),
             op: BoundWindow {
-                function: RangeFunction::Rate,
-                window: RangeWindow {
-                    range_ms: 300_000,
-                    offset_ms: 0,
-                    anchor_ms: None,
-                    modifier: None,
-                },
+                function,
+                window: range(range_ms),
                 input_grid,
                 output_grid: Arc::clone(&out),
             },
         },
         output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// An instant selection over raw samples. With `value` other than [`InstantValue::Sample`] it
+/// reports a time instead of the sample's value, which is the selection that rewrites the labels.
+fn instant_over(inner: NativeNode, value: InstantValue, out: Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(inner),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value,
+                output_grid: Arc::clone(&out),
+            },
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// A timestamp over an evaluated vector: each value replaced by its sample's time.
+fn timestamp_of(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Timestamp {
+            input: Box::new(inner),
+        },
+        output,
     }
 }
 
@@ -235,6 +314,18 @@ fn map_over(inner: NativeNode) -> NativeNode {
     }
 }
 
+/// A canonical merge over `inner`, laid out as `inner` is: a merge writes no field and no grid of its
+/// own, so it reports its input's layout.
+fn merge_over(inner: NativeNode) -> NativeNode {
+    let output = inner.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(inner),
+        },
+        output,
+    }
+}
+
 fn add() -> BinaryMatching {
     BinaryMatching {
         op: BinaryOp::Add,
@@ -242,6 +333,121 @@ fn add() -> BinaryMatching {
         labels: MatchingLabels::Ignoring(Vec::new()),
         cardinality: Cardinality::OneToOne,
         fill: FillValues::default(),
+    }
+}
+
+/// The same modifiers with another operator, which is what decides whether a scalar broadcast drops
+/// the label set it read: `broadcast_drops_labels` reads the operator and whether it returns a bool.
+fn matching(op: BinaryOp, return_bool: bool) -> BinaryMatching {
+    BinaryMatching {
+        op,
+        return_bool,
+        ..add()
+    }
+}
+
+/// `on(host)` one-to-one, the match a caller writes when it means to pair series by a label set of
+/// its own rather than by the canonical keys a placement groups by.
+fn on_host() -> BinaryMatching {
+    BinaryMatching {
+        labels: MatchingLabels::On(vec!["host".into()]),
+        ..add()
+    }
+}
+
+/// A `sum by (job)` folded into `inner` within this execution, which is an aggregate whose output is
+/// a query value rather than state.
+fn complete_aggregate(inner: NativeNode) -> NativeNode {
+    let out = inner
+        .output
+        .grid()
+        .expect("an aggregate needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// A `sort` over `inner`, which is a vector operation: it decides the whole vector at a point.
+fn sorted(inner: NativeNode) -> NativeNode {
+    let out = inner
+        .output
+        .grid()
+        .expect("a vector operation needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op: BoundVectorOp::Sort(SortOrder::Asc),
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// `left + right`, which matches two vectors by label.
+fn sum_of(left: NativeNode, right: NativeNode) -> NativeNode {
+    let out = left
+        .output
+        .grid()
+        .expect("a binary operation needs a grid")
+        .clone();
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), out),
+    }
+}
+
+/// `left <op> right` with the modifiers `matching` states, on the grid both sides are evaluated on.
+///
+/// The output is what the kinds of the two sides make it: two constants make a scalar and anything
+/// else an evaluated vector, which is what [`NativeNode::validate`] asks of a binary operation.
+fn binary_with(left: NativeNode, right: NativeNode, matching: BinaryMatching) -> NativeNode {
+    let output = match (&left.output, &right.output) {
+        (NativeType::Scalar(grid), NativeType::Scalar(_)) => NativeType::Scalar(Arc::clone(grid)),
+        _ => evaluated(
+            Arc::new([]),
+            left.output
+                .grid()
+                .expect("a binary operation needs a grid")
+                .clone(),
+        ),
+    };
+    NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching,
+        },
+        output,
+    }
+}
+
+/// A `label_replace` over `inner`, which writes a label of its own choosing: the one map operation
+/// that keeps `__name__` and still changes which series share a label set.
+fn map_rewriting_labels(inner: NativeNode) -> NativeNode {
+    let out = inner.output.grid().expect("a map needs a grid").clone();
+    let rewrite = LabelRewrite::replace("dst", "$1", "src", "(.*)")
+        .expect("a label_replace with a valid expression");
+    NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(inner),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Label(Arc::new(rewrite))]),
+            },
+        },
+        output: evaluated(Arc::new([]), out),
     }
 }
 
@@ -338,6 +544,429 @@ fn merge_rejects_raw_and_mismatched_input_shapes() {
     };
     let fields_error = wrong_fields.validate().unwrap_err();
     assert!(fields_error.to_string().contains("field"), "{fields_error}");
+}
+
+/// A merge canonicalizes evaluated fragments and names no operator below it, so any tree whose output
+/// is an evaluated vector is one it may sit over: a scan's samples, a window's rate, an aggregate's
+/// fold, a vector operation's choice and a binary operation's match all hand over the same thing.
+/// An input that is not an evaluated vector at all is still refused.
+#[test]
+fn a_merge_sits_over_any_evaluated_vector() {
+    let shared = grid(0, 60_000, 4);
+    let rate = || window_on(input(), None, Arc::clone(&shared));
+
+    // The prefix the merge was first written for, then the shapes it now also sits over: each of them
+    // answers evaluated values, which is what the collection reads.
+    for node in [
+        merge_over(input_on(Arc::clone(&shared))),
+        merge_over(rate()),
+        merge_over(map_over(rate())),
+        merge_over(complete_aggregate(rate())),
+        merge_over(sorted(rate())),
+        merge_over(sum_of(rate(), rate())),
+    ] {
+        assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
+        assert!(reads_across_series(&node));
+    }
+
+    // Raw samples carry their own timestamps instead of positions on a grid, so there is nothing to
+    // merge by: a scan is the one input a merge refuses however many fields it carries.
+    for inner in [input(), input_with_fields(1)] {
+        let error = merge_over(inner).validate().unwrap_err();
+        assert!(error.to_string().contains("evaluated vector"), "{error}");
+    }
+    // A scalar is not a vector at all, and a merge reports samples.
+    let scalar_input = NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(scalar_on(1.0, Arc::clone(&shared))),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let error = scalar_input.validate().unwrap_err();
+    assert!(error.to_string().contains("evaluated vector"), "{error}");
+}
+
+/// What a caller knows about a source it has collected into one series per canonical label set and
+/// placed by canonical key: every label set it names is whole in one execution.
+fn proven_by_key() -> NativeProperties {
+    NativeProperties {
+        owner: CanonicalOwner::ByCanonicalKey,
+        grouping: CanonicalGrouping::CanonicalComplete,
+    }
+}
+
+/// The same, in an execution that holds every series there is.
+fn proven_in_one_execution() -> NativeProperties {
+    NativeProperties {
+        owner: CanonicalOwner::SinglePartition,
+        ..proven_by_key()
+    }
+}
+
+/// What a plain raw scan proves about the pieces of a label set: nothing.
+///
+/// A scan partitions by storage `read_key` and not by canonical key, so it holds pieces of a metric
+/// with nothing grouped - which is the facts the node itself derives for an input.
+fn source_pieces() -> NativeProperties {
+    NativeProperties::source_pieces()
+}
+
+/// The facts a node reports follow what the node does to a label set.
+///
+/// This is where the RFC's simplified rule ("a pure numeric map inherits grouping") had to be
+/// corrected: none of the three map operations leaves a label set as it is, so a map is one of the
+/// nodes that lose grouping rather than pass it on.
+///
+/// The facts are two questions and a node may answer them apart, which is why this test asks both of
+/// every shape below: *grouping* is whether the output holds at most one series per canonical label
+/// set, and *ownership* is how much of each of those label sets this execution holds. A finished
+/// fold and a two-vector match derive their own grouping and neither side's ownership, so an
+/// expectation that reads one answer as the other is the mistake this test exists to catch.
+#[test]
+fn properties_follow_what_each_node_does_to_a_label_set() {
+    let shared = grid(0, 60_000, 4);
+
+    // What a caller knows about a scan: this execution holds pieces of a metric and nothing has
+    // grouped those pieces by label set.
+    let boundary = NativeProperties::source_pieces();
+
+    // A bare input is the boundary it was bound to, so it proves exactly the entry supplied beside
+    // it and nothing else.
+    let bare = input_on(Arc::clone(&shared));
+    let scanned = bare.properties(&[boundary]);
+    assert_eq!(
+        scanned,
+        NativeProperties {
+            owner: CanonicalOwner::Unknown,
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+        }
+    );
+
+    // A window folds a range of one series' samples, so it hands over the label set it read and each
+    // series stays one stream: what it proves is what its input proved.
+    //
+    // That holds only for the functions that keep the metric name, which is `last_over_time` and
+    // `first_over_time`; every other one rewrites the labels, and the test below this one is what
+    // pins that.
+    let window = |function: RangeFunction| {
+        window_with(
+            input_on(Arc::clone(&shared)),
+            function,
+            Some(Arc::clone(&shared)),
+            Arc::clone(&shared),
+        )
+    };
+    assert_eq!(
+        window(RangeFunction::LastOverTime).properties(&[scanned]),
+        scanned
+    );
+    assert_eq!(
+        window(RangeFunction::Rate).properties(&[scanned]),
+        scanned.label_sets_of_its_own()
+    );
+
+    // The grouping proof a map could inherit from a complete child is exactly what it loses: a
+    // series ends under a label set the map built, so no grouping proof survives.
+    let complete = NativeProperties {
+        owner: CanonicalOwner::ByCanonicalKey,
+        grouping: CanonicalGrouping::CanonicalComplete,
+    };
+    // `map_math` ends with `drop_metric_name`, so `abs(x)` and `x` no longer hold one label set:
+    // this is the case the RFC read as inheriting grouping.
+    let absolute = map_over(input_on(Arc::clone(&shared)));
+    let rewritten = absolute.properties(&[complete]);
+    assert_eq!(
+        rewritten,
+        NativeProperties {
+            owner: CanonicalOwner::Unknown,
+            grouping: CanonicalGrouping::SourcePiecesOnly,
+        }
+    );
+
+    // A single execution still holds every series it produces, so that ownership is the one a rewrite
+    // does not invalidate.
+    let single = NativeProperties {
+        owner: CanonicalOwner::SinglePartition,
+        ..complete
+    };
+    assert_eq!(
+        absolute.properties(&[single]).owner,
+        CanonicalOwner::SinglePartition
+    );
+
+    // The other two variants are no purer: `label_replace` writes a label of its own choosing
+    // (`__name__` included) and `histogram_*` removes `__name__`, so no map operation preserves a
+    // label set and none of them can inherit a grouping proof.
+    assert!(!preserves_canonical_identity(&MapOp::Math(MathOp::Abs)));
+    assert!(!preserves_canonical_identity(&MapOp::Histogram(
+        NativeHistogramFunction::Count
+    )));
+    assert!(!preserves_canonical_identity(&MapOp::Label(Arc::new(
+        LabelRewrite::replace("dst", "$1", "src", "(.*)").expect("a valid expression")
+    ))));
+    assert_eq!(
+        map_rewriting_labels(input_on(Arc::clone(&shared))).properties(&[complete]),
+        rewritten
+    );
+
+    // An aggregate answers the two questions apart, and a finished fold answers the grouping one
+    // with a proof of its own: `FloatAggregator::finish` builds one series per group, so the output
+    // already holds at most one series per canonical label set however the input's pieces arrived,
+    // and nothing above it has an alias left to collect.
+    let folded = complete_aggregate(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        folded.properties(&[complete]).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+    // A group's identity is the group key, so an ownership per input key says nothing about it: two
+    // input label sets placed in different executions can fold into one group, which is why the
+    // ownership is re-derived while the grouping above is the fold's own.
+    assert_eq!(
+        folded.properties(&[complete]).owner,
+        CanonicalOwner::Unknown
+    );
+    // A `sort` hands back the series it was given with their labels unchanged, so it inherits both
+    // of its input's answers: what it reorders it answers under the same label sets, and a grouping
+    // a complete child proved still holds for the order it wrote.
+    let ordered = sorted(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        ordered.properties(&[complete]).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+
+    // Two vectors are matched by label, and the two questions are answered apart here too. The
+    // kernel files its rows by the *result* label set (`Results` is keyed by the label set a
+    // pairing's sample ends under) and refuses two values of a field at one point, so it hands over
+    // one series per canonical label set however the operands arrived: the grouping is the match's
+    // own proof, not either side's. The ownership is the other question, and it is not. The two
+    // sides are two sources, so each reads its own entry of the boundary.
+    let sum = sum_of(
+        input_on_at(0, Arc::clone(&shared)),
+        input_on_at(1, Arc::clone(&shared)),
+    );
+    assert_eq!(
+        sum.properties(&[complete, complete]).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+    // Its output holds series from both sides, so its ownership is only what both agree on - and
+    // then only if it survives the match, whose output identity is its modifiers and not the keys it
+    // read.
+    assert_eq!(
+        sum.properties(&[complete, complete]).owner,
+        CanonicalOwner::Unknown
+    );
+    assert_eq!(
+        sum.properties(&[complete, scanned]).owner,
+        CanonicalOwner::Unknown
+    );
+    // The per-source indexing is visible here: a boundary that states facts for source 0 only leaves
+    // source 1 unproved, which costs the ownership - the two sides then agree on nothing they were
+    // asked - and not the grouping, which the match establishes for its own output whatever its
+    // sides proved.
+    assert_eq!(sum.properties(&[complete]).owner, CanonicalOwner::Unknown);
+    assert_eq!(
+        sum.properties(&[complete]).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+
+    // A merge is the node that establishes that fact, and the placement of what it read is the
+    // placement of what it wrote.
+    let merged = merge_over(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        merged.properties(&[complete]),
+        NativeProperties {
+            owner: CanonicalOwner::ByCanonicalKey,
+            grouping: CanonicalGrouping::CanonicalComplete,
+        }
+    );
+}
+
+/// A scalar broadcast reaches each series of its vector side as it is, so the facts it derives are
+/// the vector side's and nothing else: a constant holds no label set, and which side it is written on
+/// cannot change the answer.
+///
+/// The old derivation united the two sides before looking at them, which answered wrong in both
+/// directions: with the vector on the left it took the ownership only the two sides agree on, and a
+/// vector side placed by canonical key came out `Unknown` (the constant answers `SinglePartition`);
+/// with the vector on the right it kept the left side's grouping, so the constant's
+/// `CanonicalComplete` was handed to a vector side that is still only source pieces.
+/// The two orders are one query, `x > 0` and `0 < x`, so they are asserted against the same answer.
+#[test]
+fn a_broadcast_derives_its_vector_sides_properties_whichever_side_the_vector_is_on() {
+    let shared = grid(0, 60_000, 4);
+    // `0` broadcast over the vector, which is a filtering comparison and keeps the label set it read.
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+    let vector = || input_on(Arc::clone(&shared));
+
+    for boundary in [proven_by_key(), source_pieces()] {
+        // What the vector side proves on its own, which is what the broadcast has to prove: nothing
+        // about a label set is added, dropped or rewritten.
+        let expected = vector().properties(&[boundary]);
+        // `x > 0` and `0 < x`.
+        let vector_left = binary_with(vector(), constant(), matching(BinaryOp::Gt, false));
+        let vector_right = binary_with(constant(), vector(), matching(BinaryOp::Lt, false));
+        assert_eq!(vector_left.properties(&[boundary]), expected);
+        assert_eq!(vector_right.properties(&[boundary]), expected);
+        assert_eq!(
+            vector_left.properties(&[boundary]),
+            vector_right.properties(&[boundary])
+        );
+    }
+
+    // The facts the old formula lost, spelled out: a vector side placed by canonical key keeps that
+    // ownership (which is what a merge above the broadcast needs), and a vector side of source pieces
+    // stays ungrouped (which is what a merge above it has to collect).
+    let by_key = binary_with(vector(), constant(), matching(BinaryOp::Gt, false));
+    assert_eq!(
+        by_key.properties(&[proven_by_key()]).owner,
+        CanonicalOwner::ByCanonicalKey
+    );
+    assert_eq!(by_key.properties(&[proven_by_key()]), proven_by_key());
+    let pieces = binary_with(constant(), vector(), matching(BinaryOp::Lt, false));
+    assert_eq!(
+        pieces.properties(&[source_pieces()]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+}
+
+/// Arithmetic and a `bool` comparison answer a series under the metric name dropped, so the broadcast
+/// derives its vector side's facts rewritten — and, as for a filtering comparison, only its vector
+/// side's: the constant's `no_label_sets()` facts never reach the output.
+#[test]
+fn arithmetic_and_a_bool_comparison_rewrite_the_vector_sides_labels_only() {
+    let shared = grid(0, 60_000, 4);
+    let constant = || scalar_on(2.0, Arc::clone(&shared));
+    let vector = || input_on(Arc::clone(&shared));
+
+    for boundary in [proven_by_key(), source_pieces()] {
+        let expected = vector().properties(&[boundary]).label_sets_of_its_own();
+        // `x * 2` and `2 * x`, which drop `__name__` in `BroadcastRuntime`; `x > bool 0` and
+        // `0 < bool x`, the comparison that keeps a value instead of filtering.
+        for (vector_left_op, constant_left_op) in [
+            (
+                matching(BinaryOp::Mul, false),
+                matching(BinaryOp::Mul, false),
+            ),
+            (matching(BinaryOp::Gt, true), matching(BinaryOp::Lt, true)),
+        ] {
+            let vector_left = binary_with(vector(), constant(), vector_left_op);
+            let constant_left = binary_with(constant(), vector(), constant_left_op);
+            let derived = vector_left.properties(&[boundary]);
+            assert_eq!(derived, expected);
+            assert_eq!(constant_left.properties(&[boundary]), expected);
+            // The rewrite is a real downgrade and not a carried-over proof.
+            assert_eq!(derived.grouping, CanonicalGrouping::SourcePiecesOnly);
+            assert_eq!(derived.owner, CanonicalOwner::Unknown);
+        }
+    }
+}
+
+/// Two constants answer one value for every series there is, so neither holds a label set and the
+/// operation cannot claim one: what it derives is `no_label_sets()`, whatever the boundary says.
+#[test]
+fn two_constants_hold_no_label_set() {
+    let shared = grid(0, 60_000, 4);
+    let node = binary_with(
+        scalar_on(1.0, Arc::clone(&shared)),
+        scalar_on(2.0, Arc::clone(&shared)),
+        add(),
+    );
+    assert!(node.validate().is_ok(), "{}", node.validate().unwrap_err());
+    assert_eq!(node.properties(&[]), no_label_sets());
+    assert_eq!(node.properties(&[proven_by_key()]), no_label_sets());
+}
+
+/// A vector/vector match answers series of both sides, so its ownership is only what the two sides
+/// agree on, and the match re-derives it for the label sets its modifiers name: `label_sets_of_its_own` keeps
+/// a one-execution ownership and downgrades one per canonical key, because the keys it read are not
+/// the label sets it writes.
+///
+/// The grouping is the match's own and is complete however its sides arrived: the kernel files rows
+/// by *result* label set. What the two sides' proofs can change is therefore the ownership alone,
+/// which is the only answer that differs between the three cases below.
+#[test]
+fn a_two_vector_match_still_rederives_its_ownership() {
+    let shared = grid(0, 60_000, 4);
+    // `rate(a) + rate(b)`, whose two sides are two sources with an entry of their own.
+    let matched = || {
+        sum_of(
+            input_on_at(0, Arc::clone(&shared)),
+            input_on_at(1, Arc::clone(&shared)),
+        )
+    };
+    // What a match proves whatever it read: a match is complete in grouping - `Results` files the
+    // paired samples by the label set each one ends under and refuses two values of a field at one
+    // point, so what it hands over is one series per canonical label set - while its ownership is
+    // its modifiers' decision and the two sides' proofs only bound it.
+    let whole_vector = |owner: CanonicalOwner| NativeProperties {
+        owner,
+        grouping: CanonicalGrouping::CanonicalComplete,
+    };
+
+    // Both sides placed by canonical key agree on that ownership, and the match still downgrades it.
+    assert_eq!(
+        matched().properties(&[proven_by_key(), proven_by_key()]),
+        whole_vector(CanonicalOwner::Unknown)
+    );
+    // Sides that disagree agree on nothing.
+    assert_eq!(
+        matched().properties(&[proven_by_key(), source_pieces()]),
+        whole_vector(CanonicalOwner::Unknown)
+    );
+    // One execution holds every series there is, so that is the one ownership the match keeps.
+    assert_eq!(
+        matched().properties(&[proven_in_one_execution(), proven_in_one_execution()]),
+        whole_vector(CanonicalOwner::SinglePartition)
+    );
+}
+
+/// A timestamp and a timestamp-mode instant replace the identity with the sample's time, so neither
+/// can inherit the proof a value selection may.
+///
+/// `timestamp(x)` rebuilds the labels through `map::drop_metric_name`, which removes `__name__`
+/// together with the type and unit labels, and the selection that reports a time instead of a value
+/// does the same in `instant_eval::timestamp_of_selection`. Two series that differed only by metric
+/// name therefore answer under one label set, and nothing has assembled them.
+#[test]
+fn the_two_timestamp_shapes_downgrade_and_a_value_selection_inherits() {
+    let shared = grid(0, 60_000, 4);
+    let boundary = [proven_in_one_execution()];
+
+    // `timestamp(rate(x[5m]))` and `timestamp(x)` both rewrite the labels.
+    let stamped = timestamp_of(input_on(Arc::clone(&shared)));
+    assert_eq!(
+        stamped.properties(&boundary),
+        boundary[0].label_sets_of_its_own()
+    );
+    assert_eq!(
+        stamped.properties(&boundary).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+
+    // A one-execution ownership is not invalidated by a rewrite, a per-key one is.
+    assert_eq!(
+        stamped.properties(&boundary).owner,
+        CanonicalOwner::SinglePartition
+    );
+    assert_eq!(
+        stamped.properties(&[proven_by_key()]).owner,
+        CanonicalOwner::Unknown
+    );
+
+    // A selection that reports the sample's time is the same rewrite, applied to a selected sample.
+    let selected = instant_over(
+        raw_input_at(0),
+        InstantValue::Timestamp,
+        Arc::clone(&shared),
+    );
+    assert_eq!(
+        selected.properties(&boundary),
+        boundary[0].label_sets_of_its_own()
+    );
+
+    // A selection that reports the sample's value keeps the label set it read, so it inherits.
+    let values = instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared));
+    assert_eq!(values.properties(&boundary), boundary[0]);
 }
 
 /// A map is point-wise over values, so raw samples are not something it can consume.
@@ -913,6 +1542,509 @@ fn a_constant_operand_reads_one_series_at_a_time() {
     )));
 }
 
+/// A tree needs one execution over every scan partition exactly when one of its operators answers a
+/// value for the whole vector; every other tree answers each series on its own and keeps running one
+/// execution per partition.
+#[test]
+fn only_a_whole_vector_tree_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let rate = || window_on(input(), None, Arc::clone(&shared));
+    let vector = |inner: NativeNode, op: BoundVectorOp| NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(inner),
+            op,
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let binary = |left: NativeNode, right: NativeNode| NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: add(),
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+    let aggregate = |inner: NativeNode, stage: AggregateStage| NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(inner),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::new(["job".into()])),
+                stage,
+            },
+        },
+        output: if stage == AggregateStage::Partial {
+            partial_aggregate(rate()).output
+        } else {
+            evaluated(Arc::new([]), Arc::clone(&shared))
+        },
+    };
+
+    // One series' rows answer one series: the input, `rate(x[5m])` and `abs(rate(x[5m]))`.
+    for node in [input(), rate(), map_over(rate())] {
+        assert!(
+            !needs_single_execution(&node),
+            "a per-series tree keeps one execution per partition: {node:?}"
+        );
+    }
+    // A broadcast reaches each series of the vector side, and a state aggregate is contractually
+    // one execution's contribution.
+    assert!(!needs_single_execution(&binary(
+        scalar_on(1.0, Arc::clone(&shared)),
+        rate()
+    )));
+    assert!(!needs_single_execution(&aggregate(
+        rate(),
+        AggregateStage::Partial
+    )));
+    // `rate(a) + rate(b)` is a match, not a broadcast, so it is *not* per-series: it pairs the two
+    // sides' series by label, and with no boundary facts there is no proof that one execution holds
+    // both. This answered `false` while a match was decided by its sides alone, which is the gap the
+    // match's own co-location proof closes.
+    assert!(needs_single_execution(&binary(rate(), rate())));
+
+    // `topk(1, rate(x[5m]))`, `sort(rate(x[5m]))` and `limitk(1, rate(x[5m]))` read every series
+    // against the others, as does a complete aggregate.
+    let group = Grouping::By(Arc::new(["job".into()]));
+    for op in [
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: group.clone(),
+        },
+        BoundVectorOp::LimitK {
+            k: 1.0,
+            group: group.clone(),
+        },
+        BoundVectorOp::Sort(SortOrder::Asc),
+    ] {
+        assert!(
+            needs_single_execution(&vector(rate(), op)),
+            "a global vector operation needs every series at once"
+        );
+    }
+    assert!(needs_single_execution(&aggregate(
+        rate(),
+        AggregateStage::Complete
+    )));
+    // Depth does not hide it: `sum(rate(x[5m])) + 100` still folds a group, and so does a per-series
+    // left side over a whole-vector right side.
+    assert!(needs_single_execution(&binary(
+        aggregate(rate(), AggregateStage::Complete),
+        scalar_on(100.0, Arc::clone(&shared))
+    )));
+    assert!(needs_single_execution(&binary(
+        rate(),
+        vector(rate(), BoundVectorOp::Sort(SortOrder::Asc))
+    )));
+}
+
+/// A whole-vector operator reads the input vector itself, so what the boundary says about where the
+/// sources sit cannot make one execution unnecessary.
+#[test]
+fn a_whole_vector_operator_needs_one_execution_whatever_the_boundary() {
+    let shared = grid(0, 60_000, 4);
+    // `sort(rate(x[5m]))` orders every series against the others, and `sum(rate(x[5m]))` folds every
+    // contribution to a group.
+    let vector = sorted(input_on(Arc::clone(&shared)));
+    let aggregate = complete_aggregate(input_on(Arc::clone(&shared)));
+
+    for boundary in [
+        &[][..],
+        &[source_pieces()][..],
+        &[proven_by_key()][..],
+        &[proven_in_one_execution()][..],
+    ] {
+        assert!(
+            needs_single_execution_in(&vector, boundary),
+            "a vector operation reads the whole vector: {boundary:?}"
+        );
+        assert!(
+            needs_single_execution_in(&aggregate, boundary),
+            "a complete aggregate folds every contribution to its group: {boundary:?}"
+        );
+        // The wrapper that states no facts agrees, because it proves nothing.
+        assert!(needs_single_execution(&vector));
+        assert!(needs_single_execution(&aggregate));
+    }
+}
+
+/// A merge needs every piece of one canonical label set and not every label set in one execution, so
+/// the boundary's ownership decides where it is placed - and never how many executions the tree
+/// takes, which is its input's answer.
+///
+/// The fix that split the two questions is what this test now asserts together: a merge over a
+/// boundary that proves nothing is not placeable in one partition, and it still does not demand a
+/// single execution to make itself placeable. It used to answer the second question with the first,
+/// which is what collapsed the caller's partitions.
+#[test]
+fn a_merge_is_placed_by_the_boundary_and_needs_what_its_input_needs() {
+    let shared = grid(0, 60_000, 4);
+    let merge = merge_over(input_on(Arc::clone(&shared)));
+
+    // A raw scan partitions by storage `read_key`, which proves nothing about canonical keys: the
+    // pieces of one label set can sit in different partitions, and a merge in each of them would
+    // hand what reads it a partial series as a canonical one. So it is not placeable there - and it
+    // does not answer that by asking for one execution either.
+    assert!(!merges_are_placeable_in(&merge, &[source_pieces()], false));
+    assert!(!needs_single_execution_in(&merge, &[source_pieces()]));
+    // No facts at all prove even less: the same answer, and again not one that costs an execution.
+    assert!(!merges_are_placeable_in(&merge, &[], false));
+    assert!(!needs_single_execution_in(&merge, &[]));
+    // Placed by canonical key, every piece of a label set is in the execution that owns it, so a
+    // merge per owner partition is the whole answer.
+    assert!(merges_are_placeable_in(&merge, &[proven_by_key()], false));
+    // One execution holds every series there is.
+    assert!(merges_are_placeable_in(
+        &merge,
+        &[proven_in_one_execution()],
+        false
+    ));
+    // Whatever the boundary proves, the merge's own need is its input's, which a scan does not
+    // raise: one execution is never what a merge asks for.
+    for boundary in [
+        &[][..],
+        &[source_pieces()][..],
+        &[proven_by_key()][..],
+        &[proven_in_one_execution()][..],
+    ] {
+        assert!(
+            !needs_single_execution_in(&merge, boundary),
+            "a merge demanded a single execution: {boundary:?}"
+        );
+    }
+
+    // What sits above a merge is not proved co-located by what the merge reads: `rate` drops the
+    // metric name and can put two sources' label sets in one, so the merge over it cannot read each
+    // label set whole in an owner partition - and still does not demand one execution.
+    let windowed = merge_over(window_with(
+        input_on(Arc::clone(&shared)),
+        RangeFunction::Rate,
+        Some(Arc::clone(&shared)),
+        Arc::clone(&shared),
+    ));
+    assert!(!merges_are_placeable_in(
+        &windowed,
+        &[proven_by_key()],
+        false
+    ));
+    assert!(!needs_single_execution_in(&windowed, &[proven_by_key()]));
+    // In an execution that reads every input partition, every piece is present and the same merge is
+    // placeable: the label sets `rate` invented are still whole there.
+    assert!(merges_are_placeable_in(&windowed, &[proven_by_key()], true));
+
+    // A window that keeps the metric name hands the same label sets on, so the proof survives it and
+    // the merge stays within the owner partitions.
+    let keeping = merge_over(window_with(
+        input_on(Arc::clone(&shared)),
+        RangeFunction::LastOverTime,
+        Some(Arc::clone(&shared)),
+        Arc::clone(&shared),
+    ));
+    assert!(merges_are_placeable_in(&keeping, &[proven_by_key()], false));
+    assert!(!needs_single_execution_in(&keeping, &[proven_by_key()]));
+
+    // A complete aggregate below it needs one execution of its own, whatever the merge needs - which
+    // is the one case where a tree holding a merge does need one, and it is the aggregate's.
+    let folded = merge_over(complete_aggregate(input_on(Arc::clone(&shared))));
+    assert!(needs_single_execution_in(
+        &folded,
+        &[proven_in_one_execution()]
+    ));
+}
+
+/// The reported shape: one source read twice, a canonical merge over each occurrence, and a match
+/// over the two merges.
+///
+/// `Merge(Input(0))` on both sides is a tree the native API accepts - `collect_source_schemas` takes
+/// the same `source_index` in several leaves - and a per-canonical-key placement proves each
+/// *canonical* label set whole, which is what each merge needs and is not what the match needs. With
+/// `{host="h", zone="a"}` and `{host="h", zone="b"}` under two canonical owners, each owner holds one
+/// series per side, matches them locally, and the whole-vector `on(host)` duplicate-series check
+/// (`vector_match`) never runs over the real group: a silently wrong answer where an error is owed.
+///
+/// Before the fix this answered `false`: both sides were `ByCanonicalKey`, which the match arm took
+/// as a proof of its own co-location because the arm asked only what each side needs on its own.
+#[test]
+fn a_match_over_two_canonical_key_merges_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+
+    assert!(
+        needs_single_execution_in(&matched(), &[proven_by_key()]),
+        "an `on(host)` match pairs by `host`, and a canonical key is not that key"
+    );
+
+    // Each side alone is the case the merge already settles: one merge over a per-key placement stays
+    // in its owner partition, so the `true` above is the match's requirement and not the merges'.
+    let side = || merge_over(input_on(Arc::clone(&shared)));
+    assert!(!needs_single_execution_in(&side(), &[proven_by_key()]));
+}
+
+/// The same match in an execution that holds every series there is: both sides are already here, so
+/// the match needs nothing beyond it and the tree keeps running as the one execution it is.
+#[test]
+fn a_match_over_two_merges_in_one_execution_stays_parallel() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+
+    assert!(
+        !needs_single_execution_in(&matched(), &[proven_in_one_execution()]),
+        "one execution already pairs every series of the `on(host)` group"
+    );
+}
+
+/// A set operation matches two vectors the same way a binary one does, so the boundary answers the
+/// same way for it: `ByCanonicalKey` is not a matching-key proof, and one execution needs no proof.
+#[test]
+fn a_set_over_two_canonical_key_merges_needs_one_execution() {
+    let shared = grid(0, 60_000, 4);
+    let set = || NativeNode {
+        expr: NativeExpr::Set {
+            left: Box::new(merge_over(input_on(Arc::clone(&shared)))),
+            right: Box::new(merge_over(input_on(Arc::clone(&shared)))),
+            op: BoundSetOp {
+                op: SetOp::Or,
+                labels: MatchingLabels::On(vec!["host".into()]),
+            },
+        },
+        output: evaluated(Arc::new([]), Arc::clone(&shared)),
+    };
+
+    assert!(
+        needs_single_execution_in(&set(), &[proven_by_key()]),
+        "`or on(host)` pairs by `host`, and a canonical key is not that key"
+    );
+    assert!(
+        !needs_single_execution_in(&set(), &[proven_in_one_execution()]),
+        "one execution already pairs every series of the `on(host)` group"
+    );
+}
+
+/// A broadcast is not a match: it pairs a vector with one value, so no label set is paired on the
+/// constant's side and nothing about matching keys has to be proved for it. The fix for the match
+/// must therefore not collapse `x > 0` or `x * 2` into one execution.
+#[test]
+fn a_scalar_broadcast_over_a_canonical_key_vector_stays_parallel() {
+    let shared = grid(0, 60_000, 4);
+    let by_key = [proven_by_key()];
+    let vector = || input_on(Arc::clone(&shared));
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+
+    // `x > 0`, `x * 2` and the same two written with the constant on the left, all over a vector side
+    // placed by canonical key: each is one value against each series, not a pair of series.
+    for node in [
+        binary_with(vector(), constant(), matching(BinaryOp::Gt, false)),
+        binary_with(vector(), constant(), matching(BinaryOp::Mul, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Lt, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Mul, false)),
+    ] {
+        assert!(
+            !needs_single_execution_in(&node, &by_key),
+            "a broadcast reaches each series of its vector side on its own:\n{node:?}"
+        );
+    }
+}
+
+/// A merge is grouped by the canonical label set, so a per-key boundary is exactly the proof it needs
+/// and it must keep staying within the owner partitions the fix above does not touch.
+#[test]
+fn a_merge_over_canonical_keys_still_keeps_the_owner_partitions() {
+    let shared = grid(0, 60_000, 4);
+    let merge = merge_over(input_on(Arc::clone(&shared)));
+
+    assert!(
+        !needs_single_execution_in(&merge, &[proven_by_key()]),
+        "a canonical key is what a merge groups by, so it is a proof of a merge's input"
+    );
+    assert!(
+        merges_are_placeable_in(&merge, &[proven_by_key()], false),
+        "the proof a canonical key gives is the one a merge is placed by"
+    );
+    // The contrast that keeps the assertion above from being vacuous: the same merge over a scan that
+    // proves nothing about canonical keys is not placeable in one partition. It does not answer that
+    // by needing a single execution - a merge's own need is its input's, which a scan does not raise -
+    // so the unproved shape is declined rather than collapsed.
+    assert!(!needs_single_execution_in(&merge, &[source_pieces()]));
+    assert!(!merges_are_placeable_in(&merge, &[source_pieces()], false));
+}
+
+/// A per-series wrapper composes with the match's requirement by recursing into it: `rate` over the
+/// match needs what the match needs and adds no requirement of its own, so the answer is the match's.
+#[test]
+fn a_window_over_a_match_hands_the_matches_requirement_up_unchanged() {
+    let shared = grid(0, 60_000, 4);
+    let matched = || {
+        binary_with(
+            merge_over(input_on(Arc::clone(&shared))),
+            merge_over(input_on(Arc::clone(&shared))),
+            on_host(),
+        )
+    };
+    // `rate(<match>)`, with a name-dropping function, so the window itself changes the label sets the
+    // match pairs and cannot add a co-location proof of its own either way.
+    let windowed = || {
+        window_with(
+            matched(),
+            RangeFunction::Rate,
+            Some(Arc::clone(&shared)),
+            Arc::clone(&shared),
+        )
+    };
+
+    // One execution holds both sides, so the match is whole there and the window over it needs
+    // nothing more.
+    assert!(!needs_single_execution_in(
+        &windowed(),
+        &[proven_in_one_execution()]
+    ));
+    // Placed by canonical key, the window cannot make the match whole: what it hands on is the
+    // match's requirement, one execution.
+    assert!(needs_single_execution_in(&windowed(), &[proven_by_key()]));
+}
+
+/// A tree whose only whole-vector-looking node is a merge is placed per partition once the boundary
+/// proves the pieces of a label set arrive together, which is the case that must stop collapsing the
+/// owner partitions a canonical repartition just created.
+///
+/// The answers below are the split the fix made: the tree never needs one execution, because neither
+/// the window nor the merge raises that requirement, and whether it can run per partition is what the
+/// boundary's facts decide. The last case is the shape that used to be collapsed - unproved pieces
+/// under a merge - and it is now declined instead: `merges_are_placeable_in` says the one partition
+/// the node would run in cannot answer it.
+#[test]
+fn a_merge_alone_does_not_collapse_the_owner_partitions() {
+    let shared = grid(0, 60_000, 4);
+    // The shape a repartition hands on: a canonical merge under a per-series window, and no
+    // whole-vector operator anywhere.
+    let tree = window_with(
+        merge_over(input_on_at(1, Arc::clone(&shared))),
+        RangeFunction::LastOverTime,
+        Some(Arc::clone(&shared)),
+        Arc::clone(&shared),
+    );
+
+    // Placed by canonical key, the pieces of the label set source 1 reads are already together in the
+    // partition that owns them.
+    for boundary in [
+        [proven_by_key(), proven_by_key()],
+        [source_pieces(), proven_by_key()],
+        [proven_in_one_execution(), source_pieces()],
+    ] {
+        assert!(
+            !needs_single_execution_in(&tree, &boundary),
+            "a merge under a per-series window demanded one execution: {boundary:?}"
+        );
+    }
+    assert!(
+        merges_are_placeable_in(&tree, &[proven_by_key(), proven_by_key()], false),
+        "the merge reads source 1, whose pieces the boundary proves co-located"
+    );
+    assert!(merges_are_placeable_in(
+        &tree,
+        &[source_pieces(), proven_by_key()],
+        false
+    ));
+    // The entries are read per source: source 1 is the one the merge reads, so leaving it unproved
+    // is what makes the tree unplaceable per partition, however canonical source 0 is.
+    assert!(!merges_are_placeable_in(
+        &tree,
+        &[proven_in_one_execution(), source_pieces()],
+        false
+    ));
+    // The wrapper that states no facts proves nothing about source 1 either, so the answer is the
+    // same - and it is still not one execution.
+    assert!(!merges_are_placeable_in(&tree, &[], false));
+    assert!(!needs_single_execution(&tree));
+}
+
+/// The ownership a broadcast derives is what decides where a merge above it is placed, so deriving
+/// an arithmetic constant's facts into the vector's had a placement consequence and not only a fact
+/// wrong on paper: `x > 0` keeps the label set it read, so a vector side placed by canonical key
+/// still proves that the pieces of a label set arrive together and a merge over the comparison stays
+/// within the owner partitions a canonical repartition just created.
+///
+/// The other comparisons below are what keep the assertions from being vacuous: arithmetic and a
+/// `bool` comparison drop the metric name, so a merge over the same vector side cannot read each
+/// label set whole there, and neither can a merge over a tree whose facts are the ones the old
+/// formula derived - the vector side united with the constant's `no_label_sets()`, whose ownership is
+/// `Unknown`. All of them are placement answers: the merge's own need is its input's throughout, so
+/// none of these shapes is turned into a single execution by the merge.
+#[test]
+fn a_merge_over_a_filtering_comparison_keeps_the_owner_partitions() {
+    let shared = grid(0, 60_000, 4);
+    let by_key = [proven_by_key()];
+    let vector = || input_on(Arc::clone(&shared));
+    let constant = || scalar_on(0.0, Arc::clone(&shared));
+    // `x > 0`, which keeps the label set it read, and `0 < x`, the same query written the other way.
+    let filtering = |vector_left: bool| {
+        if vector_left {
+            binary_with(vector(), constant(), matching(BinaryOp::Gt, false))
+        } else {
+            binary_with(constant(), vector(), matching(BinaryOp::Lt, false))
+        }
+    };
+
+    for node in [filtering(true), filtering(false)] {
+        let merged = merge_over(node);
+        assert!(
+            merges_are_placeable_in(&merged, &by_key, false),
+            "a broadcast that keeps the label set leaves the merge's pieces co-located"
+        );
+        assert!(
+            !needs_single_execution_in(&merged, &by_key),
+            "a merge over a broadcast demanded one execution of its own"
+        );
+    }
+
+    // The contrast: a label set the broadcast rewrote is not the one the boundary's keys name, so
+    // the merge above it cannot read each label set whole - and it still does not ask for one
+    // execution to get them.
+    for node in [
+        binary_with(vector(), constant(), matching(BinaryOp::Mul, false)),
+        binary_with(constant(), vector(), matching(BinaryOp::Mul, false)),
+        binary_with(vector(), constant(), matching(BinaryOp::Gt, true)),
+        binary_with(constant(), vector(), matching(BinaryOp::Lt, true)),
+    ] {
+        let merged = merge_over(node);
+        assert!(
+            !merges_are_placeable_in(&merged, &by_key, false),
+            "a broadcast that drops the metric name leaves the merge's pieces unproved"
+        );
+        assert!(!needs_single_execution_in(&merged, &by_key));
+    }
+
+    // The old answer, reproduced through the facts it derived: a vector side placed by canonical key
+    // united with the constant's facts owns nothing it can name, so a merge over a tree whose vector
+    // side proves that is not placeable in one owner partition. That is the answer the fix removes
+    // from the co-located case above.
+    assert_eq!(
+        proven_by_key().united(no_label_sets()).owner,
+        CanonicalOwner::Unknown
+    );
+    assert!(!merges_are_placeable_in(
+        &merge_over(filtering(true)),
+        &[proven_by_key().united(no_label_sets())],
+        false
+    ));
+    assert!(!needs_single_execution_in(
+        &merge_over(filtering(true)),
+        &[proven_by_key().united(no_label_sets())]
+    ));
+}
+
 /// A binary operation is point-wise on a grid, so a side of raw samples has no positions to line
 /// up with the other side.
 #[test]
@@ -1478,28 +2610,12 @@ fn info_reads_the_sample_times_of_one_field() {
     }
 }
 
-/// What a raw scan proves about the pieces of a label set: nothing.
-fn source_pieces() -> NativeProperties {
-    NativeProperties::source_pieces()
-}
-
 /// What a child that routes its chunks by canonical label set proves: this execution holds every
 /// piece of the label sets it names, and no other output holds a fragment of one of them.
 fn routed_by_canonical_key() -> NativeProperties {
     NativeProperties {
         owner: CanonicalOwner::ByCanonicalKey,
         grouping: CanonicalGrouping::SourcePiecesOnly,
-    }
-}
-
-/// A merge over `inner`, laid out as `inner` is: a merge writes no field and no grid of its own.
-fn merge_over(inner: NativeNode) -> NativeNode {
-    let output = inner.output.clone();
-    NativeNode {
-        expr: NativeExpr::Merge {
-            input: Box::new(inner),
-        },
-        output,
     }
 }
 
