@@ -25,7 +25,6 @@ mod range_manipulate;
 mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
-mod series_gather;
 mod series_repartition;
 #[cfg(test)]
 mod test_util;
