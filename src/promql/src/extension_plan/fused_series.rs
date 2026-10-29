@@ -617,13 +617,10 @@ fn validate_binding(
         )));
     }
     let schemas = collect_source_schemas(tree)?;
-    if schemas.is_empty()
-        && (!matches!(tree.root().expr, NativeExpr::Scalar(_))
-            || !matches!(tree.root().output, NativeType::Scalar(_)))
-    {
-        return Err(DataFusionError::Plan(
-            "FusedSeries without inputs requires a constant scalar root".into(),
-        ));
+    // A tree built without its constructor carries no proof of its contracts, and one without an
+    // input has no scan to refuse it later.
+    if schemas.is_empty() {
+        tree.root().validate()?;
     }
     if schemas.len() != child_count {
         return Err(DataFusionError::Plan(
@@ -647,14 +644,23 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
     fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a crate::native::plan::BoundInput>) {
         match &node.expr {
             NativeExpr::Input(input) => inputs.push(input),
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => collect(input, inputs),
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => collect(input, inputs),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                collect(input, inputs);
+                for parameter in parameters {
+                    collect(parameter, inputs);
+                }
+            }
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -972,7 +978,7 @@ impl FusedSeriesExec {
         // Building a state proves the runtime executes this tree; drop the validation state now.
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let output_series = tree.root().output.samples();
-        let scalar_root = raw_schemas.is_empty();
+        let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
         if let Some(op) = &partial_fold {
             aggregate_op(op)?;
         }

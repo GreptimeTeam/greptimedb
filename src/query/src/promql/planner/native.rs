@@ -30,7 +30,8 @@
 //! fields, then the tags — so a node planned here can be consumed by the same code that consumes a
 //! `SeriesNormalize` output.
 //!
-//! A constant statement is planned with no scan: one node, no child, the time index and value.
+//! A statement that reads no data - a constant, `time()`, `vector(time())` - is planned with no
+//! scan: one node, no child, the time index and value.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
-use promql::native::plan::{NativeExpr, NativeNode, reads_across_series};
+use promql::native::plan::{NativeExpr, NativeNode, NativeType, reads_across_series};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
 use promql_parser::parser::value::ValueType;
@@ -235,22 +236,29 @@ impl PromPlanner {
         let Ok(grid) = statement_grid(&stmt) else {
             return Ok(None);
         };
-        // No selector is not proof of a constant: `time()` and other data-free functions are
-        // unsupported here, so the existing fold is asked before a zero-child node is bound.
         if selectors.is_empty() {
-            if constant_value(prom_expr).is_none() {
-                return Ok(None);
-            }
             let tree = match compile_statement(&stmt) {
                 Ok(tree) => tree,
                 Err(DataFusionError::NotImplemented(_)) => return Ok(None),
                 Err(error) => return Err(error).context(DataFusionPlanningSnafu),
             };
-            // A constant has no scan: no metric, no tags, and the value under the name the existing
-            // path gives a bare literal.
+            // A statement that reads no data has no scan: no metric, no tags, and the value under
+            // the name the existing path gives a bare literal, or the one `vector()` binds. A tree
+            // whose labels the walk cannot derive, such as `count_values("l", vector(1))`, would
+            // lose the labels it generates, so it is left to the existing plan.
+            if fused_output_tags(tree.root(), &[]).is_none_or(|tags| !tags.is_empty()) {
+                return Ok(None);
+            }
             let time_index = DEFAULT_TIME_INDEX_COLUMN.to_string();
-            let value = DEFAULT_FIELD_COLUMN.to_string();
-            let output_schema = fused_output_schema(&[value], &[], &time_index)?;
+            let values = match &tree.root().output {
+                NativeType::Samples(schema) => schema
+                    .fields
+                    .iter()
+                    .map(|field| field.name.to_string())
+                    .collect(),
+                _ => vec![DEFAULT_FIELD_COLUMN.to_string()],
+            };
+            let output_schema = fused_output_schema(&values, &[], &time_index)?;
             let node = FusedSeries::try_new(
                 Arc::from(prom_expr.to_string()),
                 tree,
@@ -627,30 +635,27 @@ impl PromPlanner {
             )));
         }
         let tree = compiled.tree;
-        let root_fields = tree
-            .root()
-            .output
-            .samples()
-            .ok_or_else(|| DataFusionError::Internal("native tree root has no samples".into()))
-            .context(DataFusionPlanningSnafu)?
-            .fields
-            .iter()
-            .map(|f| f.name.to_string())
-            .collect::<Vec<_>>();
-        if root_fields.iter().any(|field| {
-            !series_schema
-                .fields
-                .iter()
-                .any(|f| f.name.as_ref() == field)
-        }) {
-            return Ok(None);
-        }
-        let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
-            return Ok(None);
+        let (root_fields, output_tags) = match &tree.root().output {
+            // The fields are the compiled root's own: a raw field's name, or the one `vector(s)`
+            // gives its result.
+            NativeType::Samples(schema) => {
+                let fields = schema
+                    .fields
+                    .iter()
+                    .map(|f| f.name.to_string())
+                    .collect::<Vec<_>>();
+                let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
+                    return Ok(None);
+                };
+                (fields, output_tags)
+            }
+            // A scalar has no labels, and its value is named as a bare literal's is.
+            NativeType::Scalar(_) => (vec![DEFAULT_FIELD_COLUMN.to_string()], Vec::new()),
+            NativeType::AggregateState(_) => return Ok(None),
         };
-        // Under `or` the right table's tags join the left table's columns, and one of them can
-        // share a name with the left side's field or time index. The output names each column
-        // once, so such a union is left to the existing plan.
+        // A root field can share a name with a tag or the time index, and under `or` the right
+        // table's tags join the left table's columns. The output names each column once, so such a
+        // statement keeps the existing plan.
         let mut column_names = std::collections::HashSet::new();
         if !std::iter::once(&time)
             .chain(&root_fields)
@@ -834,26 +839,29 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 ///
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
-/// side's; `info` adds the data labels of the info table; an operation with a constant or a function
-/// of each value keeps its operand's. `None` for a node whose labels this walk does not derive - an
-/// aggregate's groups, or a whole-vector operation - so a tree holding one is declined rather than
-/// given its input's labels.
+/// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
+/// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
+/// labels this walk does not derive - an aggregate's groups, or a whole-vector operation - so a tree
+/// holding one is declined rather than given its input's labels.
 fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
-        NativeExpr::Scalar(_) => Some(Vec::new()),
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } | NativeExpr::VectorOf { .. } => {
+            Some(Vec::new())
+        }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
+        | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
         NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
             left,
             right,
             matching,
-        } => match (&left.expr, &right.expr) {
-            (NativeExpr::Scalar(_), _) => fused_output_tags(right, source_tags),
-            (_, NativeExpr::Scalar(_)) => fused_output_tags(left, source_tags),
+        } => match (&left.output, &right.output) {
+            (NativeType::Scalar(_), _) => fused_output_tags(right, source_tags),
+            (_, NativeType::Scalar(_)) => fused_output_tags(left, source_tags),
             _ => {
                 if matching.cardinality != Cardinality::OneToOne {
                     return None;
@@ -918,6 +926,17 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
     }
 }
 
+/// Whether `node` reads no data at all: a constant, the evaluation time, or an operation between
+/// them. Every execution computes the same value for it.
+fn data_free(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
+        NativeExpr::Binary { left, right, .. } => data_free(left) && data_free(right),
+        NativeExpr::VectorOf { input } => data_free(input),
+        _ => false,
+    }
+}
+
 /// Whether `node` reads samples point-wise, so that one partitioned execution is one answer.
 ///
 /// A node's output type is not checked here: [`NativeNode::validate`] already refuses a selection,
@@ -931,19 +950,22 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
             matches!(input.expr, NativeExpr::Input(_))
         }
         NativeExpr::Map { input, .. } | NativeExpr::Timestamp { input } => pointwise_operand(input),
-        NativeExpr::Merge { .. } => false,
-        // A constant on one side is broadcast over the vector side's positions. Two vectors are a
-        // match between two series sets, which is the shape this route cannot split.
+        // A parameter that reads no data has the same value in every execution.
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => pointwise_operand(input) && parameters.iter().all(data_free),
+        // A scalar that reads no data is broadcast over the vector side's positions. Two vectors
+        // are a match between two series sets, which is the shape this route cannot split.
         NativeExpr::Binary {
             left,
             right,
             matching,
         } => {
+            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
             matching.cardinality == Cardinality::OneToOne
-                && match (&left.expr, &right.expr) {
-                    (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => false,
-                    (NativeExpr::Scalar(_), _) => pointwise_operand(right),
-                    (_, NativeExpr::Scalar(_)) => pointwise_operand(left),
+                && match (scalar(left), scalar(right)) {
+                    (true, false) => data_free(left) && pointwise_operand(right),
+                    (false, true) => data_free(right) && pointwise_operand(left),
                     _ => false,
                 }
         }
@@ -951,9 +973,12 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
         // scalar is not a per-series evaluation.
         NativeExpr::Input(_)
         | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. }
         | NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
+        | NativeExpr::Merge { .. }
         | NativeExpr::Info { .. } => false,
     }
 }
@@ -972,7 +997,35 @@ fn admitted_single_selector(expr: &PromExpr) -> bool {
         }
     }
 
-    admitted_selector(expr).is_some() || aggregate(expr)
+    admitted_selector(expr).is_some() || aggregate(expr) || dynamic_scalar(expr)
+}
+
+/// Whether `expr` calls `time()`, `vector()` or a date function without an argument.
+/// The compiled tree decides how such a statement runs.
+fn dynamic_scalar(expr: &PromExpr) -> bool {
+    match expr {
+        PromExpr::Call(call) => {
+            matches!(call.func.name, "time" | "vector")
+                || (call.args.args.is_empty()
+                    && matches!(
+                        call.func.name,
+                        "day_of_month"
+                            | "day_of_week"
+                            | "day_of_year"
+                            | "days_in_month"
+                            | "hour"
+                            | "minute"
+                            | "month"
+                            | "year"
+                    ))
+                || call.args.args.iter().any(|arg| dynamic_scalar(arg))
+        }
+        PromExpr::Paren(paren) => dynamic_scalar(&paren.expr),
+        PromExpr::Unary(unary) => dynamic_scalar(&unary.expr),
+        PromExpr::Binary(binary) => dynamic_scalar(&binary.lhs) || dynamic_scalar(&binary.rhs),
+        PromExpr::Aggregate(aggregate) => dynamic_scalar(&aggregate.expr),
+        _ => false,
+    }
 }
 
 /// The existing selector allowlist: a selector or supported unary calls over one selector.
@@ -1171,6 +1224,9 @@ mod tests {
                     collect(right, sources);
                 }
                 NativeExpr::Scalar(_)
+                | NativeExpr::EvalTime { .. }
+                | NativeExpr::VectorOf { .. }
+                | NativeExpr::ParameterizedMap { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Vector { .. } => {}
             }

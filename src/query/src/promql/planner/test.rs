@@ -1942,6 +1942,37 @@ async fn native_fused_supports_constant_roots_and_selector_broadcasts() {
     }
 }
 
+/// A statement that reads no data plans without a scan. `scalar(v)` has no native node, so a
+/// statement that calls it keeps the existing plan.
+#[tokio::test]
+async fn native_fused_plans_dynamic_scalars() {
+    for query in ["time() - 60", "vector(time())", "hour()"] {
+        let plan = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&plan).expect("a data-free statement uses the native route");
+        assert!(fused.children().is_empty(), "{query}");
+    }
+    for query in [
+        "scalar(some_metric)",
+        "some_metric > bool scalar(some_metric)",
+    ] {
+        let plan = build_native_fused_plan(query, true).await;
+        assert!(find_fused_series(&plan).is_none(), "{query}");
+    }
+}
+
+/// A map whose parameter reads no data runs per partition over its scan.
+#[tokio::test]
+async fn native_fused_plans_varying_map_parameters() {
+    let plan = build_native_fused_plan("round(some_metric, time() / 1e9)", true).await;
+    let fused = find_fused_series(&plan).expect("a data-free parameter uses the native route");
+    assert_eq!(1, fused.children().len());
+    // Such a map is still one series at a time, so it can be one side of a two-scan match.
+    let query = "round(some_metric, time() / 1e9) - on(tag_0) some_metric";
+    let plan = build_native_fused_plan(query, true).await;
+    let fused = find_fused_series(&plan).expect("the match uses the native route");
+    assert_eq!(2, fused.children().len(), "{query}");
+}
+
 /// The flag on and a shape the compiler accepts: the statement plans to one native node.
 #[tokio::test]
 async fn native_fused_rate_plans_to_a_fused_series_node() {
@@ -2550,6 +2581,9 @@ async fn native_fused_binary_keeps_independent_scan_occurrences() {
                     sources(right, out);
                 }
                 NativeExpr::Scalar(_)
+                | NativeExpr::EvalTime { .. }
+                | NativeExpr::VectorOf { .. }
+                | NativeExpr::ParameterizedMap { .. }
                 | NativeExpr::Aggregate { .. }
                 | NativeExpr::Vector { .. } => {}
             }

@@ -27,13 +27,17 @@
 //!   double_exponential_smoothing(<matrix>, <constant>, <constant>)
 //!                                                  e.g. double_exponential_smoothing(x[5m], .5, .1)
 //!   <math function>(<expression>[, <constant>]*)   e.g. abs(rate(x[5m])), clamp_min(x, 0)
+//!   <round or clamp>(<expression>, <scalar>+)      e.g. round(x, time() / 10), clamp(x, 0, time())
 //!   <histogram function>(<expression>)             e.g. histogram_count(x)
 //!   <sort>(<expression>[, <string>]*)              e.g. sort_desc(x), sort_by_label(x, "job")
 //!   absent(<expression>)                           e.g. absent(x{job="a"})
 //!   <histogram>(<constant>+, <expression>)         e.g. histogram_quantile(0.9, rate(x[5m]))
 //!   <label function>(<expression>, <string>*)       e.g. label_replace(x, "a", "$1", "b", "(.*)")
-//!   <expression> <operator> <constant>             e.g. x * 100, x > bool 0
-//!   <constant> <operator> <expression>             e.g. 1 / x, 0 < x
+//!   <expression> <operator> <scalar>               e.g. x * 100, x > bool time()
+//!   <scalar> <operator> <expression>               e.g. 1 / x, time() - timestamp(x)
+//!   <scalar> <operator> <scalar>                   e.g. time() - 60, time() > bool 1
+//!   time(), vector(<scalar>)                       e.g. vector(time())
+//!   <date function>()                              e.g. hour(), which is `hour(vector(time()))`
 //!   -<expression>                                  e.g. -x
 //!   <expression> <set operator> <expression>       e.g. x and on(job) y, x unless y
 //!   info(<expression>[, {<matchers>}])             e.g. info(rate(x[5m]), {version=~".+"})
@@ -52,6 +56,7 @@
 //!           | <expression>[<range>:<step>]<modifiers>
 //!                                                  a subquery: <expression> evaluated on a grid;
 //!                                                  the step may be omitted as `[<range>:]`
+//! <scalar>    <constant> | time() | <scalar> <operator> <scalar>
 //! <modifiers>                                      nothing, `offset <duration>`, `@ <anchor>`, or
 //!                                                  both, in either order — e.g. `x[5m] @ 1234
 //!                                                  offset 1m`
@@ -137,7 +142,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use datafusion::error::{DataFusionError, Result};
-use datatypes::series::samples::SeriesSchema;
+use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::{EvalGrid, GridSpec};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 use promql::histogram_eval::{HistogramFunction, NativeHistogramFunction};
@@ -148,7 +153,7 @@ use promql::map_time::DateFunction;
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
     BoundSetOp, BoundVectorOp, BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    NativeTree, NativeType, ParameterizedOp,
 };
 use promql::range_eval::{RangeFunction, RangeWindow, subquery_grid};
 use promql::select::{LabelMatcher, MatchOp, SortOrder, absent_labels};
@@ -241,14 +246,19 @@ const SUPPORTED: &str = "a selector — `x`, optionally with an `offset` — a r
                          is any shape here, so a subquery nests on a grid of its own as in \
                          `rate(rate(x[5m:1m])[10m:30s])`, and where either matrix shape carries the \
                          `offset` and `@` anchor written on it as in `rate(x[5m] @ 1234)`; a math \
-                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), a native \
+                         function over any of them (`abs(rate(x[5m]))`, `clamp_min(x, 0)`), with \
+                         `round` and the `clamp` functions also taking scalars \
+                         (`round(x, time() / 10)`), a native \
                          histogram function over any of them (`histogram_count(x)`), a label \
                          function over any of them \
                          (`label_replace(x, \"a\", \"$1\", \"b\", \"(.*)\")`), a binary \
-                         operation between one of them and a constant (`2 / (x + 1)`, \
-                         `x > bool 0`), a negation of one of them (`-x`), a set operation between \
-                         two of them (`x and on(job) y`, `x or y`, `x unless y`), `info` over any \
-                         of them with one info metric (`info(x, {version=~\".+\"})`), or one of the \
+                         operation between one of them and a scalar (`2 / (x + 1)`, \
+                         `x > bool time()`, `time() - timestamp(x)`), a scalar — a constant, \
+                         `time()` or a binary operation between scalars — \
+                         `vector(<scalar>)`, a date function without an argument (`hour()`), a \
+                         negation of one of them (`-x`), a set operation between two of them \
+                         (`x and on(job) y`, `x or y`, `x unless y`), `info` over any of them with \
+                         one info metric (`info(x, {version=~\".+\"})`), or one of the \
                          aggregators that folds a group's values into one value per grid point — \
                          `sum`, `avg`, `count`, `min`, `max`, `group`, `stddev`, `stdvar` and \
                          `quantile(<constant>, <expression>)` — over any of them, optionally \
@@ -298,18 +308,23 @@ pub fn compile(
     Ok(compiled.tree)
 }
 
-/// Compiles a constant statement to a scalar on the statement's grid, reading no input.
+/// Compiles a statement that reads no data — a constant, `time()`, `vector(time())`, `hour()` —
+/// to a tree without inputs, on the statement's grid.
 ///
-/// A value that depends on data or on the evaluation time is refused, which the same fold
-/// [`compile_expr`] uses for a constant operand decides ([`constant_value`]).
+/// A statement that reads a selector is refused: its scan is the caller's to bind, through
+/// [`compile_selectors`].
 pub fn compile_statement(stmt: &EvalStmt) -> Result<NativeTree> {
-    let value = constant_value(&stmt.expr)
-        .ok_or_else(|| not_implemented(&format!("the expression `{}`", stmt.expr)))?;
-    let grid = statement_grid(stmt)?;
-    NativeTree::try_new(NativeNode {
-        expr: NativeExpr::Scalar(BoundScalar { value }),
-        output: NativeType::Scalar(grid),
-    })
+    let compiled = compile_selectors(
+        stmt,
+        &|_| {
+            Err(not_implemented(&format!(
+                "a selector in `{}`, which is compiled as a statement that reads no data",
+                stmt.expr
+            )))
+        },
+        SeriesOrdering::Contiguous,
+    )?;
+    Ok(compiled.tree)
 }
 
 /// Compiles `stmt` into a tree and returns a binding record for each selector occurrence.
@@ -328,11 +343,15 @@ pub fn compile_selectors(
              series may not interleave",
         ));
     }
-    // A tree with selector inputs reports evaluated vector samples. A constant root has no input
-    // and is bound separately by [`compile_statement`].
-    if stmt.expr.value_type() != ValueType::Vector {
+    // A tree reports evaluated samples or a scalar on the statement's grid; a range vector or a
+    // string has no grid of its own.
+    if !matches!(
+        stmt.expr.value_type(),
+        ValueType::Vector | ValueType::Scalar
+    ) {
         return Err(not_implemented(&format!(
-            "the expression `{}`, which is a {} where a tree reports evaluated samples",
+            "the expression `{}`, which is a {} where a tree reports evaluated samples or a \
+             scalar",
             stmt.expr,
             stmt.expr.value_type()
         )));
@@ -370,14 +389,15 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
                         .samples()
                         .is_some_and(|schema| Arc::ptr_eq(schema, &input.schema))
             }
-            NativeExpr::Scalar(_) => true,
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => true,
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::Aggregate { input, .. } => check(input, inputs, next),
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::VectorOf { input } => check(input, inputs, next),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -385,6 +405,14 @@ fn validate_inputs(root: &NativeNode, inputs: &[CompiledInput]) -> Result<()> {
                 info: right,
                 ..
             } => check(left, inputs, next) && check(right, inputs, next),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                check(input, inputs, next)
+                    && parameters
+                        .iter()
+                        .all(|parameter| check(parameter, inputs, next))
+            }
         }
     }
     let mut next = 0;
@@ -515,16 +543,17 @@ fn binary_operation(context: &Context, binary: &BinaryExpr) -> Result<NativeNode
              value fills in a match group that could miss"
         )));
     }
-    // Two constants are a value rather than an operation over a vector. A `bool` comparison of two
-    // of them folded to its number before this point, so what arrives here is a comparison without
-    // `bool`, which Prometheus refuses to parse at all. Binding it would produce a node that only
-    // fails when it is run, so it is refused here with what was found.
-    if binary.lhs.value_type() == ValueType::Scalar && binary.rhs.value_type() == ValueType::Scalar
+    // A comparison of two scalars reports a value only when written with `bool`; Prometheus
+    // refuses to parse one without it. Binding it would produce a node that only fails when it is
+    // run, so it is refused here with what was found. Two constants never reach here: they folded.
+    if binary.lhs.value_type() == ValueType::Scalar
+        && binary.rhs.value_type() == ValueType::Scalar
+        && comparison_op(&binary.op).is_some()
+        && !binary.return_bool()
     {
         return Err(not_implemented(&format!(
-            "the binary operation `{binary}` between two constants, which reports no value: a \
-             comparison of two scalars is written with `bool` to say whether it holds, and one \
-             written that way is folded to the number it means"
+            "the binary operation `{binary}` between two scalars, which reports no value: a \
+             comparison of two scalars is written with `bool` to say whether it holds"
         )));
     }
     // Both operands are compiled before the node is built, so `2 / (x + 1)` nests. The constant side
@@ -1185,6 +1214,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
         return info_call(context, &call.args.args);
     }
     let Call { func, args } = call;
+    if let Some(node) = scalar_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     if let Some(signature) = range_signature(func.name) {
         return window_call(context, func.name, signature, &args.args);
     }
@@ -1195,6 +1227,9 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
     // kernel for is refused as such whichever arguments it was given: `pi()` and `time()` have no
     // vector to map, and the rejection names the name rather than describing a vector they never
     // wrote.
+    if let Some(node) = parameterized_call(context, func.name, &args.args)? {
+        return Ok(node);
+    }
     if let Some((op, vector)) = math_op(func.name, &args.args)? {
         return map_call(context, func.name, MapOp::Math(op), vector);
     }
@@ -1216,6 +1251,103 @@ fn compile_call(context: &Context, call: &Call) -> Result<NativeNode> {
         func.name
     )))
 }
+
+/// Binds `time()`, `vector(s)` and a date function called without an argument, or
+/// returns `None` when the call is none of them.
+///
+/// A date function without an argument is `f(vector(time()))` in Prometheus, but it reads the
+/// evaluation timestamp truncated to whole seconds rather than the float `time()` reports, so it is
+/// bound as the evaluation time's own date and then handed on as a vector.
+fn scalar_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let grid = || Arc::clone(&context.grid);
+    let eval_time = |date| NativeNode {
+        expr: NativeExpr::EvalTime { date },
+        output: NativeType::Scalar(grid()),
+    };
+    let node = match (name, args) {
+        ("time", []) => eval_time(None),
+        ("vector", [scalar]) => vector_of(compile_expr(context, scalar)?, &grid()),
+        (name, []) => match math_signature(name) {
+            Some(MathSignature::Unary(MathOp::Date(date))) => {
+                vector_of(eval_time(Some(date)), &grid())
+            }
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(node))
+}
+
+/// Binds `round`, `clamp`, `clamp_min` or `clamp_max` whose parameters are not all constants, or
+/// returns `None` for any other call. Prometheus reads each parameter at every step, so each one is
+/// bound as the scalar node it compiles to; with constant parameters the call is a [`MathOp`].
+fn parameterized_call(
+    context: &Context,
+    name: &str,
+    args: &[Box<PromExpr>],
+) -> Result<Option<NativeNode>> {
+    let op = match name {
+        "round" => ParameterizedOp::Round,
+        "clamp" => ParameterizedOp::Clamp,
+        "clamp_min" => ParameterizedOp::ClampMin,
+        "clamp_max" => ParameterizedOp::ClampMax,
+        _ => return Ok(None),
+    };
+    let Some((vector, parameters)) = args.split_first() else {
+        return Ok(None);
+    };
+    if parameters.len() != op.arity()
+        || parameters
+            .iter()
+            .all(|parameter| constant_value(parameter).is_some())
+    {
+        return Ok(None);
+    }
+    if vector.value_type() != ValueType::Vector {
+        return Err(not_implemented(&format!(
+            "a call to `{name}` whose first argument is `{vector}`, which is a {}, where the \
+             function takes a vector",
+            vector.value_type()
+        )));
+    }
+    let input = compile_expr(context, vector)?;
+    let parameters = parameters
+        .iter()
+        .map(|parameter| compile_expr(context, parameter))
+        .collect::<Result<Vec<_>>>()?;
+    let output = input.output.clone();
+    Ok(Some(NativeNode {
+        expr: NativeExpr::ParameterizedMap {
+            input: Box::new(input),
+            op,
+            parameters,
+        },
+        output,
+    }))
+}
+
+/// `vector(s)`: the scalar `input` as one series without labels, under one value field.
+fn vector_of(input: NativeNode, grid: &Arc<EvalGrid>) -> NativeNode {
+    NativeNode {
+        expr: NativeExpr::VectorOf {
+            input: Box::new(input),
+        },
+        output: NativeType::Samples(Arc::new(SeriesSchema {
+            fields: Arc::from([FieldSpec {
+                name: Arc::from(VECTOR_FIELD),
+            }]),
+            eval_grid: Some(Arc::clone(grid)),
+        })),
+    }
+}
+
+/// The field `vector(s)` reports its value under: a scalar names no column, so it is the planner's
+/// default value column.
+const VECTOR_FIELD: &str = "value";
 
 /// Binds a range function over the matrix it is given, and the window that matrix opens.
 ///
@@ -2026,12 +2158,6 @@ fn math_op<'a>(
     // The vector is the function's first argument, so a call that wrote no argument at all is
     // refused by the same arity check as one that wrote too few constants.
     let Some((vector, parameters)) = arguments.split_first() else {
-        if let MathSignature::Unary(MathOp::Date(_)) = signature {
-            return Err(not_implemented(&format!(
-                "a call to `{name}` without an argument, which reads the evaluation time and has \
-                 no native kernel"
-            )));
-        }
         return Err(arity_error(name, signature, 0));
     };
     let given = parameters.len() + 1;

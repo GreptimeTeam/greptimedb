@@ -25,10 +25,12 @@ use datatypes::series::samples::{FieldSpec, SampleRef, Samples, SeriesFields, Se
 use datatypes::series::{Label, SeriesLabels};
 use promql::evaluated::EvaluatedChunk;
 use promql::map::MathOp;
+use promql::map_time::DateFunction;
 use promql::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use promql::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundSetOp,
     BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    ParameterizedOp,
 };
 use promql::range_eval::RangeFunction;
 use promql::select::MatchOp;
@@ -582,9 +584,6 @@ fn a_call_with_the_wrong_number_of_arguments_names_the_count_it_takes() {
             "abs",
             "with 0 argument(s), where it takes its vector",
         ),
-        // A date function written without an argument is valid PromQL that reads the evaluation
-        // time; there is no input to map, so it is left to the ordinary path.
-        (eval_stmt("hour()"), "hour", "reads the evaluation time"),
     ];
 
     for (stmt, name, expected) in cases {
@@ -2092,21 +2091,13 @@ fn info_refuses_info_metrics_it_cannot_read_as_one_table() {
     }
 }
 
-/// A statement with no vector has nothing to read, so it is refused: a tree reads a scan and reports
-/// evaluated samples, and a constant is bound next to a vector rather than on its own. The refusal
-/// names the expression and its type, because the type is why it cannot be bound.
+/// A statement whose value has no grid of its own - a range vector or a string - is refused, and
+/// the refusal names the expression and its type, because the type is why it cannot be bound.
 #[test]
-fn a_statement_with_no_vector_is_refused() {
-    // `pi()` and `time()` are the two functions PromQL calls with no arguments. Both are scalars, so
-    // they reach this refusal before any function-name lookup: what a tree cannot do with them is
-    // report them, not fold them. The rejection still names the expression it found, so a reader
-    // learns which function it was.
+fn a_statement_without_values_on_a_grid_is_refused() {
     for (query, found) in [
-        ("1 + 2", "which is a scalar"),
-        ("1", "which is a scalar"),
-        ("-3", "which is a scalar"),
-        ("pi()", "which is a scalar"),
-        ("time()", "which is a scalar"),
+        ("x[5m]", "which is a matrix"),
+        ("\"a\"", "which is a string"),
     ] {
         let error = compile(&eval_stmt(query), raw_schema(), SeriesOrdering::KeyThenTime)
             .expect_err(&format!("`{query}` compiled, and it should not have"));
@@ -2115,10 +2106,6 @@ fn a_statement_with_no_vector_is_refused() {
             "`{query}` did not report NotImplemented: {error}"
         );
         let message = error.to_string();
-        assert!(
-            message.contains(&format!("`{query}`")),
-            "`{query}` did not name the expression it found: {message}"
-        );
         assert!(
             message.contains(found),
             "`{query}` did not name the type it found: {message}"
@@ -2143,22 +2130,128 @@ fn a_constant_statement_is_a_scalar_on_the_statement_grid_without_input() {
     }
 }
 
-/// A statement whose value comes from the data or from the evaluation time has no constant to bind,
-/// so the statement entry refuses it rather than compiling a tree with nothing to read.
+/// A statement that reads the evaluation time but no data compiles to a tree without input: `time()`
+/// and an operation over it are scalars, and `vector(...)` and a date function without an argument
+/// are one unlabelled series. A statement that reads a selector is refused by this entry, and a call
+/// with no kernel is still refused by name.
 #[test]
-fn a_statement_that_is_not_constant_has_no_statement_compilation() {
-    for query in ["time()", "time() + 1", "vector(1)", "x"] {
+fn a_statement_that_reads_no_data_compiles_without_input() {
+    let tree = compile_statement(&eval_stmt("time()")).unwrap();
+    assert!(matches!(
+        tree.root().expr,
+        NativeExpr::EvalTime { date: None }
+    ));
+    assert_eq!((0, 5_000, 21), scalar_grid(tree.root()));
+
+    let tree = compile_statement(&eval_stmt("time() - 60")).unwrap();
+    let (left, right, matching) = binary_parts(tree.root());
+    assert!(matches!(left.expr, NativeExpr::EvalTime { date: None }));
+    assert_eq!(constant(right), Some(60.0));
+    assert_eq!(matching.op, BinaryOp::Sub);
+    assert!(matches!(tree.root().output, NativeType::Scalar(_)));
+
+    let tree = compile_statement(&eval_stmt("vector(1)")).unwrap();
+    let NativeExpr::VectorOf { input } = &tree.root().expr else {
+        panic!("`vector(1)` is a vector over its scalar: {tree}");
+    };
+    assert_eq!(constant(input), Some(1.0));
+    assert_eq!(evaluated(tree.root()).fields.len(), 1);
+
+    let tree = compile_statement(&eval_stmt("hour()")).unwrap();
+    let NativeExpr::VectorOf { input } = &tree.root().expr else {
+        panic!("`hour()` is a vector over the evaluation time: {tree}");
+    };
+    assert!(matches!(
+        input.expr,
+        NativeExpr::EvalTime {
+            date: Some(DateFunction::Hour)
+        }
+    ));
+
+    for (query, found) in [("x", "a selector"), ("pi()", "a call to `pi`")] {
         let error = compile_statement(&eval_stmt(query))
             .expect_err(&format!("`{query}` compiled, and it should not have"));
         assert!(
             matches!(error, DataFusionError::NotImplemented(_)),
             "`{query}` did not report NotImplemented: {error}"
         );
-        assert!(
-            error.to_string().contains(&format!("`{query}`")),
-            "`{query}` did not name the expression it found: {error}"
-        );
+        assert!(error.to_string().contains(found), "`{query}`: {error}");
     }
+}
+
+/// A varying scalar is broadcast over a vector on the side it was written.
+#[test]
+fn a_varying_scalar_is_broadcast_where_it_was_written() {
+    let compile_tree = |query: &str| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+        .tree
+    };
+    let tree = compile_tree("x > bool time()");
+    let (left, right, matching) = binary_parts(tree.root());
+    assert!(matches!(left.expr, NativeExpr::Instant { .. }));
+    assert!(matches!(right.expr, NativeExpr::EvalTime { date: None }));
+    assert!(matching.return_bool);
+    assert!(matches!(tree.root().output, NativeType::Samples(_)));
+
+    let tree = compile_tree("time() - timestamp(x)");
+    let (left, right, matching) = binary_parts(tree.root());
+    assert!(matches!(left.expr, NativeExpr::EvalTime { date: None }));
+    assert!(matches!(right.expr, NativeExpr::Instant { .. }));
+    assert_eq!(matching.op, BinaryOp::Sub);
+}
+
+/// `round` and the `clamp` functions bind their parameters as scalar nodes, in argument order, when
+/// any of them varies, and keep the constant map otherwise.
+#[test]
+fn a_math_function_with_a_varying_parameter_binds_its_parameters_as_scalars() {
+    let compiled = |query: &str| {
+        compile_selectors(
+            &eval_stmt(query),
+            &|_| Ok(raw_schema()),
+            SeriesOrdering::KeyThenTime,
+        )
+        .unwrap_or_else(|error| panic!("`{query}` was refused: {error}"))
+    };
+    let parts = |tree: &NativeTree| match &tree.root().expr {
+        NativeExpr::ParameterizedMap {
+            input,
+            op,
+            parameters,
+        } => (input.as_ref().clone(), *op, parameters.clone()),
+        other => panic!("expected a parameterized map, got {other:?}"),
+    };
+
+    let tree = compiled("round(x, time() / 10)").tree;
+    let (input, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::Round);
+    assert!(matches!(input.expr, NativeExpr::Instant { .. }));
+    assert!(matches!(
+        parameters.as_slice(),
+        [NativeNode {
+            expr: NativeExpr::Binary { .. },
+            ..
+        }]
+    ));
+
+    let tree = compiled("clamp(x, 0, time())").tree;
+    let (_, op, parameters) = parts(&tree);
+    assert_eq!(op, ParameterizedOp::Clamp);
+    assert_eq!(constant(&parameters[0]), Some(0.0));
+    assert!(matches!(
+        parameters[1].expr,
+        NativeExpr::EvalTime { date: None }
+    ));
+
+    let tree = compiled("round(x, 2 * 5)").tree;
+    assert!(matches!(
+        map_op(tree.root()),
+        MathOp::Round { nearest } if nearest == 10.0
+    ));
 }
 
 /// A vector-matching modifier has nothing to match when one operand is a constant, and the tree's
@@ -2305,7 +2398,7 @@ fn a_comparison_of_two_constants_without_bool_is_refused() {
     );
     let message = error.to_string();
     assert!(
-        message.contains("between two constants"),
+        message.contains("between two scalars"),
         "the comparison did not say what it found: {message}"
     );
 }
@@ -5048,7 +5141,8 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Vector { input, .. }
-            | NativeExpr::Aggregate { input, .. } => set_input_source(input, source),
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::VectorOf { input } => set_input_source(input, source),
             NativeExpr::Binary { left, right, .. }
             | NativeExpr::Set { left, right, .. }
             | NativeExpr::Info {
@@ -5059,7 +5153,15 @@ fn validate_inputs_rejects_misbound_occurrences_and_accepts_scalar_wrappers() {
                 set_input_source(left, source);
                 set_input_source(right, source);
             }
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                set_input_source(input, source);
+                for parameter in parameters {
+                    set_input_source(parameter, source);
+                }
+            }
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
         }
     }
     let mut wrong_bound_source = compiled.tree.root().clone();
