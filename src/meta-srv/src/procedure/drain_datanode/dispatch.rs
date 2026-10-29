@@ -105,6 +105,13 @@ impl State for Dispatch {
                     );
                     ctx.forget_leader_region(region_id);
                 }
+                Err(error::Error::TableRouteNotFound { table_id, .. }) => {
+                    warn!(
+                        "Skipping region {} while draining datanode {}: table {} has no route",
+                        region_id, node_id, table_id
+                    );
+                    ctx.forget_leader_region(region_id);
+                }
                 Err(e) => {
                     // Another migration may finish between target selection and the
                     // migration manager's route check, releasing its tracker guard.
@@ -288,16 +295,16 @@ mod tests {
         assert!(ctx.volatile_ctx.inflight_subprocedures.is_empty());
     }
 
-    /// Moves the leader after the drain's first route read, during target discovery.
-    struct MoveLeaderDuringDiscovery {
+    /// Changes the route after the drain's first read, during target discovery.
+    struct ChangeRouteDuringDiscovery {
         inner: PeerDiscoveryRef,
         metadata: TableMetadataManagerRef,
         region_id: RegionId,
-        leader_id: u64,
+        leader_id: Option<u64>,
     }
 
     #[async_trait::async_trait]
-    impl PeerDiscovery for MoveLeaderDuringDiscovery {
+    impl PeerDiscovery for ChangeRouteDuringDiscovery {
         async fn active_frontends(&self) -> MetaResult<Vec<NodeInfo>> {
             self.inner.active_frontends().await
         }
@@ -309,9 +316,27 @@ mod tests {
             let storage = self.metadata.table_route_manager().table_route_storage();
             let table_id = self.region_id.table_id();
             let current = storage.get_with_raw_bytes(table_id).await?.unwrap();
-            let updated = current.update(vec![leader_region(self.region_id, self.leader_id)])?;
-            let (txn, _) = storage.build_update_txn(table_id, &current, &updated)?;
-            assert!(self.metadata.kv_backend().txn(txn).await?.succeeded);
+            if let Some(leader_id) = self.leader_id {
+                let updated = current.update(vec![leader_region(self.region_id, leader_id)])?;
+                let (txn, _) = storage.build_update_txn(table_id, &current, &updated)?;
+                assert!(self.metadata.kv_backend().txn(txn).await?.succeeded);
+            } else {
+                let table_info = self
+                    .metadata
+                    .table_info_manager()
+                    .get(table_id)
+                    .await?
+                    .unwrap();
+                self.metadata
+                    .delete_table_metadata(
+                        table_id,
+                        &table_info.table_name(),
+                        &current,
+                        &HashMap::new(),
+                        None,
+                    )
+                    .await?;
+            }
             self.inner.active_datanodes(filter).await
         }
 
@@ -324,18 +349,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_datanode_dispatch_skips_region_moved_during_discovery() {
+    async fn test_drain_datanode_dispatch_skips_region_moved_or_dropped_during_discovery() {
         for strategy in [
             DrainDatanodeStrategy::FailFast,
             DrainDatanodeStrategy::TryAll,
         ] {
-            // Target 2 yields RegionMigrated; another leader yields LeaderPeerChanged.
-            for leader_id in [2, 3] {
+            // Target 2 yields RegionMigrated; leader 3 yields LeaderPeerChanged;
+            // dropping the table yields TableRouteNotFound.
+            for leader_id in [Some(2), Some(3), None] {
                 let env = TestEnv::new().await;
                 let region_id = RegionId::new(1024, 1);
                 env.create_table(vec![leader_region(region_id, 1)]).await;
                 let mut ctx = env.context(new_persistent_context(Some(2), strategy));
-                ctx.selector_ctx.peer_discovery = Arc::new(MoveLeaderDuringDiscovery {
+                ctx.selector_ctx.peer_discovery = Arc::new(ChangeRouteDuringDiscovery {
                     inner: ctx.selector_ctx.peer_discovery.clone(),
                     metadata: env.table_metadata_manager.clone(),
                     region_id,
