@@ -114,6 +114,7 @@ impl BloomFilterIndexer {
             }
             // Only flush and compaction builds collect JSON targets; manual and schema-change
             // rebuilds skip them because existing SSTs may not materialize the current hints.
+            // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
             if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
                 && column.column_schema.data_type.is_json2()
                 && let Ok(Some(extension)) =

@@ -517,6 +517,7 @@ impl IndexerBuilderImpl {
     /// Only flush and compaction builds collect these targets; manual and schema-change
     /// rebuilds return no JSON targets.
     fn collect_json_inverted_index_targets(&self) -> Vec<IndexTarget> {
+        // FIXME: Rebuilds replace the whole Puffin file and can drop existing JSON path indexes.
         if !matches!(
             self.build_type,
             IndexBuildType::Flush | IndexBuildType::Compact
