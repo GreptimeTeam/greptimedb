@@ -120,7 +120,7 @@ pub struct RegionOptions {
     /// Max number of rows in a parquet row group. Uses [DEFAULT_ROW_GROUP_SIZE] if `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_row_group_row_count: Option<usize>,
-    /// Internal primary key encoding override used by metric-engine.
+    /// Primary key encoding. Sparse regions require reserved table ID and TSID columns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
     /// Per-region write buffer size. A positive size flushes/stalls this region
@@ -313,6 +313,19 @@ impl RegionOptions {
             None
         };
 
+        let primary_key_encoding = options_map
+            .get(PRIMARY_KEY_ENCODING)
+            .or_else(|| options_map.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
+            .map(|v| match v.to_lowercase().as_str() {
+                "dense" => Ok(PrimaryKeyEncoding::Dense),
+                "sparse" => Ok(PrimaryKeyEncoding::Sparse),
+                _ => Err(InvalidRegionOptionsSnafu {
+                    reason: format!("Invalid primary key encoding: {v}"),
+                }
+                .build()),
+            })
+            .transpose()?;
+
         // The partition tree memtable has been removed. Besides falling back to
         // the default memtable, also override the SST format to flat.
         let mut sst_format = options.sst_format;
@@ -327,7 +340,9 @@ impl RegionOptions {
 
         // Bulk memtable produces flat-encoded ranges and flushes them through
         // `put_sst()`, so the SST format must be flat to match.
-        if matches!(memtable, Some(MemtableOptions::Bulk(_))) {
+        if matches!(memtable, Some(MemtableOptions::Bulk(_)))
+            || primary_key_encoding == Some(PrimaryKeyEncoding::Sparse)
+        {
             if let Some(format) = sst_format
                 && format != FormatType::Flat
             {
@@ -346,18 +361,6 @@ impl RegionOptions {
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
             .unwrap_or(false);
         let compaction_override = has_compaction_type || compaction_override_flag;
-        let primary_key_encoding = options_map
-            .get(PRIMARY_KEY_ENCODING)
-            .or_else(|| options_map.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
-            .map(|v| match v.to_lowercase().as_str() {
-                "dense" => Ok(PrimaryKeyEncoding::Dense),
-                "sparse" => Ok(PrimaryKeyEncoding::Sparse),
-                _ => Err(InvalidRegionOptionsSnafu {
-                    reason: format!("Invalid primary key encoding: {v}"),
-                }
-                .build()),
-            })
-            .transpose()?;
 
         let opts = RegionOptions {
             ttl: options.ttl,
@@ -1027,6 +1030,19 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_sparse_forces_flat_sst() {
+        for format in [None, Some("primary_key"), Some("flat")] {
+            let mut map = make_map(&[("primary_key_encoding", "sparse")]);
+            if let Some(format) = format {
+                map.insert("sst_format".into(), format.into());
+            }
+            let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
     }
 
     #[test]

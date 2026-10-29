@@ -147,6 +147,7 @@ impl SchedulerEnv {
                     manifest_cache: None,
                 },
                 FormatType::PrimaryKey,
+                false,
                 &Default::default(),
             )
             .await
