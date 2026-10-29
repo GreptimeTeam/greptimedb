@@ -49,9 +49,8 @@
 //! So a chain is the unit of routing, not a chunk: an input task reads its child until the chunk that
 //! closes the chain it is assembling - or until its stream ends - and hands the whole chain to the one
 //! output its label set hashes to, in one step. Two sources' chains may reach one output in either
-//! order, but never inside one another, so an output is still a run of whole chains. That is what the
-//! node handed downstream when one routing task served every input and only switched input at a chain
-//! boundary, and it is what a downstream merge relies on.
+//! order, but never inside one another, so an output is still a run of whole chains, which a downstream
+//! merge relies on.
 //!
 //! What that costs is stated rather than hidden. Nothing of a chain is handed over before the chain
 //! closes, so the first chunk of a series reaches its output later than a chunk-at-a-time design would
@@ -60,10 +59,8 @@
 //! error instead of letting a chain grow without bound: the node refuses, it does not spin and it does
 //! not buffer past the pool's limit.
 //!
-//! The alternative - routing one chunk at a time - would need a channel per (input, output) pair to
-//! keep two sources' partial chains from interleaving on one shared output queue, which is N x M
-//! channels plus a reader for each of them. That complexity is deliberately not taken here: a whole
-//! chain per handover gets every output the same order with one queue per output.
+//! Queues carry whole chains rather than individual chunks, so two sources' partial chains cannot
+//! interleave on one shared output queue; each output needs only one queue.
 //!
 //! # Where the reads run
 //!
@@ -185,7 +182,7 @@ use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
-use crate::grid_series::{label_set, table_bytes};
+use crate::grid_series::label_set;
 use crate::native::execute::operand_chunk_bytes;
 use datatypes::series::samples::DenseSamplesRef;
 
@@ -399,9 +396,7 @@ impl ExecutionPlan for SeriesRepartitionExec {
                 "SeriesRepartition output partition {partition} was executed twice"
             ))
         })?;
-        // The queue and the claim on the read are taken in one step, so an output that is refused -
-        // or one that is handed out after every other output already finished - is counted for
-        // exactly what it is.
+        // Take the queue and its claim on the read together.
         let output = pack_evaluated_series(
             Box::pin(RepartitionStream {
                 receiver,
@@ -425,7 +420,7 @@ struct SharedExecution {
     /// The queues, the tasks filling them, and how many of the execution's outputs the read still has.
     running: Mutex<Running>,
     /// How the read ended, and the failure it owes its outputs if it failed.
-    ending: Arc<Mutex<EndingRecord>>,
+    ending: Arc<Mutex<Ending>>,
 }
 
 /// What one execution's state holds that has to be stopped together.
@@ -498,7 +493,7 @@ impl SharedExecution {
             senders.push(sender);
             receivers.push(Some(receiver));
         }
-        let ending = Arc::new(Mutex::new(EndingRecord::default()));
+        let ending = Arc::new(Mutex::new(Ending::default()));
         let inputs = Inputs::new(Arc::clone(&ending), partitions);
         // A child with no partitions has nothing to read, so the read finished before it started: the
         // count that the last input task would bring to zero is already there.
@@ -595,12 +590,11 @@ impl SharedExecution {
     ///
     /// Both are read under the one lock that records them, so an output never sees a failure without
     /// the error that belongs to it.
-    fn ending(&self) -> (Ending, Option<Arc<DataFusionError>>) {
-        let record = self
-            .ending
+    fn ending(&self) -> Ending {
+        self.ending
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        (record.ending, record.terminal.clone())
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
     /// Stops the read and releases everything it holds.
@@ -629,17 +623,13 @@ impl Drop for SharedExecution {
 
 /// The input tasks of one read: what is left of them, and what the last of them records.
 ///
-/// There is one task per child partition and no task above them, so there is no longer one place that
-/// sees every input finish and no producer whose return closes the queues. This is that place
-/// instead: the tasks count themselves down, and the task that counts the last of the others off
-/// records that the read finished and then returns - returning is what drops its senders, so the
-/// record is made before the queues close, and an output woken by their closing reads the outcome
-/// instead of finding nothing there.
+/// One task reads each child partition. The tasks count themselves down; the last records completion
+/// before returning and dropping its senders, so outputs read the recorded outcome when queues close.
 struct Inputs {
     /// The tasks themselves, and the count of those that have not stopped.
     state: Mutex<InputState>,
     /// How the read ended, and the failure it owes its outputs if it failed.
-    ending: Arc<Mutex<EndingRecord>>,
+    ending: Arc<Mutex<Ending>>,
 }
 
 /// What [`Inputs`] guards.
@@ -652,18 +642,10 @@ struct InputState {
     tasks: Vec<Option<common_runtime::JoinHandle<()>>>,
     /// How many of those tasks have not stopped yet.
     ///
-    /// The last task to stop brings this to zero, and reaching zero on a read nobody cancelled is
-    /// what records that the read finished. A cancellation sets it to zero itself, because a
-    /// cancelled read has no task left that will do its own bookkeeping: the failed task counts itself
-    /// out after cancelling peers, and aborted tasks drop their futures without reaching `count_out`. A task spawned and attached after
-    /// the cancellation is aborted by [`Inputs::attach`] and never runs, so it cannot raise this
-    /// back above zero and keep a finished read open.
+    /// The last task to stop brings this to zero and records that the read finished. Cancelled peers
+    /// are aborted and their report guards count them out; a task attached after cancellation is
+    /// aborted by [`Inputs::attach`] and its guard does the same.
     live: usize,
-    /// Whether the read was stopped from outside - every output is gone, or the plan's state went
-    /// away. It is the one thing that keeps the last task from recording that the read finished: a
-    /// stopped read never finished, and the outputs that wake on the close of their queues must say
-    /// so rather than report a complete answer.
-    stopped: bool,
     /// Whether the read has been cancelled: a failure was elected, or [`Inputs::stop`] was called.
     ///
     /// Recorded under the same lock that guards [`tasks`](Self::tasks), so a task attached after the
@@ -676,12 +658,11 @@ struct InputState {
 
 impl Inputs {
     /// The bookkeeping of a read over `partitions` input partitions.
-    fn new(ending: Arc<Mutex<EndingRecord>>, partitions: usize) -> Arc<Self> {
+    fn new(ending: Arc<Mutex<Ending>>, partitions: usize) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InputState {
                 tasks: (0..partitions).map(|_| None).collect(),
                 live: partitions,
-                stopped: false,
                 cancelled: false,
             }),
             ending,
@@ -694,12 +675,8 @@ impl Inputs {
     /// before its handle is stored - because the slot is only consulted to stop what is still running,
     /// and aborting a finished task is a no-op.
     ///
-    /// A task attached to an already cancelled read is aborted here instead of stored. The
-    /// cancellation swept the tasks that existed when it ran - a partition that fails before its
-    /// peers are even spawned is exactly the case the sweep misses - so this is where those tasks
-    /// stop: storing one would leave it waiting on its child for a read that is over, holding a
-    /// sender to every output, so no queue would ever close. It is not counted either:
-    /// [`live`](InputState::live) is already zero and a task that never runs cannot add to it.
+    /// A task attached after cancellation is aborted rather than stored, so it cannot keep output
+    /// queues open after the read is over. Its report guard counts it out if it is polled.
     fn attach(&self, partition: usize, task: common_runtime::JoinHandle<()>) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.cancelled {
@@ -712,8 +689,7 @@ impl Inputs {
 
     /// Records that `partition` ended, and that the read finished if it was the last one running.
     ///
-    /// Nothing is recorded when the read was stopped from outside: its tasks do not reach this point,
-    /// and one that gets here anyway must not turn a stopped read into a finished one.
+    /// A stopped or cancelled read cannot be reported as finished.
     fn ended(&self, partition: usize) {
         if self.count_out(partition) {
             self.record(Ending::Finished);
@@ -774,38 +750,27 @@ impl Inputs {
             .cancelled
     }
 
-    /// Cancels the read under the task lock, then aborts its peer tasks.
+    /// Marks the read cancelled under the task lock, then aborts its peer tasks.
     ///
-    /// Cancelled is what keeps a peer from recording that the read finished: a task that reaches
-    /// [`count_out`](Self::count_out) after this records nothing, so [`Ending::Finished`] - which an
-    /// output reports as a complete answer - cannot be recorded for a read that stopped under its
-    /// outputs. The count is taken to zero in the same step for the same reason from the count's side:
-    /// the read is over as of here, every other task is about to be aborted and so never counts itself
-    /// out, and the task doing the cancelling has no more of the read to run either.
+    /// Cancellation keeps peers from recording a successful completion after this read has failed.
     fn cancel(&self, partition: usize) {
         {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            Self::cancel_locked(&mut state);
+            state.cancelled = true;
         }
         self.abort_others(partition);
-    }
-
-    fn cancel_locked(state: &mut InputState) {
-        state.cancelled = true;
-        state.live = 0;
     }
 
     /// Counts `partition` off the read, and says whether it was the last task still running.
     fn count_out(&self, partition: usize) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         // Taken and dropped: this task is the one stopping, and holding its own handle would leave the
-        // read waiting for a task that has already finished. Saturating because a task that was
-        // stopped from outside may still reach this after [`stop`](Self::stop) counted it off.
+        // read waiting for a task that has already finished.
         state.tasks[partition] = None;
-        state.live = state.live.saturating_sub(1);
+        state.live -= 1;
         // A cancelled read never records that it finished: a failure is the outcome its outputs
         // report, and a stop is not an end.
-        state.live == 0 && !state.stopped && !state.cancelled
+        state.live == 0 && !state.cancelled
     }
 
     /// Aborts every input task but `partition`'s own.
@@ -825,18 +790,12 @@ impl Inputs {
         }
     }
 
-    /// Stops every input task that has not stopped yet, and counts the read as stopped.
-    ///
-    /// The count is set rather than left to the tasks: an aborted task does not run its own
-    /// bookkeeping, and a read whose tasks were aborted never reached an end of its own. The read is
-    /// cancelled as well as stopped, so that a task attached after this call - one the sweep here
-    /// could not see - is aborted by [`attach`](Self::attach) instead of waiting on a child for a
-    /// read that is over.
+    /// Stops every input task that has not stopped yet and marks the read cancelled, so a task
+    /// attached after this sweep is aborted by [`attach`](Self::attach) rather than keeping queues
+    /// open after the read is over.
     fn stop(&self) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.stopped = true;
         state.cancelled = true;
-        state.live = 0;
         for task in state.tasks.iter_mut() {
             if let Some(task) = task.take() {
                 task.abort();
@@ -850,15 +809,15 @@ impl Inputs {
     /// its error in the same write.
     fn record(&self, outcome: Ending) {
         debug_assert!(
-            !matches!(outcome, Ending::Failed),
+            !matches!(outcome, Ending::Failed(_)),
             "a failure is recorded by `fail`, with its error"
         );
-        let mut record = self
+        let mut ending = self
             .ending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if matches!(record.ending, Ending::Unrecorded) {
-            record.ending = outcome;
+        if matches!(*ending, Ending::Pending) {
+            *ending = outcome;
         }
     }
 
@@ -866,13 +825,12 @@ impl Inputs {
     ///
     /// The first failure and its error are recorded together so outputs all report the same error.
     fn fail(&self, error: Arc<DataFusionError>) {
-        let mut record = self
+        let mut ending = self
             .ending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if record.terminal.is_none() {
-            record.ending = Ending::Failed;
-            record.terminal = Some(error);
+        if !matches!(*ending, Ending::Failed(_)) {
+            *ending = Ending::Failed(error);
         }
     }
 
@@ -932,13 +890,12 @@ async fn route_partition(
 /// Reports an input task that stopped without recording an outcome, on the paths that would
 /// otherwise report nothing.
 ///
-/// The match in [`route_partition`] covers the ways a read ends on its own terms: the partition ended,
-/// a chain had no output to go to, the child failed. What it does not cover is a task that never
-/// returns at all. A panic unwinds the task and takes the future polling it with it, and the task
+/// [`route_partition`] records ordinary input completion and errors; this guard records when a task
+/// stops without returning. A panic unwinds the task and takes the future polling it with it, and the task
 /// being aborted drops that future where it stands; neither reaches an arm of that match, so nothing
 /// is recorded, the count is untouched and the peers go on reading. A peer parked on a child that
 /// never answers then holds a sender to every output for good, no queue ever closes, and every output
-/// waits for an ending that is not coming - the `Unrecorded` fallback is no help there, since it is
+/// waits for an ending that is not coming - the `Pending` fallback is no help there, since it is
 /// only read once a queue has closed.
 ///
 /// A guard is what covers both without [`std::panic::catch_unwind`], which covers neither an abort nor
@@ -968,6 +925,47 @@ enum Stop {
     Ended,
     /// The partition failed, or a chain could not be buffered: every output has to learn that.
     Failed(Arc<DataFusionError>),
+}
+
+/// Accounts for the portion of a decoded histogram table retained by one series slice.
+fn histogram_table_slice_bytes(
+    batch: &datatypes::series::histogram::HistogramBatch,
+) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::{Array, ListArray};
+
+    let array = batch.as_arrow();
+    let mut bytes = std::mem::size_of_val(batch);
+    if array.nulls().is_some() {
+        bytes = bytes.saturating_add(array.len().div_ceil(8));
+    }
+    for (index, column) in array.columns().iter().enumerate() {
+        if (7..=13).contains(&index) {
+            let list = column.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
+                DataFusionError::Execution(format!(
+                    "histogram list column {index} has invalid type"
+                ))
+            })?;
+            let offsets = list.value_offsets();
+            let first = *offsets
+                .first()
+                .ok_or_else(|| DataFusionError::Execution("empty histogram offsets".into()))?
+                as usize;
+            let last = *offsets
+                .last()
+                .ok_or_else(|| DataFusionError::Execution("empty histogram offsets".into()))?
+                as usize;
+            let values = list.values().slice(first, last.saturating_sub(first));
+            bytes =
+                bytes.saturating_add((list.len() + 1).saturating_mul(std::mem::size_of::<i32>()));
+            bytes = bytes.saturating_add(values.to_data().get_slice_memory_size()?);
+            if list.nulls().is_some() {
+                bytes = bytes.saturating_add(list.len().div_ceil(8));
+            }
+        } else {
+            bytes = bytes.saturating_add(column.to_data().get_slice_memory_size()?);
+        }
+    }
+    Ok(bytes)
 }
 
 /// Reads one input partition to its end, one whole chain at a time, routing each chain as it closes.
@@ -1043,20 +1041,22 @@ async fn read_chains(
                         continue;
                     }
                     let charge = read_ahead.new_empty();
-                    let tables = series
-                        .fields
-                        .iter()
-                        .flat_map(|field| field.segments())
-                        .filter_map(|segment| match segment.dense() {
+                    let mut tables = 0usize;
+                    for segment in series.fields.iter().flat_map(|field| field.segments()) {
+                        let batch = match segment.dense() {
                             Some(DenseSamplesRef::Histogram(histograms)) => {
                                 Some(histograms.batch())
                             }
                             Some(DenseSamplesRef::Mixed(mixed)) => Some(mixed.histograms().batch()),
                             _ => None,
-                        })
-                        .fold(0usize, |total, table| {
-                            total.saturating_add(table_bytes(table))
-                        });
+                        };
+                        if let Some(batch) = batch {
+                            match histogram_table_slice_bytes(batch) {
+                                Ok(bytes) => tables = tables.saturating_add(bytes),
+                                Err(error) => return Stop::Failed(Arc::new(error)),
+                            }
+                        }
+                    }
                     let bytes = operand_chunk_bytes(&series).saturating_add(tables);
                     if let Err(error) = charge.try_grow(bytes) {
                         if senders[output].is_closed() {
@@ -1134,18 +1134,10 @@ impl OutputLease {
     /// A failed read is an error here even when no output was polled before the failure; the recorded
     /// error is returned after the input senders close.
     fn ending(&self) -> Option<Result<(Series, bool), BoxedError>> {
-        let (ending, terminal) = self.shared.ending();
-        match ending {
+        match self.shared.ending() {
             Ending::Finished => None,
-            Ending::Failed => Some(Err(boxed(match &terminal {
-                Some(error) => DataFusionError::from(error),
-                // A failure whose error cannot be found is still a failure, and saying so is the
-                // point: an end here would claim that every chunk routed to this output arrived.
-                None => DataFusionError::Execution(
-                    "series repartition failed and its error is no longer available".to_string(),
-                ),
-            }))),
-            Ending::Unrecorded => Some(Err(boxed(DataFusionError::Execution(
+            Ending::Failed(error) => Some(Err(boxed(DataFusionError::from(&error)))),
+            Ending::Pending => Some(Err(boxed(DataFusionError::Execution(
                 "series repartition producer stopped unexpectedly before the read finished"
                     .to_string(),
             )))),
@@ -1164,30 +1156,12 @@ impl Drop for OutputLease {
 }
 
 /// How a read ended, as an output whose queue has closed has to report it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default)]
 enum Ending {
-    /// Nothing recorded an outcome - and a read that ends on its own terms records one before it
-    /// drops its queues - so this is a read that was stopped, aborted or panicked, mid-flight.
     #[default]
-    Unrecorded,
-    /// Every input partition finished and every chunk routed to an output was handed over.
+    Pending,
     Finished,
-    /// The read failed. Its error is recorded beside this ending in [`EndingRecord`], and every
-    /// output reports it after the input senders close.
-    Failed,
-}
-
-/// How a read ended, and - when it failed - the error it owes every output.
-///
-/// The ending and the error are one value under one lock on purpose: a failure is recorded in one
-/// write, so an output that reads [`Ending::Failed`] always reads the error that goes with it.
-#[derive(Default)]
-struct EndingRecord {
-    /// How the read ended.
-    ending: Ending,
-    /// The failure the read recorded, shared rather than rebuilt so every output reports the one
-    /// error the child answered with. `None` until a failure is recorded, and never cleared.
-    terminal: Option<Arc<DataFusionError>>,
+    Failed(Arc<DataFusionError>),
 }
 
 /// One whole chain of one series: its chunks from the one that opened it to the one that closed it,
