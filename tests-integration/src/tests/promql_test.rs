@@ -4624,7 +4624,7 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     ];
 
     observer.clear();
-    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    let legacy_rows = native_result_rows(native_tql_output(&instance, sql, false).await).await;
     assert!(
         observer.fused().is_none(),
         "the existing plan must not hold a native node"
@@ -4632,7 +4632,7 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     assert_eq!(legacy_rows, expected, "legacy");
 
     observer.clear();
-    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let native_rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_eq!(plan.output_partitioning().partition_count(), 1);
@@ -4933,6 +4933,85 @@ async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
             );
         }
     }
+}
+
+/// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
+/// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
+/// group's winner on the existing plan and must not reach the native node, which would fold both
+/// series into one group and return fewer rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_ranking_grouped_by_a_value_field() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_ranking_value_field",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_rank_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_rank_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_rank_phy');
+        CREATE TABLE native_rank_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_rank_phy');
+        INSERT INTO native_rank_demo (host, ts, val) VALUES ('x', 0, 2);
+        INSERT INTO native_rank_other (host, ts, val) VALUES ('y', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let pair = r#"native_rank_demo{host="x"} or native_rank_other{host="y"}"#;
+    // `by (val)` forms two groups of one sample each, so both series survive: the existing plan
+    // answers two rows where the native node would keep the single winner of one group.
+    for query in [
+        format!("topk by (val) (1, {pair})"),
+        format!("bottomk by (val) (1, {pair})"),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            legacy_rows.len(),
+            2,
+            "{query}: the existing plan keeps one row per value group"
+        );
+        assert!(
+            legacy_rows
+                .iter()
+                .map(|(_, _, value)| *value)
+                .eq([2.0, 8.0]),
+            "{query}: {legacy_rows:?}"
+        );
+
+        observer.clear();
+        let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a grouping its groups cannot honor"
+        );
+        assert_eq!(native_rows, legacy_rows, "{query}: full rows");
+    }
+
+    // A label grouping is what the native node does honor, so it still runs natively and keeps every
+    // group's winner.
+    let sql = format!("TQL EVAL (0, 0, '1s') topk by (host) (1, {pair})");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(observer.take().name(), "FusedSeriesExec");
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+    assert_eq!(native_rows.len(), 2);
 }
 
 /// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.

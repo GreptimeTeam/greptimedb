@@ -714,6 +714,18 @@ fn validate_input(schema: &SeriesSchema, input: &[Series], grouping: Grouping<'_
     Ok(())
 }
 
+/// Validates the grouping a whole-vector operation addresses its series by.
+///
+/// The native route keys `topk`, `bottomk` and `limitk` groups by series labels only, while the
+/// existing planner also accepts a value field there, where it varies between samples. Refusing
+/// the field here keeps such a statement on the existing plan before native execution is chosen.
+pub(crate) fn validate_vector_grouping(
+    schema: &SeriesSchema,
+    grouping: Grouping<'_>,
+) -> Result<()> {
+    validate_grouping(schema, grouping)
+}
+
 fn validate_grouping(schema: &SeriesSchema, grouping: Grouping<'_>) -> Result<()> {
     if schema.eval_grid.is_none() {
         return Err(DataFusionError::Execution(

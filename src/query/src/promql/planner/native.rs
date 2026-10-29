@@ -657,8 +657,9 @@ impl PromPlanner {
             return Ok(None);
         }
         // Catch construction-time refusals before choosing native execution: errors raised during
-        // physical planning cannot fall back. This includes unsupported aggregates and CountValues
-        // groupings; it does not cover data-dependent errors raised while executing the tree.
+        // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
+        // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
+        // executing the tree.
         if multi_input
             && NativeExecutionState::try_new(
                 &compiled.tree,
