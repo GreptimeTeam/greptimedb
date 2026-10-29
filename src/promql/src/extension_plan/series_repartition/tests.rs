@@ -38,7 +38,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::task::{Poll, Waker};
 use std::time::Duration;
 
-use datafusion::arrow::array::{Array, Float64Array};
+use datafusion::arrow::array::{Array, Float64Array, ListArray, StructArray};
 use datafusion::common::config::ConfigOptions;
 use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
 use datafusion::execution::runtime_env::RuntimeEnvBuilder;
@@ -102,7 +102,16 @@ fn histogram_chunk(metric: SeriesLabels, position: usize) -> (Series, bool) {
 }
 
 fn histogram_rows_chunk(metric: SeriesLabels, position: usize, rows: usize) -> (Series, bool) {
-    histogram_rows_chunk_with_schema(&schema(), metric, position, rows)
+    histogram_rows_chunk_with_sum(metric, position, rows, 3.0)
+}
+
+fn histogram_rows_chunk_with_sum(
+    metric: SeriesLabels,
+    position: usize,
+    rows: usize,
+    sum: f64,
+) -> (Series, bool) {
+    histogram_rows_chunk_with_schema(&schema(), metric, position, rows, sum)
 }
 
 fn histogram_rows_chunk_with_schema(
@@ -110,6 +119,7 @@ fn histogram_rows_chunk_with_schema(
     metric: SeriesLabels,
     position: usize,
     rows: usize,
+    sum: f64,
 ) -> (Series, bool) {
     let mut builder = HistogramBatchBuilder::new();
     let mut indices = Vec::with_capacity(rows);
@@ -122,7 +132,7 @@ fn histogram_rows_chunk_with_schema(
                 .push(HistogramView {
                     schema: 0,
                     zero_threshold: 0.0,
-                    sum: 3.0,
+                    sum,
                     count: 4.0,
                     zero_count: 0.0,
                     reset_hint: CounterResetHint::Unknown,
@@ -153,6 +163,24 @@ fn histogram_rows_chunk_with_schema(
     )
     .expect("histogram rows lie on the grid");
     (Series::try_new(schema, metric, time, fields).unwrap(), true)
+}
+
+fn sparse_histogram_rows_chunk(
+    metric: SeriesLabels,
+    positions: impl IntoIterator<Item = usize>,
+    rows: usize,
+    sum: f64,
+) -> (Series, bool) {
+    let (mut series, is_last) = histogram_rows_chunk_with_sum(metric, 0, rows, sum);
+    series.time = TimeAxis::from_grid_spans(
+        schema().eval_grid.clone().unwrap(),
+        positions
+            .into_iter()
+            .map(|position| GridSpan::new(position, 1))
+            .collect(),
+    )
+    .expect("sparse histogram rows lie on the grid");
+    (series, is_last)
 }
 
 fn sliced_chunks(metric: SeriesLabels) -> [(Series, bool); 2] {
@@ -5175,6 +5203,131 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
         pool.reserved(),
         "dropping handoff releases retained charges"
     );
+}
+
+#[tokio::test]
+async fn public_repartition_interleaved_histogram_tables_stay_linear() {
+    use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+    for table_count in [1usize, 2] {
+        let metric = labels("interleaved-histograms");
+        let mut inputs = Vec::new();
+        let mut hist_positions = Vec::new();
+        for table in 0..table_count {
+            let positions = (0..128 / table_count)
+                .map(|index| index * 2 * table_count + table * 2)
+                .collect::<Vec<_>>();
+            hist_positions.extend(positions.iter().copied());
+            inputs.push(vec![Step::chunk(sparse_histogram_rows_chunk(
+                metric.clone(),
+                positions,
+                128 / table_count,
+                10.0 + table as f64,
+            ))]);
+        }
+        let float_positions = (0..128).map(|index| index * 2 + 1).collect::<Vec<_>>();
+        let float_values = float_positions
+            .iter()
+            .map(|position| Some(*position as f64))
+            .collect::<Vec<_>>();
+        let float_time = TimeAxis::from_grid_spans(
+            schema().eval_grid.clone().unwrap(),
+            float_positions
+                .iter()
+                .map(|position| GridSpan::new(*position, 1))
+                .collect(),
+        )
+        .unwrap();
+        let float_series = Series::try_new(
+            &schema(),
+            metric.clone(),
+            float_time,
+            SeriesFields::one(Samples::from_float(Float64Array::from(float_values))),
+        )
+        .unwrap();
+        inputs.push(vec![Step::chunk((float_series, true))]);
+        let child = Scripted::plan(inputs);
+        let context = unbounded_context();
+        let plan = node(child, 1);
+        let mut frames = plan.execute(0, Arc::clone(&context)).unwrap();
+        let mut batches = Vec::new();
+        let mut referenced_histogram_rows = 0usize;
+        while let Some(batch) = frames.try_next().await.unwrap() {
+            let fields = batch
+                .column(3)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            let payload = fields
+                .column(0)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            let hist = payload
+                .column(1)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            let tables = hist.column(1).as_any().downcast_ref::<ListArray>().unwrap();
+            for row in 0..tables.len() {
+                referenced_histogram_rows += tables.value_length(row) as usize;
+            }
+            batches.push(batch);
+        }
+        assert_eq!(128, referenced_histogram_rows, "table_count={table_count}");
+
+        let frame_schema = batches[0].schema();
+        let frames = Box::pin(RecordBatchStreamAdapter::new(
+            frame_schema,
+            futures::stream::iter(batches.into_iter().map(Ok)),
+        ));
+        let mut decoded = unpack_evaluated_series(frames, Some(schema())).unwrap();
+        let mut chunks = Vec::new();
+        while let Some(chunk) = decoded.try_next().await.unwrap() {
+            chunks.push(chunk);
+        }
+        let mut next_position = 0;
+        let mut final_count = 0;
+        for (series, is_last) in chunks {
+            assert_eq!(metric, series.metric, "full input identity survives");
+            final_count += usize::from(is_last);
+            assert_eq!(series.time.len(), series.fields.get(0).unwrap().len());
+            for (position, row) in series.time.positions() {
+                assert_eq!(
+                    next_position, position,
+                    "positions stay strictly increasing and complete"
+                );
+                if position % 2 == 0 {
+                    let table = (position / 2) % table_count;
+                    match series.fields.get(0).unwrap().sample(row) {
+                        datatypes::series::samples::SampleRef::Histogram(histogram) => {
+                            assert_eq!(10.0 + table as f64, histogram.sum);
+                            assert_eq!(4.0, histogram.count);
+                            assert_eq!(0.0, histogram.zero_threshold);
+                            assert_eq!(0.0, histogram.zero_count);
+                            assert_eq!(0, histogram.schema);
+                            assert_eq!(CounterResetHint::Unknown, histogram.reset_hint);
+                            assert_eq!(&[0.5, 1.5, 2.5, 3.5], histogram.custom_values);
+                            assert_eq!(&[1.0, 2.0, 3.0, 4.0], histogram.positive.buckets);
+                            assert_eq!(&[1.0, 2.0, 3.0, 4.0], histogram.negative.buckets);
+                        }
+                        _ => panic!("histogram at {position}"),
+                    }
+                } else {
+                    match series.fields.get(0).unwrap().sample(row) {
+                        datatypes::series::samples::SampleRef::Float(value) => {
+                            assert_eq!(position as f64, value);
+                        }
+                        _ => panic!("float at {position}"),
+                    }
+                }
+                next_position += 1;
+            }
+        }
+        assert_eq!(256, next_position, "the full grid survives decoding");
+        assert_eq!(1, final_count, "the merged identity closes exactly once");
+        assert_eq!(128, hist_positions.len());
+    }
 }
 
 #[tokio::test]
