@@ -23,8 +23,8 @@
 //! The frame names each series by its complete labels rather than by its storage key. The node's
 //! schema is fixed while the frontend plans it, where the region's key layout is unknown, and the
 //! receiver compares that schema exactly; an explicit frame depends only on the field names. The
-//! stream is one partition that reads every scan partition at once and interleaves them only where
-//! a series ends: a scan keeps each series in one partition, so every series stays contiguous.
+//! stream preserves the scan's partitions, so each requested partition reads only its own series
+//! and keeps them contiguous.
 
 use std::fmt::{self, Formatter};
 use std::pin::Pin;
@@ -40,7 +40,6 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -52,15 +51,14 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use futures::Stream;
-use store_api::region_engine::{RawLabelSource, RawSeriesStream};
+use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
 
-use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
 use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
 ///
-/// Interleaving the scan partitions at series boundaries keeps each series contiguous but not the
-/// series in key order, and the schema has to be known before the region's scan declares its own.
+/// The scan's output order is not known when the frame schema is declared, so advertise only the
+/// conservative contiguous-series ordering.
 const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// The logical node: one table scan bound to one metric's raw series.
@@ -201,7 +199,7 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
     }
 }
 
-/// The physical node: the region's raw-series leaf, relabelled and read as one partition.
+/// The physical node: the region's raw-series leaf, relabelled with one output per scan partition.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
     input: Arc<dyn ExecutionPlan>,
@@ -229,7 +227,7 @@ impl RawSeriesSourceExec {
         )?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(frame_schema(&fields)?),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(input.properties().partitioning.partition_count()),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -311,52 +309,40 @@ impl ExecutionPlan for RawSeriesSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition != 0 {
+        let partition_count = self.properties.partitioning.partition_count();
+        if partition >= partition_count {
             return Err(DataFusionError::Execution(format!(
-                "RawSeriesSourceExec has one partition, got {partition}"
+                "RawSeriesSourceExec has {partition_count} partitions, got {partition}"
             )));
         }
-        let mut inputs = Vec::new();
-        for child_partition in 0..self.input.properties().partitioning.partition_count() {
-            let frames = self.input.execute(child_partition, Arc::clone(&context))?;
-            let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
-            inputs.push((
-                0,
-                materialize_raw_labels(raw)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
-            ));
-        }
-        let reservation = MemoryConsumer::new("RawSeriesSourceGather")
-            .register(&context.runtime_env().memory_pool);
-        pack_raw_series(Box::pin(GatheredRawSeries {
+        let frames = self.input.execute(partition, context)?;
+        let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
+        let raw = materialize_raw_labels(raw)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        pack_raw_series(Box::pin(ContiguousRawSeries {
             schema: Arc::clone(&self.series_schema),
             label_source: RawLabelSource::Explicit,
-            inputs: SeriesGather::new(
-                spawn_partitions(inputs, &context.runtime_env().memory_pool),
-                reservation,
-            ),
+            input: raw,
         }))
     }
 }
 
-/// The partitions of one scan, read at once and interleaved where a series ends.
-struct GatheredRawSeries {
+/// A scan partition with its labels materialized as explicit labels.
+struct ContiguousRawSeries {
     schema: Arc<SeriesSchema>,
     label_source: RawLabelSource,
-    inputs: SeriesGather,
+    input: SendableRawSeriesStream,
 }
 
-impl Stream for GatheredRawSeries {
+impl Stream for ContiguousRawSeries {
     type Item = Result<RawSeriesChunk, BoxedError>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inputs)
-            .poll_next(cx)
-            .map(|item| item.map(|result| result.map(|(_, chunk)| chunk)))
+        self.get_mut().input.as_mut().poll_next(cx)
     }
 }
 
-impl RawSeriesStream for GatheredRawSeries {
+impl RawSeriesStream for ContiguousRawSeries {
     fn schema(&self) -> &Arc<SeriesSchema> {
         &self.schema
     }
@@ -367,5 +353,226 @@ impl RawSeriesStream for GatheredRawSeries {
 
     fn ordering(&self) -> SeriesOrdering {
         ORDERING
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use datafusion::arrow::array::Float64Array;
+    use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
+    use datafusion::common::tree_node::TreeNodeRecursion;
+    use datafusion::datasource::memory::MemorySourceConfig;
+    use datafusion::datasource::source::DataSourceExec;
+    use datafusion::physical_expr::PhysicalExpr;
+    use datafusion::physical_plan::execution_plan::{
+        ChildrenPropertiesMode, ReplaceChildrenOptions,
+    };
+    use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+    use datatypes::series::frame::FrameLabelMode;
+    use datatypes::series::raw::RawTimestamps;
+    use datatypes::series::samples::{Samples, SeriesFields};
+    use datatypes::series::{Label, SeriesLabels};
+    use futures::TryStreamExt;
+
+    use super::*;
+
+    struct CountedExec {
+        input: Arc<dyn ExecutionPlan>,
+        calls: Arc<Vec<AtomicUsize>>,
+    }
+
+    impl std::fmt::Debug for CountedExec {
+        fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+            f.debug_struct("CountedExec").finish()
+        }
+    }
+
+    impl DisplayAs for CountedExec {
+        fn fmt_as(&self, t: DisplayFormatType, f: &mut Formatter) -> fmt::Result {
+            self.input.fmt_as(t, f)
+        }
+    }
+
+    impl ExecutionPlan for CountedExec {
+        fn name(&self) -> &str {
+            "CountedExec"
+        }
+        fn properties(&self) -> &Arc<PlanProperties> {
+            self.input.properties()
+        }
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            vec![&self.input]
+        }
+        fn apply_expressions(
+            &self,
+            f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DataFusionResult<TreeNodeRecursion>,
+        ) -> DataFusionResult<TreeNodeRecursion> {
+            self.input.apply_expressions(f)
+        }
+        fn with_new_children(
+            self: Arc<Self>,
+            mut children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+            if children.len() != 1 {
+                return Err(DataFusionError::Plan(
+                    "CountedExec requires one child".into(),
+                ));
+            }
+            Ok(Arc::new(Self {
+                input: children.remove(0),
+                calls: Arc::clone(&self.calls),
+            }))
+        }
+        fn execute(
+            &self,
+            partition: usize,
+            context: Arc<TaskContext>,
+        ) -> DataFusionResult<SendableRecordBatchStream> {
+            self.calls[partition].fetch_add(1, Ordering::SeqCst);
+            self.input.execute(partition, context)
+        }
+    }
+
+    fn source(partition_count: usize) -> (Arc<dyn ExecutionPlan>, Arc<Vec<AtomicUsize>>) {
+        let fields = vec!["value".to_string()];
+        let schema = frame_schema(&fields).unwrap();
+        let series_schema = series_schema(&fields);
+        let batches = ["p0", "p1", "p2"]
+            .iter()
+            .zip([10.0, 20.0, 30.0])
+            .take(partition_count)
+            .map(|(host, value)| {
+                let chunk = RawSeriesChunk::try_new(
+                    &series_schema,
+                    Buffer::from_slice_ref(host.as_bytes()),
+                    Some(
+                        SeriesLabels::try_new(
+                            Some(Arc::from("metric")),
+                            vec![Label {
+                                name: Arc::from("host"),
+                                value: Arc::from(*host),
+                            }],
+                        )
+                        .unwrap(),
+                    ),
+                    RawTimestamps::try_new(ScalarBuffer::from(vec![1000_i64])).unwrap(),
+                    SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+                        vec![Some(value)],
+                    ))])
+                    .unwrap(),
+                    true,
+                )
+                .unwrap();
+                datatypes::series::frame::pack_raw_series_chunk(
+                    &series_schema,
+                    FrameLabelMode::Explicit,
+                    None,
+                    &chunk,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&batches, schema, None).unwrap(),
+        )));
+        let calls = Arc::new((0..partition_count).map(|_| AtomicUsize::new(0)).collect());
+        (
+            Arc::new(CountedExec {
+                input,
+                calls: Arc::clone(&calls),
+            }),
+            calls,
+        )
+    }
+
+    async fn read_partition(
+        exec: &RawSeriesSourceExec,
+        partition: usize,
+    ) -> Vec<(String, String, i64, f64, bool)> {
+        let stream = exec
+            .execute(partition, Arc::new(TaskContext::default()))
+            .unwrap();
+        assert_eq!(exec.schema(), stream.schema());
+        let chunks = unpack_raw_series(stream, Some(Arc::clone(&exec.series_schema))).unwrap();
+        chunks
+            .map_ok(|chunk| {
+                let metric_name = chunk.metric.as_ref().unwrap().name().unwrap().to_string();
+                let host = chunk
+                    .metric
+                    .as_ref()
+                    .unwrap()
+                    .get("host")
+                    .unwrap()
+                    .to_string();
+                let time = chunk.time.timestamp(0).unwrap();
+                let value = match chunk.fields.as_slice()[0].sample(0) {
+                    datatypes::series::samples::SampleRef::Float(value) => value,
+                    _ => panic!("expected float sample"),
+                };
+                (metric_name, host, time, value, chunk.is_last)
+            })
+            .try_collect()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn preserves_partitioned_raw_series_and_rebuilds_partition_count() {
+        let fields = vec!["value".to_string()];
+        let (input, calls) = source(3);
+        let counted = input.clone();
+        let exec =
+            RawSeriesSourceExec::try_new(counted, Arc::from("metric"), fields.clone()).unwrap();
+        assert_eq!(3, exec.properties.partitioning.partition_count());
+        assert_eq!(
+            vec![("metric".into(), "p1".into(), 1000, 20.0, true)],
+            read_partition(&exec, 1).await
+        );
+        assert_eq!(
+            vec![0, 1, 0],
+            calls
+                .iter()
+                .map(|c| c.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            vec![("metric".into(), "p0".into(), 1000, 10.0, true)],
+            read_partition(&exec, 0).await
+        );
+        assert_eq!(
+            vec![("metric".into(), "p2".into(), 1000, 30.0, true)],
+            read_partition(&exec, 2).await
+        );
+        assert_eq!(
+            vec![1, 1, 1],
+            calls
+                .iter()
+                .map(|c| c.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        );
+        assert!(exec.execute(3, Arc::new(TaskContext::default())).is_err());
+        assert_eq!(
+            vec![1, 1, 1],
+            calls
+                .iter()
+                .map(|c| c.load(Ordering::SeqCst))
+                .collect::<Vec<_>>()
+        );
+
+        let (replacement, _) = source(2);
+        let rebuilt = Arc::new(exec)
+            .replace_children(
+                vec![replacement],
+                ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+            )
+            .unwrap();
+        assert_eq!(2, rebuilt.properties().partitioning.partition_count());
+        assert_eq!(frame_schema(&fields).unwrap(), rebuilt.schema());
+        assert_eq!(
+            vec![("metric".into(), "p1".into(), 1000, 20.0, true)],
+            read_partition(rebuilt.downcast_ref::<RawSeriesSourceExec>().unwrap(), 1).await
+        );
     }
 }

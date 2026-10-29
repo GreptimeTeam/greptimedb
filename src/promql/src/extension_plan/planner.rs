@@ -131,7 +131,7 @@ fn plan_fused_series(
     if let Some(inputs) = physical_inputs
         .iter()
         .map(|input| {
-            explicit_raw_frame_ordering(input.schema().as_ref())
+            explicit_frame_ordering(input.schema().as_ref())
                 .map(|ordering| (Arc::clone(input), RawLabelSource::Explicit, ordering))
         })
         .collect::<Option<Vec<_>>>()
@@ -251,11 +251,14 @@ fn series_scan(
         })
 }
 
-/// The ordering an input declares when it produces raw frames that carry their own labels.
-fn explicit_raw_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
+/// The ordering an input declares when it produces explicit-label raw or evaluated frames.
+fn explicit_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
     let declaration = SeriesFrameDeclaration::parse(schema).ok()?;
-    if declaration.content() != FrameContent::Raw
-        || declaration.labels() != FrameLabelMode::Explicit
+    if declaration.labels() != FrameLabelMode::Explicit
+        || !matches!(
+            declaration.content(),
+            FrameContent::Raw | FrameContent::Evaluated
+        )
     {
         return None;
     }

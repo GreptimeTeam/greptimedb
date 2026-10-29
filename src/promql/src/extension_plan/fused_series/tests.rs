@@ -78,6 +78,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use store_api::region_engine::RawLabelSource;
 
 mod frame_output;
+mod input_contract;
 
 use super::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
@@ -523,6 +524,20 @@ fn frame_schema_of(schema: &SeriesSchema) -> SchemaRef {
 /// The schema of a frame carrying these series, which is what the node declares as its input.
 fn frame_schema() -> SchemaRef {
     frame_schema_of(&raw_schema())
+}
+
+/// An evaluated frame schema on the test grid.
+fn evaluated_frame_schema() -> SchemaRef {
+    let schema = SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(grid()),
+    };
+    common_query::series_frame::pack_evaluated_series(
+        Box::pin(futures::stream::empty()),
+        Arc::new(schema),
+    )
+    .unwrap()
+    .schema()
 }
 
 /// The description a frame with its labels encoded in a dense [`HOST`] key declares.
@@ -1744,25 +1759,24 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
 
 /// Independent sources gather all child partitions, without zipping.
 #[tokio::test]
-async fn independent_sources_execute_all_partitions() {
+async fn independent_sources_evaluate_on_one_shared_partition() {
     let tree = binary_tree_over_sources(BinaryOp::Sub, raw_schema(), other_field_schema(), 0, 1);
-    let left_calls = Arc::new((0..2).map(|_| AtomicUsize::new(0)).collect());
-    let right_calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect());
+    let left_calls = Arc::new((0..1).map(|_| AtomicUsize::new(0)).collect());
+    let right_calls = Arc::new((0..1).map(|_| AtomicUsize::new(0)).collect());
+    // Each source carries every series it contributes in its one partition, because a global
+    // consumer is handed one partition per source and nothing reads the others.
     let left = Arc::new(CountedExec {
-        input: memory_exec_partitioned(vec![
-            vec![frame(&series_chunk("web-2", &[(GRID_START, 8.0)], true))],
-            vec![frame(&series_chunk("web-1", &[(GRID_START, 9.0)], true))],
-        ]),
+        input: memory_exec_partitioned(vec![vec![frame(&series_chunk(
+            "web-2",
+            &[(GRID_START, 8.0)],
+            true,
+        ))]]),
         calls: Arc::clone(&left_calls),
     });
     let right = Arc::new(CountedExec {
         input: memory_exec_partitioned_with(
             frame_schema_of(&other_field_schema()),
-            vec![
-                vec![other_field_chunk("web-2", 3.0)],
-                vec![other_field_chunk("web-1", 2.0)],
-                vec![other_field_chunk("web-3", 4.0)],
-            ],
+            vec![vec![other_field_chunk("web-2", 3.0)]],
         ),
         calls: Arc::clone(&right_calls),
     });
@@ -1783,22 +1797,24 @@ async fn independent_sources_execute_all_partitions() {
             (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
         ])
         .unwrap();
+    // A raw vector-vector operation reads across series, so it is a global consumer: every source
+    // contributes exactly one partition and the node has no gather to read the others.
     assert_eq!(1, exec.properties().output_partitioning().partition_count());
     let results = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
         .await
         .unwrap();
     let mut actual = binary_values(&results);
     actual.sort_by(f64::total_cmp);
-    assert_eq!(vec![5.0, 7.0], actual);
+    assert_eq!(vec![5.0], actual, "web-2 is 8 - 3");
     assert_eq!(
-        vec![1, 1],
+        vec![1],
         left_calls
             .iter()
             .map(|c| c.load(Ordering::SeqCst))
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        vec![1, 1, 1],
+        vec![1],
         right_calls
             .iter()
             .map(|c| c.load(Ordering::SeqCst))
@@ -1951,37 +1967,6 @@ async fn empty_first_source_does_not_end_gather_early() {
 }
 
 /// A multiparty gather requires Contiguous input, not global KeyThenTime ordering.
-#[test]
-fn multiparty_gather_rejects_key_then_time_leaf_requirement() {
-    let tree = declaring_orderings(
-        &binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1),
-        &[SeriesOrdering::KeyThenTime, SeriesOrdering::Contiguous],
-    );
-    let node = FusedSeries::try_new(
-        Arc::from("left + right"),
-        tree.clone(),
-        binding(&tree),
-        vec![input_plan(frame_schema()), input_plan(frame_schema())],
-        binary_output_schema().to_dfschema_ref().unwrap(),
-    )
-    .unwrap();
-    let error = node
-        .to_execution_plan(vec![
-            (
-                memory_exec_partitioned(vec![vec![], vec![]]),
-                RawLabelSource::Explicit,
-                SeriesOrdering::KeyThenTime,
-            ),
-            (
-                memory_exec_partitioned(vec![vec![], vec![]]),
-                RawLabelSource::Explicit,
-                SeriesOrdering::Contiguous,
-            ),
-        ])
-        .expect_err("concatenated partitions are not globally KeyThenTime");
-    assert!(error.to_string().contains("ordering"), "{error}");
-}
-
 /// A later source failure drops streams already opened for earlier sources and releases state.
 #[tokio::test]
 async fn later_source_error_drops_all_gathered_inputs() {
@@ -2535,7 +2520,7 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     let error = plan(rate_tree(), source).expect_err("the frame declares a grid");
     let message = error_chain(&error);
     assert!(
-        message.contains("expected a raw frame, found an evaluated one"),
+        message.contains("frame content does not match its compiled input"),
         "refused for another reason: {message}"
     );
     assert!(
@@ -2777,6 +2762,303 @@ fn error_chain(error: &DataFusionError) -> String {
     message
 }
 
+/// Different source counts are refused, including zero at either dense-source position.
+#[test]
+fn unequal_and_zero_source_partition_counts_are_rejected() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let source = |count: usize| memory_exec_partitioned((0..count).map(|_| Vec::new()).collect());
+    for (left, right) in [(2, 3), (0, 2), (2, 0)] {
+        assert!(
+            node.to_execution_plan(vec![
+                (
+                    source(left),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous
+                ),
+                (
+                    source(right),
+                    RawLabelSource::Explicit,
+                    SeriesOrdering::Contiguous
+                ),
+            ])
+            .is_err(),
+            "partition counts {left} and {right} must fail"
+        );
+    }
+}
+
+/// An invalid output partition is rejected before any input stream is opened.
+#[test]
+fn out_of_range_partition_fails_before_opening_sources() {
+    let calls = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let source = Arc::new(CountedExec {
+        input: memory_exec_partitioned((0..3).map(|_| Vec::new()).collect()),
+        calls: Arc::clone(&calls),
+    });
+    let exec = plan(rate_tree(), source).unwrap();
+    assert!(
+        exec.execute(3, SessionContext::default().task_ctx())
+            .is_err()
+    );
+    assert_eq!(
+        vec![0, 0, 0],
+        calls
+            .iter()
+            .map(|n| n.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A partition-local window asks its source only for the requested partition.
+#[tokio::test]
+async fn partition_local_tree_executes_only_requested_partition() {
+    let counts = Arc::new((0..3).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let source = Arc::new(CountedExec {
+        input: memory_exec_partitioned((0..3).map(|_| Vec::new()).collect()),
+        calls: Arc::clone(&counts),
+    });
+    let exec = plan(rate_tree(), source).expect("window is partition-local");
+    assert_eq!(3, exec.properties().output_partitioning().partition_count());
+    let stream = exec
+        .execute(1, SessionContext::default().task_ctx())
+        .unwrap();
+    assert!(stream.try_collect::<Vec<_>>().await.unwrap().is_empty());
+    assert_eq!(
+        vec![0, 1, 0],
+        counts
+            .iter()
+            .map(|n| n.load(Ordering::SeqCst))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Build two direct grid inputs so the tree classifies as matching-local.
+fn direct_matching_tree() -> (NativeTree, MatchingLabels) {
+    let grid = grid();
+    let labels = MatchingLabels::On(vec![Arc::from(HOST)]);
+    let schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let input = |source_index| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index,
+            output: NativeType::Samples(Arc::clone(&schema)),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: NativeType::Samples(Arc::clone(&schema)),
+    };
+    let output = crate::vector_match::binary_output_schema(&schema, &schema).unwrap();
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(input(0)),
+            right: Box::new(input(1)),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: labels.clone(),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .unwrap();
+    (tree, labels)
+}
+
+/// EOF on one input partition does not discard rows from a later live partition.
+#[tokio::test]
+async fn asymmetric_eof_plain_rows_keeps_later_partition_rows() {
+    let partitions = vec![
+        Vec::new(),
+        vec![frame(&series_chunk("web-live", &series_samples(2.0), true))],
+    ];
+    let exec = plan(rate_tree(), memory_exec_partitioned(partitions)).unwrap();
+    let batches = collect(exec, SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let rows = rows(&batches);
+    assert_eq!(
+        GRID_LEN as usize,
+        rows.len(),
+        "the live partition's rows all arrive once"
+    );
+    assert!(rows.iter().all(|row| row.2.as_deref() == Some("web-live")));
+}
+
+/// Frame output carries the live partition's final chunk after the empty partition reaches EOF.
+#[tokio::test]
+async fn asymmetric_eof_frame_output_keeps_later_partition_chunk() {
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        canonical_frame_schema(&tree),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let input = memory_exec_partitioned(vec![
+        Vec::new(),
+        vec![frame(&series_chunk("web-live", &series_samples(2.0), true))],
+    ]);
+    let exec = plan_of(node, input).unwrap();
+    let batches = collect(exec.clone(), SessionContext::default().task_ctx())
+        .await
+        .unwrap();
+    let stream = Box::pin(RecordBatchStreamAdapter::new(
+        exec.schema(),
+        futures::stream::iter(batches.into_iter().map(Ok)),
+    ));
+    let decoded = unpack_evaluated_series(stream, None)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(
+        1,
+        decoded.len(),
+        "the live partition's closed series arrives once"
+    );
+    assert_eq!("web-live", decoded[0].0.metric.get(HOST).unwrap());
+    assert!(decoded[0].1, "the emitted chunk closes at end of stream");
+}
+
+/// Matching-local layouts cannot be claimed by plain frame producers without matching routers.
+#[test]
+fn matching_local_plain_producers_without_router_are_rejected() {
+    let (tree, _) = direct_matching_tree();
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let plain = || memory_exec_partitioned((0..3).map(|_| Vec::new()).collect());
+    let error = node
+        .to_execution_plan(vec![
+            (
+                plain(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                plain(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect_err("plain producers do not prove matching-key locality");
+    assert!(
+        error
+            .to_string()
+            .contains("requires a direct matching-key SeriesRepartitionExec"),
+        "{error}"
+    );
+}
+
+#[test]
+fn matching_local_matching_routers_are_accepted() {
+    use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+    let (tree, labels) = direct_matching_tree();
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![
+            input_plan(evaluated_frame_schema()),
+            input_plan(evaluated_frame_schema()),
+        ],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let routed = || {
+        Arc::new(
+            SeriesRepartitionExec::try_new_with_routing(
+                memory_exec_partitioned_with(
+                    evaluated_frame_schema(),
+                    (0..3).map(|_| Vec::new()).collect(),
+                ),
+                3,
+                SeriesRouting::Matching(labels.clone()),
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>
+    };
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                routed(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                routed(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("matching routers satisfy matching-local placement");
+    assert_eq!(3, exec.properties().output_partitioning().partition_count());
+}
+
+#[test]
+fn matching_local_canonical_routers_are_rejected() {
+    use crate::extension_plan::{SeriesRepartitionExec, SeriesRouting};
+    let (tree, _) = direct_matching_tree();
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![
+            input_plan(evaluated_frame_schema()),
+            input_plan(evaluated_frame_schema()),
+        ],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let routed = || {
+        Arc::new(
+            SeriesRepartitionExec::try_new_with_routing(
+                memory_exec_partitioned_with(
+                    evaluated_frame_schema(),
+                    (0..3).map(|_| Vec::new()).collect(),
+                ),
+                3,
+                SeriesRouting::CanonicalLabels,
+            )
+            .unwrap(),
+        ) as Arc<dyn ExecutionPlan>
+    };
+    let error = node
+        .to_execution_plan(vec![
+            (
+                routed(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                routed(),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect_err("canonical routing is not matching-key routing");
+    assert!(error.to_string().contains("matching"), "{error}");
+}
+
 /// Each partition runs its own series and answers it independently.
 #[tokio::test]
 async fn every_partition_evaluates_its_own_series() {
@@ -2825,111 +3107,118 @@ async fn every_partition_evaluates_its_own_series() {
 
 /// A single repeated source feeds both operands once in each of four independent partitions.
 #[tokio::test]
-async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
-    let partitions = (0..4)
-        .map(|partition| {
-            let samples = (0..GRID_LEN as i64)
-                .map(|index| {
-                    let time = GRID_START + index * GRID_STEP;
-                    (time, partition as f64 * 10.0 + index as f64 + 1.0)
-                })
-                .collect::<Vec<_>>();
-            vec![frame(&series_chunk(
-                &format!("web-{partition}"),
-                &samples,
-                true,
-            ))]
-        })
-        .collect::<Vec<_>>();
+async fn repeated_source_runs_once_on_its_one_partition_with_ordered_operands() {
+    // The tree is a compound binary over one repeated source, which reads across series: it is a
+    // global consumer, so all four series live in the source's one partition.
+    let samples = |partition: usize| {
+        (0..GRID_LEN as i64)
+            .map(|index| {
+                let time = GRID_START + index * GRID_STEP;
+                (time, partition as f64 * 10.0 + index as f64 + 1.0)
+            })
+            .collect::<Vec<_>>()
+    };
+    let partitions = vec![
+        (0..4)
+            .map(|partition| {
+                frame(&series_chunk(
+                    &format!("web-{partition}"),
+                    &samples(partition),
+                    true,
+                ))
+            })
+            .collect::<Vec<_>>(),
+    ];
     let input = memory_exec_partitioned(partitions);
-    let calls_by_partition = Arc::new((0..4).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
+    let calls_by_partition = Arc::new((0..1).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
     let counted = Arc::new(CountedExec {
         input,
         calls: Arc::clone(&calls_by_partition),
     });
     let exec = plan(subtracted_scaled_tree(), counted)
         .expect("the repeated source tree runs over one physical child");
-    assert_eq!(4, exec.properties().output_partitioning().partition_count());
+    assert_eq!(1, exec.properties().output_partitioning().partition_count());
     assert_eq!(1, exec.children().len());
 
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
     let expected_times = grid_timestamps();
-    let mut total_rows = 0;
-    for partition in 0..4 {
-        let mut stream = exec
-            .execute(partition, Arc::clone(&context))
-            .expect("each requested partition exists");
-        let batches = stream
-            .as_mut()
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("the partition completes without errors");
-        let actual = batches
-            .iter()
-            .flat_map(|batch| {
-                let time = batch
-                    .column_by_name(TIME)
-                    .expect("binary output has time")
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .expect("time output is millisecond timestamp");
-                let value = batch
-                    .column_by_name(VALUE)
-                    .expect("binary output has value")
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("value output is Float64");
-                let host = batch
-                    .column_by_name(HOST)
-                    .expect("binary output retains host")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("host output is Utf8");
-                (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            time.value(row),
-                            value.is_valid(row).then(|| value.value(row)),
-                            host.is_valid(row).then(|| host.value(row).to_string()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        total_rows += actual.len();
+    let mut stream = exec
+        .execute(0, Arc::clone(&context))
+        .expect("the one partition exists");
+    let batches = stream
+        .as_mut()
+        .try_collect::<Vec<_>>()
+        .await
+        .expect("the partition completes without errors");
+    let rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let time = batch
+                .column_by_name(TIME)
+                .expect("binary output has time")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("time output is millisecond timestamp");
+            let value = batch
+                .column_by_name(VALUE)
+                .expect("binary output has value")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("value output is Float64");
+            let host = batch
+                .column_by_name(HOST)
+                .expect("binary output retains host")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("host output is Utf8");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        time.value(row),
+                        value.is_valid(row).then(|| value.value(row)),
+                        host.is_valid(row).then(|| host.value(row).to_string()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(4 * GRID_LEN as usize, rows.len(), "every series survives");
+    for partition in 0..4usize {
         let host = format!("web-{partition}");
-        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
+        let series = rows
+            .iter()
+            .filter(|row| row.2.as_deref() == Some(host.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(GRID_LEN as usize, series.len(), "{host}: {series:?}");
         assert_eq!(
             expected_times,
-            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
+            series.iter().map(|row| row.0).collect::<Vec<_>>(),
             "{host} timestamps preserve grid order"
-        );
-        assert!(
-            actual
-                .iter()
-                .all(|row| row.2.as_deref() == Some(host.as_str()))
         );
         let expected_values = (0..GRID_LEN as usize)
             .map(|index| Some(-((partition * 10 + index + 1) as f64)))
             .collect::<Vec<_>>();
         assert_eq!(
             expected_values,
-            actual.iter().map(|row| row.1).collect::<Vec<_>>()
+            series.iter().map(|row| row.1).collect::<Vec<_>>(),
+            "{host} values follow the tree"
         );
-        assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
-    assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
-        vec![1, 1, 1, 1],
+        vec![1],
         calls_by_partition
             .iter()
             .map(|call| call.load(Ordering::SeqCst))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        "the repeated source is read once, not once per reference"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "the partition released its reservations"
     );
 }
-
 /// The optimizer inserts no exchange between a two-partition scan and this node.
 ///
 /// This is the claim the whole arrangement rests on, so it is checked against the real rule rather
@@ -3776,6 +4065,42 @@ async fn an_exported_state_batch_stays_charged_until_its_stream_ends() {
     );
 }
 
+/// A physical rebuild revalidates source partition counts.
+#[test]
+fn rebuilding_physical_node_rejects_unequal_source_partition_counts() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                memory_exec(Vec::new()),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec(Vec::new()),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .unwrap();
+    let changed = memory_exec_partitioned(vec![Vec::new(), Vec::new()]);
+    let error = Arc::clone(&exec)
+        .replace_children(
+            vec![exec.children()[0].clone(), changed],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect_err("rebuilding must reject a source count mismatch");
+    assert!(error.to_string().contains("same positive count"), "{error}");
+}
+
 /// A partial node keeps its mode when an optimizer rebuilds it, and another aggregate is another
 /// node.
 #[test]
@@ -3981,11 +4306,11 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
     assert!(batches.iter().any(|batch| batch.num_rows() > 0));
 }
 
-/// Frame output refuses the currently unsupported multi-source physical shape at planning time.
+/// Frame output accepts multiple sources when each contributes the shared partition.
 #[test]
-fn series_frame_rejects_multiple_sources_during_planning() {
+fn series_frame_accepts_multiple_sources_on_one_partition() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
-    let err = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_with_format(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
@@ -3993,8 +4318,36 @@ fn series_frame_rejects_multiple_sources_during_planning() {
         canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("multiple sources"));
+    .expect("a frame output accepts more than one source");
+    // The tree reads across series, so it is a global consumer: each source contributes one
+    // partition and the frame output declares that count, not a gathered single partition.
+    let exec = node
+        .to_execution_plan(vec![
+            (
+                memory_exec(vec![frame(&series_chunk(
+                    "web-1",
+                    &[(GRID_START, 1.0)],
+                    true,
+                ))]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec(vec![frame(&series_chunk(
+                    "web-1",
+                    &[(GRID_START, 2.0)],
+                    true,
+                ))]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("one partition per source is enough");
+    assert_eq!(
+        1,
+        exec.properties().output_partitioning().partition_count(),
+        "the frame follows its sources' partition count"
+    );
 }
 
 /// A real four-partition input remains four independent frame-output executions.
@@ -4272,19 +4625,9 @@ fn a_series_frame_refuses_a_root_it_cannot_carry() {
     );
 }
 
-/// A pending input hands the rows a frame already encoded over before it reports pending.
-///
-/// The builder buffers up to a batch, and a closing row only exists once its chunk is encoded. If a
-/// pending input could hold those rows, a consumer waiting for a series to close would wait for input
-/// that may never arrive.
-///
-/// This polls by hand rather than awaiting the stream: `StagedStream` reports pending once and then
-/// wakes itself, so an `await` would run straight through the boundary and satisfy every later
-/// assertion whether or not the rows were handed over at the right moment. What is checked instead is
-/// the poll that *meets* the pending input - it has to return rows, and the input has to have been
-/// read only once by then.
+/// A series-frame producer waits for EOF before publishing complete series.
 #[tokio::test]
-async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
+async fn a_pending_input_does_not_publish_an_incomplete_frame() {
     let schema = frame_schema();
     let batches = one_series_frames();
     let handed = Arc::new(AtomicUsize::new(0));
@@ -4293,9 +4636,6 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     let source = staged(Arc::clone(&schema), move || {
         Box::pin(
             StagedStream::new(Arc::clone(&staged_schema), batches.clone())
-                // The third read is the one that reports pending. By then the first two chunks have
-                // filled an evaluation window, so the encoder is holding rows: the boundary is met
-                // with something buffered, which is the case worth checking.
                 .pending_after(2)
                 .counted(&staged_handed),
         )
@@ -4314,76 +4654,78 @@ async fn a_pending_input_does_not_hold_the_rows_a_frame_buffered() {
     let declared = exec.schema();
     let mut stream = exec
         .execute(0, SessionContext::default().task_ctx())
-        .expect("the node executes");
+        .unwrap();
 
-    // Poll by hand so the boundary is observable: `await` runs through the pending poll, and every
-    // later assertion would then hold whether or not the rows came out at the right moment.
-    //
-    // The pending poll is the one under test. `StagedStream` wakes itself straight after reporting
-    // pending, so a stream that answered nothing there would still be collected correctly; the only
-    // way to see the difference is to look at what that single poll returned. Two chunks have been
-    // read by then and an evaluation window is full, so the encoder is holding rows: it must answer
-    // them, not pending.
     let next = stream.next();
     futures::pin_mut!(next);
-    let mut answered = match futures::poll!(next) {
-        std::task::Poll::Ready(Some(Ok(batch))) => vec![batch],
-        std::task::Poll::Ready(Some(Err(error))) => panic!("the frame answered {error}"),
-        std::task::Poll::Ready(None) => panic!("the frame ended before answering a row"),
-        std::task::Poll::Pending => panic!(
-            "the pending input held the rows the frame already encoded: the input handed over {} \
-             batches",
-            handed.load(Ordering::SeqCst)
-        ),
-    };
-    assert_eq!(
-        declared.as_ref(),
-        answered[0].schema().as_ref(),
-        "a batch is declared as the plan declared it"
+    assert!(
+        futures::poll!(next).is_pending(),
+        "no complete frame exists before EOF"
     );
-    answered.extend(
-        stream
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("the stream resumes where the pending poll left it"),
-    );
-    let stream = Box::pin(RecordBatchStreamAdapter::new(
-        declared,
-        futures::stream::iter(answered.into_iter().map(Ok)),
-    ));
-    let decoded = unpack_evaluated_series(stream, None)
-        .expect("the node declares the frame it yields")
+    assert_eq!(2, handed.load(Ordering::SeqCst));
+    let batches = stream
         .try_collect::<Vec<_>>()
         .await
-        .expect("every batch of the frame decodes");
+        .expect("input resumes to EOF");
+    let stream = Box::pin(RecordBatchStreamAdapter::new(
+        declared,
+        futures::stream::iter(batches.into_iter().map(Ok)),
+    ));
+    let decoded = unpack_evaluated_series(stream, None)
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert!(!decoded.is_empty(), "the completed series is emitted");
+    let expected_labels = decoded[0].0.metric.clone();
+    assert!(
+        decoded
+            .iter()
+            .all(|(series, _)| series.metric == expected_labels),
+        "physical fragments of one logical series retain identical labels"
+    );
     assert_eq!(
         1,
         decoded.iter().filter(|(_, last)| *last).count(),
-        "one series closes exactly once, across the pending boundary"
+        "the logical series is finalized exactly once"
     );
-    // What the row table answers for the same input is the reference: `rate` decides which grid
-    // points carry a value, so computing the expected timestamps here would guess at it.
-    let plain =
-        plan(rate_tree(), memory_exec(one_series_frames())).expect("the runtime executes a tree");
+    assert!(
+        decoded.last().unwrap().1,
+        "only the final physical fragment closes the series"
+    );
+
+    let plain = plan(rate_tree(), memory_exec(one_series_frames())).unwrap();
     let mut expected = rows(
         &collect(plain, SessionContext::default().task_ctx())
             .await
-            .expect("the row table runs"),
+            .unwrap(),
     )
     .into_iter()
     .map(|(time, _, _, _)| time)
     .collect::<Vec<_>>();
     expected.sort_unstable();
-    let mut times = Vec::new();
+    let mut actual = Vec::new();
     for (series, _) in &decoded {
-        for timestamp in series.time.timestamps().expect("a grid axis").iter() {
-            times.push(*timestamp);
+        let times = series.time.timestamps().unwrap();
+        let values = series.fields.get(0).unwrap();
+        assert_eq!(times.len(), values.len());
+        for (row, time) in times.iter().enumerate() {
+            let datatypes::series::samples::SampleRef::Float(value) =
+                values.iter().nth(row).unwrap()
+            else {
+                panic!("rate output is a float sample");
+            };
+            actual.push((*time, value.to_bits()));
         }
     }
-    times.sort_unstable();
+    actual.sort_unstable();
+    let expected = expected
+        .into_iter()
+        .map(|time| (time, 1.0f64.to_bits()))
+        .collect::<Vec<_>>();
     assert_eq!(
-        expected, times,
-        "every row the row table answers is in the frame, none twice"
+        expected, actual,
+        "all rows and values are emitted once after EOF"
     );
 }
 

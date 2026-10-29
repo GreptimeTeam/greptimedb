@@ -157,6 +157,8 @@ use datatypes::series::samples::DenseSamplesRef;
 pub enum SeriesRouting {
     /// Hash the canonical label set.
     CanonicalLabels,
+    /// Hash the exact PromQL matching key, so both sides of a vector operation meet.
+    Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
     RawPrimaryKey,
 }
@@ -274,7 +276,7 @@ impl SeriesRepartitionExec {
                     "SeriesRepartition evaluated frames cannot use RawPrimaryKey routing".into(),
                 ));
             }
-            (FrameContent::Raw, SeriesRouting::CanonicalLabels) => {
+            (FrameContent::Raw, SeriesRouting::CanonicalLabels | SeriesRouting::Matching(_)) => {
                 return Err(DataFusionError::Plan(
                     "SeriesRepartition raw frames require RawPrimaryKey routing".into(),
                 ));
@@ -2119,6 +2121,9 @@ impl Routing {
         let mut hasher = XxHash64::with_seed(self.seed);
         match &self.policy {
             SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
+            SeriesRouting::Matching(policy) => {
+                crate::vector_match::group_key(metric, policy).hash(&mut hasher)
+            }
             SeriesRouting::RawPrimaryKey => unreachable!("raw routing uses output_key"),
         }
         (hasher.finish() % self.outputs as u64) as usize

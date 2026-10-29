@@ -74,6 +74,7 @@ use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
 use crate::optimizer::remove_duplicate::RemoveDuplicate;
 use crate::optimizer::scan_hint::ScanHintRule;
+use crate::optimizer::series_frame_output::SeriesFrameOutput;
 use crate::optimizer::string_normalization::StringNormalizationRule;
 use crate::optimizer::transcribe_atat::TranscribeAtatRule;
 use crate::optimizer::type_conversion::TypeConversionRule;
@@ -300,6 +301,9 @@ impl QueryEngineState {
             &mut physical_optimizer.rules,
             SanityCheckPlan {}.name(),
         );
+        // A series-frame root leaves as one output stream: the client reads one, and the frame's
+        // finality is per identity rather than per partition.
+        physical_optimizer.rules.push(Arc::new(SeriesFrameOutput));
         physical_optimizer.rules.push(Arc::new(SanityCheckPlan {}));
 
         let session_state = SessionStateBuilder::new()
