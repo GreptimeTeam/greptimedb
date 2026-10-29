@@ -3390,6 +3390,7 @@ pub async fn test_config_api(store_type: StorageType) {
     let storage = if store_type != StorageType::File {
         format!(
             r#"[storage]
+probe_on_startup = false
 type = "{}"
 providers = []
 
@@ -3404,6 +3405,7 @@ skip_ssl_validation = false"#,
     } else {
         format!(
             r#"[storage]
+probe_on_startup = false
 type = "{}"
 providers = []"#,
             store_type
@@ -3573,6 +3575,7 @@ experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
+experimental_compaction_output_parallelism = 1
 auto_flush_interval = "10m"
 default_region_write_buffer_size = "0KiB"
 enable_write_cache = false

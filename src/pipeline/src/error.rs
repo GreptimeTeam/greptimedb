@@ -619,6 +619,13 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+    #[snafu(display("Failed to parse logfmt input: {input}, reason: {reason}"))]
+    LogfmtParse {
+        input: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
     #[snafu(display("Failed to parse json"))]
     JsonParse {
         #[snafu(source)]
@@ -1010,6 +1017,7 @@ impl ErrorExt for Error {
             | UnsupportedIndexType { .. }
             | IdentifyPipelineColumnTypeMismatch { .. }
             | JsonParse { .. }
+            | LogfmtParse { .. }
             | JsonPathParse { .. }
             | JsonPathParseResultIndex { .. }
             | FieldRequiredForDispatcher

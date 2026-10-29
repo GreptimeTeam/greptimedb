@@ -1013,6 +1013,14 @@ impl FlatSource {
         self.inner.next_batch().await
     }
 
+    /// Converts the source into a stream of its batches.
+    pub(crate) fn into_stream(self) -> BoxedRecordBatchStream {
+        match self.inner {
+            FlatSourceInner::Iter(iter) => Box::pin(futures::stream::iter(iter)),
+            FlatSourceInner::Stream(stream) => stream,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn take_iter(self) -> BoxedRecordBatchIterator {
         match self.inner {

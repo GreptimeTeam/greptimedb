@@ -1,0 +1,52 @@
+name: GitHub Script Tests
+description: Validate CI scripts before starting expensive jobs
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - name: Run Node GitHub script tests
+      shell: bash
+      run: node --test .github/scripts/tests/ci-cache-policy.test.cjs .github/scripts/query-regression-comment.test.cjs .github/scripts/heavy-ci-policy.test.cjs .github/scripts/tests/nightly-merge.test.cjs
+    - name: Setup uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+    - name: Run check-version script tests
+      shell: bash
+      run: uv run --no-project python .github/scripts/check-version-test.py
+    - name: Run release Linux architecture tests
+      shell: bash
+      run: python3 .github/scripts/release-linux-architectures-test.py
+    - name: Run previous-release-tag script tests
+      shell: bash
+      run: python3 .github/scripts/previous-release-tag-test.py
+    - name: Run enterprise license check tests
+      shell: bash
+      run: python3 scripts/check-enterprise-license-test.py
+    - name: Run fuzz orchestration script tests
+      shell: bash
+      run: .github/scripts/run-fuzz-targets-test.sh
+    - name: Run CI comment-command tests
+      shell: bash
+      run: python3 .github/scripts/tests/test_ci_slash.py
+    - name: Run CI scope gate tests
+      shell: bash
+      run: python3 .github/ci/tests/test_ci_scope.py
+    - name: Run metric snapshot benchmark tests
+      shell: bash
+      run: python3 -m unittest discover -s .github/scripts/tests -p 'test_metric_snapshot*.py'
+    - name: Run query-regression Python tooling tests
+      shell: bash
+      run: |
+        python3 tests/perf/test_query_regression_runner_compaction_toctou.py
+        python3 tests/perf/test_query_regression_runner_otlp_trace_load.py
+        python3 tests/perf/test_query_regression_summary_otlp.py
+        python3 tests/perf/test_query_regression_case_selection.py
+        python3 tests/perf/test_query_regression_nightly_refs.py
+        python3 tests/perf/test_query_regression_slash.py
+        python3 tests/perf/test_aliyun_ecs_runner_scripts.py
+        python3 tests/perf/test_ci_runner_scripts.py
+        python3 tests/perf/test_agent_observability_summary.py
+        python3 tests/perf/test_tracesbench_summary.py

@@ -95,6 +95,11 @@ pub struct RegionOptions {
     /// Compaction options.
     pub compaction: CompactionOptions,
     pub compaction_override: bool,
+    /// Per-output decode and encode parallelism. Falls back to the engine config
+    /// when unset; 1 disables parallelism without disabling the merge pipeline.
+    /// Independent of TWCS options and their database-level inheritance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_output_parallelism: Option<usize>,
     /// Custom storage. Uses default storage if it is `None`.
     pub storage: Option<String>,
     /// If append mode is enabled, the region keeps duplicate rows.
@@ -115,7 +120,7 @@ pub struct RegionOptions {
     /// Max number of rows in a parquet row group. Uses [DEFAULT_ROW_GROUP_SIZE] if `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_row_group_row_count: Option<usize>,
-    /// Internal primary key encoding override used by metric-engine.
+    /// Primary key encoding. Sparse regions require reserved table ID and TSID columns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub primary_key_encoding: Option<PrimaryKeyEncoding>,
     /// Per-region write buffer size. A positive size flushes/stalls this region
@@ -159,6 +164,14 @@ impl RegionOptions {
                 auto_flush_interval > Duration::ZERO,
                 InvalidRegionOptionsSnafu {
                     reason: "auto_flush_interval must be greater than 0",
+                }
+            );
+        }
+        if let Some(parallelism) = self.compaction_output_parallelism {
+            ensure!(
+                parallelism > 0,
+                InvalidRegionOptionsSnafu {
+                    reason: "compaction.experimental_output_parallelism must be greater than 0",
                 }
             );
         }
@@ -243,6 +256,11 @@ impl RegionOptions {
         self.auto_flush_interval.unwrap_or(default)
     }
 
+    /// Returns the per-output compaction parallelism, falling back to the engine default.
+    pub fn compaction_output_parallelism_or(&self, default: usize) -> usize {
+        self.compaction_output_parallelism.unwrap_or(default)
+    }
+
     /// Returns the `primary_key_encoding` if it is set, otherwise returns the default [`PrimaryKeyEncoding`].
     pub fn primary_key_encoding(&self) -> PrimaryKeyEncoding {
         self.primary_key_encoding.unwrap_or_default()
@@ -295,6 +313,19 @@ impl RegionOptions {
             None
         };
 
+        let primary_key_encoding = options_map
+            .get(PRIMARY_KEY_ENCODING)
+            .or_else(|| options_map.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
+            .map(|v| match v.to_lowercase().as_str() {
+                "dense" => Ok(PrimaryKeyEncoding::Dense),
+                "sparse" => Ok(PrimaryKeyEncoding::Sparse),
+                _ => Err(InvalidRegionOptionsSnafu {
+                    reason: format!("Invalid primary key encoding: {v}"),
+                }
+                .build()),
+            })
+            .transpose()?;
+
         // The partition tree memtable has been removed. Besides falling back to
         // the default memtable, also override the SST format to flat.
         let mut sst_format = options.sst_format;
@@ -309,7 +340,9 @@ impl RegionOptions {
 
         // Bulk memtable produces flat-encoded ranges and flushes them through
         // `put_sst()`, so the SST format must be flat to match.
-        if matches!(memtable, Some(MemtableOptions::Bulk(_))) {
+        if matches!(memtable, Some(MemtableOptions::Bulk(_)))
+            || primary_key_encoding == Some(PrimaryKeyEncoding::Sparse)
+        {
             if let Some(format) = sst_format
                 && format != FormatType::Flat
             {
@@ -328,24 +361,13 @@ impl RegionOptions {
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
             .unwrap_or(false);
         let compaction_override = has_compaction_type || compaction_override_flag;
-        let primary_key_encoding = options_map
-            .get(PRIMARY_KEY_ENCODING)
-            .or_else(|| options_map.get(MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING))
-            .map(|v| match v.to_lowercase().as_str() {
-                "dense" => Ok(PrimaryKeyEncoding::Dense),
-                "sparse" => Ok(PrimaryKeyEncoding::Sparse),
-                _ => Err(InvalidRegionOptionsSnafu {
-                    reason: format!("Invalid primary key encoding: {v}"),
-                }
-                .build()),
-            })
-            .transpose()?;
 
         let opts = RegionOptions {
             ttl: options.ttl,
             auto_flush_interval: options.auto_flush_interval,
             compaction,
             compaction_override,
+            compaction_output_parallelism: options.compaction_output_parallelism,
             storage: options.storage,
             append_mode: options.append_mode,
             skip_wal: options.skip_wal,
@@ -495,6 +517,9 @@ struct RegionOptionsWithoutEnum {
     ttl: Option<TimeToLive>,
     #[serde(with = "humantime_serde")]
     auto_flush_interval: Option<Duration>,
+    #[serde(rename = "compaction.experimental_output_parallelism")]
+    #[serde_as(as = "NoneAsEmptyString")]
+    compaction_output_parallelism: Option<usize>,
     storage: Option<String>,
     #[serde_as(as = "DisplayFromStr")]
     append_mode: bool,
@@ -520,6 +545,7 @@ impl Default for RegionOptionsWithoutEnum {
             write_buffer_size: options.write_buffer_size,
             ttl: options.ttl,
             auto_flush_interval: options.auto_flush_interval,
+            compaction_output_parallelism: options.compaction_output_parallelism,
             storage: options.storage,
             append_mode: options.append_mode,
             skip_wal: options.skip_wal,
@@ -1007,6 +1033,19 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_forces_flat_sst() {
+        for format in [None, Some("primary_key"), Some("flat")] {
+            let mut map = make_map(&[("primary_key_encoding", "sparse")]);
+            if let Some(format) = format {
+                map.insert("sst_format".into(), format.into());
+            }
+            let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
+    }
+
+    #[test]
     fn test_primary_key_encoding() {
         // New top-level key.
         let map = make_map(&[("primary_key_encoding", "sparse")]);
@@ -1146,6 +1185,7 @@ mod tests {
                 fallback_to_local: true,
             }),
             compaction_override: true,
+            compaction_output_parallelism: None,
             storage: Some("S3".to_string()),
             append_mode: false,
             skip_wal: false,
@@ -1226,6 +1266,7 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
+            compaction_output_parallelism: Some(4),
             preserve_row_sequence: true,
             float_field_encoding: FloatFieldEncoding::default(),
         };
@@ -1238,6 +1279,8 @@ mod tests {
         let old_region_options_json_str = r#"{"ttl":null}"#;
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
+        assert_eq!(None, got.compaction_output_parallelism);
+        assert_eq!(4, got.compaction_output_parallelism_or(4));
         assert!(!got.preserve_row_sequence);
         assert_eq!(FloatFieldEncoding::Default, got.float_field_encoding);
         let CompactionOptions::Twcs(twcs) = got.compaction;
@@ -1305,10 +1348,48 @@ mod tests {
             max_row_group_row_count: None,
             primary_key_encoding: None,
             write_buffer_size: None,
+            compaction_output_parallelism: None,
             preserve_row_sequence: false,
             float_field_encoding: FloatFieldEncoding::default(),
         };
         assert_eq!(options, got);
+    }
+
+    #[test]
+    fn test_compaction_output_parallelism_preserves_strategy_inheritance() {
+        for parallelism in [None, Some(1), Some(4)] {
+            let mut map = make_map(&[]);
+            if let Some(parallelism) = parallelism {
+                map.insert(
+                    "compaction.experimental_output_parallelism".to_string(),
+                    parallelism.to_string(),
+                );
+            }
+            let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+            assert_eq!(parallelism, options.compaction_output_parallelism);
+            assert_eq!(
+                parallelism.unwrap_or(8),
+                options.compaction_output_parallelism_or(8)
+            );
+            assert!(!options.compaction_override);
+
+            map.insert("compaction.type".to_string(), "twcs".to_string());
+            map.insert("compaction.twcs.time_window".to_string(), "2h".to_string());
+            let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+            assert_eq!(parallelism, options.compaction_output_parallelism);
+            assert_eq!(
+                Some(Duration::from_secs(7200)),
+                options.compaction.time_window()
+            );
+        }
+    }
+
+    #[test]
+    fn test_invalid_compaction_output_parallelism() {
+        for parallelism in ["0", "-1", "1.5", "invalid", "18446744073709551616"] {
+            let map = make_map(&[("compaction.experimental_output_parallelism", parallelism)]);
+            assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
+        }
     }
 
     #[test]

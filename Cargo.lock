@@ -2344,6 +2344,9 @@ dependencies = [
 name = "common-cache"
 version = "1.4.0-alpha.0"
 dependencies = [
+ "async-trait",
+ "bytes",
+ "common-base",
  "futures",
  "moka",
  "prometheus 0.14.0",
@@ -4563,6 +4566,7 @@ dependencies = [
  "prometheus 0.14.0",
  "prost 0.14.1",
  "query",
+ "rand 0.9.4",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

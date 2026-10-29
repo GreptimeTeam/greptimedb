@@ -82,7 +82,7 @@ function warmupJob(workflow, job, {
   const github = { repository: 'GreptimeTeam/greptimedb', event_name: event, ref,
     event: { pull_request: { draft } }, run_attempt: 1 };
   const needs = { scope: { outputs }, ...Object.fromEntries(
-    ['build', 'prepare-fuzz-targets', 'build-greptime-ci'].map(name =>
+    ['github-script-tests', 'build', 'prepare-fuzz-targets', 'build-greptime-ci'].map(name =>
       [name, { result: name === failed ? 'failure' : 'success' }])) };
   const evaluate = expression => new Function('github', 'inputs', 'needs', 'cancelled',
     'return (' + expression.replace(/^\$\{\{\s*|\s*\}\}$/g, '') + ');')(
@@ -142,12 +142,13 @@ test('warmup keeps scope exclusions, dependency failures and cancellation gates'
   const gates = ['any_fuzz', 'build_ci_needed', 'fuzz_standalone',
     'fuzz_unstable', 'fuzz_distributed', 'fuzz_chaos'];
   for (const [index, job] of fuzzJobs.entries()) {
+    assert.equal(warmupJob('integration', job, { failed: 'github-script-tests' }).admitted, false, job);
     assert.equal(warmupJob('integration', job, { cancelled: true }).admitted, false, job);
     assert.equal(warmupJob('integration', job,
       { outputs: { [gates[index]]: 'false' } }).admitted, false, job);
   }
   for (const job of fuzzJobs.slice(2)) {
-    for (const failed of ['prepare-fuzz-targets', job === 'fuzztest' ? 'build' : 'build-greptime-ci']) {
+    for (const failed of ['github-script-tests', 'prepare-fuzz-targets', job === 'fuzztest' ? 'build' : 'build-greptime-ci']) {
       assert.equal(warmupJob('integration', job, { failed }).admitted, false, job);
     }
   }

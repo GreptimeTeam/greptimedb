@@ -578,6 +578,7 @@ pub(crate) fn create_datanode_opts(
         storage: StorageConfig {
             data_home: home_dir,
             copy_root: None,
+            probe_on_startup: false,
             providers,
             store: default_store,
         },
