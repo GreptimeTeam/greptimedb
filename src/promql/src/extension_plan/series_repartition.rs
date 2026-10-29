@@ -1269,21 +1269,23 @@ async fn read_raw_chains(
             };
             match next {
                 Some(Ok(chunk)) => {
-                    let output = *destination.get_or_insert_with(|| match &routing.policy {
-                        SeriesRouting::Matching(_) => chunk
-                            .metric
-                            .as_ref()
-                            .map_or_else(
-                                || {
-                                    Err(DataFusionError::Execution(
-                                        "a matching-routed raw chain has no labels".into(),
-                                    ))
-                                },
-                                |labels| Ok(routing.output_labels(labels)),
-                            )
-                            .unwrap_or_else(|_| routing.output_key(chunk.primary_key.as_slice())),
-                        _ => routing.output_key(chunk.primary_key.as_slice()),
-                    });
+                    let output = match destination {
+                        Some(output) => output,
+                        None => {
+                            let output = match &routing.policy {
+                                SeriesRouting::Matching(_) => {
+                                    let Some(labels) = chunk.metric.as_ref() else {
+                                        return Stop::Failed(Arc::new(DataFusionError::Execution(
+                                            "a matching-routed raw chain carries no labels".into(),
+                                        )));
+                                    };
+                                    routing.output_labels(labels)
+                                }
+                                _ => routing.output_key(chunk.primary_key.as_slice()),
+                            };
+                            *destination.insert(output)
+                        }
+                    };
                     let final_chunk = chunk.is_last;
                     if senders[output].is_closed() {
                         chain.clear();
@@ -2198,8 +2200,14 @@ impl Routing {
             SeriesRouting::Matching(policy) => {
                 crate::vector_match::group_key(metric, policy).hash(&mut hasher)
             }
-            // Raw frames hash their stored key by default; a match key hashes their labels.
-            SeriesRouting::RawPrimaryKey => {}
+            // A raw frame routed by its stored key never reaches here: its destination is the
+            // stored key itself, not a label hash. Evaluated frames never use this policy.
+            SeriesRouting::RawPrimaryKey => {
+                debug_assert!(
+                    false,
+                    "RawPrimaryKey routing hashes stored keys, not labels"
+                );
+            }
         }
         (hasher.finish() % self.outputs as u64) as usize
     }
