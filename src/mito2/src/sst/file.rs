@@ -220,7 +220,7 @@ pub struct FileMeta {
     pub max_row_group_uncompressed_size: u64,
     /// Available indexes of the file.
     pub available_indexes: IndexTypes,
-    /// Created indexes of the file for each column.
+    /// Created indexes of the file for each whole column or JSON path.
     ///
     /// This is essentially a more granular, column-level version of `available_indexes`,
     /// primarily used for manual index building in the asynchronous index construction mode.
@@ -385,7 +385,7 @@ pub enum IndexType {
     VectorIndex,
 }
 
-/// Metadata of indexes created for a specific column in an SST file.
+/// Metadata of indexes created for a whole column or JSON path in an SST file.
 ///
 /// This structure tracks which index types have been successfully created for a column.
 /// It provides more granular, column-level index information compared to the file-level
@@ -397,8 +397,11 @@ pub enum IndexType {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ColumnIndexMetadata {
-    /// The column ID this index metadata applies to.
+    /// The root column ID this index metadata applies to.
     pub column_id: ColumnId,
+    /// JSON path within the column. `None` means the whole column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<Vec<String>>,
     /// List of index types that have been successfully created for this column.
     pub created_indexes: IndexTypes,
     /// Version of the column's fulltext bloom index. `0` means not recorded: the column
@@ -468,6 +471,7 @@ impl FileMeta {
         let id_to_indexes = self
             .indexes
             .iter()
+            .filter(|index| index.path.is_none())
             .map(|index| (index.column_id, index))
             .collect::<std::collections::HashMap<_, _>>();
         let inverted_options = &index_options.inverted_index;
@@ -1169,6 +1173,7 @@ mod tests {
         );
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
         assert_eq!(file_meta, deserialized_file_meta);
+        assert!(deserialized_file_meta.indexes[0].path.is_none());
     }
 
     #[test]
@@ -1372,6 +1377,28 @@ mod tests {
     }
 
     #[test]
+    fn test_file_meta_column_index_path_serde() {
+        let mut file_meta = create_file_meta(FileId::random(), 0);
+        file_meta.indexes.push(ColumnIndexMetadata {
+            column_id: 0,
+            path: Some(vec!["service".into(), "name".into()]),
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
+        });
+
+        let encoded = serde_json::to_value(&file_meta).unwrap();
+        assert!(encoded["indexes"][0].get("path").is_none());
+        assert_eq!(
+            encoded["indexes"][1]["path"],
+            serde_json::json!(["service", "name"])
+        );
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(encoded).unwrap(),
+            file_meta
+        );
+    }
+
+    #[test]
     fn test_file_meta_preserve_row_sequence_serde() {
         let file_meta = FileMeta {
             preserve_row_sequence: true,
@@ -1520,6 +1547,21 @@ mod tests {
         let mut index_options = IndexOptions::default();
         index_options.inverted_index.segment_row_count = 0;
         assert!(file_meta.is_index_consistent_with_region(&region_meta, &index_options));
+
+        // A path index does not satisfy the whole-column index requirement.
+        file_meta.indexes = vec![ColumnIndexMetadata {
+            column_id: 1,
+            path: Some(vec!["nested".into()]),
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
+        }];
+        assert!(!file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
+        file_meta.indexes.push(ColumnIndexMetadata {
+            column_id: 1,
+            created_indexes: SmallVec::from_iter([IndexType::InvertedIndex]),
+            ..Default::default()
+        });
+        assert!(file_meta.is_index_consistent_with_region(&region_meta, &IndexOptions::default()));
     }
 
     #[test]
@@ -1544,6 +1586,7 @@ mod tests {
         let file_meta = |fulltext_bloom_version| FileMeta {
             indexes: vec![ColumnIndexMetadata {
                 column_id: 1,
+                path: None,
                 created_indexes: SmallVec::from_iter([IndexType::FulltextIndex]),
                 fulltext_bloom_version,
             }],

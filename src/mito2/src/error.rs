@@ -804,6 +804,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Cannot preserve existing JSON path indexes: {reason}"))]
+    PreserveJsonIndex {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to convert value"))]
     ConvertValue {
         source: datatypes::error::Error,
@@ -1590,7 +1597,7 @@ impl ErrorExt for Error {
                 StatusCode::StorageUnavailable
             }
             FlushRegion { source, .. } | BuildIndexAsync { source, .. } => source.status_code(),
-            IndexBuildIncomplete { .. } => StatusCode::IllegalState,
+            IndexBuildIncomplete { .. } | PreserveJsonIndex { .. } => StatusCode::IllegalState,
             RegionDropped { .. } => StatusCode::Cancelled,
             RegionClosed { .. } => StatusCode::Cancelled,
             StaleCompactionExecution { .. } => StatusCode::Cancelled,

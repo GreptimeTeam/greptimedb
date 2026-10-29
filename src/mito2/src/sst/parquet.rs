@@ -264,6 +264,7 @@ mod tests {
     use datatypes::schema::{
         CompressionOptions, FulltextAnalyzer, FulltextBackend, FulltextOptions,
     };
+    use index::target::IndexTarget;
     use object_store::ObjectStore;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
@@ -1557,11 +1558,17 @@ mod tests {
 
         assert!(info.index_metadata.inverted_index.index_size > 0);
         assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+        assert_eq!(
+            info.index_metadata.inverted_index.targets,
+            vec![IndexTarget::ColumnId(0)]
+        );
 
         assert!(info.index_metadata.bloom_filter.index_size > 0);
         assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_eq!(
+            info.index_metadata.bloom_filter.targets,
+            vec![IndexTarget::ColumnId(1)]
+        );
 
         assert_eq!(
             (
@@ -1579,7 +1586,7 @@ mod tests {
                 level: 0,
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
+                available_indexes: info.index_metadata.build_available_index_types(),
                 indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
@@ -2120,7 +2127,7 @@ mod tests {
                 level: 0,
                 file_size: info.file_size,
                 max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-                available_indexes: info.index_metadata.build_available_indexes(),
+                available_indexes: info.index_metadata.build_available_index_types(),
                 indexes: info.index_metadata.build_indexes(),
                 index_file_size: info.index_metadata.file_size,
                 index_version: 0,
@@ -2220,11 +2227,17 @@ mod tests {
 
         assert!(info.index_metadata.inverted_index.index_size > 0);
         assert_eq!(info.index_metadata.inverted_index.row_count, 200);
-        assert_eq!(info.index_metadata.inverted_index.columns, vec![0]);
+        assert_eq!(
+            info.index_metadata.inverted_index.targets,
+            vec![IndexTarget::ColumnId(0)]
+        );
 
         assert!(info.index_metadata.bloom_filter.index_size > 0);
         assert_eq!(info.index_metadata.bloom_filter.row_count, 200);
-        assert_eq!(info.index_metadata.bloom_filter.columns, vec![1]);
+        assert_eq!(
+            info.index_metadata.bloom_filter.targets,
+            vec![IndexTarget::ColumnId(1)]
+        );
 
         assert_eq!(
             (
@@ -3172,8 +3185,11 @@ mod tests {
         assert!(info.index_metadata.fulltext_index.index_size > 0);
         assert_eq!(info.index_metadata.fulltext_index.row_count, 200);
         // text_bloom (column_id 1) and text_tantivy (column_id 2)
-        info.index_metadata.fulltext_index.columns.sort_unstable();
-        assert_eq!(info.index_metadata.fulltext_index.columns, vec![1, 2]);
+        info.index_metadata.fulltext_index.targets.sort_unstable();
+        assert_eq!(
+            info.index_metadata.fulltext_index.targets,
+            vec![IndexTarget::ColumnId(1), IndexTarget::ColumnId(2)]
+        );
 
         assert_eq!(
             (

@@ -13,8 +13,8 @@
 // limitations under the License.
 
 use common_telemetry::{debug, warn};
+use index::target::IndexTarget;
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
-use store_api::storage::ColumnId;
 
 use crate::sst::file::{RegionFileId, RegionIndexId};
 use crate::sst::index::puffin_manager::SstPuffinWriter;
@@ -126,14 +126,14 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.indexed_column_ids().collect();
+        let targets = indexer.indexed_targets().cloned().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_inverted_index_output(
                     &mut index_output.inverted_index,
                     row_count,
                     byte_count,
-                    column_ids,
+                    targets,
                 );
                 return true;
             }
@@ -164,7 +164,7 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
+        let targets = indexer.column_ids().map(IndexTarget::ColumnId).collect();
         index_output.fulltext_bloom_columns = indexer.bloom_column_ids().collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
@@ -172,7 +172,7 @@ impl Indexer {
                     &mut index_output.fulltext_index,
                     row_count,
                     byte_count,
-                    column_ids,
+                    targets,
                 );
                 return true;
             }
@@ -203,14 +203,14 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
+        let targets = indexer.column_ids().map(IndexTarget::ColumnId).collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_bloom_filter_output(
                     &mut index_output.bloom_filter,
                     row_count,
                     byte_count,
-                    column_ids,
+                    targets,
                 );
                 return true;
             }
@@ -237,16 +237,16 @@ impl Indexer {
         output: &mut InvertedIndexOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
+        targets: Vec<IndexTarget>,
     ) {
         debug!(
-            "Inverted index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
+            "Inverted index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, targets: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, targets
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = column_ids;
+        output.targets = targets;
     }
 
     fn fill_fulltext_index_output(
@@ -254,16 +254,16 @@ impl Indexer {
         output: &mut FulltextIndexOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
+        targets: Vec<IndexTarget>,
     ) {
         debug!(
-            "Full-text index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
+            "Full-text index created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, targets: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, targets
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = column_ids;
+        output.targets = targets;
     }
 
     fn fill_bloom_filter_output(
@@ -271,16 +271,16 @@ impl Indexer {
         output: &mut BloomFilterOutput,
         row_count: RowCount,
         byte_count: ByteCount,
-        column_ids: Vec<ColumnId>,
+        targets: Vec<IndexTarget>,
     ) {
         debug!(
-            "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, columns: {:?}",
-            self.region_id, self.file_id, byte_count, row_count, column_ids
+            "Bloom filter created, region_id: {}, file_id: {}, written_bytes: {}, written_rows: {}, targets: {:?}",
+            self.region_id, self.file_id, byte_count, row_count, targets
         );
 
         output.index_size = byte_count;
         output.row_count = row_count;
-        output.columns = column_ids;
+        output.targets = targets;
     }
 
     pub(crate) async fn do_prune_intm_sst_dir(&mut self) {
