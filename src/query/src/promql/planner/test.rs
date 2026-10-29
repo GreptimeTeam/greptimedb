@@ -35,6 +35,7 @@ use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
+use datafusion::common::config::ConfigOptions;
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
@@ -43,6 +44,7 @@ use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner};
+use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::series::frame::{
@@ -56,7 +58,8 @@ use promql::extension_plan::{
     SeriesRepartitionExec,
 };
 use promql::native::plan::{
-    NativeExpr, NativeNode, needs_single_execution, output_has_metric_name,
+    AggregateKind, AggregateStage, NativeExpr, NativeNode, needs_single_execution,
+    output_has_metric_name,
 };
 use promql_parser::label::Labels;
 use promql_parser::parser;
@@ -69,6 +72,7 @@ use table::test_util::{EmptyTable, MemTable as GreptimeMemTable};
 
 use super::*;
 use crate::QueryEngineContext;
+use crate::dist_plan::{DistPlannerAnalyzer, MergeScanLogicalPlan};
 use crate::options::QueryOptions;
 use crate::parser::QueryLanguageParser;
 use crate::query_engine::DefaultSerializer;
@@ -2489,10 +2493,9 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// More than one selector over metric-engine logical tables is not one multi-input node, though
-/// one selector over the same tables is native.
+/// Metric-engine selectors may use the native route only for the bounded dual-fold match.
 #[tokio::test]
-async fn native_fused_multiple_metric_engine_selectors_fall_back() {
+async fn native_fused_metric_engine_dual_aggregate_match_is_bounded() {
     let tables = [
         (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
         (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
@@ -2501,9 +2504,201 @@ async fn native_fused_multiple_metric_engine_selectors_fall_back() {
     let single =
         build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
     assert!(find_fused_series(&single).is_some(), "{single}");
+    let positive = build_native_fused_plan_with_provider(
+        "sum by(tag_0)(some_metric) / sum by(tag_0)(other_metric)",
+        true,
+        provider().await,
+    )
+    .await;
+    let distributed = DistPlannerAnalyzer::new(true)
+        .analyze(positive.clone(), &ConfigOptions::default())
+        .expect("metric dual-fold plan distributes");
+    fn assert_remote_metric_source(plan: &LogicalPlan, expected_ids: &[&str]) -> usize {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(merge) = node.as_any().downcast_ref::<MergeScanLogicalPlan>()
+        {
+            let LogicalPlan::Extension(remote) = merge.input() else {
+                panic!("merge scan input is not RawSeriesSource: {}", merge.input());
+            };
+            let source = remote
+                .node
+                .as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .expect("merge scan carries a metric raw source");
+            let [LogicalPlan::TableScan(scan)] = remote.node.inputs()[..] else {
+                panic!("raw source retains table scan: {}", merge.input());
+            };
+            assert!(
+                expected_ids.iter().any(|id| {
+                    scan.filters
+                        .iter()
+                        .any(|filter| format!("{filter:?}").contains(id))
+                }),
+                "{}: {scan:?}",
+                source.metric_name()
+            );
+            assert_eq!(vec!["field_0"], source.fields());
+            assert_eq!(
+                merge.schema(),
+                source.schema(),
+                "region input stays the raw frame"
+            );
+            let frame = raw_series_frame_schema(
+                &SeriesSchema {
+                    fields: Arc::from([FieldSpec {
+                        name: "field_0".into(),
+                    }]),
+                    eval_grid: None,
+                },
+                FrameLabelMode::Explicit,
+            )
+            .expect("raw source frame schema");
+            assert_eq!(
+                merge
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.name())
+                    .collect::<Vec<_>>(),
+                frame
+                    .fields()
+                    .iter()
+                    .map(|field| field.name())
+                    .collect::<Vec<_>>(),
+                "MergeScan exposes the raw frame schema, not ordinary row output"
+            );
+            return 1;
+        }
+        plan.inputs()
+            .into_iter()
+            .map(|input| assert_remote_metric_source(input, expected_ids))
+            .sum()
+    }
+    assert_eq!(
+        2,
+        assert_remote_metric_source(&distributed, &["1024", "1025"]),
+        "exactly two metric raw sources cross the MergeScan boundary"
+    );
+    let producers = fused_series_nodes(&positive);
+    assert_eq!(3, producers.len(), "{positive}");
+    let mut metric_ids = std::collections::HashMap::new();
+    fn only_input_source(node: &NativeNode) -> Option<usize> {
+        match &node.expr {
+            NativeExpr::Input(input) => Some(input.source_index),
+            NativeExpr::Scalar(_) => None,
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => only_input_source(input),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => only_input_source(left).or_else(|| only_input_source(right)),
+        }
+    }
+    for producer in producers
+        .iter()
+        .filter(|node| node.binding().metric_name.is_some())
+    {
+        let metric = producer.binding().metric_name.as_deref().unwrap();
+        let [LogicalPlan::Extension(Extension { node })] = producer.inputs()[..] else {
+            panic!("producer must retain its raw-series source: {producer:?}");
+        };
+        let source = node
+            .as_any()
+            .downcast_ref::<RawSeriesSource>()
+            .expect("metric producer wraps its physical scan in RawSeriesSource");
+        let [LogicalPlan::TableScan(scan)] = source.inputs()[..] else {
+            panic!("raw-series source retains the producer scan: {source:?}");
+        };
+        assert_eq!("phy", scan.table_name.table());
+        assert_eq!(vec!["tag_0"], producer.binding().tags);
+        assert!(matches!(
+            &producer.tree().root().expr,
+            NativeExpr::Aggregate { .. }
+        ));
+        assert_eq!(Some(0), only_input_source(producer.tree().root()));
+        let filter = scan
+            .filters
+            .iter()
+            .map(|filter| format!("{filter:?}"))
+            .find(|filter| filter.contains(DATA_SCHEMA_TABLE_ID_COLUMN_NAME))
+            .expect("producer retains logical table-id predicate");
+        metric_ids.insert(metric.to_string(), filter);
+    }
+    assert_eq!(2, metric_ids.len());
+    let avg_plan = build_native_fused_plan_with_provider(
+        "avg by(tag_0)(some_metric) / avg by(tag_0)(other_metric)",
+        true,
+        provider().await,
+    )
+    .await;
+    let (outer, avg_producers) = split_match(&avg_plan);
+    assert!(matches!(
+        &outer.tree().root().expr,
+        NativeExpr::Binary { left, right, .. }
+            if matches!(left.expr, NativeExpr::Input(ref input) if input.source_index == 0)
+                && matches!(right.expr, NativeExpr::Input(ref input) if input.source_index == 1)
+    ));
+    for producer in avg_producers {
+        assert!(matches!(
+            &producer.tree().root().expr,
+            NativeExpr::Aggregate { op, .. }
+                if op.kind == AggregateKind::Avg && op.stage == AggregateStage::Complete
+        ));
+        assert_eq!(Some(0), only_input_source(producer.tree().root()));
+    }
+    let avg_physical = plan_split_match(
+        &build_query_engine_state_with_parallelism(4),
+        outer,
+        [
+            (
+                avg_producers[0],
+                metric_frames(
+                    &tree_input_schema(avg_producers[0]),
+                    "some_metric",
+                    &[("a", 1.0)],
+                ),
+            ),
+            (
+                avg_producers[1],
+                metric_frames(
+                    &tree_input_schema(avg_producers[1]),
+                    "other_metric",
+                    &[("a", 1.0)],
+                ),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!("FusedSeriesExec", avg_physical.name());
+    assert!(
+        avg_physical
+            .children()
+            .iter()
+            .all(|child| child.downcast_ref::<SeriesRepartitionExec>().is_some()),
+        "{avg_physical:?}"
+    );
+    for (metric, id) in [("some_metric", "1024"), ("other_metric", "1025")] {
+        assert!(
+            metric_ids[metric].contains(id),
+            "{metric} must retain table id {id}: {:?}",
+            metric_ids[metric]
+        );
+    }
     for query in [
         "some_metric / other_metric",
         "some_metric + some_metric",
+        "sum by(tag_0)(some_metric) / on(tag_0) sum by(tag_0)(other_metric)",
+        "sum by(tag_0)(some_metric) / ignoring(tag_0) sum by(tag_0)(other_metric)",
+        "topk(1, some_metric) / sum by(tag_0)(other_metric)",
+        "sum by(tag_0)(some_metric) / sum by(tag_0)(other_metric) + some_metric",
         "some_metric + other_metric + some_metric",
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;

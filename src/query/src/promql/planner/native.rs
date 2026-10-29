@@ -279,6 +279,7 @@ impl PromPlanner {
             )));
         }
         let original_context = self.ctx.clone();
+        let mut verified_metric_rewrites = Vec::with_capacity(selectors.len());
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
             let mut single_input_context = None;
@@ -336,6 +337,7 @@ impl PromPlanner {
                 let mut input = self.create_table_scan_plan(table_ref).await?;
                 let logical_scan = metric_scan_and_table_id(&input);
                 let has_verified_metric_rewrite = logical_scan.is_some();
+                verified_metric_rewrites.push(has_verified_metric_rewrite);
                 let scan = match logical_scan {
                     Some((mut scan, predicate)) => {
                         // Preserve logical field order and the table restriction on the direct
@@ -384,7 +386,9 @@ impl PromPlanner {
                 // recognised above, which is what makes its series the table's own.
                 if !supports_native_raw_series(&table_meta.engine)
                     || (selectors.len() > 1
-                        && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
+                        && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE)
+                        && !(table_meta.engine == METRIC_ENGINE_NAME
+                            && has_verified_metric_rewrite))
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
                     return Ok(None);
@@ -560,6 +564,11 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu);
             }
         }
+        let verified_metric_exception = selectors.len() > 1
+            && verified_metric_rewrites.iter().any(|verified| *verified)
+            && (selectors.len() != 2
+                || !verified_metric_rewrites.iter().all(|verified| *verified)
+                || !same_table_scans(prepared.iter().map(|(scan, ..)| scan)));
         let source_tags = prepared
             .iter()
             .map(|(_, _, _, _, tags)| tags.clone())
@@ -568,10 +577,18 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, metric, _, _)| metric.clone())
             .collect::<Vec<_>>();
+        // A verified logical metric rewrite permits multiple selectors only for the exact dual-fold
+        // match below. Decline all other uses before consuming the prepared scans, and before generic
+        // placement can mistake a shared physical table for one logical metric.
+        if verified_metric_exception {
+            return Ok(None);
+        }
+        let needs_raw_source = cross_table
+            || (selectors.len() > 1 && verified_metric_rewrites.iter().any(|verified| *verified));
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags)| {
-                if !cross_table {
+                if !needs_raw_source {
                     return Ok(scan);
                 }
                 let Some(metric) = metric else {
@@ -599,7 +616,7 @@ impl PromPlanner {
         // `match_is_co_partitioned` proves from the physical children. The split is offered the
         // children this route already prepared, so each producer reads its scan exactly as the
         // single-selector route would have it read.
-        if let Some(plan) = plan_dual_aggregate_match(
+        let dual_aggregate_plan = plan_dual_aggregate_match(
             prom_expr,
             &compiled.tree,
             &children,
@@ -607,8 +624,16 @@ impl PromPlanner {
             &source_tags,
             &grid,
             &time,
-        )? {
+        )?;
+        if let Some(plan) = dual_aggregate_plan {
             return Ok(Some((plan, single_input_context)));
+        }
+        // Multiple selectors on a metric-engine table are admitted above only when each scan
+        // carries the verified logical metric rewrite. That bounded exception exists solely for
+        // the split dual-aggregate shape; never let a declined split reach generic placement, whose
+        // shared physical table name does not prove that its inputs are one metric.
+        if selectors.len() > 1 && verified_metric_rewrites.iter().any(|verified| *verified) {
+            return Ok(None);
         }
         // Where the tree is placed is decided on the tree exactly as the compiler produced it, and
         // before anything is inserted into it. A merge reads across series, so a decision taken
