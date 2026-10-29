@@ -23,11 +23,13 @@ use common_telemetry::info;
 use snafu::ResultExt;
 
 use crate::error::{self, Result};
+use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::{
     Context as DrainDatanodeContext, DrainDatanodeProcedure, DrainDatanodeProcedureTask,
     PersistentContext,
 };
+use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
 
 pub type DrainDatanodeManagerRef = Arc<DrainDatanodeManager>;
 
@@ -85,6 +87,8 @@ pub struct DrainDatanodeManager {
     procedure_manager: ProcedureManagerRef,
     table_metadata_manager: TableMetadataManagerRef,
     node_scheduling_manager: NodeSchedulingManagerRef,
+    region_migration_manager: RegionMigrationManagerRef,
+    selector_ctx: SelectorContext,
     tracker: DrainDatanodeProcedureTracker,
 }
 
@@ -94,11 +98,15 @@ impl DrainDatanodeManager {
         procedure_manager: ProcedureManagerRef,
         table_metadata_manager: TableMetadataManagerRef,
         node_scheduling_manager: NodeSchedulingManagerRef,
+        region_migration_manager: RegionMigrationManagerRef,
+        selector_ctx: SelectorContext,
     ) -> Self {
         Self {
             procedure_manager,
             table_metadata_manager,
             node_scheduling_manager,
+            region_migration_manager,
+            selector_ctx,
             tracker: DrainDatanodeProcedureTracker::default(),
         }
     }
@@ -114,6 +122,8 @@ impl DrainDatanodeManager {
         DrainDatanodeContext::new(
             self.table_metadata_manager.clone(),
             self.node_scheduling_manager.clone(),
+            self.region_migration_manager.clone(),
+            self.selector_ctx.clone(),
             persistent_ctx,
         )
     }
@@ -162,6 +172,8 @@ impl DrainDatanodeManager {
     pub(crate) fn try_start(&self) -> Result<()> {
         let table_metadata_manager = self.table_metadata_manager.clone();
         let node_scheduling_manager = self.node_scheduling_manager.clone();
+        let region_migration_manager = self.region_migration_manager.clone();
+        let selector_ctx = self.selector_ctx.clone();
         let tracker = self.tracker.clone();
         self.procedure_manager
             .register_loader(
@@ -169,10 +181,14 @@ impl DrainDatanodeManager {
                 Box::new(move |json| {
                     let table_metadata_manager = table_metadata_manager.clone();
                     let node_scheduling_manager = node_scheduling_manager.clone();
+                    let region_migration_manager = region_migration_manager.clone();
+                    let selector_ctx = selector_ctx.clone();
                     let factory = move |persistent_ctx| {
                         DrainDatanodeContext::new(
                             table_metadata_manager,
                             node_scheduling_manager,
+                            region_migration_manager,
+                            selector_ctx,
                             persistent_ctx,
                         )
                     };
@@ -183,5 +199,76 @@ impl DrainDatanodeManager {
             .context(error::RegisterProcedureLoaderSnafu {
                 type_name: DrainDatanodeProcedure::TYPE_NAME,
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedure::drain_datanode::test_util::{TestEnv, new_persistent_context};
+    use common_procedure::Procedure;
+
+    #[tokio::test]
+    async fn test_submit_procedure_rejects_same_target() {
+        let env = TestEnv::new().await;
+        let manager = env.drain_manager();
+
+        let error = manager
+            .submit_procedure(
+                common_procedure::ProcedureContext::default(),
+                DrainDatanodeProcedureTask {
+                    node_id: 1,
+                    target_node_id: Some(1),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, error::Error::InvalidArguments { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_submit_procedure_rejects_a_running_drain() {
+        let env = TestEnv::new().await;
+        let manager = env.drain_manager();
+        let task = DrainDatanodeProcedureTask {
+            node_id: 1,
+            target_node_id: Some(2),
+        };
+
+        // A drain of datanode 1 is running, for example one recovered after a restart.
+        let _guard = manager.tracker().insert_running_procedure(&task).unwrap();
+
+        let error = manager
+            .submit_procedure(common_procedure::ProcedureContext::default(), task)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, error::Error::DrainDatanodeRunning { .. }));
+        assert!(!error.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn test_drain_datanode_tracker_takes_the_place_back_on_reload() {
+        let env = TestEnv::new().await;
+        let procedure =
+            DrainDatanodeProcedure::new(env.context(new_persistent_context(Some(2))), vec![]);
+        let json = procedure.dump().unwrap();
+        let tracker = DrainDatanodeProcedureTracker::default();
+
+        // Reloading takes the place back, so a second drain of the datanode is rejected.
+        let reloaded = DrainDatanodeProcedure::from_json(&json, &tracker, |persistent_ctx| {
+            env.context(persistent_ctx)
+        })
+        .unwrap();
+        let task = DrainDatanodeProcedureTask {
+            node_id: 1,
+            target_node_id: Some(2),
+        };
+        assert!(tracker.insert_running_procedure(&task).is_none());
+
+        // Dropping the reloaded procedure releases the place.
+        drop(reloaded);
+        assert!(tracker.insert_running_procedure(&task).is_some());
     }
 }
