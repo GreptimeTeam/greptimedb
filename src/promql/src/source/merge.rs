@@ -16,6 +16,7 @@
 mod tests;
 
 use datafusion::arrow::buffer::ScalarBuffer;
+use datafusion_common::DataFusionError;
 use datatypes::error::{InvalidSeriesSnafu, Result};
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
@@ -25,6 +26,19 @@ use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema}
 pub(crate) fn merge_raw_identity(
     schema: &SeriesSchema,
     chunks: &[RawSeriesChunk],
+) -> Result<RawSeriesChunk> {
+    merge_raw_identity_charging(schema, chunks, &mut |_| Ok(()))
+}
+
+/// The same rebuild, reporting each allocation before it happens.
+///
+/// Reconstruction holds three intermediate vectors whose sizes depend on how the pieces interleave,
+/// so what it needs cannot be known up front. The caller charges `reserve` as the work grows
+/// instead of reserving a worst case it may never reach.
+pub(crate) fn merge_raw_identity_charging(
+    schema: &SeriesSchema,
+    chunks: &[RawSeriesChunk],
+    reserve: &mut dyn FnMut(usize) -> std::result::Result<(), DataFusionError>,
 ) -> Result<RawSeriesChunk> {
     let invalid = |reason: &str| {
         InvalidSeriesSnafu {
@@ -73,7 +87,13 @@ pub(crate) fn merge_raw_identity(
         }
     }
 
-    let mut rows = Vec::new();
+    let mut row_count = 0usize;
+    for chunk in chunks.iter() {
+        row_count = row_count.saturating_add(chunk.time.len());
+    }
+    reserve(row_count.saturating_mul(std::mem::size_of::<(i64, usize, usize)>()))
+        .map_err(|error| invalid(error.to_string().as_str()))?;
+    let mut rows = Vec::with_capacity(row_count);
     for (chunk_index, chunk) in chunks.iter().enumerate() {
         for row_index in 0..chunk.time.len() {
             rows.push((chunk.time.as_buffer()[row_index], chunk_index, row_index));
@@ -81,6 +101,11 @@ pub(crate) fn merge_raw_identity(
     }
     rows.sort_unstable();
 
+    reserve(
+        rows.len()
+            .saturating_mul(std::mem::size_of::<(i64, usize, usize)>()),
+    )
+    .map_err(|error| invalid(error.to_string().as_str()))?;
     let mut selected = Vec::with_capacity(rows.len());
     let mut index = 0;
     while index < rows.len() {
@@ -110,6 +135,8 @@ pub(crate) fn merge_raw_identity(
         index = end;
     }
 
+    reserve(selected.len().saturating_mul(std::mem::size_of::<i64>()))
+        .map_err(|error| invalid(error.to_string().as_str()))?;
     let mut times = Vec::with_capacity(selected.len());
     for row in &selected {
         times.push(row.0);
@@ -131,6 +158,8 @@ pub(crate) fn merge_raw_identity(
                 .fields
                 .get(field_index)
                 .ok_or_else(|| invalid("field index out of bounds"))?;
+            reserve(std::mem::size_of::<Samples>())
+                .map_err(|error| invalid(error.to_string().as_str()))?;
             parts.push(source.slice(row_index, end - start)?);
             start = end;
         }

@@ -6364,13 +6364,10 @@ async fn raw_histogram_index_arrays_are_charged() {
     );
 }
 
-/// A key-then-time frame promises its keys arrive in order, so an identity that is complete while
-/// a smaller one still waits must not be handed out first.
-///
-/// Input 0 delivers A then B and ends; input 1 delivers B and stays open. B is complete while A is
-/// not, and publishing it there would put B before A.
+/// A key-then-time frame promises its keys arrive in order, so an identity whose inputs have all
+/// contributed is published without waiting for any of them to end.
 #[tokio::test]
-async fn a_key_then_time_frame_publishes_its_keys_in_order() {
+async fn an_ordered_frame_publishes_a_key_its_inputs_have_passed() {
     let switch = Arc::new(Switch::default());
     let child = RawScripted::plan_with_ordering(
         vec![
@@ -6382,11 +6379,13 @@ async fn a_key_then_time_frame_publishes_its_keys_in_order() {
                 gate: None,
                 gate_chunks: false,
             },
+            // Contributes `a` and then stays open: `a` is complete, and nothing has been seen past
+            // `b`, so `b` waits.
             RawPartition {
                 chunks: vec![raw_chunk(
-                    "b",
-                    Some(raw_metric("b")),
-                    &[2],
+                    "a",
+                    Some(raw_metric("a")),
+                    &[3],
                     vec![Some(3.0)],
                     true,
                 )],
@@ -6401,37 +6400,86 @@ async fn a_key_then_time_frame_publishes_its_keys_in_order() {
     let context = task_context(&pool);
     let frames = plan
         .execute(0, Arc::clone(&context))
-        .expect("partition 0 exists");
-    // Read through the frame's own decoder, which is where a key-order violation is refused.
-    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), stream.next())
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    // A frame may split one identity's rows across chunks, so read until `a` closes.
+    let mut rows = std::collections::BTreeMap::<Vec<u8>, Vec<i64>>::new();
+    let mut closed = std::collections::HashSet::new();
+    while !closed.contains(b"a".as_slice()) {
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
             .await
-            .is_err(),
-        "b is complete but a is not, and a key-then-time frame cannot publish b first"
-    );
-    switch.open();
-    let mut keys = Vec::new();
-    let mut times = std::collections::BTreeMap::<Vec<u8>, Vec<i64>>::new();
-    while let Some(next) = stream.next().await {
-        let chunk = next.expect("the ordered identity arrives");
-        keys.push(chunk.primary_key.to_vec());
-        times
-            .entry(chunk.primary_key.to_vec())
+            .expect("`a` publishes without EOF")
+            .expect("`a` arrives")
+            .expect("valid frame");
+        rows.entry(chunk.primary_key.to_vec())
             .or_default()
             .extend(chunk.time.as_buffer().iter().copied());
+        if chunk.is_last {
+            closed.insert(chunk.primary_key.to_vec());
+        }
     }
-    // The frame promises its keys arrive in order, and the decoder restates that promise: it splits
-    // one identity's rows across chunks, each closing exactly once.
-    assert!(
-        keys.windows(2).all(|pair| pair[0] <= pair[1]),
-        "keys arrive in non-decreasing order: {keys:?}"
-    );
     assert_eq!(
-        std::collections::BTreeMap::from([(b"a".to_vec(), vec![1]), (b"b".to_vec(), vec![1, 2]),]),
-        times,
-        "each identity carries all of its inputs' samples"
+        vec![1, 3],
+        rows[b"a".as_slice()],
+        "both inputs' samples are merged and `a` closed without any input ending"
     );
+    assert!(
+        !rows.contains_key(b"b".as_slice()),
+        "`b` waits: no input has been seen past it and none has ended"
+    );
+    switch.open();
+    while stream.next().await.is_some() {}
+}
+
+/// A key below one this owner has already seen from the same input cannot arrive again, so an
+/// identity waiting on it publishes without that input ending.
+#[tokio::test]
+async fn an_ordered_frame_waits_for_an_input_that_has_not_passed_the_key() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan_with_ordering(
+        vec![
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "a",
+                    Some(raw_metric("a")),
+                    &[1],
+                    vec![Some(1.0)],
+                    true,
+                )],
+                gate: None,
+                gate_chunks: false,
+            },
+            // Delivers `b`, which proves this input passed `a`, then stays open so neither input
+            // ends before `a` is published.
+            RawPartition {
+                chunks: vec![raw_chunk(
+                    "b",
+                    Some(raw_metric("b")),
+                    &[2],
+                    vec![Some(2.0)],
+                    true,
+                )],
+                gate: Some(Arc::clone(&switch)),
+                gate_chunks: false,
+            },
+        ],
+        SeriesOrdering::KeyThenTime,
+    );
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let context = task_context(&pool);
+    let frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+    let first = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("`a` publishes although no input ended")
+        .expect("`a` arrives")
+        .expect("valid frame");
+    assert_eq!(b"a", first.primary_key.as_slice());
+    switch.open();
+    while stream.next().await.is_some() {}
 }
 
 #[tokio::test]

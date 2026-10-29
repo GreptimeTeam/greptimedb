@@ -16,7 +16,7 @@ mod merge;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use merge::merge_raw_identity;
+pub(crate) use merge::{merge_raw_identity, merge_raw_identity_charging};
 
 use std::pin::Pin;
 use std::sync::Arc;

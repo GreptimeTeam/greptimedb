@@ -149,7 +149,7 @@ use twox_hash::XxHash64;
 
 use crate::grid_series::{label_set, merge_same_labelset};
 use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
-use crate::source::merge_raw_identity;
+use crate::source::merge_raw_identity_charging;
 use datatypes::series::samples::DenseSamplesRef;
 
 /// Selects the key used to route a series to an output partition.
@@ -1896,30 +1896,12 @@ impl RepartitionStream {
             });
             return Ok(());
         }
-        let rows = group
-            .raw_chunks
-            .iter()
-            .fold(0usize, |rows, chunk| rows.saturating_add(chunk.time.len()));
-        // Reconstruction sorts into two parallel row vectors before it builds the output, then
-        // emits up to one sample slice per surviving run per field and collects those runs into a
-        // field. Alternating contributions from several chunks can make that one slice per row per
-        // field, so the bound below covers the row vectors, the timestamps and the worst case
-        // rather than one descriptor per field. It charges one run descriptor plus the flattened
-        // field it lands in, matching what `merge_workspace_bytes` charges the evaluated merge for
-        // the same interleaving.
-        let fields = self.schema.fields.len();
-        let row = std::mem::size_of::<(i64, usize, usize)>();
-        let per_row_field = 2 * std::mem::size_of::<datatypes::series::samples::Samples>()
-            + 3 * std::mem::size_of::<usize>();
+        // Reconstruction's working set depends on how the pieces interleave, which is only known
+        // while it runs: charge each allocation as it is made rather than reserving a worst case
+        // that a well-ordered identity never approaches.
         let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
-        workspace.try_grow(
-            2usize
-                .saturating_mul(rows.saturating_mul(row))
-                .saturating_add(rows.saturating_mul(std::mem::size_of::<i64>()))
-                .saturating_add(rows.saturating_mul(fields).saturating_mul(per_row_field))
-                .saturating_add(fields.saturating_mul(per_row_field)),
-        )?;
-        let chunk = merge_raw_identity(&self.schema, &group.raw_chunks)
+        let mut reserve = |bytes: usize| workspace.try_grow(bytes);
+        let chunk = merge_raw_identity_charging(&self.schema, &group.raw_chunks, &mut reserve)
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
         self.output.push_back(ReadySeries {
             series: ReadyOutput::Raw(chunk),
@@ -1996,7 +1978,7 @@ impl Stream for RepartitionStream {
                         }),
                     None => this.groups.iter().find_map(|(key, group)| {
                         group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                                .then(|| key.clone())
+                            .then(|| key.clone())
                     }),
                 };
                 match next {
@@ -2145,8 +2127,13 @@ impl Stream for RepartitionStream {
                     if this.ordering == SeriesOrdering::KeyThenTime {
                         this.rescan = true;
                         this.resume_after = None;
-                    } else if group_ready(group, &this.eof, &this.last_key_from, this.ordering, &key)
-                        && let Err(error) = this.finish_group(&key)
+                    } else if group_ready(
+                        group,
+                        &this.eof,
+                        &this.last_key_from,
+                        this.ordering,
+                        &key,
+                    ) && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));
                     }
