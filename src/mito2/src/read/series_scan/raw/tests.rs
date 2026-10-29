@@ -291,6 +291,15 @@ fn convert_with_predicate(
     schema: Arc<SeriesSchema>,
     predicate: Arc<dyn PhysicalExpr>,
 ) -> SendableRawSeriesStream {
+    convert_with_predicate_ordering(inner, schema, predicate, SeriesOrdering::Contiguous)
+}
+
+fn convert_with_predicate_ordering(
+    inner: ScanBatchStream,
+    schema: Arc<SeriesSchema>,
+    predicate: Arc<dyn PhysicalExpr>,
+    ordering: SeriesOrdering,
+) -> SendableRawSeriesStream {
     make_stream(
         inner,
         schema,
@@ -298,7 +307,7 @@ fn convert_with_predicate(
         vec![(0, ConcreteDataType::int64_datatype())],
         metrics(),
         vec![predicate],
-        SeriesOrdering::Contiguous,
+        ordering,
     )
 }
 
@@ -888,6 +897,34 @@ async fn duplicate_or_descending_cross_batch_time_is_terminal() {
 
 #[tokio::test]
 async fn coalesced_groups_evaluate_predicates_once_and_keep_the_chunk_sequence() {
+    let package_keys: Vec<Vec<u8>> = (0..2000).map(|i| format!("{i:04}").into_bytes()).collect();
+    let packages: Vec<ScanBatch> = package_keys
+        .iter()
+        .map(|key| {
+            package(vec![dictionary_batch(
+                &[key, key],
+                &[1, 2],
+                &[Some(1), Some(2)],
+            )])
+        })
+        .collect();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let chunks = collect_chunks(convert_with_predicate_ordering(
+        input(packages.into_iter().map(Ok).collect()),
+        schema(),
+        positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
+    ))
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        chunks,
+        package_keys
+            .iter()
+            .map(|key| (key.clone(), vec![1, 2], vec![Some(1.0), Some(2.0)], true))
+            .collect::<Vec<_>>()
+    );
+
     let payload: Vec<(i64, Option<i64>)> = vec![(1, Some(1)), (2, Some(2))];
     let keys: [&[u8]; 3] = [b"a", b"b", b"c"];
     let small: Vec<RecordBatch> = keys
@@ -1151,6 +1188,153 @@ async fn a_complete_package_closes_its_last_series_without_the_next_package() {
 
 /// A package end closes the last series even when the predicate drops the run that would have closed
 /// it, and an emptied package adds no chunk of its own.
+#[tokio::test]
+async fn multiple_ready_packages_close_before_pending_with_predicate() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let packages: Vec<Result<ScanBatch>> = (0..3)
+        .map(|i| {
+            let key = format!("{i}").into_bytes();
+            Ok(package(vec![dictionary_batch(
+                &[&key, &key],
+                &[1, 2],
+                &[Some(1), Some(2)],
+            )]))
+        })
+        .collect();
+    let mut output = convert_with_predicate_ordering(
+        Box::pin(PendingAfter {
+            items: packages.into_iter(),
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
+    );
+    for i in 0..3 {
+        let chunk = next_within(&mut output).await;
+        assert_eq!(chunk.primary_key.as_slice(), format!("{i}").as_bytes());
+        assert_eq!(values(&chunk), vec![Some(1.0), Some(2.0)]);
+        assert!(chunk.is_last);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_waits_for_input(&mut output).await;
+}
+
+#[tokio::test]
+async fn filtered_package_tails_do_not_close_an_incomplete_ordinary_tail() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut output = convert_with_predicate(
+        Box::pin(PendingAfter {
+            items: vec![
+                Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
+                Ok(package(vec![dictionary_batch(&[b"b"], &[1], &[Some(-1)])])),
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
+                    &[b"c"],
+                    &[1],
+                    &[Some(3)],
+                ))),
+            ]
+            .into_iter(),
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+    );
+    let first = next_within(&mut output).await;
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(first.is_last);
+    assert_waits_for_input(&mut output).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn key_then_time_filtered_tail_closes_package_but_not_later_ordinary_tail() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut output = convert_with_predicate_ordering(
+        Box::pin(PendingAfter {
+            items: vec![
+                Ok(package(vec![
+                    dictionary_batch(&[b"a"], &[1], &[Some(1)]),
+                    dictionary_batch(&[b"b"], &[1], &[Some(-1)]),
+                ])),
+                Ok(ScanBatch::RecordBatch(dictionary_batch(
+                    &[b"c"],
+                    &[1],
+                    &[Some(3)],
+                ))),
+            ]
+            .into_iter(),
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
+    );
+    let first = next_within(&mut output).await;
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(first.is_last);
+    // `c` remains pending: the ordinary RecordBatch boundary does not close it, and upstream
+    // Pending must not make the package-complete `a` chunk depend on that incomplete tail.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_waits_for_input(&mut output).await;
+}
+
+#[tokio::test]
+async fn filtered_package_tail_closes_earlier_surviving_series() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut output = convert_with_predicate_ordering(
+        Box::pin(PendingAfter {
+            items: vec![Ok(package(vec![
+                dictionary_batch(&[b"a"], &[1], &[Some(1)]),
+                dictionary_batch(&[b"b"], &[1], &[Some(-1)]),
+            ]))]
+            .into_iter(),
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
+    );
+    let chunk = next_within(&mut output).await;
+    assert_eq!(chunk.primary_key.as_slice(), b"a");
+    assert_eq!(values(&chunk), vec![Some(1.0)]);
+    assert!(chunk.is_last);
+    assert_waits_for_input(&mut output).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn filtered_flat_package_cannot_hide_descending_next_package() {
+    let mut output = convert_with_predicate_ordering(
+        input(vec![
+            Ok(package(vec![dictionary_batch(&[b"b"], &[1], &[Some(-1)])])),
+            Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
+        ]),
+        schema(),
+        positive_value_predicate(Arc::new(AtomicUsize::new(0))),
+        SeriesOrdering::KeyThenTime,
+    );
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
+}
+
+#[tokio::test]
+async fn completed_filtered_flat_key_cannot_reopen_in_ordinary_batch() {
+    let mut output = convert_with_predicate_ordering(
+        input(vec![
+            Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(-1)])])),
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[b"a"],
+                &[2],
+                &[Some(1)],
+            ))),
+        ]),
+        schema(),
+        positive_value_predicate(Arc::new(AtomicUsize::new(0))),
+        SeriesOrdering::KeyThenTime,
+    );
+    assert!(output.next().await.unwrap().is_err());
+    assert!(output.next().await.is_none());
+}
+
 #[tokio::test]
 async fn a_package_end_closes_the_series_whose_tail_run_the_predicate_dropped() {
     let calls = Arc::new(AtomicUsize::new(0));

@@ -43,7 +43,7 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use futures::stream::BoxStream;
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use snafu::Location;
 use snafu::{IntoError, ResultExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
@@ -248,6 +248,7 @@ pub(crate) fn make_stream(
         // `pending`, but the next package's first chunk must still be ordered after it, so the
         // comparisons keep their own baseline.
         let mut closed: Option<Buffer> = None;
+        let mut last_package_key: Option<Buffer> = None;
         // Records waiting for one predicate pass, and the number of rows they hold.
         let mut buffered: Vec<RecordBatch> = Vec::new();
         let mut buffered_rows = 0;
@@ -263,16 +264,24 @@ pub(crate) fn make_stream(
         // so the chunks that precede it are still yielded first.
         let mut upstream_error: Option<Error> = None;
         loop {
-            // Whether the group being filled ends a flat package, and so must close the last series
-            // in it. Only a record pushed into the group can set it.
-            let mut group_ends_package = false;
+            // The last complete package tail admitted to this predicate group, if any.
+            let mut group_last_package_key: Option<Buffer> = None;
             // Fill: pull records until one predicate pass is amortized by the group.
             while !exhausted && upstream_error.is_none() && buffered_rows < coalesce_rows {
                 let record = match held.take() {
                     Some(record) => record,
                     None => match incoming.pop_front() {
                         Some(record) => record,
-                        None => match input.next().await {
+                        None => {
+                            let next = if buffered.is_empty() {
+                                input.next().await
+                            } else {
+                                match input.next().now_or_never() {
+                                    Some(next) => next,
+                                    None => break,
+                                }
+                            };
+                            match next {
                             Some(Ok(ScanBatch::Series(SeriesBatch::Flat(flat)))) => {
                                 // A package holds every row of the series in it, so the record that
                                 // ends it closes the last of them. Empty records carry no rows and no
@@ -299,6 +308,7 @@ pub(crate) fn make_stream(
                             },
                             Some(Err(error)) => { upstream_error = Some(error); break; }
                             None => { exhausted = true; break; }
+                            }
                         },
                     },
                 };
@@ -315,13 +325,30 @@ pub(crate) fn make_stream(
                     held = Some(record);
                     break;
                 }
+                if ordering == SeriesOrdering::KeyThenTime {
+                    let first_key = primary_key_at_row(&record.batch, 0).map(Buffer::from);
+                    if let (Some(previous), Some(first)) = (last_package_key.as_ref(), first_key)
+                        && first.as_slice() <= previous.as_slice()
+                    {
+                        upstream_error = Some(InvalidRecordBatchSnafu {
+                            reason: "legacy series primary keys are not strictly increasing".to_string(),
+                        }.build());
+                        break;
+                    }
+                }
                 buffered_rows += record.batch.num_rows();
-                group_ends_package = record.ends_package;
+                if record.ends_package
+                    && let Some(key) = record.batch.num_rows().checked_sub(1)
+                        .and_then(|row| primary_key_at_row(&record.batch, row))
+                {
+                    let key = Buffer::from(key);
+                    last_package_key = Some(key.clone());
+                    group_last_package_key = Some(key);
+                }
                 buffered.push(record.batch);
-                // The flagged record is the last one of its package, so it must be the last one of
-                // its group as well: a record of the next package in the same group would have its
-                // series closed by the package end below.
-                if group_ends_package { break; }
+                if ordering == SeriesOrdering::Contiguous && record.ends_package {
+                    break;
+                }
             }
             if buffered.is_empty() { break; }
             // Take the rows out of the buffer before processing them, so an early return cannot
@@ -343,18 +370,7 @@ pub(crate) fn make_stream(
             // The concatenated arrays own their buffers, so the source records can go now instead of
             // staying alive across this round's filtering and per-chunk yields.
             drop(group);
-            // The last primary key of the package, taken before the predicates run: they may drop
-            // the run that would have closed the series, but the package still holds all of its
-            // rows and the next package must be ordered after it.
-            let package_last_key = if group_ends_package {
-                record
-                    .num_rows()
-                    .checked_sub(1)
-                    .and_then(|row| primary_key_at_row(&record, row))
-                    .map(Buffer::from)
-            } else {
-                None
-            };
+            // Completion metadata was captured before predicates, so a filtered tail still closes its package.
             for predicate in &predicates {
                 record = match filter::batch_filter(&record, predicate) {
                     Ok(record) => record,
@@ -442,13 +458,9 @@ pub(crate) fn make_stream(
                     // the split through. It is checked before `pending` so a series resuming after
                     // another one in between is caught as well.
                     //
-                    // `closed` keeps one key, which catches a repeat only until another key closes in
-                    // between. That is enough because every flat producer declares `KeyThenTime`:
-                    // the legacy distributor's ordering is `KeyThenTime`, and the prepared columnar
-                    // source passes it explicitly. Under that ordering the comparison below rejects
-                    // any earlier key outright, so a reopened key can never reach this equality test.
-                    // A `Contiguous` producer is never wired to this path; if one ever is, the
-                    // comparison must become a set of closed keys.
+                    // Legacy flat producers declare `KeyThenTime`, so a reopened key is rejected by
+                    // the ordered-key comparison below. `Contiguous` flat input uses package-local
+                    // completion, while ordinary RecordBatch boundaries carry no completion fact.
                     if let Some(key) = closed.as_ref() {
                         if key.as_slice() == current.primary_key.as_slice() {
                             yield Err(invalid("raw series continued after the package that completed it")); return;
@@ -462,29 +474,28 @@ pub(crate) fn make_stream(
                         }
                     }
                     if let Some(mut old) = pending.take() {
-                        if old.primary_key.as_slice() != current.primary_key.as_slice() { old.is_last = true; }
+                        if old.primary_key.as_slice() != current.primary_key.as_slice() {
+                            old.is_last = true;
+                        }
                         yield Ok(old);
                     }
                     pending = Some(current);
                     start = end;
                 }
             }
-            if group_ends_package {
-                // The package holds every row of the series in it, so its last series is closed
-                // here instead of waiting for the next package or the end of the input. A tail run
-                // the predicates emptied leaves whatever `pending` holds as the chunk to close; a
-                // group that produced nothing leaves nothing to close, and the end of the input
-                // then finds `pending` already `None`.
-                if let Some(mut last) = pending.take() {
+            if let Some(package_last_key) = group_last_package_key {
+                if ordering == SeriesOrdering::KeyThenTime {
+                    if pending.as_ref().is_some_and(|last| last.primary_key.as_slice() <= package_last_key.as_slice())
+                        && let Some(mut last) = pending.take()
+                    {
+                        last.is_last = true;
+                        yield Ok(last);
+                    }
+                } else if let Some(mut last) = pending.take() {
                     last.is_last = true;
-                    // A tail whose key cannot be decoded leaves this series as the baseline; it ends
-                    // no later than the tail does.
-                    closed = Some(last.primary_key.clone());
                     yield Ok(last);
                 }
-                if let Some(key) = package_last_key {
-                    closed = Some(key);
-                }
+                closed = Some(package_last_key);
             }
         }
         if let Some(error) = upstream_error { yield Err(BoxedError::new(error)); return; }

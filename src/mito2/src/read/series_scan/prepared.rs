@@ -57,7 +57,7 @@ use crate::read::BoxedRecordBatchStream;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::seq_scan::SeqScan;
-use crate::read::series_scan::{FlatSeriesBatchDivider, RawScanPreparation, SeriesBatch, raw};
+use crate::read::series_scan::{RawScanPreparation, raw};
 use crate::read::stream::ScanBatch;
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::format::{
@@ -564,19 +564,10 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
                 }));
             }
             let mut merged = SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?;
-            // The merged stream re-cuts the per-series batches by `batch_size`, which loses how far
-            // each series extends. Dividing it again restores packages that hold complete series, so
-            // the raw producer can close a series as soon as its package ends. Rows of one series
-            // are already contiguous here, so the divider only splits at series boundaries.
-            let mut divider = FlatSeriesBatchDivider::default();
             while let Some(batch) = merged.try_next().await? {
-                if batch.num_rows() == 0 { continue; }
-                if let Some(flat) = divider.push(batch) {
-                    yield ScanBatch::Series(SeriesBatch::Flat(flat));
+                if batch.num_rows() > 0 {
+                    yield ScanBatch::RecordBatch(batch);
                 }
-            }
-            if let Some(flat) = divider.finish() {
-                yield ScanBatch::Series(SeriesBatch::Flat(flat));
             }
         };
         Ok(raw::make_stream(
