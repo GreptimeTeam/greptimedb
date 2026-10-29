@@ -14,12 +14,14 @@
 
 //! Routes evaluated series chains by canonical label set across DataFusion input partitions.
 //!
-//! This node routes chains by canonical label-set hash, then waits for all producers to finish and
-//! merges exact metric-name/tag identities at each owner. This is owner-local grouping, not a claim
+//! This node routes chains by canonical label-set hash, then merges exact metric-name/tag
+//! identities at each owner after their close/EOF barriers. This is owner-local grouping, not a claim
 //! of global canonical completeness. It operates on DataFusion partitions only; arbitrary `MatchKey`
 //! and `GroupKey` routing is unsupported.
 //!
-//! Chains are transported intact to owners; they are grouped there only after successful EOF. The
+//! Chains are transported intact to owners with their input-partition ID, followed by one charged
+//! normal-EOF message per live output from each completed input. Owners group exact identities and
+//! may publish an identity as soon as every input has contributed its final chain or normal EOF. The
 //! frame is the child's own: evaluated chunks are decoded only to read routing labels, and outputs
 //! publish the child's declared layout.
 //!
@@ -42,8 +44,10 @@
 //! A consumer of these frames requires a series' identity not to change and its positions to increase
 //! strictly while open, with `is_last` closing it. An input task therefore assembles each child chain
 //! before routing it as one atomic unit. This prevents chains from interleaving during transport; it
-//! does not establish the output order or final series boundaries. After successful global EOF, each
-//! owner merges exact identities and publishes one complete series per identity.
+//! does not establish the output order or final series boundaries. For a full exact identity (metric
+//! name and every tag name/value), the input contract is that each identity closes at most once per
+//! input. Each owner therefore waits only for each distinct input's final chain or normal EOF before
+//! merging and publishing that identity.
 //!
 //! What that costs is stated rather than hidden. Nothing of a chain is handed over before the chain
 //! closes, so the first chunk of a series reaches its output later than a chunk-at-a-time design would
@@ -73,23 +77,24 @@
 //!   routing, so where one input's chain goes is not something another input learns or needs.
 //!
 //! Producer queues are unbounded: unread owners do not stall routing, but their retained chains
-//! continue to consume pool-accounted memory. Owners wait for successful EOF before publishing any
-//! data, then merge complete exact identities and recompute finality as one output per identity.
+//! continue to consume pool-accounted memory. Owners publish each exact identity after its per-input
+//! close/EOF barrier, with finality recomputed for that output series.
 //!
 //! # Memory, backpressure and end of stream
 //!
 //! Output queues are unbounded; each input task holds at most the one chain it is assembling. Every
-//! queued chain is admitted through the task context's pool and carries its charge. The pool controls
-//! admission, but queue length is not a constant-byte bound. Owners retain all routed chains until all
-//! producers finish successfully, then reserve merge workspace and merge exact identities locally;
-//! this owner-side EOF buffer is an additional retention cost. No task waits for memory admission.
+//! queued chain is admitted through the task context's pool and carries its charge. The public packed
+//! stream releases a completed cursor's charges after its batch is flushed, while retaining the
+//! current cursor's charges until the cursor is exhausted. The pool controls
+//! admission, but queue length is not a constant-byte bound. Owners retain each pending exact identity
+//! until its per-input close/EOF barrier is satisfied, then
+//! reserve merge workspace for that identity alone. This bounds merge workspace to one pending
+//! identity, while its inputs remain charged until handoff. No task waits for memory admission.
 //!
-//! An output ends only when every input partition finished and every chain routed to it was handed
-//! over; a chain that closed locally is not the end of anything. With one task per input there is no
-//! single place that sees every input finish, so the tasks count themselves down: the one
-//! that counts the last of the others off records that the read finished, and returning is what drops
-//! the last sender and closes the queues - so an output woken by the close reads the outcome instead
-//! of finding nothing there. If the child errors, the failing task records it before cancelling its peers; sender closure makes
+//! An output ends only when every input partition finished and its queue was drained; a chain that
+//! closed locally is not the end of anything. Each input sends its own EOF to each live output before
+//! recording normal completion. With one task per input the tasks count themselves down: the last
+//! records the read outcome, then sender closure lets outputs detect missing EOF or report failure. If the child errors, the failing task records it before cancelling its peers; sender closure makes
 //! every output report that recorded error instead of a clean end.
 //!
 //! A queue closing is not by itself that end: it also closes when the read is stopped - aborted, or
@@ -107,17 +112,19 @@
 //! partition can still claim its queue; the execution going away as a whole, which no later `execute`
 //! can reach, is the other point at which everything is released.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::{self, Formatter};
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll};
 
 use common_error::ext::BoxedError;
 use common_query::series_frame::{
     SendableEvaluatedSeriesStream, pack_evaluated_series, unpack_evaluated_series,
 };
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
@@ -126,7 +133,7 @@ use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{EmissionType, EvaluationType, SchedulingType};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
-    Partitioning, PlanProperties, SendableRecordBatchStream,
+    Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesLabels;
 use datatypes::series::frame::{FrameContent, SeriesFrameDeclaration};
@@ -213,8 +220,8 @@ impl SeriesRepartitionExec {
         let properties = PlanProperties::new(
             EquivalenceProperties::new(input.schema()),
             Partitioning::UnknownPartitioning(outputs),
-            // An owner can finalize an identity only after all producers finish successfully.
-            EmissionType::Final,
+            // Each exact identity becomes final independently at its per-input close/EOF barrier.
+            EmissionType::Incremental,
             // The node ends when its child does, and spends its life waiting until then.
             input.properties().boundedness,
         )
@@ -346,15 +353,21 @@ impl ExecutionPlan for SeriesRepartitionExec {
             ))
         })?;
         // Take the queue and its claim on the read together.
-        let output = pack_evaluated_series(
-            Box::pin(RepartitionStream::new(
-                receiver,
-                lease,
-                Arc::clone(&self.series_schema),
-                &context.runtime_env().memory_pool,
-            )),
+        let inner = RepartitionStream::new(
+            receiver,
+            lease,
             Arc::clone(&self.series_schema),
-        )?;
+            &context.runtime_env().memory_pool,
+            self.input.properties().partitioning.partition_count(),
+        );
+        let handoff = Arc::clone(&inner.handoff);
+        let output = pack_evaluated_series(Box::pin(inner), Arc::clone(&self.series_schema))?;
+        let schema = output.schema();
+        let output = Box::pin(PackedHandoffStream {
+            inner: Some(output),
+            schema,
+            handoff,
+        });
         Ok(datafusion::physical_plan::coop::make_cooperative(output))
     }
 }
@@ -440,7 +453,22 @@ impl SharedExecution {
             receivers.push(Some(receiver));
         }
         let ending = Arc::new(Mutex::new(Ending::default()));
-        let inputs = Inputs::new(Arc::clone(&ending), partitions);
+        let shared = Arc::new_cyclic(|weak| SharedExecution {
+            running: Mutex::new(Running {
+                receivers,
+                inputs: Inputs::new(Arc::clone(&ending), partitions, weak.clone()),
+                claimed: 0,
+                remaining: routing.outputs,
+            }),
+            ending: Arc::clone(&ending),
+        });
+        let inputs = {
+            let running = shared
+                .running
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            Arc::clone(&running.inputs)
+        };
         // A child with no partitions has nothing to read, so the read finished before it started: the
         // count that the last input task would bring to zero is already there.
         if partitions == 0 {
@@ -471,16 +499,7 @@ impl SharedExecution {
         }
         // This copy is dropped before any output exists, so it is no part of when the queues close.
         drop(senders);
-        Ok(Arc::new(Self {
-            running: Mutex::new(Running {
-                receivers,
-                inputs,
-                // No output is handed out yet: every one of them is still to be claimed.
-                claimed: 0,
-                remaining: routing.outputs,
-            }),
-            ending,
-        }))
+        Ok(shared)
     }
 
     /// The queue of `partition` and the lease on this read that reading it takes.
@@ -571,6 +590,7 @@ struct Inputs {
     state: Mutex<InputState>,
     /// How the read ended, and the failure it owes its outputs if it failed.
     ending: Arc<Mutex<Ending>>,
+    shared: Weak<SharedExecution>,
 }
 
 /// What [`Inputs`] guards.
@@ -599,7 +619,11 @@ struct InputState {
 
 impl Inputs {
     /// The bookkeeping of a read over `partitions` input partitions.
-    fn new(ending: Arc<Mutex<Ending>>, partitions: usize) -> Arc<Self> {
+    fn new(
+        ending: Arc<Mutex<Ending>>,
+        partitions: usize,
+        shared: Weak<SharedExecution>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InputState {
                 tasks: (0..partitions).map(|_| None).collect(),
@@ -607,6 +631,7 @@ impl Inputs {
                 cancelled: false,
             }),
             ending,
+            shared,
         })
     }
 
@@ -770,8 +795,20 @@ impl Inputs {
             .ending
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if !matches!(*ending, Ending::Failed(_)) {
+        let first_failure = !matches!(*ending, Ending::Failed(_));
+        if first_failure {
             *ending = Ending::Failed(error);
+        }
+        drop(ending);
+        if first_failure && let Some(shared) = self.shared.upgrade() {
+            let mut running = shared
+                .running
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            for receiver in running.receivers.iter_mut().flatten() {
+                receiver.close();
+                while receiver.try_recv().is_ok() {}
+            }
         }
     }
 
@@ -810,7 +847,26 @@ async fn route_partition(
     inputs: Arc<Inputs>,
     mut report: ReportIfUnreported,
 ) {
-    let stop = read_chains(&mut stream, &routing, &senders, &read_ahead).await;
+    let stop = read_chains(&mut stream, partition, &routing, &senders, &read_ahead).await;
+    if matches!(&stop, Stop::Ended) {
+        for sender in &senders {
+            if sender.is_closed() {
+                continue;
+            }
+            let metadata = read_ahead.new_empty();
+            if let Err(error) = metadata.try_grow(std::mem::size_of::<Queued>()) {
+                inputs.failed(partition, &Arc::new(error));
+                report.reported = true;
+                return;
+            }
+            if let Err(error) = sender.send(Queued::Eof {
+                input: partition,
+                _metadata: metadata,
+            }) {
+                drop(error.0);
+            }
+        }
+    }
     match &stop {
         Stop::Ended => inputs.ended(partition),
         Stop::Failed(error) => inputs.failed(partition, error),
@@ -909,6 +965,7 @@ pub(crate) fn histogram_table_slice_bytes(
 /// otherwise waits only on its own child.
 async fn read_chains(
     stream: &mut SendableEvaluatedSeriesStream,
+    partition: usize,
     routing: &Routing,
     senders: &[mpsc::UnboundedSender<Queued>],
     read_ahead: &MemoryReservation,
@@ -1030,14 +1087,42 @@ async fn read_chains(
                 "series repartition completed a chain without a routing destination".into(),
             )));
         };
-        if !discarding && senders[output].send(chain).is_err() {
+        if !discarding && {
+            let metadata = read_ahead.new_empty();
+            if let Err(error) = metadata.try_grow(std::mem::size_of::<Queued>()) {
+                return Stop::Failed(Arc::new(error));
+            }
+            senders[output]
+                .send(Queued::Chain {
+                    input: partition,
+                    chain,
+                    _metadata: metadata,
+                })
+                .is_err()
+        } {
             // A closed output is no longer a destination. Drop this chain and keep consuming.
             continue;
         }
     }
 }
 
+fn exact_identity(series: &Series) -> ExactIdentity {
+    (
+        series.metric.name().map(Arc::<str>::from),
+        series
+            .metric
+            .tags()
+            .iter()
+            .map(|tag| (Arc::clone(&tag.name), Arc::clone(&tag.value)))
+            .collect(),
+    )
+}
+
 /// Merges exact metric-name and complete-tag identities, preserving first-seen group order.
+///
+/// The Fused series stack calls this helper for evaluated frame finalization; this branch does not
+/// yet contain that caller, so the shared helper is not dead code in the integrated feature.
+#[allow(dead_code)]
 pub(crate) fn merge_exact_series(
     schema: &Arc<SeriesSchema>,
     series: Vec<Series>,
@@ -1143,19 +1228,106 @@ enum Ending {
 type Chain = Vec<(Series, bool, MemoryReservation)>;
 
 /// What one output queue carries: a whole chain and its memory charge.
-type Queued = Chain;
+enum Queued {
+    Chain {
+        input: usize,
+        chain: Chain,
+        _metadata: MemoryReservation,
+    },
+    Eof {
+        input: usize,
+        _metadata: MemoryReservation,
+    },
+}
 
-/// One owner collects producer chains through successful EOF before merging exact identities.
+type ExactIdentity = (Option<Arc<str>>, Vec<(Arc<str>, Arc<str>)>);
+
+struct PendingGroup {
+    fragments: Vec<Series>,
+    charges: Vec<MemoryReservation>,
+    received: Vec<bool>,
+    metadata: MemoryReservation,
+}
+
+fn group_ready(group: &PendingGroup, eof: &[bool]) -> bool {
+    group
+        .received
+        .iter()
+        .zip(eof)
+        .all(|(received, eof)| *received || *eof)
+}
+
+struct ReadySeries {
+    series: Series,
+    charges: ReadyCharges,
+}
+
+struct ReadyCharges {
+    _charges: Vec<MemoryReservation>,
+    _metadata: MemoryReservation,
+    _workspace: Option<MemoryReservation>,
+}
+
+/// One owner processes identities as soon as every input has closed or contributed its final chain.
 struct RepartitionStream {
     receiver: mpsc::UnboundedReceiver<Queued>,
     lease: OutputLease,
     schema: Arc<SeriesSchema>,
     pool: Arc<dyn MemoryPool>,
-    chains: Vec<Series>,
-    charges: Vec<MemoryReservation>,
-    output: std::vec::IntoIter<Series>,
-    workspace: Option<MemoryReservation>,
+    groups: BTreeMap<ExactIdentity, PendingGroup>,
+    eof: Vec<bool>,
+    eof_metadata: Option<MemoryReservation>,
+    inputs: usize,
+    output: VecDeque<ReadySeries>,
+    handoff: Arc<Mutex<Handoff>>,
     reported: bool,
+}
+
+/// Charges move out of the current cursor only after it is exhausted; the public batch stream
+/// releases completed cursors after the packer has flushed the frames they back.
+#[derive(Default)]
+struct Handoff {
+    current: Option<ReadyCharges>,
+    completed: Vec<ReadyCharges>,
+}
+
+struct PackedHandoffStream {
+    inner: Option<SendableRecordBatchStream>,
+    schema: SchemaRef,
+    handoff: Arc<Mutex<Handoff>>,
+}
+
+impl RecordBatchStream for PackedHandoffStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+impl Stream for PackedHandoffStream {
+    type Item = DataFusionResult<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let result = match self.inner.as_mut() {
+            Some(inner) => inner.as_mut().poll_next(cx),
+            None => return Poll::Ready(None),
+        };
+        match &result {
+            Poll::Ready(Some(Ok(_))) | Poll::Pending => {
+                let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+                // A pending packer has exhausted its cursor and its frame builder is empty, so
+                // completed charges no longer retain any payload; `current` may still own the
+                // whole merged series behind a live cursor.
+                handoff.completed.clear();
+            }
+            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                drop(self.inner.take());
+                let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+                handoff.current = None;
+                handoff.completed.clear();
+            }
+        }
+        result
+    }
 }
 
 impl RepartitionStream {
@@ -1164,49 +1336,62 @@ impl RepartitionStream {
         lease: OutputLease,
         schema: Arc<SeriesSchema>,
         pool: &Arc<dyn MemoryPool>,
+        inputs: usize,
     ) -> Self {
         Self {
             receiver,
             lease,
             schema,
             pool: Arc::clone(pool),
-            chains: Vec::new(),
-            charges: Vec::new(),
-            output: Vec::new().into_iter(),
-            workspace: None,
+            groups: BTreeMap::new(),
+            eof: Vec::new(),
+            eof_metadata: None,
+            inputs,
+            output: VecDeque::new(),
+            handoff: Arc::new(Mutex::new(Handoff::default())),
             reported: false,
         }
     }
 
-    fn finalize(&mut self) -> Result<(), BoxedError> {
-        let rows = self.chains.iter().fold(0usize, |rows, series| {
-            rows.saturating_add(series.time.len())
+    fn finish_group(&mut self, key: &ExactIdentity) -> DataFusionResult<()> {
+        let Some(group) = self.groups.remove(key) else {
+            return Ok(());
+        };
+        let workspace = if group.fragments.len() > 1 {
+            let rows = group.fragments.iter().fold(0usize, |rows, series| {
+                rows.saturating_add(series.time.len())
+            });
+            let reservation = MemoryConsumer::new("SeriesRepartitionOwner").register(&self.pool);
+            reservation.try_grow(merge_workspace_bytes(
+                rows,
+                group.fragments.len(),
+                self.schema.fields.len(),
+            ))?;
+            Some(reservation)
+        } else {
+            None
+        };
+        let merged = merge_same_labelset(&self.schema, group.fragments)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        if merged.len() != 1 {
+            return Err(DataFusionError::Internal(
+                "exact identity produced multiple merged series".into(),
+            ));
+        }
+        let Some(series) = merged.into_iter().next() else {
+            return Err(DataFusionError::Internal(
+                "exact identity produced no merged series".into(),
+            ));
+        };
+        self.output.push_back(ReadySeries {
+            series,
+            charges: ReadyCharges {
+                _charges: group.charges,
+                _metadata: group.metadata,
+                _workspace: workspace,
+            },
         });
-        let fragments = self.chains.len();
-        let bytes = merge_workspace_bytes(rows, fragments, self.schema.fields.len());
-        let workspace = MemoryConsumer::new("SeriesRepartitionOwner").register(&self.pool);
-        if let Err(error) = workspace.try_grow(bytes) {
-            let error = Arc::new(error);
-            self.lease.fail(Arc::clone(&error));
-            self.chains.clear();
-            self.charges.clear();
-            return Err(boxed(DataFusionError::from(&error)));
-        }
-        self.workspace = Some(workspace);
-        let series = std::mem::take(&mut self.chains);
-        match merge_exact_series(&self.schema, series) {
-            Ok(series) => {
-                self.output = series.into_iter();
-                Ok(())
-            }
-            Err(error) => {
-                let error = Arc::new(error);
-                self.lease.fail(Arc::clone(&error));
-                self.charges.clear();
-                self.workspace = None;
-                Err(boxed(DataFusionError::from(&error)))
-            }
-        }
+        Ok(())
     }
 }
 
@@ -1215,54 +1400,183 @@ impl Stream for RepartitionStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        {
+            let mut handoff = this.handoff.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(current) = handoff.current.take() {
+                handoff.completed.push(current);
+            }
+        }
         let mut drained = 0;
         loop {
+            if let Ending::Failed(error) = this.lease.shared.ending() {
+                if this.reported {
+                    return Poll::Ready(None);
+                }
+                this.reported = true;
+                this.receiver.close();
+                while this.receiver.try_recv().is_ok() {}
+                this.groups.clear();
+                this.output.clear();
+                this.eof.clear();
+                this.eof_metadata = None;
+                return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
+            }
+            if this.eof_metadata.is_none() {
+                let metadata = MemoryConsumer::new("SeriesRepartitionEof").register(&this.pool);
+                let bytes = this.inputs.saturating_mul(std::mem::size_of::<bool>());
+                if let Err(error) = metadata.try_grow(bytes) {
+                    this.lease.fail(Arc::new(error));
+                    continue;
+                }
+                this.eof = vec![false; this.inputs];
+                this.eof_metadata = Some(metadata);
+            }
+            if let Ending::Failed(error) = this.lease.shared.ending() {
+                if this.reported {
+                    return Poll::Ready(None);
+                }
+                this.reported = true;
+                this.receiver.close();
+                while this.receiver.try_recv().is_ok() {}
+                this.groups.clear();
+                this.output.clear();
+                this.eof.clear();
+                this.eof_metadata = None;
+                return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
+            }
+            if let Some(key) = this
+                .groups
+                .iter()
+                .find_map(|(key, group)| group_ready(group, &this.eof).then(|| key.clone()))
+                && let Err(error) = this.finish_group(&key)
+            {
+                this.lease.fail(Arc::new(error));
+                continue;
+            }
+            if let Some(ready) = this.output.pop_front() {
+                this.handoff
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .current = Some(ready.charges);
+                return Poll::Ready(Some(Ok((ready.series, true))));
+            }
+            if this.reported {
+                return Poll::Ready(None);
+            }
             if drained == 128 {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            if let Some(series) = this.output.next() {
-                if let Ending::Failed(error) = this.lease.shared.ending() {
-                    this.reported = true;
-                    this.output = Vec::new().into_iter();
-                    this.chains.clear();
-                    this.charges.clear();
-                    this.workspace = None;
-                    return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
-                }
-                if this.output.len() == 0 {
-                    this.charges.clear();
-                    this.workspace = None;
-                }
-                return Poll::Ready(Some(Ok((series, true))));
-            }
-            if this.reported {
-                this.charges.clear();
-                this.workspace = None;
-                return Poll::Ready(None);
-            }
             match this.receiver.poll_recv(cx) {
-                Poll::Ready(Some(chain)) => {
+                Poll::Ready(Some(Queued::Chain {
+                    input,
+                    chain,
+                    _metadata,
+                })) => {
                     drained += 1;
-                    for (series, _, charge) in chain {
-                        this.chains.push(series);
-                        this.charges.push(charge);
+                    let Some(first) = chain.first() else {
+                        continue;
+                    };
+                    let key = exact_identity(&first.0);
+                    if chain
+                        .iter()
+                        .any(|(series, _, _)| exact_identity(series) != key)
+                    {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "one series chain contains multiple exact identities".into(),
+                        )));
+                        continue;
                     }
+                    if !this.groups.contains_key(&key) {
+                        let metadata =
+                            MemoryConsumer::new("SeriesRepartitionIdentity").register(&this.pool);
+                        let bytes = std::mem::size_of::<PendingGroup>()
+                            .saturating_add(std::mem::size_of::<ExactIdentity>())
+                            .saturating_add(key.0.as_ref().map_or(0, |name| name.len()))
+                            .saturating_add(key.1.capacity().saturating_mul(std::mem::size_of::<(
+                                Arc<str>,
+                                Arc<str>,
+                            )>(
+                            )))
+                            .saturating_add(
+                                key.1
+                                    .iter()
+                                    .map(|(n, v)| n.len().saturating_add(v.len()))
+                                    .sum::<usize>(),
+                            )
+                            .saturating_add(this.eof.len().saturating_mul(2));
+                        if let Err(error) = metadata.try_grow(bytes) {
+                            this.lease.fail(Arc::new(error));
+                            continue;
+                        }
+                        this.groups.insert(
+                            key.clone(),
+                            PendingGroup {
+                                fragments: Vec::new(),
+                                charges: Vec::new(),
+                                received: vec![false; this.eof.len()],
+                                metadata,
+                            },
+                        );
+                    }
+                    let Some(group) = this.groups.get_mut(&key) else {
+                        this.lease.fail(Arc::new(DataFusionError::Internal(
+                            "series identity group was not retained".into(),
+                        )));
+                        continue;
+                    };
+                    if input >= group.received.len() || group.received[input] {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "input repeated an exact series identity".into(),
+                        )));
+                        continue;
+                    }
+                    group.received[input] = true;
+                    for (series, _, charge) in chain {
+                        group.fragments.push(series);
+                        group.charges.push(charge);
+                    }
+                    if group_ready(group, &this.eof)
+                        && let Err(error) = this.finish_group(&key)
+                    {
+                        this.lease.fail(Arc::new(error));
+                    }
+                }
+                Poll::Ready(Some(Queued::Eof { input, _metadata })) => {
+                    drained += 1;
+                    if input >= this.eof.len() || this.eof[input] {
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "duplicate series repartition input EOF".into(),
+                        )));
+                        continue;
+                    }
+                    this.eof[input] = true;
                 }
                 Poll::Ready(None) => {
                     this.reported = true;
-                    match this.lease.ending() {
-                        Some(Err(error)) => {
-                            this.chains.clear();
-                            this.charges.clear();
-                            return Poll::Ready(Some(Err(error)));
-                        }
-                        Some(Ok(_)) => return Poll::Ready(None),
-                        None => match this.finalize() {
-                            Ok(()) => continue,
-                            Err(error) => return Poll::Ready(Some(Err(error))),
-                        },
+                    if let Some(Err(error)) = this.lease.ending() {
+                        this.groups.clear();
+                        this.output.clear();
+                        return Poll::Ready(Some(Err(error)));
                     }
+                    if this.eof.iter().any(|seen| !seen) || !this.groups.is_empty() {
+                        let error = boxed(DataFusionError::Execution(
+                            "series repartition queue closed before every input EOF".into(),
+                        ));
+                        this.lease.fail(Arc::new(DataFusionError::Execution(
+                            "series repartition queue closed before every input EOF".into(),
+                        )));
+                        this.groups.clear();
+                        return Poll::Ready(Some(Err(error)));
+                    }
+                    if let Some(ready) = this.output.pop_front() {
+                        this.handoff
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .current = Some(ready.charges);
+                        return Poll::Ready(Some(Ok((ready.series, true))));
+                    }
+                    return Poll::Ready(None);
                 }
                 Poll::Pending => return Poll::Pending,
             }
