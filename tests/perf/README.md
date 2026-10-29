@@ -620,7 +620,7 @@ Additional SQL optimizer cases:
 
 `helpers_image` is optional in Query Regression (dispatch and reusable calls).
 The empty default still builds both helpers from the candidate source. Set it to
-`pinned` to use `.github/query-regression-helpers-image.txt`, or provide an explicit
+`pinned` to use the `QUERY_REGRESSION_HELPERS_IMAGE` repository variable, or provide an explicit
 `image@sha256:...` reference. With both database image inputs and a helper image,
 the run skips all Cargo builds and build-cache preparation. PR comment admission
 continues to require source builds.
@@ -638,10 +638,15 @@ the case DSL.
 The **Publish query regression helpers** workflow builds and pushes to
 `greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/query-regression-helpers`.
 It runs manually or on main when helper sources, packaging, or Cargo.lock change.
-After verifying the published digest, it opens a draft PR updating the pin, like
-the runner-image update workflow. Review and merge that PR before using `pinned`
-for the first time (the initial pin is deliberately empty). No mutable `latest`
-tag is consumed and publication alone does not change the version used by runs.
+After verifying the published digest, it creates or updates the
+`QUERY_REGRESSION_HELPERS_IMAGE` Actions repository variable, using
+`GH_PERSONAL_ACCESS_TOKEN` with Actions-variable write permission (the same
+credential used to update the ECS runner image variable). No version-update PR
+is needed. Subsequent runs with `helpers_image: pinned` use that digest; runs
+with an explicit digest keep their chosen version, and empty inputs still build
+from source. To roll back, set the variable to a previously verified digest.
+No mutable `latest` tag is consumed. Local extraction with `pinned` reads the
+same name from the environment.
 The existing **Release builder images** workflow can also invoke publication via
 `release_query_regression_helpers_image`, including for initial branch testing.
 

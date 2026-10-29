@@ -14,12 +14,13 @@ on:
       - .github/workflows/publish-query-regression-helpers.yml
       - .github/scripts/publish-query-regression-helpers.sh
       - .github/scripts/build-query-regression-helpers.sh
+      - .github/scripts/update-query-regression-helpers-image.sh
       - Cargo.lock
 
 permissions:
   contents: read
 
-# Serialize publication so pin-update PRs follow source order.
+# Serialize publication and updates of the repository image variable.
 concurrency:
   group: publish-query-regression-helpers
   cancel-in-progress: false
@@ -128,14 +129,14 @@ jobs:
             helpers-validation/extracted/helpers-image.json
           if-no-files-found: warn
 
-  update-pin:
+  update-variable:
     needs: publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-      - name: Open image pin update PR
+          persist-credentials: false
+      - name: Update helpers image repository variable
         env:
           GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
           HELPERS_IMAGE: ${{ needs.publish.outputs.image }}

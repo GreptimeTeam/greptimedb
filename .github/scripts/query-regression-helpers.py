@@ -18,19 +18,19 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
 BINARIES = ("query_perf_fixture", "query_regression_runner")
-PIN = Path(__file__).resolve().parents[1] / "query-regression-helpers-image.txt"
 
 
-def resolve_image(value, pin=PIN):
+def resolve_image(value):
     if value == "pinned":
-        value = pin.read_text().strip()
+        value = os.environ.get("QUERY_REGRESSION_HELPERS_IMAGE", "")
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._/:@-]*@sha256:[0-9a-f]{64}", value):
-        raise ValueError("helpers_image requires an image@sha256 digest; publish and merge the pin-update PR before using 'pinned'")
+        raise ValueError("helpers_image requires an image@sha256 digest; set QUERY_REGRESSION_HELPERS_IMAGE by publishing a verified image before using 'pinned'")
     return value
 
 

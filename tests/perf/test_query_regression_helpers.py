@@ -18,6 +18,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -33,17 +34,17 @@ REVISION = "b" * 40
 
 
 class HelpersTest(unittest.TestCase):
-    def test_pin_and_digest_validation(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            pin = Path(tmp) / "pin"
-            pin.write_text(IMAGE + "\n")
-            self.assertEqual(helpers.resolve_image("pinned", pin), IMAGE)
-            for value in ("", "registry/helpers:latest", IMAGE + "\nmalicious", "--help"):
-                with self.subTest(value=value), self.assertRaises(ValueError):
-                    helpers.resolve_image(value)
-            pin.write_text("")
-            with self.assertRaises(ValueError):
-                helpers.resolve_image("pinned", pin)
+    def test_repository_variable_and_explicit_digest(self):
+        with patch.dict(os.environ, {"QUERY_REGRESSION_HELPERS_IMAGE": IMAGE}):
+            self.assertEqual(helpers.resolve_image("pinned"), IMAGE)
+            explicit = IMAGE.replace("a" * 64, "b" * 64)
+            self.assertEqual(helpers.resolve_image(explicit), explicit)
+        for value in ("", "registry/helpers:latest", IMAGE + "\nmalicious", "--help"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                helpers.resolve_image(value)
+        for variables in ({}, {"QUERY_REGRESSION_HELPERS_IMAGE": "registry/helpers:latest"}):
+            with patch.dict(os.environ, variables, clear=True), self.assertRaises(ValueError):
+                helpers.resolve_image("pinned")
 
     def test_extraction_provenance_and_cleanup_on_failure(self):
         for fail in (False, True):

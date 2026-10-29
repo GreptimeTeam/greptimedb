@@ -37,7 +37,7 @@ on:
         type: string
         default: ""
       helpers_image:
-        description: Helpers image@sha256 or pinned (empty builds helpers from source)
+        description: Helpers image@sha256 or pinned from repository variable (empty builds from source)
         required: false
         type: string
         default: ""
@@ -106,7 +106,7 @@ on:
         type: string
         default: ""
       helpers_image:
-        description: Helpers image@sha256 or pinned (empty builds helpers from source)
+        description: Helpers image@sha256 or pinned from repository variable (empty builds from source)
         required: false
         type: string
         default: ""
@@ -247,6 +247,7 @@ jobs:
       HEAD_REPO: ${{ inputs.head_repo }}
       BASE_REPO: ${{ inputs.base_repo }}
       HELPERS_IMAGE: ${{ inputs.helpers_image }}
+      QUERY_REGRESSION_HELPERS_IMAGE: ${{ vars.QUERY_REGRESSION_HELPERS_IMAGE }}
       BASE_IMAGE: ${{ inputs.base_image }}
       CANDIDATE_IMAGE: ${{ inputs.candidate_image }}
       BASE_REF: ${{ inputs.base_ref }}

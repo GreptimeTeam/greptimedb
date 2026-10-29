@@ -37,7 +37,7 @@ on:
         default: false
       release_query_regression_helpers_image:
         type: boolean
-        description: Publish precompiled query regression helpers and open a pin-update PR
+        description: Publish precompiled query regression helpers and update the image repository variable
         required: false
         default: false
       update_dev_builder_image_tag:
