@@ -48,6 +48,9 @@ use crate::read::scan_region::{PredicateGroup, ScanInput};
 use crate::read::series_scan::SeriesScan;
 use crate::region::MitoRegionRef;
 use crate::series_index::SeriesIndexReadContext;
+use crate::series_index::columnar::ColumnarSeriesFormat;
+use crate::series_index::format::{SamplesFormat, SeriesIndexFormat};
+use crate::series_index::samples::ColumnarSamplesFormat;
 use crate::test_util::sst_util::{new_sparse_primary_key, sst_region_metadata_with_encoding};
 use crate::test_util::{TestEnv, flush_region};
 
@@ -278,6 +281,7 @@ fn scan_input(
                 .collect(),
         )
         .with_series_index(Some(SeriesIndexReadContext {
+            cache_namespace: store_api::storage::FileId::random(),
             format,
             store,
             version: region.series_index_version(),
@@ -1299,6 +1303,282 @@ async fn series_artifact_read_failure_propagates() {
         .expect("a failed artifact read must not report a not-ready source");
     assert!(error.output_msg().contains("injected"), "{error}");
     engine.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn metadata_cache_reuses_structures_and_isolates_storage() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use crate::series_index::columnar::reader::ColumnarReader;
+    use crate::series_index::samples::reader::SamplesReader;
+    use store_api::storage::FileId;
+
+    let (_env, engine, region) = fixture().await;
+    build(&engine, &region).await;
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let observed = reads.clone();
+    let store = region.series_index_store.clone().unwrap().layer(
+        MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |path, _, inner| {
+                Box::new(ReadRecorder {
+                    inner,
+                    path: path.to_owned(),
+                    reads: observed.clone(),
+                })
+            }))
+            .build()
+            .unwrap(),
+    );
+    let version = region.series_index_version();
+    let series = version.series_indexes.values().next().unwrap();
+    let samples = version.samples.values().next().unwrap();
+    let strategy = CacheStrategy::EnableAll(Arc::new(
+        CacheManager::builder()
+            .sst_meta_cache_size(8 * 1024 * 1024)
+            .build(),
+    ));
+    let namespace = FileId::random();
+    let contexts = [
+        strategy.columnar_metadata(namespace),
+        strategy.columnar_metadata(namespace),
+        strategy.columnar_metadata(FileId::random()),
+        None,
+    ];
+    let mut results = Vec::new();
+    let mut counts = Vec::new();
+    for context in contexts {
+        reads.lock().unwrap().clear();
+        let reader = ColumnarReader::open_cached(store.clone(), series.clone(), context.clone())
+            .await
+            .unwrap();
+        let request = SeriesReadRequest {
+            projection: reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        };
+        let series_rows = reader
+            .read(request)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        let reader = SamplesReader::open_cached(store.clone(), samples.clone(), context)
+            .await
+            .unwrap();
+        let request = SamplesReadRequest {
+            projection: reader
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().clone())
+                .collect(),
+            ..Default::default()
+        };
+        let sample_rows = reader
+            .read(request)
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        results.push((series_rows, sample_rows));
+        counts.push(reads.lock().unwrap().len());
+    }
+    assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(
+        counts[1] < counts[0],
+        "warm metadata should avoid reads: {counts:?}"
+    );
+    assert_eq!(counts[0], counts[2], "a new storage namespace must miss");
+    assert_eq!(counts[0], counts[3], "disabled caches must read metadata");
+    engine.stop().await.unwrap();
+}
+
+/// Local diagnostic benchmark, intentionally excluded from routine CI. No timing threshold:
+/// results depend on the machine, build profile, and filesystem page cache.
+#[tokio::test]
+#[ignore = "manual native preparation cold/warm measurement"]
+#[allow(clippy::print_stdout)] // This manual benchmark reports measurements to its caller.
+async fn native_preparation_metadata_benchmark() {
+    use crate::cache::{CacheManager, CacheStrategy};
+    use std::time::Instant;
+    use store_api::metadata::RegionMetadataBuilder;
+    use store_api::storage::FileId;
+
+    // Keep wide-artifact setup small: this measures preparation, not sample writing.
+    for (series_count, field_count) in [(4096, 1), (64, 1024)] {
+        let tag_count = 78;
+        let mut env = TestEnv::with_prefix("native-metadata-bench").await;
+        let mut metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+        metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|column| column.column_id == 2)
+            .unwrap()
+            .column_schema
+            .data_type = ConcreteDataType::float64_datatype();
+        for index in 2..tag_count {
+            let mut column = metadata
+                .column_metadatas
+                .iter()
+                .find(|column| column.column_id == 0)
+                .unwrap()
+                .clone();
+            column.column_id = 1000 + index;
+            column.column_schema.name = format!("tag_{index:04}");
+            metadata.primary_key.push(column.column_id);
+            metadata.column_metadatas.push(column);
+        }
+        let field = metadata
+            .column_metadatas
+            .iter()
+            .find(|column| column.column_id == 2)
+            .unwrap()
+            .clone();
+        for index in 1..field_count {
+            let mut column = field.clone();
+            column.column_id = 10000 + index;
+            column.column_schema.name = format!("field_{index}");
+            metadata.column_metadatas.push(column);
+        }
+        let metadata = Arc::new(
+            RegionMetadataBuilder::from_existing(metadata)
+                .build()
+                .unwrap(),
+        );
+        let (engine, region) = crate::series_index::prepare_region_with_metadata(
+            &mut env,
+            &[],
+            MitoConfig {
+                experimental_enable_series_index: true,
+                experimental_series_index_format: SelectedFormat::Columnar,
+                experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+                min_compaction_interval: Duration::from_secs(3600),
+                ..Default::default()
+            },
+            metadata.clone(),
+        )
+        .await;
+        let mut schema = vec![
+            ColumnSchema {
+                column_name: "__primary_key".into(),
+                datatype: ColumnDataType::Binary as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "ts".into(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+        ];
+        schema.extend((0..field_count).map(|index| ColumnSchema {
+            column_name: format!("field_{index}"),
+            datatype: ColumnDataType::Float64 as i32,
+            semantic_type: SemanticType::Field as i32,
+            ..Default::default()
+        }));
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut rows = Vec::new();
+        for id in 0..series_count {
+            let mut key = Vec::new();
+            codec.encode_internal(10, id, &mut key).unwrap();
+            codec
+                .encode_to_vec(
+                    metadata
+                        .column_metadatas
+                        .iter()
+                        .filter(|column| {
+                            column.semantic_type == SemanticType::Tag && column.column_id < 10000
+                        })
+                        .map(|column| {
+                            (
+                                column.column_id,
+                                ValueRef::String(if column.column_id == 1 { "x" } else { "a" }),
+                            )
+                        }),
+                    &mut key,
+                )
+                .unwrap();
+            for timestamp in [1000, 2000] {
+                let mut values = vec![
+                    ValueData::BinaryValue(key.clone()),
+                    ValueData::TimestampMillisecondValue(timestamp),
+                ];
+                values.extend((0..field_count).map(|_| ValueData::F64Value(1.0)));
+                rows.push(row(values));
+            }
+        }
+        engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows { schema, rows },
+                    skip_wal: false,
+                    hint: Some(api::v1::WriteHint {
+                        primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse as i32,
+                    }),
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        flush_region(&engine, region.region_id, None).await;
+        build(&engine, &region).await;
+        let store = region.series_index_store.clone().unwrap();
+        let namespace = FileId::random();
+        let mut cold = Vec::new();
+        let mut warm = Vec::new();
+        for _ in 0..7 {
+            let cache = CacheStrategy::EnableAll(Arc::new(
+                CacheManager::builder()
+                    .sst_meta_cache_size(256 * 1024 * 1024)
+                    .build(),
+            ));
+            for iteration in 0..8 {
+                let mut input = scan_input(
+                    &region,
+                    store.clone(),
+                    SelectedFormat::Columnar,
+                    (0..metadata.column_metadatas.len()).collect(),
+                );
+                input.cache_strategy = cache.clone();
+                input.series_index.as_mut().unwrap().cache_namespace = namespace;
+                let scanner = SeriesScan::new(input, false);
+                let binding = labels(scanner.metadata());
+                let start = Instant::now();
+                let source = scanner
+                    .prepare_series(
+                        &QueryScanContext::default(),
+                        &ExecutionPlanMetricsSet::new(),
+                        &binding,
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                assert_eq!(series_count as usize, source.num_series());
+                if iteration == 0 {
+                    cold.push(elapsed);
+                } else if iteration >= 3 {
+                    warm.push(elapsed);
+                }
+            }
+        }
+        cold.sort_by(f64::total_cmp);
+        warm.sort_by(f64::total_cmp);
+        println!(
+            "native_prepare series={series_count} tags={tag_count} fields={field_count} cold_median_ms={:.3} warm_median_ms={:.3} cold_runs={} warm_runs={}",
+            cold[cold.len() / 2],
+            warm[warm.len() / 2],
+            cold.len(),
+            warm.len()
+        );
+        engine.stop().await.unwrap();
+    }
 }
 
 #[test]

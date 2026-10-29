@@ -231,11 +231,6 @@ fn assert_histogram_with_start(
     );
 }
 
-fn assert_unreferenced_histogram(histogram: crate::series::histogram::HistogramView<'_>) {
-    assert_eq!(histogram.schema, -7);
-    assert_histogram_with_start(histogram, 90.5, None);
-}
-
 fn assert_float_bits(actual: &Samples, expected: &[Option<f64>]) {
     assert_eq!(actual.len(), expected.len());
     for (index, expected) in expected.iter().enumerate() {
@@ -347,8 +342,7 @@ fn frame_histogram_lists(batch: &RecordBatch, field: usize) -> (ListArray, ListA
     (indices, tables)
 }
 
-/// Every row is expected to resolve index 0 inside its own table only, with the whole table
-/// retained and the other index entry null.
+/// Each row's referenced histogram is preserved in its compact row-local table.
 fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].time.as_buffer().as_ref(), &[1_i64, 2]);
@@ -357,23 +351,20 @@ fn assert_row_local_histogram_rows(rows: &[RawSeriesChunk]) {
     let DenseSamplesRef::Histogram(first) = rows[0].fields.get(0).unwrap().dense().unwrap() else {
         panic!("expected histogram samples");
     };
-    assert_eq!(first.batch().len(), 2);
+    assert_eq!(first.batch().len(), 1);
     assert_eq!(first.indices().len(), 2);
     assert_eq!(first.indices().value(0), 0);
     assert!(!first.indices().is_valid(1));
     assert_histogram(first.view_at(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(first.batch().view(1).unwrap());
 
     let DenseSamplesRef::Histogram(second) = rows[1].fields.get(0).unwrap().dense().unwrap() else {
         panic!("expected histogram samples");
     };
-    assert_eq!(second.batch().len(), 2);
+    assert_eq!(second.batch().len(), 1);
     assert_eq!(second.indices().len(), 2);
     assert!(!second.indices().is_valid(0));
     assert_eq!(second.indices().value(1), 0);
-    // A global index remap would resolve index 0 into the first row's table instead.
     assert_histogram(second.view_at(1).unwrap(), 42.25);
-    assert_histogram_with_start(second.batch().view(1).unwrap(), 142.25, None);
 }
 
 #[test]
@@ -431,23 +422,10 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
         DenseSamplesRef::Histogram(histograms) => histograms.batch(),
         _ => panic!("expected histogram samples"),
     };
-    assert!(!Arc::ptr_eq(&first_table, second_table));
-    let first_values = first_table
-        .as_arrow()
-        .column(2)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    let second_values = second_table
-        .as_arrow()
-        .column(2)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    assert_eq!(
-        first_values.values().as_ptr(),
-        second_values.values().as_ptr()
-    );
+    assert_eq!(first_table.len(), 1);
+    assert_eq!(second_table.len(), 1);
+    assert_histogram(first_table.view(0).unwrap(), -9.5);
+    assert_histogram(second_table.view(0).unwrap(), -9.5);
 
     // The default budget groups the same 64 rows into one multirow batch; every row still decodes
     // to its own slice of the shared table with bit-exact values.
@@ -490,21 +468,9 @@ fn sliced_histogram_frames_densify_without_duplicating_shared_table() {
         panic!("expected dense histogram samples");
     };
     assert_eq!(histograms.len(), 64);
-    assert_eq!(histograms.batch().len(), first_table.len());
     for position in 0..64 {
         assert_histogram(histograms.view_at(position).unwrap(), -9.5);
     }
-    let dense_values = histograms
-        .batch()
-        .as_arrow()
-        .column(2)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    assert_eq!(
-        dense_values.values().as_ptr(),
-        first_values.values().as_ptr()
-    );
 }
 
 #[test]
@@ -2730,7 +2696,7 @@ fn rejects_malformed_histogram_and_payload_encodings() {
                 DataType::List(item) => item.clone(),
                 _ => unreachable!(),
             },
-            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1, 1])),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 1])),
             Arc::new(arrow::array::Int32Array::from(vec![1])),
             None,
         )
@@ -2740,8 +2706,8 @@ fn rejects_malformed_histogram_and_payload_encodings() {
                 DataType::List(item) => item.clone(),
                 _ => unreachable!(),
             },
-            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 2, 5])),
-            Arc::new(Float64Array::from(vec![3.25, 7.5, 3.0, 7.0, 8.0])),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0_i32, 2])),
+            Arc::new(Float64Array::from(vec![3.25, 7.5])),
             None,
         )
         .unwrap();
@@ -3165,67 +3131,19 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
         .as_any()
         .downcast_ref::<UInt32Array>()
         .unwrap();
-    for (packed_indices, source_indices) in [
-        (packed_mixed_indices, source_indices),
-        (packed_hist_indices, &histogram_indices),
-    ] {
-        assert_eq!(
-            packed_indices.values().as_ptr(),
-            source_indices.values().as_ptr()
-        );
-        assert_eq!(
-            packed_indices.nulls().unwrap().buffer().as_ptr(),
-            source_indices.nulls().unwrap().buffer().as_ptr()
-        );
-        assert_eq!(
-            packed_indices.nulls().unwrap().offset(),
-            source_indices.nulls().unwrap().offset()
-        );
-    }
+    assert_eq!(
+        packed_mixed_indices,
+        &UInt32Array::from(vec![Some(0), None])
+    );
+    assert_eq!(
+        packed_hist_indices,
+        &UInt32Array::from(vec![Some(0), Some(0)]),
+        "both positions name the same distinct row"
+    );
     let packed_mixed_table = frame_histogram_table(packed, 0);
     let packed_hist_table = frame_histogram_table(packed, 1);
-    for packed_table in [&packed_mixed_table, &packed_hist_table] {
-        let packed_sum = packed_table
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(packed_sum.values().as_ptr(), sliced_sum.values().as_ptr());
-        let packed_positive = packed_table
-            .column(10)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        assert_eq!(packed_positive.offset(), sliced_positive.offset());
-        assert_eq!(
-            packed_positive.value_offsets().as_ptr(),
-            sliced_positive.value_offsets().as_ptr()
-        );
-        assert_eq!(
-            packed_positive.value_offsets()[sliced_table_offset],
-            sliced_positive.value_offsets()[sliced_table_offset]
-        );
-        assert_eq!(
-            packed_positive.value_offsets()[sliced_table_offset + 1],
-            sliced_positive.value_offsets()[sliced_table_offset + 1]
-        );
-        assert_eq!(
-            packed_positive
-                .values()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .as_ptr(),
-            sliced_positive
-                .values()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .as_ptr()
-        );
-    }
+    assert_eq!(packed_mixed_table.len(), 1);
+    assert_eq!(packed_hist_table.len(), 1);
     let decoded = unpack_raw_series_frame(
         &schema,
         FrameLabelMode::Key,
@@ -3245,30 +3163,14 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
     let decoded_time_values = decoded[0].time.as_buffer();
     assert_eq!(decoded_time_values.as_ptr(), packed_times.values().as_ptr());
     assert_eq!(decoded_time_values, source_times);
-    for (decoded_indices, source_indices) in [
-        (decoded_mixed.histograms().indices(), source_indices),
-        (decoded_histogram.indices(), &histogram_indices),
-    ] {
-        assert_eq!(
-            decoded_indices.values().as_ptr(),
-            source_indices.values().as_ptr()
-        );
-        assert_eq!(
-            decoded_indices.nulls().unwrap().buffer().as_ptr(),
-            source_indices.nulls().unwrap().buffer().as_ptr()
-        );
-        assert_eq!(
-            decoded_indices.nulls().unwrap().offset(),
-            source_indices.nulls().unwrap().offset()
-        );
-    }
     assert_eq!(
-        decoded_mixed.histograms().indices().values().as_ptr(),
-        indices_owner.values().as_ptr().wrapping_add(1)
+        decoded_mixed.histograms().indices(),
+        &UInt32Array::from(vec![Some(0), None])
     );
     assert_eq!(
-        decoded_histogram.indices().values().as_ptr(),
-        histogram_indices_owner.values().as_ptr().wrapping_add(1)
+        decoded_histogram.indices(),
+        &UInt32Array::from(vec![Some(0), Some(0)]),
+        "both positions name the one distinct row"
     );
     assert_eq!(decoded_mixed.histograms().indices().value(0), 0);
     assert!(!decoded_mixed.histograms().indices().is_valid(1));
@@ -3281,84 +3183,16 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
         float_owner.nulls().unwrap().buffer().as_ptr()
     );
     assert_eq!(decoded_mixed.floats().nulls().unwrap().offset(), 1);
-    assert_eq!(decoded_histogram.indices().value(0), 1);
-    assert_eq!(decoded_histogram.indices().value(1), 1);
-    assert_eq!(decoded_histogram.batch().len(), 2);
-    let decoded_table = decoded_histogram.batch().as_arrow();
-    let decoded_sum = decoded_table
-        .column(2)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    assert_eq!(decoded_sum.values().as_ptr(), sliced_sum.values().as_ptr());
-    let decoded_mixed_table = decoded_mixed.histograms().batch().as_arrow();
-    for decoded_table_view in [decoded_mixed_table, decoded_table] {
-        let primitive = decoded_table_view
-            .column(2)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(
-            primitive.values().as_ptr(),
-            source_sum.values().as_ptr().wrapping_add(1)
-        );
-        let positive = decoded_table_view
-            .column(10)
-            .as_any()
-            .downcast_ref::<ListArray>()
-            .unwrap();
-        assert_eq!(positive.offset(), source_positive.offset());
-        assert_eq!(
-            positive.value_offsets()[sliced_table_offset],
-            source_positive.value_offsets()[1]
-        );
-        assert_eq!(
-            positive.value_offsets().as_ptr(),
-            sliced_positive.value_offsets().as_ptr()
-        );
-        assert_eq!(
-            positive.value_offsets()[sliced_table_offset + 1],
-            source_positive.value_offsets()[2]
-        );
-        assert_eq!(
-            positive
-                .values()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .as_ptr(),
-            source_positive
-                .values()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .as_ptr()
-        );
-    }
-    let decoded_positive_buckets = decoded_table
-        .column(10)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap()
-        .values()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    let source_positive_buckets = source_table
-        .column(10)
-        .as_any()
-        .downcast_ref::<ListArray>()
-        .unwrap()
-        .values()
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap();
-    assert_eq!(
-        decoded_positive_buckets.values().as_ptr(),
-        source_positive_buckets.values().as_ptr()
+    assert_eq!(decoded_histogram.indices().value(0), 0);
+    assert_eq!(decoded_histogram.indices().value(1), 0);
+    assert_eq!(decoded_histogram.batch().len(), 1);
+    assert_histogram_with_start(
+        decoded_mixed.histograms().batch().view(0).unwrap(),
+        -9.5,
+        Some(-123),
     );
+    // Both positions name the one distinct row of the compact table.
+    assert_histogram_with_start(decoded_histogram.batch().view(0).unwrap(), 90.5, None);
 
     drop(packed_mixed_table);
     drop(packed_hist_table);
@@ -3372,11 +3206,13 @@ fn sliced_canonical_mixed_histogram_round_trip_keeps_buffers_alive() {
     drop(chunk);
     drop(frames);
 
-    assert_eq!(decoded_table.len(), 2);
-    assert_histogram(decoded_mixed.histograms().batch().view(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(decoded_mixed.histograms().batch().view(1).unwrap());
-    assert_histogram(decoded_histogram.batch().view(0).unwrap(), -9.5);
-    assert_unreferenced_histogram(decoded_histogram.batch().view(1).unwrap());
+    assert_eq!(decoded_histogram.batch().len(), 1);
+    assert_histogram_with_start(
+        decoded_mixed.histograms().batch().view(0).unwrap(),
+        -9.5,
+        Some(-123),
+    );
+    assert_histogram_with_start(decoded_histogram.batch().view(0).unwrap(), 90.5, None);
     assert!(matches!(
         decoded[0].fields.get(0).unwrap().sample(0),
         SampleRef::Histogram(_)
@@ -3885,6 +3721,160 @@ fn byte_budget_flushes_before_exceeding_and_retries_the_pending_row() {
 }
 
 #[test]
+fn histogram_tables_encode_only_referenced_rows_and_remap_indices() {
+    let schema = test_schema(&["histogram", "mixed", "all_null"]);
+    let table = histogram_batch();
+    let indices = UInt32Array::from(vec![Some(1), None, Some(0), Some(1)]);
+    let mixed = Samples::try_from_mixed(
+        Float64Array::from(vec![None, Some(12.5), None, None]),
+        crate::series::samples::HistogramSamples::try_new(indices.clone(), table.clone()).unwrap(),
+    )
+    .unwrap();
+    let fields = SeriesFields::try_from_vec(vec![
+        Samples::try_from_histogram(indices.clone(), table.clone()).unwrap(),
+        mixed,
+        Samples::try_from_histogram(UInt32Array::new_null(4), table.clone()).unwrap(),
+    ])
+    .unwrap();
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x71_u8]),
+        None,
+        RawTimestamps::try_new(vec![1_i64, 2, 3, 4].into()).unwrap(),
+        fields,
+        true,
+    )
+    .unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let (encoded_indices, _) = frame_histogram_lists(&packed[0], 0);
+    let encoded_indices = encoded_indices
+        .value(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap()
+        .clone();
+    // Source indices are [1, null, 0, 1]: row 1 is named first and then row 0, and the second
+    // reference to row 1 reuses the first encoded row.
+    assert_eq!(
+        encoded_indices,
+        UInt32Array::from(vec![Some(0), None, Some(1), Some(0)])
+    );
+    assert_eq!(
+        frame_histogram_table(&packed[0], 0).len(),
+        2,
+        "one encoded row per distinct referenced row, not per reference"
+    );
+    assert_eq!(frame_histogram_table(&packed[0], 1).len(), 2);
+    assert_eq!(frame_histogram_table(&packed[0], 2).len(), 0);
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &packed);
+    let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    assert_eq!(
+        histograms.indices(),
+        &UInt32Array::from(vec![Some(0), None, Some(1), Some(0)])
+    );
+    assert_histogram_with_start(histograms.view_at(0).unwrap(), 90.5, None);
+    assert_histogram_with_start(histograms.view_at(2).unwrap(), -9.5, Some(-123));
+    assert_histogram_with_start(histograms.view_at(3).unwrap(), 90.5, None);
+
+    let DenseSamplesRef::Mixed(mixed) = decoded[0].fields.get(1).unwrap().dense().unwrap() else {
+        panic!("mixed representation was normalized");
+    };
+    assert_eq!(mixed.histograms().indices(), histograms.indices());
+    for (index, expected) in [None, Some(12.5_f64), None, None].into_iter().enumerate() {
+        match (
+            mixed.floats().is_valid(index),
+            mixed.floats().value(index),
+            expected,
+        ) {
+            (false, _, None) => {}
+            (true, actual, Some(expected)) => {
+                assert_eq!(actual.to_bits(), expected.to_bits(), "position {index}");
+            }
+            _ => panic!("unexpected mixed float at position {index}"),
+        }
+    }
+    assert!(mixed.floats().is_null(0));
+    assert!(mixed.histograms().indices().is_valid(0));
+    assert!(mixed.floats().is_valid(1));
+    assert!(!mixed.histograms().indices().is_valid(1));
+    assert_histogram_with_start(mixed.histograms().view_at(0).unwrap(), 90.5, None);
+    assert_histogram_with_start(mixed.histograms().view_at(2).unwrap(), -9.5, Some(-123));
+    assert_histogram_with_start(mixed.histograms().view_at(3).unwrap(), 90.5, None);
+
+    let DenseSamplesRef::Histogram(all_null) = decoded[0].fields.get(2).unwrap().dense().unwrap()
+    else {
+        panic!("all-null histogram representation was normalized");
+    };
+    assert_eq!(all_null.indices().len(), 4);
+    assert!((0..4).all(|index| !all_null.indices().is_valid(index)));
+    assert_eq!(all_null.batch().len(), 0);
+}
+
+#[test]
+fn repeated_references_to_one_histogram_row_encode_it_once() {
+    let schema = test_schema(&["histogram"]);
+    let table = histogram_batch();
+    // Every position names the same row: the encoded payload must grow with distinct named rows,
+    // not with positions.
+    let positions = 10_000;
+    let indices = UInt32Array::from(vec![Some(1); positions]);
+    let chunk = RawSeriesChunk::try_new(
+        &schema,
+        Buffer::from(vec![0x33_u8]),
+        None,
+        RawTimestamps::try_new((0..positions as i64).collect::<Vec<_>>().into()).unwrap(),
+        SeriesFields::one(Samples::try_from_histogram(indices, table).unwrap()),
+        true,
+    )
+    .unwrap();
+    let packed = pack_raw_series_chunk(
+        &schema,
+        FrameLabelMode::Key,
+        Some(&dense_description()),
+        &chunk,
+    )
+    .unwrap();
+    let (encoded_indices, _) = frame_histogram_lists(&packed[0], 0);
+    let encoded = encoded_indices
+        .value(0)
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .unwrap()
+        .clone();
+    assert_eq!(encoded.len(), positions);
+    assert!(
+        (0..positions).all(|position| encoded.value(position) == 0),
+        "every position reuses the one encoded row"
+    );
+    assert_eq!(
+        frame_histogram_table(&packed[0], 0).len(),
+        1,
+        "one distinct referenced row, regardless of how often it is referenced"
+    );
+
+    let decoded = decode_batches(&schema, FrameLabelMode::Key, &packed);
+    let DenseSamplesRef::Histogram(histograms) = decoded[0].fields.get(0).unwrap().dense().unwrap()
+    else {
+        panic!("histogram representation was normalized");
+    };
+    assert_eq!(histograms.batch().len(), 1);
+    // Row 1 of the fixture is the one with sum 90.5 and no start timestamp.
+    for position in [0, positions / 2, positions - 1] {
+        assert_histogram_with_start(histograms.view_at(position).unwrap(), 90.5, None);
+    }
+}
+
+#[test]
 fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
     let schema = test_schema(&["histogram"]);
     let first_table = histogram_batch();
@@ -3932,16 +3922,16 @@ fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
     assert_eq!(
         encoded_second.value(1),
         0,
-        "row-local indices must not be remapped"
+        "indices must be remapped within their row's compact table"
     );
-    // The second row references its own table through a nonzero slice of the concatenated child.
-    assert_eq!(tables.value_offsets(), [0, 2, 4]);
+    // Each row's sole referenced table entry is encoded independently.
+    assert_eq!(tables.value_offsets(), [0, 1, 2]);
     let concatenated = tables
         .values()
         .as_any()
         .downcast_ref::<StructArray>()
         .unwrap();
-    assert_eq!(concatenated.len(), 4);
+    assert_eq!(concatenated.len(), 2);
 
     let decoded = decode_batches(
         &schema,
@@ -3950,8 +3940,8 @@ fn multirow_histogram_rows_keep_row_local_indices_and_tables() {
     );
     assert_row_local_histogram_rows(&decoded);
 
-    // A real Arrow IPC round trip keeps the schema, the whole tables, the null index entries and
-    // the bit-exact payloads.
+    // A real Arrow IPC round trip keeps the schema, compact row tables, null index entries and
+    // the bit-exact referenced payloads.
     let mut ipc = Vec::new();
     {
         let mut writer = StreamWriter::try_new(&mut ipc, &packed[0].schema()).unwrap();

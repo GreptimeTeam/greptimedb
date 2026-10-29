@@ -68,6 +68,7 @@ pub use crate::series_index::writer::{
 /// Index storage and pinned catalog snapshot for a query.
 #[derive(Clone)]
 pub(crate) struct SeriesIndexReadContext {
+    pub(crate) cache_namespace: store_api::storage::FileId,
     pub(crate) format: crate::config::SeriesIndexFormat,
     pub(crate) store: ObjectStore,
     pub(crate) version: Arc<SeriesIndexVersion>,
