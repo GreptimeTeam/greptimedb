@@ -206,16 +206,7 @@ impl BloomFilterKey {
         let mem_usage = predicates
             .iter()
             .map(|(target, predicates)| {
-                let target_size = size_of::<IndexTarget>()
-                    + match target {
-                        IndexTarget::ColumnId(_) => 0,
-                        IndexTarget::JsonPath(path) => path
-                            .path()
-                            .iter()
-                            .map(|p| size_of::<String>() + p.len())
-                            .sum(),
-                    };
-                target_size
+                target.approx_mem_size()
                     + predicates
                         .iter()
                         .map(|predicate| {
@@ -245,16 +236,7 @@ impl InvertedIndexKey {
         let mem_usage = predicates
             .iter()
             .map(|(target, predicates)| {
-                let target_size = size_of::<IndexTarget>()
-                    + match target {
-                        IndexTarget::ColumnId(_) => 0,
-                        IndexTarget::JsonPath(target) => target
-                            .path()
-                            .iter()
-                            .map(|part| size_of::<String>() + part.len())
-                            .sum(),
-                    };
-                target_size
+                target.approx_mem_size()
                     + predicates
                         .iter()
                         .map(|predicate| match predicate {

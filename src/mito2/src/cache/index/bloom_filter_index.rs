@@ -22,7 +22,7 @@ use bytes::Bytes;
 use index::bloom_filter::error::Result;
 use index::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 use index::target::IndexTarget;
-use store_api::storage::{ColumnId, FileId, IndexVersion};
+use store_api::storage::{FileId, IndexVersion};
 
 use crate::cache::index::{INDEX_METADATA_TYPE, IndexCache, PageKey};
 use crate::metrics::{CACHE_HIT, CACHE_MISS};
@@ -65,7 +65,7 @@ impl BloomFilterIndexCache {
 fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomFilterMeta>) -> u32 {
     let base = k.0.as_bytes().len()
         + std::mem::size_of::<IndexVersion>()
-        + target_weight(&k.2)
+        + k.2.approx_mem_size()
         + std::mem::size_of::<Tag>()
         + std::mem::size_of::<BloomFilterMeta>();
 
@@ -77,7 +77,7 @@ fn bloom_filter_index_metadata_weight(k: &BloomFilterIndexKey, meta: &Arc<BloomF
 
 /// Calculates weight for bloom filter index content.
 fn bloom_filter_index_content_weight((k, _): &(BloomFilterIndexKey, PageKey), v: &Bytes) -> u32 {
-    (k.0.as_bytes().len() + target_weight(&k.2) + v.len()) as u32
+    (k.0.as_bytes().len() + k.2.approx_mem_size() + v.len()) as u32
 }
 
 /// Bloom filter index blob reader with cache.
@@ -96,7 +96,7 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
     pub fn new(
         file_id: FileId,
         index_version: IndexVersion,
-        column_id: ColumnId,
+        target: IndexTarget,
         tag: Tag,
         blob_size: u64,
         inner: R,
@@ -105,18 +105,12 @@ impl<R> CachedBloomFilterIndexBlobReader<R> {
         Self {
             file_id,
             index_version,
-            target: Arc::new(IndexTarget::ColumnId(column_id)),
+            target: Arc::new(target),
             tag,
             blob_size,
             inner,
             cache,
         }
-    }
-
-    /// Uses a complete target identity for JSON path index caches.
-    pub fn with_target(mut self, target: IndexTarget) -> Self {
-        self.target = Arc::new(target);
-        self
     }
 }
 
@@ -227,21 +221,10 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     }
 }
 
-fn target_weight(target: &IndexTarget) -> usize {
-    std::mem::size_of::<IndexTarget>()
-        + match target {
-            IndexTarget::ColumnId(_) => 0,
-            IndexTarget::JsonPath(path) => path
-                .path()
-                .iter()
-                .map(|part| std::mem::size_of::<String>() + part.len())
-                .sum(),
-        }
-}
-
 #[cfg(test)]
 mod test {
     use rand::{Rng, RngCore};
+    use store_api::storage::ColumnId;
 
     use super::*;
 

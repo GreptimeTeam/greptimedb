@@ -116,23 +116,17 @@ impl BloomFilterIndexer {
             // rebuilds skip them because existing SSTs may not materialize the current hints.
             if matches!(build_type, IndexBuildType::Flush | IndexBuildType::Compact)
                 && column.column_schema.data_type.is_json2()
+                && let Ok(Some(extension)) =
+                    column.column_schema.extension_type::<Json2ExtensionType>()
             {
-                let extension = column
-                    .column_schema
-                    .extension_type::<Json2ExtensionType>()
-                    .context(IndexOptionsSnafu {
-                        column_name: &column.column_schema.name,
-                    })?;
-                if let Some(extension) = extension {
-                    for hint in extension.metadata().json_settings().type_hints() {
-                        let Some(options) = &hint.skipping_index else {
-                            continue;
-                        };
-                        if let Ok(target) =
-                            IndexTarget::new_json_path(column.column_id, hint.path.clone())
-                        {
-                            targets.push((target, options.clone()));
-                        }
+                for hint in extension.metadata().json_settings().type_hints() {
+                    let Some(options) = &hint.skipping_index else {
+                        continue;
+                    };
+                    if let Ok(target) =
+                        IndexTarget::new_json_path(column.column_id, hint.path.clone())
+                    {
+                        targets.push((target, options.clone()));
                     }
                 }
             }

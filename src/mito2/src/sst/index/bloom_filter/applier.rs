@@ -250,16 +250,12 @@ impl BloomFilterIndexApplier {
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id.file_id(),
                     file_id.version,
-                    match column_id {
-                        IndexTarget::ColumnId(id) => *id,
-                        IndexTarget::JsonPath(path) => path.column_id(),
-                    },
+                    column_id.clone(),
                     Tag::Skipping,
                     blob_size,
                     BloomFilterReaderImpl::new(blob),
                     bloom_filter_cache.clone(),
-                )
-                .with_target(column_id.clone());
+                );
                 self.apply_predicates(reader, predicates, &mut output, metrics.as_deref_mut())
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
