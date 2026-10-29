@@ -27,9 +27,11 @@
 //! each series contiguous within its scan partition.
 
 use std::fmt::{self, Formatter};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use crate::source::materialize_raw_labels;
+use common_error::ext::BoxedError;
 use common_query::series_frame::{
     pack_raw_series, raw_series_frame_schema_with_ordering, unpack_raw_series,
 };
@@ -46,13 +48,20 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
+use datatypes::series::frame::LabelDecodeSpec;
+use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use store_api::region_engine::RawLabelSource;
+use futures::Stream;
+use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
+
+use crate::source::materialize_raw_labels;
 
 /// The ordering every frame of this node declares.
 ///
-/// Interleaving the scan partitions at series boundaries keeps each series contiguous but not the
-/// series in key order, and the schema has to be known before the region's scan declares its own.
+/// The frontend plans this node before the region's scan declares how it orders its keys, so the
+/// schema cannot carry the scan's own promise. The node therefore states the weakest one that its
+/// output always keeps: one scan partition emits one series after another, so each series stays
+/// contiguous, while the finer key-then-time order of the scan is not repeated here.
 const ORDERING: SeriesOrdering = SeriesOrdering::Contiguous;
 
 /// The logical node: one table scan bound to one metric's raw series.
@@ -193,6 +202,38 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
     }
 }
 
+/// One partition's relabelled frames, published under this node's declared ordering.
+///
+/// The scan states its own key order, which the node cannot repeat in a schema it fixed at plan
+/// time. Every other property is forwarded unchanged.
+struct DeclaredOrdering(SendableRawSeriesStream);
+
+impl Stream for DeclaredOrdering {
+    type Item = Result<RawSeriesChunk, BoxedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.as_mut().poll_next(cx)
+    }
+}
+
+impl RawSeriesStream for DeclaredOrdering {
+    fn schema(&self) -> &Arc<SeriesSchema> {
+        self.0.schema()
+    }
+
+    fn label_source(&self) -> &RawLabelSource {
+        self.0.label_source()
+    }
+
+    fn label_decode_spec(&self) -> Option<&LabelDecodeSpec> {
+        self.0.label_decode_spec()
+    }
+
+    fn ordering(&self) -> SeriesOrdering {
+        ORDERING
+    }
+}
+
 /// The physical node: the region's raw-series leaf, re-labelling each scan partition in place.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
@@ -319,6 +360,9 @@ impl ExecutionPlan for RawSeriesSourceExec {
         let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
         let relabelled = materialize_raw_labels(raw)
             .map_err(|error| DataFusionError::External(Box::new(error)))?;
-        pack_raw_series(relabelled)
+        // The scan may promise a finer order than this node declares. Exchange the promise here so
+        // the published frame carries the schema the plan was built with, which is what the region
+        // and the frontend both compare.
+        pack_raw_series(Box::pin(DeclaredOrdering(relabelled)))
     }
 }
