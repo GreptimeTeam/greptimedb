@@ -649,14 +649,9 @@ impl PromPlanner {
         if multi_input && groups_by_metric_name(root) {
             return Ok(None);
         }
-        // A multi-input tree also skips the split's own capability refusal: `check_cut` declines a
-        // `quantile` and a grouping by a value field. The node is chosen while planning the logical
-        // plan, so a refusal the physical layer raises later is an error the statement reports
-        // rather than a fall back - which would turn a query the existing plan answers into a
-        // failure. Ask the runtime here instead, with the same construction the physical layer
-        // validates by, and keep the existing plan for whatever it refuses. Doing it this way is
-        // what makes the check cover every refusal the runtime has, including ones this planner does
-        // not know about.
+        // Catch construction-time refusals before choosing native execution: errors raised during
+        // physical planning cannot fall back. This includes unsupported aggregates and CountValues
+        // groupings; it does not cover data-dependent errors raised while executing the tree.
         if multi_input
             && NativeExecutionState::try_new(
                 &compiled.tree,
