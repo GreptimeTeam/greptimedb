@@ -1280,6 +1280,15 @@ struct RepartitionStream {
     inputs: usize,
     output: VecDeque<ReadySeries>,
     handoff: Arc<Mutex<Handoff>>,
+    /// Whether a new pass over the pending identities is owed after an input EOF.
+    ///
+    /// A chain can only complete the identity it carries, so the chain arm checks that group
+    /// directly. An EOF can complete any waiting identity, so it opens a pass instead; the pass
+    /// resumes after [`resume_after`](Self::resume_after) so the same prefix is not rescanned for
+    /// every identity it releases.
+    rescan: bool,
+    /// The last identity a pass examined, exclusive. Retains at most one identity descriptor.
+    resume_after: Option<ExactIdentity>,
     reported: bool,
 }
 
@@ -1349,6 +1358,8 @@ impl RepartitionStream {
             inputs,
             output: VecDeque::new(),
             handoff: Arc::new(Mutex::new(Handoff::default())),
+            rescan: false,
+            resume_after: None,
             reported: false,
         }
     }
@@ -1444,14 +1455,38 @@ impl Stream for RepartitionStream {
                 this.eof_metadata = None;
                 return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
             }
-            if let Some(key) = this
-                .groups
-                .iter()
-                .find_map(|(key, group)| group_ready(group, &this.eof).then(|| key.clone()))
-                && let Err(error) = this.finish_group(&key)
-            {
-                this.lease.fail(Arc::new(error));
-                continue;
+            if this.rescan {
+                let next = match &this.resume_after {
+                    Some(after) => this
+                        .groups
+                        .range((
+                            std::ops::Bound::Excluded(after.clone()),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .find_map(|(key, group)| {
+                            group_ready(group, &this.eof).then(|| key.clone())
+                        }),
+                    None => this.groups.iter().find_map(|(key, group)| {
+                        group_ready(group, &this.eof).then(|| key.clone())
+                    }),
+                };
+                match next {
+                    Some(key) => {
+                        this.resume_after = Some(key.clone());
+                        if let Err(error) = this.finish_group(&key) {
+                            this.rescan = false;
+                            this.resume_after = None;
+                            this.lease.fail(Arc::new(error));
+                            continue;
+                        }
+                    }
+                    None => {
+                        // Every pending identity after the resume point was examined and none is
+                        // ready; only a new chain or EOF can change that.
+                        this.rescan = false;
+                        this.resume_after = None;
+                    }
+                }
             }
             if let Some(ready) = this.output.pop_front() {
                 this.handoff
@@ -1551,6 +1586,9 @@ impl Stream for RepartitionStream {
                         continue;
                     }
                     this.eof[input] = true;
+                    // An EOF can complete any identity waiting only for this input.
+                    this.rescan = true;
+                    this.resume_after = None;
                 }
                 Poll::Ready(None) => {
                     this.reported = true;

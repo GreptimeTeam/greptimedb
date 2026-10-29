@@ -73,7 +73,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{
@@ -1459,13 +1459,25 @@ fn histogram_charge(values: &HistogramSamples) -> Result<usize> {
 
 fn compact_histogram(values: &HistogramSamples) -> Result<(ArrayRef, UInt32Array)> {
     let indices = values.indices();
-    let mut selected = Vec::with_capacity(indices.len() - indices.null_count());
+    // One encoded entry per *distinct* referenced row: a segment that references the same row many
+    // times would otherwise copy that row once per reference, so a small table plus a long run of
+    // equal indices would still grow the payload with every position.
+    let mut carried: HashMap<u32, u32> = HashMap::new();
+    let mut selected = Vec::new();
     let mut remapped = Vec::with_capacity(indices.len());
     for index in 0..indices.len() {
         if indices.is_valid(index) {
-            let local_index = u32::try_from(selected.len())
-                .map_err(|_| err("too many referenced histograms in one frame segment"))?;
-            selected.push(indices.value(index));
+            let original = indices.value(index);
+            let local_index = match carried.get(&original) {
+                Some(local_index) => *local_index,
+                None => {
+                    let local_index = u32::try_from(selected.len())
+                        .map_err(|_| err("too many referenced histograms in one frame segment"))?;
+                    selected.push(original);
+                    carried.insert(original, local_index);
+                    local_index
+                }
+            };
             remapped.push(Some(local_index));
         } else {
             remapped.push(None);
@@ -1478,8 +1490,9 @@ fn compact_histogram(values: &HistogramSamples) -> Result<(ArrayRef, UInt32Array
 
 /// Encodes buffered rows as one batch with direct N-row Arrow array construction.
 ///
-/// Each histogram segment carries only the table rows referenced by that segment; its local
-/// indices are remapped into that compact table. A single constituent child array is reused by
+/// Each histogram segment carries each *distinct* table row it references exactly once, and its
+/// local indices are remapped into that compact table, so the payload grows with the rows a segment
+/// actually names rather than with its positions. A single constituent child array is reused by
 /// clone (sharing its buffers); multiple constituents are concatenated, which copies.
 fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Result<RecordBatch> {
     let count = rows.len();
