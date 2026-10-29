@@ -159,7 +159,6 @@
 //! can reach, is the other point at which everything is released.
 
 use std::fmt::{self, Formatter};
-use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -911,7 +910,7 @@ impl Inputs {
 /// What it saw is recorded before it returns, and returning is what drops its senders: the queues
 /// close only once every task has done that, so the outcome is in place before anything can be woken
 /// by a close.
-fn route_partition(
+async fn route_partition(
     mut stream: SendableEvaluatedSeriesStream,
     partition: usize,
     routing: Routing,
@@ -919,17 +918,15 @@ fn route_partition(
     read_ahead: MemoryReservation,
     inputs: Arc<Inputs>,
     mut report: ReportIfUnreported,
-) -> impl Future<Output = ()> + Send + 'static {
-    async move {
-        let stop = read_chains(&mut stream, &routing, &senders, &read_ahead).await;
-        match &stop {
-            Stop::Ended => inputs.ended(partition),
-            Stop::Failed(error) => inputs.failed(partition, error),
-        }
-        // This task said what became of its partition, so the guard has nothing left to report.
-        report.reported = true;
-        drop(report);
+) {
+    let stop = read_chains(&mut stream, &routing, &senders, &read_ahead).await;
+    match &stop {
+        Stop::Ended => inputs.ended(partition),
+        Stop::Failed(error) => inputs.failed(partition, error),
     }
+    // This task said what became of its partition, so the guard has nothing left to report.
+    report.reported = true;
+    drop(report);
 }
 
 /// Reports an input task that stopped without recording an outcome, on the paths that would
@@ -996,12 +993,55 @@ async fn read_chains(
         // One whole chain, assembled here: the chunk that closes the series ends it, and so does a
         // stream that ends between two chains.
         let mut chain: Chain = Vec::new();
+        let mut chain_output: Option<usize> = None;
+        let mut discarding = false;
         let mut ended = false;
         loop {
-            match stream.next().await {
+            // Input streams may return a long run of ready chunks without yielding to Tokio. Consume
+            // the normal task budget per chunk so sibling producers can run and report failures.
+            tokio::task::coop::consume_budget().await;
+            let next = match (chain_output, discarding) {
+                (Some(output), false) if !chain.is_empty() => {
+                    tokio::select! {
+                        biased;
+                        _ = senders[output].closed() => {
+                            chain.clear();
+                            discarding = true;
+                            continue;
+                        }
+                        next = stream.next() => next,
+                    }
+                }
+                _ => stream.next().await,
+            };
+            match next {
                 Some(Ok((series, is_last))) => {
+                    let output = match chain_output {
+                        Some(output) => output,
+                        None => {
+                            let output = routing.output(&series.metric);
+                            chain_output = Some(output);
+                            output
+                        }
+                    };
+                    // A dropped output is no longer a destination. Still read and validate its
+                    // entire chain, but do not retain or reserve its chunks.
+                    if senders[output].is_closed() {
+                        chain.clear();
+                        discarding = true;
+                        if is_last {
+                            break;
+                        }
+                        continue;
+                    }
                     // Charged as the chain grows, so a chain that does not fit the pool is refused
                     // here rather than after it has been held.
+                    if discarding {
+                        if is_last {
+                            break;
+                        }
+                        continue;
+                    }
                     let charge = read_ahead.new_empty();
                     let tables = series
                         .fields
@@ -1019,6 +1059,14 @@ async fn read_chains(
                         });
                     let bytes = operand_chunk_bytes(&series).saturating_add(tables);
                     if let Err(error) = charge.try_grow(bytes) {
+                        if senders[output].is_closed() {
+                            chain.clear();
+                            discarding = true;
+                            if is_last {
+                                break;
+                            }
+                            continue;
+                        }
                         return Stop::Failed(Arc::new(error));
                     }
                     chain.push((series, is_last, charge));
@@ -1041,7 +1089,7 @@ async fn read_chains(
             // A partition that ends is a partition with nothing left to route - unless it ended
             // inside a chain, which no later chunk can close. The decoders refuse that, so this is a
             // producer that bypassed them, and its output would hold a series no chunk can close.
-            return if chain.is_empty() {
+            return if chain_output.is_none() {
                 Stop::Ended
             } else {
                 Stop::Failed(Arc::new(DataFusionError::Execution(
@@ -1051,8 +1099,12 @@ async fn read_chains(
         }
         // One hash per chain, over the labels of its first chunk: the chunks of a chain are one
         // series, so the first of them names the output for all of them.
-        let output = routing.output(&chain[0].0.metric);
-        if senders[output].send(chain).await.is_err() {
+        let Some(output) = chain_output else {
+            return Stop::Failed(Arc::new(DataFusionError::Internal(
+                "series repartition completed a chain without a routing destination".into(),
+            )));
+        };
+        if !discarding && senders[output].send(chain).await.is_err() {
             // A closed output is no longer a destination. Drop this chain and keep consuming.
             continue;
         }

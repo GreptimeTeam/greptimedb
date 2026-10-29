@@ -65,7 +65,7 @@ use crate::native::execute::operand_chunk_bytes;
 /// The grid every frame of this module is addressed on: a value per second, sixteen of them.
 const GRID_START: i64 = 0;
 const GRID_STEP: i64 = 1_000;
-const GRID_LEN: u64 = 16;
+const GRID_LEN: u64 = 256;
 
 fn grid() -> Arc<EvalGrid> {
     Arc::new(
@@ -3194,6 +3194,8 @@ enum Behaviour {
     /// over back to back reaches a consumer as ONE chunk. A chunk per poll is what keeps them apart,
     /// and a test about how a chain accumulates is about chunks rather than about batches.
     OneAtATime(Vec<Step>),
+    /// Delivers one chunk, waits until the test opens the gate, then delivers the rest.
+    Gated(Vec<Step>),
 }
 
 /// A child whose partitions stop in ways of their own: one dies or is parked, another stays parked.
@@ -3320,7 +3322,9 @@ impl ExecutionPlan for Fragile {
             DataFusionError::Execution(format!("fragile child has no partition {partition}"))
         })?;
         let steps = match &behaviour {
-            Behaviour::Held(steps) | Behaviour::OneAtATime(steps) => steps.clone(),
+            Behaviour::Held(steps) | Behaviour::OneAtATime(steps) | Behaviour::Gated(steps) => {
+                steps.clone()
+            }
             Behaviour::Panics | Behaviour::Parked => Vec::new(),
         };
         pack_evaluated_series(
@@ -3367,6 +3371,17 @@ impl Stream for FragileScript {
         }
         match &this.behaviour {
             Behaviour::Held(_) => {
+                this.switch.wait(cx);
+                if !this.switch.is_open() {
+                    return Poll::Pending;
+                }
+                Poll::Ready(this.steps.next().map(step_answer))
+            }
+            Behaviour::Gated(_) => {
+                if !this.stayed_pending {
+                    this.stayed_pending = true;
+                    return Poll::Ready(this.steps.next().map(step_answer));
+                }
                 this.switch.wait(cx);
                 if !this.switch.is_open() {
                     return Poll::Pending;
@@ -3590,6 +3605,172 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
     }
 }
 
+/// A continuously-ready decoded source is cooperatively budgeted while retaining a partial chain.
+#[tokio::test]
+async fn ready_chain_yields_after_a_charged_prefix_and_drop_releases_it() {
+    const TOTAL: usize = 16_384;
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let long_grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, TOTAL as u64).unwrap()).unwrap(),
+    );
+    let long_schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(Arc::clone(&long_grid)),
+    });
+    let source = futures::stream::poll_fn(move |_| {
+        let position = seen.fetch_add(1, Ordering::SeqCst);
+        Poll::Ready((position < TOTAL).then(|| {
+            let time =
+                TimeAxis::from_grid_spans(long_grid.clone(), vec![GridSpan::new(position, 1)])
+                    .unwrap();
+            let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+                position as f64,
+            ])));
+            let series =
+                Series::try_new(&long_schema, labels("cooperative-prefix"), time, fields).unwrap();
+            Ok((series, position + 1 == TOTAL))
+        }))
+    });
+    let mut source: SendableEvaluatedSeriesStream = Box::pin(source);
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let reservation = MemoryConsumer::new("cooperative-prefix-test")
+        .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>));
+    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    let routing = Routing::new(1);
+    let senders = [sender];
+    let mut read = Box::pin(read_chains(&mut source, &routing, &senders, &reservation));
+    let result = std::future::poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+    assert!(
+        result.is_pending(),
+        "one poll reaches the cooperative budget, not chain end"
+    );
+    let prefix = count.load(Ordering::SeqCst);
+    assert!(
+        prefix > 0 && prefix < TOTAL,
+        "observed {prefix} of {TOTAL} chunks"
+    );
+    assert!(
+        pool.reserved() > 0,
+        "partial chain owns a memory reservation"
+    );
+    drop(read);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "dropping the read releases its partial chain"
+    );
+    drop(receiver);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
+    const TOTAL: usize = 16_384;
+    let count = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let guard = DropCounter(Arc::clone(&dropped));
+    let long_grid = Arc::new(
+        EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, TOTAL as u64).unwrap()).unwrap(),
+    );
+    let long_schema = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("value"),
+        }]),
+        eval_grid: Some(Arc::clone(&long_grid)),
+    });
+    let source = futures::stream::poll_fn(move |_| {
+        let _ = &guard;
+        let position = seen.fetch_add(1, Ordering::SeqCst);
+        Poll::Ready((position < TOTAL).then(|| {
+            let time =
+                TimeAxis::from_grid_spans(long_grid.clone(), vec![GridSpan::new(position, 1)])
+                    .unwrap();
+            let fields = SeriesFields::one(Samples::from_float(Float64Array::from(vec![
+                position as f64,
+            ])));
+            let series =
+                Series::try_new(&long_schema, labels("aborted-prefix"), time, fields).unwrap();
+            Ok((series, position + 1 == TOTAL))
+        }))
+    });
+    let source: SendableEvaluatedSeriesStream = Box::pin(source);
+    let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
+    let ending = Arc::new(Mutex::new(EndingRecord::default()));
+    let inputs = Inputs::new(Arc::clone(&ending), 2);
+    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    let shared = Arc::new(SharedExecution {
+        running: Mutex::new(Running {
+            receivers: vec![Some(receiver)],
+            inputs: Arc::clone(&inputs),
+            claimed: 0,
+            remaining: 1,
+        }),
+        ending: Arc::clone(&ending),
+    });
+    let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
+    let mut output: SendableEvaluatedSeriesStream = Box::pin(RepartitionStream {
+        receiver,
+        chain: Vec::new().into_iter(),
+        lease,
+        reported: false,
+    });
+    let future = route_partition(
+        source,
+        0,
+        Routing::new(1),
+        vec![sender],
+        MemoryConsumer::new("aborted-prefix-test")
+            .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>)),
+        Arc::clone(&inputs),
+        ReportIfUnreported {
+            inputs: Arc::clone(&inputs),
+            partition: 0,
+            reported: false,
+        },
+    );
+    let task = tokio::spawn(future);
+    inputs.attach(0, task);
+    wait_until("route yields after charging a strict chunk prefix", || {
+        let chunks = count.load(Ordering::SeqCst);
+        chunks > 0 && chunks < TOTAL && pool.reserved() > 0
+    })
+    .await;
+    let prefix = count.load(Ordering::SeqCst);
+    assert!(prefix < TOTAL, "failure arrives before all {TOTAL} chunks");
+    inputs.failed(
+        1,
+        &Arc::new(DataFusionError::Execution("sibling failure".into())),
+    );
+    wait_until("aborted route drops its decoded source", || {
+        dropped.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    assert_eq!(
+        prefix,
+        count.load(Ordering::SeqCst),
+        "no chunk is read after cancellation"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "cancellation releases the retained prefix"
+    );
+    let (chunks, errors) = until_end(&mut output).await;
+    assert!(chunks.is_empty());
+    assert_eq!(
+        1,
+        errors.len(),
+        "one terminal failure precedes EOF: {errors:?}"
+    );
+    assert!(
+        errors[0].contains("sibling failure"),
+        "first failure is preserved: {errors:?}"
+    );
+}
+
 /// T-S1: a partition whose task panics ends every output with the read's error, and stops its peers.
 ///
 /// Two inputs and one output. Partition 0's child panics inside its `poll_next`, which unwinds the
@@ -3719,7 +3900,191 @@ async fn an_aborted_input_task_ends_every_output_and_stops_its_peers() {
     wait_until("the read's tasks are gone", || producer_stopped(&execution)).await;
 }
 
+/// A dropped destination's oversized chain is discarded while a live destination continues.
+#[tokio::test]
+async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
+    let doomed = labels_routed_to(0, 1).remove(0);
+    let survivor = labels_routed_to(1, 1).remove(0);
+    let many_chunks = (0..GRID_LEN as usize)
+        .map(|position| {
+            Step::chunk(chunk(
+                doomed.clone(),
+                position,
+                1,
+                position + 1 == GRID_LEN as usize,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let many_chunk_count = many_chunks.len();
+    let live_chunk = chunk(survivor.clone(), 0, 1, true);
+    let byte_budget = operand_chunk_bytes(&live_chunk.0) * 2;
+    let pool = Arc::new(GreedyMemoryPool::new(byte_budget));
+    let context = task_context(&pool);
+    let switch = Arc::new(Switch::default());
+    let child = Fragile::plan(
+        vec![Behaviour::Held({
+            let mut steps = many_chunks;
+            steps.push(Step::chunk(live_chunk));
+            steps
+        })],
+        Arc::clone(&switch),
+    );
+    let plan = node(child.plan, 2);
+    let dropped_output = output_of(&plan, 0, &context);
+    let mut kept_output = output_of(&plan, 1, &context);
+    let first_chunk_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
+    assert_eq!(0, pool.reserved(), "held child has not produced a chunk");
+    drop(dropped_output);
+    switch.open();
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "closed destination was dropped before first chunk"
+    );
+    assert!(first_chunk_bytes > 0);
+    wait_until(
+        "held child processes discarded chain and live chain",
+        || child.polled[0].load(Ordering::SeqCst) >= many_chunk_count + 2,
+    )
+    .await;
+
+    let (chunks, errors) =
+        tokio::time::timeout(Duration::from_secs(10), until_end(&mut kept_output))
+            .await
+            .expect("discarded oversized chain does not block the live destination");
+    assert!(errors.is_empty(), "live output reports {errors:?}");
+    assert_eq!(
+        vec![named(&survivor)],
+        chunks
+            .iter()
+            .map(|chunk| named(&chunk.0.metric))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(1, chunks.len());
+    wait_until("discarded and delivered chain charges are released", || {
+        pool.reserved() == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn discarded_open_chain_is_validated_before_live_chain_routes() {
+    const INVALID: &str = "evaluated series positions are not increasing across chunks";
+    let doomed = labels_routed_to(0, 1).remove(0);
+    let first_chunk_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
+    let invalid = chunk(doomed.clone(), 0, 1, true);
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let switch = Arc::new(Switch::default());
+    let child = Fragile::plan(
+        vec![Behaviour::Gated(vec![
+            Step::chunk(chunk(doomed, 0, 1, false)),
+            Step::chunk(invalid),
+        ])],
+        Arc::clone(&switch),
+    );
+    let plan = node(child.plan, 2);
+    let dropped_output = output_of(&plan, 0, &context);
+    let mut kept_output = output_of(&plan, 1, &context);
+    wait_until("valid prefix is flushed and child parks at gate", || {
+        pool.reserved() >= first_chunk_bytes && child.polled[0].load(Ordering::SeqCst) >= 2
+    })
+    .await;
+    drop(dropped_output);
+    wait_until(
+        "discarding destination releases prefix while gate stays closed",
+        || pool.reserved() == 0,
+    )
+    .await;
+    switch.open();
+    let (chunks, errors) =
+        tokio::time::timeout(Duration::from_secs(10), until_end(&mut kept_output))
+            .await
+            .expect("malformed continuation fails the execution");
+    assert!(
+        chunks.is_empty(),
+        "no incomplete chain was routed: {chunks:?}"
+    );
+    assert_eq!(
+        1,
+        errors.len(),
+        "terminal error is reported exactly once: {errors:?}"
+    );
+    assert!(
+        errors[0].contains(INVALID),
+        "expected position validation error: {errors:?}"
+    );
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "failed discarded chain retains no memory"
+    );
+}
+
+#[tokio::test]
+async fn discarded_open_chain_eof_is_still_an_error() {
+    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    drop(receiver);
+    let series = chunk(labels("unclosed"), 0, 1, false).0;
+    let mut input: SendableEvaluatedSeriesStream =
+        Box::pin(futures::stream::iter(vec![Ok((series, false))]));
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let reservation = MemoryConsumer::new("discarded-open-eof-test").register(&pool);
+    let result = read_chains(&mut input, &Routing::new(1), &[sender], &reservation).await;
+    assert!(
+        matches!(result, Stop::Failed(_)),
+        "open discarded chain EOF is not clean"
+    );
+    assert_eq!(0, pool.reserved());
+}
+
 /// A closed output is skipped while the sibling output continues to receive its chains.
+#[tokio::test]
+async fn closing_destination_releases_an_open_chain_before_child_resumes() {
+    let doomed = labels_routed_to(0, 1).remove(0);
+    let survivor = labels_routed_to(1, 1).remove(0);
+    let switch = Arc::new(Switch::default());
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let context = task_context(&pool);
+    let held_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
+    let child = Fragile::plan(
+        vec![Behaviour::Gated(vec![
+            Step::chunk(chunk(doomed.clone(), 0, 1, false)),
+            Step::chunk(chunk(doomed, 1, 1, true)),
+            Step::chunk(chunk(survivor.clone(), 4, 1, true)),
+        ])],
+        Arc::clone(&switch),
+    );
+    let plan = node(child.plan, 2);
+    let dropped_output = output_of(&plan, 0, &context);
+    let mut kept_output = output_of(&plan, 1, &context);
+    wait_until("open chain is retained and child is gated", || {
+        pool.reserved() >= held_bytes
+    })
+    .await;
+    drop(dropped_output);
+    wait_until(
+        "open chain reservation is released while child remains gated",
+        || pool.reserved() < held_bytes,
+    )
+    .await;
+    switch.open();
+    let (chunks, errors) =
+        tokio::time::timeout(Duration::from_secs(10), until_end(&mut kept_output))
+            .await
+            .expect("the live output completes after gate opens");
+    assert!(errors.is_empty());
+    assert_eq!(
+        vec![named(&survivor)],
+        chunks
+            .iter()
+            .map(|chunk| named(&chunk.0.metric))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(1, chunks.len());
+    assert_eq!(0, pool.reserved());
+}
+
 #[tokio::test]
 async fn dropping_an_output_leaves_surviving_outputs_running() {
     let switch = Arc::new(Switch::default());
@@ -3816,8 +4181,8 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     let plan = node(
         Scripted::plan(vec![
             slices
-                .to_vec()
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|(s, l)| Step::Chunk(s, l))
                 .collect(),
         ]),
@@ -3844,8 +4209,8 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     let plan = node(
         Scripted::plan(vec![
             slices
-                .to_vec()
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|(s, l)| Step::Chunk(s, l))
                 .collect(),
         ]),
@@ -3878,8 +4243,8 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     let plan = node(
         Scripted::plan(vec![
             slices
-                .to_vec()
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|(s, l)| Step::Chunk(s, l))
                 .collect(),
         ]),
