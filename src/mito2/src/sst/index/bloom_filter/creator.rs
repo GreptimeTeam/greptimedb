@@ -491,12 +491,9 @@ impl BloomFilterIndexer {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Returns column IDs indexed as whole columns, excluding JSON path targets.
-    pub fn indexed_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.creators.keys().filter_map(|target| match target {
-            IndexTarget::ColumnId(id) => Some(*id),
-            IndexTarget::JsonPath(_) => None,
-        })
+    /// Returns the targets indexed by this creator.
+    pub fn indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
+        self.creators.keys()
     }
 }
 

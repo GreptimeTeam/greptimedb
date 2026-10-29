@@ -591,7 +591,7 @@ mod tests {
                 }
             }
 
-            assert_eq!(creator.indexed_column_ids().count(), 0);
+            assert_eq!(creator.indexed_targets().collect::<Vec<_>>(), vec![&target]);
             let object_store = mock_object_store();
             let manager = factory.build(
                 object_store.clone(),

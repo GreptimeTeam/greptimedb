@@ -305,12 +305,16 @@ impl Indexer {
         let requested: HashSet<_> = self
             .inverted_indexer
             .iter()
-            .flat_map(|indexer| indexer.indexed_column_ids())
+            .flat_map(|indexer| indexer.indexed_targets())
             .chain(
                 self.bloom_filter_indexer
                     .iter()
-                    .flat_map(|indexer| indexer.indexed_column_ids()),
+                    .flat_map(|indexer| indexer.indexed_targets()),
             )
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
             .collect();
         if metadata.primary_key.iter().all(|id| requested.contains(id)) {
             self.dense_pk_decoder = Some(DensePrimaryKeyCodec::new(metadata));
