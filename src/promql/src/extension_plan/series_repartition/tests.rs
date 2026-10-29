@@ -62,7 +62,7 @@ use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::{render_label_set, series_bytes, table_bytes};
 use crate::native::execute::operand_chunk_bytes;
 
-/// The grid every frame of this module is addressed on: a value per second, sixteen of them.
+/// The grid every frame of this module is addressed on: a value per second, 256 of them.
 const GRID_START: i64 = 0;
 const GRID_STEP: i64 = 1_000;
 const GRID_LEN: u64 = 256;
@@ -3935,12 +3935,12 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
     let first_chunk_bytes = operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0);
     assert_eq!(0, pool.reserved(), "held child has not produced a chunk");
     drop(dropped_output);
-    switch.open();
     assert_eq!(
         0,
         pool.reserved(),
         "closed destination was dropped before first chunk"
     );
+    switch.open();
     assert!(first_chunk_bytes > 0);
     wait_until(
         "held child processes discarded chain and live chain",
