@@ -613,11 +613,13 @@ impl NativeNode {
             // aliases its own rewrite creates afterwards: those are a consumer's to merge, which is
             // a merge above the window and not one below it.
             NativeExpr::Window { input, op } => {
-                let input = input.properties(boundary);
+                let input_properties = input.properties(boundary);
                 if op.function.drops_metric_name() {
-                    input.label_sets_of_its_own()
+                    input_properties.label_sets_of_its_own()
+                } else if matches!(unifies_its_own_contributions(input), Some(false)) {
+                    input_properties.label_sets_of_its_own().merged()
                 } else {
-                    input
+                    input_properties
                 }
             }
             // A timestamp replaces each value with its sample's time, and the labels with
@@ -689,8 +691,11 @@ impl NativeNode {
             // labels, `count_values`' value label - re-derive it from a proof about keys they no
             // longer name.
             NativeExpr::Vector { input, op } => {
+                let limitk_merges = matches!(op, BoundVectorOp::LimitK { .. })
+                    && matches!(unifies_its_own_contributions(input), Some(false));
                 let input = input.properties(boundary);
                 match op {
+                    BoundVectorOp::LimitK { .. } if limitk_merges => input.merged(),
                     BoundVectorOp::TopK { .. }
                     | BoundVectorOp::LimitK { .. }
                     | BoundVectorOp::LimitRatio { .. }
@@ -800,8 +805,11 @@ impl NativeNode {
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Window { input, .. } => {
+            matches!(unifies_its_own_contributions(input), Some(false))
+                || reads_across_series(input)
+        }
         NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => reads_across_series(input),
         NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
@@ -953,9 +961,14 @@ pub fn merges_are_placeable_in(
     match &node.expr {
         NativeExpr::Input(_) | NativeExpr::Scalar(_) => true,
         NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
         | NativeExpr::Timestamp { input } => merges_are_placeable_in(input, boundary, co_located),
+        NativeExpr::Window { input, .. } => {
+            (!matches!(unifies_its_own_contributions(input), Some(false))
+                || co_located
+                || pieces_co_located(input, boundary))
+                && merges_are_placeable_in(input, boundary, co_located)
+        }
         // A merge reads the pieces of one canonical label set and answers one series of it, so it is
         // placeable where the execution holds every piece. The recursion does not stop here: a merge
         // of a merge has to be placeable at every level, and a label-rewriting node between two of

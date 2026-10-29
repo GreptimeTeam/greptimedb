@@ -584,10 +584,8 @@ impl PromPlanner {
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
         // Where the tree is placed is decided on the tree exactly as the compiler produced it, and
-        // before anything is inserted into it. A merge reads across series, so a decision taken
-        // afterwards would answer for the rewrite rather than for the query: the prefix of `sum(x)`
-        // would sit over a merge, which the split's `admit_prefix` refuses, and `rate(x[5m])` would
-        // report that it reads across series. What the insertion pass below does is therefore a
+        // before anything is inserted into it. A decision taken afterwards would answer for the
+        // rewrite rather than for the query. What the insertion pass below does is therefore a
         // consequence of this placement and can never change which placement is taken.
         let Some(placement) = NativePlacement::of(
             &compiled.tree,
@@ -1587,15 +1585,11 @@ mod tests {
         vec![vec!["host".to_string()]]
     }
 
-    /// An aggregate tree still takes the split route, because the placement is decided before the
-    /// insertion pass runs.
+    /// Aggregate placement is decided on the compiled tree before the insertion pass runs.
     ///
-    /// The two facts are one test on purpose: the placement of these shapes is a split only for the
-    /// tree the compiler produced. A merge reads across series, and the split cuts at the innermost
-    /// aggregate, so a pass that ran first would put a merge below the cut and its prefix would
-    /// become `Merge(Window(..))`, which `admit_prefix` refuses with "a per-series prefix across a
-    /// canonical merge, which reads the whole vector". The second half of each case is that tree, so
-    /// the order is what the test holds.
+    /// These cases pin the intended ordering: placement belongs to the compiled expression, not a
+    /// rewritten tree. The insertion pass leaves the split examples unchanged because their complete
+    /// aggregate folds each group point by point and needs no canonical merge.
     #[test]
     fn an_admitted_aggregate_still_splits_after_the_insertion_pass() {
         let fields = [FieldSpec { name: "v0".into() }];
@@ -1624,10 +1618,8 @@ mod tests {
                 "`{query}`: the split route was handed a tree it cannot cut:\n{routed}"
             );
 
-            // The pass leaves a split shape split: a `Complete` aggregate folds its input one
-            // point at a time and needs no merge (see `canonicalize`'s module documentation), so
-            // nothing the pass inserts can sit below the cut and turn the prefix into
-            // `Merge(Window(..))`, which `admit_prefix` would refuse.
+            // The pass leaves a split shape unchanged: a `Complete` aggregate folds its input one
+            // point at a time and needs no canonical merge (see `canonicalize`'s module documentation).
             let passed = passed_tree(query, 1);
             assert_eq!(
                 compiled.to_string(),
@@ -1706,17 +1698,9 @@ mod tests {
     /// A tree whose single execution reads every input partition is the placement the pass runs
     /// on, and it finds nothing to insert into the shapes the route decides it for.
     ///
-    /// `topk`, `sort`, `absent` and an aggregate the split refuses all read the whole vector, so the
-    /// route decides a single execution for them and runs the pass. None of them needs a merge:
-    /// `topk`, `sort` and `absent` answer their input one contribution at a time (see
-    /// `canonicalize`'s per-consumer table, which has one line per vector kernel), a `Complete`
-    /// aggregate folds a group point by point, and the root is not canonicalized by default. The
-    /// tree is therefore handed over exactly as compiled.
-    ///
-    /// The route declines it anyway, and for a reason the pass cannot reach: the labels the fused
-    /// node must declare are derived by [`fused_output_tags`], which names none for an aggregate or
-    /// a vector root. So even a tree carrying a merge would not be built, which is why no plan the
-    /// route produces today carries one.
+    /// `topk`, `sort`, `absent` and an aggregate the split refuses read the whole vector, so the
+    /// route decides a single execution for them and runs the pass. The route currently declines
+    /// these plans because [`fused_output_tags`] cannot derive labels for an aggregate or vector root.
     #[test]
     fn a_single_execution_tree_gains_no_merge_and_the_route_declines_it() {
         for query in ["topk(1, x)", "sort(x)", "absent(x)", "quantile(0.9, x)"] {
@@ -1823,26 +1807,34 @@ mod tests {
         rows
     }
 
-    /// One raw chunk of the series `x{host=<host>}`, holding `rows` at their source timestamps.
-    ///
-    /// `is_last` says this chunk closes the series, so one label set can be handed over as two
-    /// fragments - which is what one scan partition's pieces of a series look like.
+    /// One raw chunk of `x{host=<host>}`, holding `rows` at their source timestamps.
     fn raw_chunk_of(host: &str, key: &[u8], rows: &[(i64, f64)], is_last: bool) -> RawSeriesChunk {
+        raw_chunk_of_labels(key, rows, is_last, host)
+    }
+
+    /// One raw chunk holding an explicit host label, including the empty value.
+    fn raw_chunk_of_labels(
+        key: &[u8],
+        rows: &[(i64, f64)],
+        is_last: bool,
+        host: &str,
+    ) -> RawSeriesChunk {
         let timestamps = rows.iter().map(|&(time, _)| time).collect::<Vec<_>>();
         let values = rows.iter().map(|&(_, value)| value).collect::<Vec<_>>();
+        let labels = Some(
+            SeriesLabels::try_new(
+                Some("x".into()),
+                vec![Label {
+                    name: "host".into(),
+                    value: host.into(),
+                }],
+            )
+            .expect("distinct label names"),
+        );
         RawSeriesChunk::try_new(
             &raw_test_schema(),
             Buffer::from_slice_ref(key),
-            Some(
-                SeriesLabels::try_new(
-                    Some("x".into()),
-                    vec![Label {
-                        name: "host".into(),
-                        value: host.into(),
-                    }],
-                )
-                .expect("distinct label names"),
-            ),
+            labels,
             RawTimestamps::try_new(ScalarBuffer::from(timestamps)).expect("increasing timestamps"),
             SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(values))])
                 .expect("one field"),
@@ -1854,16 +1846,14 @@ mod tests {
     /// The input a single-execution test reads: `x{host="h1"}` in two fragments, and a second series
     /// `x{host="h2"}` that the `topk` below drops.
     ///
-    /// `h1` holds 1, 2 and 3 on the three grid points and `h2` holds a smaller value on each of them,
-    /// so `topk(1, x)` keeps the whole of `h1` - which is what makes that series' fragments show up
-    /// in the answer rather than being lost.
+    /// Two distinct raw keys carry identical `h1` labels and hold 1, 2 and 3 on the three grid
+    /// points. A separate `h2` series holds smaller values, so `topk(1, x)` keeps the unified `h1`
+    /// label set rather than losing it or counting its raw pieces separately.
     fn fragmented_single_execution_input() -> Vec<RawSeriesChunk> {
         vec![
-            // One label set handed over as two pieces: the same encoded key, the first chunk not
-            // closing the series and the second one closing it, which is what one scan partition's
-            // pieces of a series look like.
-            raw_chunk_of("h1", b"h1", &[(0, 1.0), (5_000, 2.0)], false),
-            raw_chunk_of("h1", b"h1", &[(10_000, 3.0)], true),
+            // Distinct raw keys, each closed independently, but identical canonical labels.
+            raw_chunk_of("h1", b"raw-h1-first", &[(0, 1.0), (5_000, 2.0)], true),
+            raw_chunk_of("h1", b"raw-h1-last", &[(10_000, 3.0)], true),
             raw_chunk_of(
                 "h2",
                 b"h2",
@@ -1874,14 +1864,13 @@ mod tests {
     }
 
     /// A merge over a tree whose operation keeps its series' labels answers the rows the unmerged
-    /// tree answered - including when the series arrived as two fragments.
+    /// tree answered - including when distinct raw keys have identical canonical labels.
     ///
     /// `topk(1, x)` is a [`NativePlacement::SingleExecution`] tree, and it is one a merge may sit
-    /// over: `topk` keeps the labels of the series it picks, so collecting its pieces first leaves
-    /// one series per grid position where the unmerged tree had two fragments. What the merge may
-    /// not do is change the answer, so both trees are executed here over the same input - a series
-    /// arriving as two fragments, which is what one partition's pieces of it look like - and the
-    /// rows are compared. The merged tree is built by hand: the insertion pass inserts no merge
+    /// over: `topk` keeps the labels of the series it picks, so collecting distinct raw keys with
+    /// identical canonical labels leaves one series per grid position. What the merge may not do is
+    /// change the answer, so both trees are executed here over the same input and the rows are
+    /// compared. The merged tree is built by hand: the insertion pass inserts no merge
     /// here, because a `topk` reads its input one contribution at a time.
     #[test]
     fn a_merge_over_a_series_keeping_tree_answers_the_rows_it_answered() {
@@ -1909,8 +1898,8 @@ mod tests {
             without, with,
             "`{query}`: the merge over the tree answered different rows:\n{inserted}"
         );
-        // The fixture's point: `topk(1, x)` keeps the whole of the one series it picks and drops the
-        // other, so the answer is that series' three values.
+        // The fixture's point: `topk(1, x)` keeps the one canonical `h1` series assembled from
+        // the distinct raw keys and drops `h2`.
         assert_eq!(
             vec![vec![(0, 1.0), (1, 2.0), (2, 3.0)]],
             with.into_values().collect::<Vec<_>>(),
@@ -1922,10 +1911,9 @@ mod tests {
     /// that placement inserts anything.
     ///
     /// This is the invariant the order exists for, stated one shape at a time. A merge may only be
-    /// inserted where one execution sees every partition, so the shapes that reach a plan today -
-    /// per-series work and the aggregate split - carry none, and the one shape that would carry one
-    /// is not planned at all. A plan the route returns therefore runs exactly the tree the compiler
-    /// produced, and the insertion pass is wired to a placement that no reachable shape takes.
+    /// inserted where one execution sees every partition. Per-series work and the aggregate split
+    /// need none, while the single-execution shapes that could need one are declined by this route
+    /// today. Every plan returned here therefore runs the tree the compiler produced.
     #[test]
     fn no_shape_the_route_plans_carries_an_inserted_merge() {
         let one = one_source_tags();
@@ -2006,10 +1994,9 @@ mod tests {
     /// The pass leaves a per-series tree alone, so what the route hands over is the compiled tree and
     /// the placement it read is the placement of that tree.
     ///
-    /// The window folds one series at a time and the runtime supplies the collection it needs
-    /// (`RuntimeNode::build`'s `Window` arm), so the pass adds no merge above it and none below it.
-    /// A merge writes no label of its own either way, so the tags the fused node declares are the
-    /// compiled tree's.
+    /// A raw scan hands the window one storage series at a time, so the compiled per-partition
+    /// window needs no collection. A merge writes no label of its own either way, so the tags the
+    /// fused node declares are the compiled tree's.
     #[test]
     fn the_insertion_pass_leaves_a_per_series_tree_and_its_tags_alone() {
         let query = "rate(x[5m])";
@@ -2021,7 +2008,7 @@ mod tests {
         assert!(matches!(input.expr, NativeExpr::Input(_)), "{unpassed}");
 
         let passed = passed_tree(query, 1);
-        // No merge anywhere: the window is the root, and the root is not canonicalized by default.
+        // No merge anywhere: the raw scan is complete per series, so this window needs none.
         assert_eq!(0, passed.to_string().matches("Merge").count(), "{passed}");
         let NativeExpr::Window { input, .. } = &passed.root().expr else {
             panic!("the pass wrapped the window at the root: {passed}");

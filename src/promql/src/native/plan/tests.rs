@@ -1564,6 +1564,123 @@ fn a_merge_inherits_and_never_demands_a_single_execution() {
 /// where the node is neither collapsed to one execution nor refused, and it is why a merge no longer
 /// answers the "needs one execution" question with its own placement.
 #[test]
+fn window_unification_matches_runtime_for_placement_and_grouping() {
+    let evaluated_input = input_on(grid(0, 60_000, 4));
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(evaluated_input),
+            op: BoundMap {
+                ops: Arc::new([MapOp::Math(MathOp::Abs)]),
+            },
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    let shared_grid = grid(0, 60_000, 4);
+    let mut window = window_on(map, Some(shared_grid), grid(0, 60_000, 4));
+    if let NativeExpr::Window { op, .. } = &mut window.expr {
+        op.function = RangeFunction::LastOverTime;
+    }
+    let split = [NativeProperties::not_known()];
+    assert!(reads_across_series(&window));
+    assert!(merges_are_placeable_in(&window, &[], true));
+    assert!(!merges_are_placeable_in(&window, &split, false));
+    assert!(!needs_single_execution_in(&window, &split));
+    assert_eq!(
+        window.properties(&split).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+
+    let one_execution = [NativeProperties {
+        owner: CanonicalOwner::SinglePartition,
+        ..source_pieces()
+    }];
+    assert!(merges_are_placeable_in(&window, &one_execution, false));
+
+    // A name-preserving window only inherits complete grouping when the child reports the
+    // runtime's MergeInput behavior. A raw input has unknown ownership and no such report.
+    let transparent = |input| NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(input),
+            op: BoundWindow {
+                function: RangeFunction::LastOverTime,
+                window: RangeWindow {
+                    range_ms: 300_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: grid(0, 60_000, 4),
+            },
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert_eq!(
+        transparent(input()).properties(&[]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    let selected = NativeNode {
+        expr: NativeExpr::Instant {
+            input: Box::new(input()),
+            op: BoundInstant {
+                lookback_ms: 300_000,
+                offset_ms: 0,
+                at_ms: None,
+                value: InstantValue::InfoTimestamp,
+                output_grid: grid(0, 60_000, 4),
+            },
+        },
+        output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+    };
+    assert_eq!(
+        transparent(selected).properties(&[]).grouping,
+        CanonicalGrouping::SourcePiecesOnly
+    );
+    assert_eq!(
+        transparent(merge_over(window_over(input(), None)))
+            .properties(&[])
+            .grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+
+    let limited = NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(window.clone()),
+            op: BoundVectorOp::LimitK {
+                k: 1.0,
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output: window.output.clone(),
+    };
+    assert_eq!(
+        limited.properties(&split).grouping,
+        CanonicalGrouping::CanonicalComplete
+    );
+
+    for value in [InstantValue::Sample, InstantValue::InfoTimestamp] {
+        let selected = NativeNode {
+            expr: NativeExpr::Instant {
+                input: Box::new(input()),
+                op: BoundInstant {
+                    lookback_ms: 300_000,
+                    offset_ms: 0,
+                    at_ms: None,
+                    value,
+                    output_grid: grid(0, 60_000, 4),
+                },
+            },
+            output: evaluated(Arc::new([]), grid(0, 60_000, 4)),
+        };
+        assert_eq!(
+            selected.properties(&[]).grouping,
+            CanonicalGrouping::SourcePiecesOnly,
+            "instant value {value:?} inherits input fragments"
+        );
+    }
+}
+
+#[test]
 fn a_merge_over_a_repartitioning_child_keeps_its_partitions() {
     let merge = merge_over(input_on(grid(0, 60_000, 4)));
     let boundary = [routed_by_canonical_key()];

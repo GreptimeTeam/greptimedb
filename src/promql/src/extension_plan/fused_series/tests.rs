@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::unpack_evaluated_series;
+use common_query::series_frame::{
+    SendableEvaluatedSeriesStream, pack_evaluated_series, unpack_evaluated_series,
+};
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -2055,6 +2057,173 @@ async fn later_source_error_drops_all_gathered_inputs() {
     })
     .await
     .expect("the failure left an input stream or its charge alive");
+}
+
+/// Builds an evaluated input that contributes one grid position with the supplied value.
+async fn evaluated_window_frame(host: &str, position: usize, value: f64) -> RecordBatch {
+    let grid = grid();
+    let schema = SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    };
+    let series = Series::try_new(
+        &schema,
+        metric(&[(HOST, host)], Some(METRIC)),
+        TimeAxis::from_grid_spans(Arc::clone(&grid), vec![GridSpan::new(position, 1)]).unwrap(),
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![value]))),
+    )
+    .unwrap();
+    let evaluated_schema = Arc::new(schema);
+    let source: SendableEvaluatedSeriesStream =
+        Box::pin(futures::stream::iter(vec![Ok((series, true))]));
+    let mut packed = pack_evaluated_series(source, evaluated_schema).unwrap();
+    packed.next().await.unwrap().unwrap()
+}
+
+/// Window over mapped evaluated inputs requires a canonical merge of same-label contributions.
+fn implicit_window_merge_tree() -> NativeTree {
+    let grid = grid();
+    let evaluated_schema = Arc::new(SeriesSchema {
+        fields: raw_schema().fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&evaluated_schema));
+    let input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: evaluated.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: evaluated.clone(),
+    };
+    let map = NativeNode {
+        expr: NativeExpr::Map {
+            input: Box::new(input),
+            op: BoundMap {
+                ops: Arc::from([MapOp::Label(Arc::new(
+                    LabelRewrite::replace(HOST, "web-1", HOST, "web-.*").unwrap(),
+                ))]),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(map),
+            op: BoundWindow {
+                function: RangeFunction::SumOverTime,
+                window: RangeWindow {
+                    range_ms: 2 * GRID_STEP,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: Some(Arc::clone(&grid)),
+                output_grid: grid,
+            },
+        },
+        output: evaluated,
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn implicit_window_merge_requires_complete_input_ownership() {
+    let input_frame = evaluated_window_frame("web-1", 1, 1.0).await;
+    let second_frame = evaluated_window_frame("web-2", 2, 2.0).await;
+    let tree = implicit_window_merge_tree();
+    let schema = input_frame.schema();
+    let node = || {
+        FusedSeries::try_new(
+            Arc::from("sum_over_time(mapped_input)"),
+            tree.clone(),
+            binding(&tree),
+            vec![input_plan(schema.clone())],
+            output_schema().to_dfschema_ref().unwrap(),
+        )
+        .unwrap()
+    };
+    let unknown = memory_exec_partitioned_with(
+        schema.clone(),
+        vec![vec![input_frame.clone()], vec![second_frame.clone()]],
+    );
+    let error = plan_of(node(), unknown)
+        .expect_err("unknown ownership cannot place the implicit canonical merge");
+    assert!(error.to_string().contains("canonical merge"), "{error}");
+
+    let complete = plan_of(
+        node(),
+        memory_exec_with(
+            schema.clone(),
+            vec![input_frame.clone(), second_frame.clone()],
+        ),
+    )
+    .expect("one input partition contains all contributions");
+    assert_eq!(
+        1,
+        complete
+            .properties()
+            .output_partitioning()
+            .partition_count()
+    );
+    let complete_rows = rows(
+        &collect(complete, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        vec![
+            (grid_timestamps()[1], Some(1.0), Some("web-1".into()), None),
+            (grid_timestamps()[2], Some(3.0), Some("web-1".into()), None),
+            (grid_timestamps()[3], Some(2.0), Some("web-1".into()), None),
+        ],
+        complete_rows
+    );
+
+    let wrapped = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(tree.root().clone()),
+            op: BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: Grouping::By(Arc::new([])),
+            },
+        },
+        output: tree.root().output.clone(),
+    })
+    .unwrap();
+    let gathered_input =
+        memory_exec_partitioned_with(schema, vec![vec![input_frame], vec![second_frame]]);
+    let gathered_node = FusedSeries::try_new(
+        Arc::from("topk(1, sum_over_time(mapped_input))"),
+        wrapped,
+        binding(&tree),
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let gathered = plan_of(gathered_node, gathered_input)
+        .expect("TopK independently requires a single execution over all partitions");
+    assert_eq!(
+        1,
+        gathered
+            .properties()
+            .output_partitioning()
+            .partition_count()
+    );
+    let rows = rows(
+        &collect(gathered, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        vec![
+            (grid_timestamps()[1], Some(1.0), Some("web-1".into()), None),
+            (grid_timestamps()[2], Some(3.0), Some("web-1".into()), None),
+            (grid_timestamps()[3], Some(2.0), Some("web-1".into()), None),
+        ],
+        rows
+    );
 }
 
 /// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map

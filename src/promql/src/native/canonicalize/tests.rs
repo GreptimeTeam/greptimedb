@@ -718,7 +718,7 @@ fn each_vector_operator_is_decided_on_its_own() {
                 k: 1.0,
                 group: by_job(),
             },
-            1,
+            0,
         ),
         (BoundVectorOp::LimitRatio { ratio: 0.5 }, 0),
         (BoundVectorOp::Sort(SortOrder::Asc), 0),
@@ -771,22 +771,23 @@ fn the_only_consumer_that_needs_a_merge_still_gets_one() {
     };
     let tree = passed(
         vector_over(window_over(raw_input(0), Arc::clone(&out)), limitk()),
-        1,
+        0,
     );
-    assert_eq!(1, merges(&tree), "`limitk` gained no merge:\n{tree}");
+    assert_eq!(
+        0,
+        merges(&tree),
+        "runtime LimitK already collects its input:\n{tree}"
+    );
     let NativeExpr::Vector { input, .. } = &tree.root().expr else {
         panic!("the vector operation is not the root:\n{tree}");
     };
-    let NativeExpr::Merge { input: collected } = &input.expr else {
-        panic!("the merge does not sit over the `limitk` input:\n{tree}");
-    };
     assert!(
-        matches!(collected.expr, NativeExpr::Window { .. }),
-        "the merge does not sit directly over the window:\n{tree}"
+        matches!(input.expr, NativeExpr::Window { .. }),
+        "the runtime's collection trigger was wrapped in an explicit merge:\n{tree}"
     );
 
-    // Condition 2 again, one level down: a `limitk` over a `limitk` whose input was already
-    // collected gains nothing, because the inner one reports `CanonicalComplete`.
+    // Condition 2 again, one level down: an inner `limitk` already collects its input at runtime,
+    // so the outer one gains no explicit merge.
     let nested = passed(
         vector_over(
             vector_over(window_over(raw_input(0), Arc::clone(&out)), limitk()),
@@ -795,9 +796,9 @@ fn the_only_consumer_that_needs_a_merge_still_gets_one() {
         1,
     );
     assert_eq!(
-        1,
+        0,
         merges(&nested),
-        "a second `limitk` collected an input that was already complete:\n{nested}"
+        "limitk inputs collected by their runtime need no explicit merge:\n{nested}"
     );
 }
 

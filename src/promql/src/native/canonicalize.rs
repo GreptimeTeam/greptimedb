@@ -379,6 +379,11 @@ fn rewrite(node: &NativeNode, boundary: &[NativeProperties]) -> DfResult<NativeN
             let input = rewrite(input, boundary)?;
             NativeExpr::Vector {
                 input: Box::new(match op {
+                    BoundVectorOp::LimitK { .. }
+                        if matches!(unifies_its_own_contributions(&input), Some(false)) =>
+                    {
+                        input
+                    }
                     BoundVectorOp::LimitK { .. } => canonical(input, boundary),
                     BoundVectorOp::TopK { .. }
                     | BoundVectorOp::LimitRatio { .. }

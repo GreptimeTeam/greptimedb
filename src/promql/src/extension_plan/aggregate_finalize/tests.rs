@@ -403,6 +403,43 @@ fn limitk_above_the_cut_is_declined_because_merge_does_not_preserve_input_order(
     );
 }
 
+fn merge_over(input: NativeNode) -> NativeNode {
+    let output = input.output.clone();
+    NativeNode {
+        expr: NativeExpr::Merge {
+            input: Box::new(input),
+        },
+        output,
+    }
+}
+
+#[test]
+fn a_canonical_merge_around_a_split_is_declined() {
+    let aggregate = complete(AggregateKind::Sum, by(&["k0"]))(window());
+    let merge_above = NativeTree::try_new(merge_over(aggregate)).unwrap();
+    assert!(!AggregateFinalize::can_split(
+        &merge_above,
+        &raw_fields(),
+        "ts"
+    ));
+    assert!(matches!(
+        split(merge_above.root(), &raw_fields(), "ts"),
+        Err(DataFusionError::NotImplemented(_))
+    ));
+
+    let merge_prefix = complete(AggregateKind::Sum, by(&["k0"]))(merge_over(window()));
+    let merge_prefix = NativeTree::try_new(merge_prefix).unwrap();
+    assert!(!AggregateFinalize::can_split(
+        &merge_prefix,
+        &raw_fields(),
+        "ts"
+    ));
+    assert!(matches!(
+        split(merge_prefix.root(), &raw_fields(), "ts"),
+        Err(DataFusionError::NotImplemented(_))
+    ));
+}
+
 #[test]
 fn topk_without_aggregate_is_not_split() {
     let tree = NativeTree::try_new(vector_over(
