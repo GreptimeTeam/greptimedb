@@ -545,11 +545,19 @@ async fn initialize_series_index_cache(store: &ObjectStore) -> Result<()> {
         return Ok(());
     }
     common_telemetry::info!("Resetting series-index cache: missing or incompatible layout version");
-    store
-        .delete_with("/")
-        .recursive(true)
-        .await
-        .context(crate::error::OpenDalSnafu)?;
+    // Preserve the cache root, which may be a mount point.
+    let entries = store.list("/").await.context(crate::error::OpenDalSnafu)?;
+    for entry in entries {
+        // Listings can include the directory itself.
+        if entry.path() == "/" {
+            continue;
+        }
+        store
+            .delete_with(entry.path())
+            .recursive(true)
+            .await
+            .context(crate::error::OpenDalSnafu)?;
+    }
     store
         .write("version", SERIES_INDEX_CACHE_VERSION)
         .await
@@ -1737,10 +1745,14 @@ mod tests {
         let store = crate::access_layer::new_fs_cache_store(&root.to_string_lossy())
             .await
             .unwrap();
+        // Keep the original directory alive so its inode cannot be reused after deletion.
+        #[cfg(unix)]
+        let root_handle = tokio::fs::File::open(&root).await.unwrap();
         for version in [None, Some("0"), Some("invalid")] {
             if let Some(version) = version {
                 store.write("version", version).await.unwrap();
             }
+            store.write("stale", "old").await.unwrap();
             store
                 .write("42/samples/old/source/part-0.samples", "old")
                 .await
@@ -1750,6 +1762,22 @@ mod tests {
                 .await
                 .unwrap();
             super::initialize_series_index_cache(&store).await.unwrap();
+            assert!(!store.exists("stale").await.unwrap());
+            assert_eq!(
+                store.read("version").await.unwrap().to_bytes().as_ref(),
+                SERIES_INDEX_CACHE_VERSION.as_bytes()
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+
+                let original = root_handle.metadata().await.unwrap();
+                let current = tokio::fs::metadata(&root).await.unwrap();
+                assert_eq!(
+                    (original.dev(), original.ino()),
+                    (current.dev(), current.ino())
+                );
+            }
             assert!(!store.exists("42/samples.json").await.unwrap());
             assert!(
                 !store
