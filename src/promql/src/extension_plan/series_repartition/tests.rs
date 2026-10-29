@@ -570,6 +570,7 @@ fn raw_metric(host: &str) -> SeriesLabels {
 struct RawPartition {
     chunks: Vec<RawSeriesChunk>,
     gate: Option<Arc<Switch>>,
+    gate_chunks: bool,
 }
 
 struct RawScript {
@@ -577,13 +578,19 @@ struct RawScript {
     schema: Arc<SeriesSchema>,
     binding: store_api::region_engine::RawLabelSource,
     gate: Option<Arc<Switch>>,
+    gate_chunks: bool,
 }
 
 impl Stream for RawScript {
     type Item = Result<RawSeriesChunk, BoxedError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        // The gate holds back only the end of the stream, so a test can show that this partition has
-        // contributed every chunk it owns while its EOF is still outstanding.
+        if self.gate_chunks
+            && let Some(gate) = &self.gate
+            && !gate.is_open()
+        {
+            gate.wait(cx);
+            return Poll::Pending;
+        }
         if let Some(chunk) = self.chunks.next() {
             return Poll::Ready(Some(Ok(chunk)));
         }
@@ -685,6 +692,7 @@ impl ExecutionPlan for RawScripted {
             schema: Arc::clone(&self.series_schema),
             binding: store_api::region_engine::RawLabelSource::Explicit,
             gate: spec.gate,
+            gate_chunks: spec.gate_chunks,
         }))
     }
 }
@@ -5979,7 +5987,7 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
 }
 
 #[tokio::test]
-async fn raw_identity_waits_for_every_input_to_reach_eof() {
+async fn raw_identity_publishes_once_every_input_contributed() {
     let switch = Arc::new(Switch::default());
     let child = RawScripted::plan(vec![
         RawPartition {
@@ -5991,6 +5999,7 @@ async fn raw_identity_waits_for_every_input_to_reach_eof() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
         RawPartition {
             chunks: vec![raw_chunk(
@@ -6001,38 +6010,144 @@ async fn raw_identity_waits_for_every_input_to_reach_eof() {
                 true,
             )],
             gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
         },
     ]);
     let plan = raw_node(child, 1);
-    let pool = Arc::new(GreedyMemoryPool::new(8 << 20));
-    let context = task_context(&pool);
-    let frames = plan
-        .execute(0, Arc::clone(&context))
-        .expect("partition 0 exists");
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan.execute(0, context).expect("partition 0 exists");
     let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), stream.next())
-            .await
-            .is_err(),
-        "no raw identity is emitted before every input reaches EOF"
-    );
-    switch.open();
     let mut chunks = Vec::new();
-    while let Some(item) = stream.next().await {
+    while let Some(item) = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("published while EOF gate remains closed")
+    {
         chunks.push(item.expect("raw merge succeeds"));
+        if chunks.last().is_some_and(|chunk| chunk.is_last) {
+            break;
+        }
     }
     let timestamps: Vec<i64> = chunks
         .iter()
         .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
         .collect();
-    assert_eq!(
-        timestamps,
-        [1, 2, 3, 4],
-        "the shared key's timestamps are merged in order"
-    );
+    assert_eq!(timestamps, [1, 2, 3, 4]);
+    assert!(chunks.last().is_some_and(|chunk| chunk.is_last));
+    switch.open();
+}
+
+#[tokio::test]
+async fn raw_identity_waits_for_an_input_that_has_not_contributed() {
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[1, 3],
+                vec![Some(1.0), Some(3.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "k",
+                Some(raw_metric("a")),
+                &[2, 4],
+                vec![Some(2.0), Some(4.0)],
+                true,
+            )],
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: true,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let frames = plan.execute(0, context).expect("partition 0 exists");
+    let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("the frame decodes");
     assert!(
-        chunks.last().is_some_and(|chunk| chunk.is_last),
-        "the merged key closes"
+        tokio::time::timeout(Duration::from_millis(200), stream.next())
+            .await
+            .is_err()
+    );
+    switch.open();
+    let chunks: Vec<_> = stream.try_collect().await.expect("raw merge succeeds");
+    let timestamps: Vec<i64> = chunks
+        .iter()
+        .flat_map(|chunk| chunk.time.as_buffer().iter().copied())
+        .collect();
+    assert_eq!(timestamps, [1, 2, 3, 4]);
+    assert!(chunks.last().is_some_and(|chunk| chunk.is_last));
+}
+
+/// Chunks decoded from one frame batch share its Arrow buffers, so charging each chunk the whole
+/// allocation would charge the batch's timestamps once per chunk.
+///
+/// A second input that stays open and contributes nothing holds every group unpublished, which is
+/// what keeps the charges of the first input's chunks alive to be measured.
+#[tokio::test]
+async fn raw_chunks_of_one_batch_are_charged_their_own_slice() {
+    const SERIES: usize = 64;
+    const ROWS: usize = 64;
+    let switch = Arc::new(Switch::default());
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: (0..SERIES)
+                .map(|series| {
+                    let times: Vec<i64> = (0..ROWS as i64)
+                        .map(|row| series as i64 * 1000 + row)
+                        .collect();
+                    let values: Vec<Option<f64>> = (0..ROWS).map(|row| Some(row as f64)).collect();
+                    raw_chunk(
+                        &format!("k{series}"),
+                        Some(raw_metric("a")),
+                        &times,
+                        values,
+                        true,
+                    )
+                })
+                .collect(),
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: Vec::new(),
+            gate: Some(Arc::clone(&switch)),
+            gate_chunks: false,
+        },
+    ]);
+    let plan = raw_node(child, 1);
+    let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
+    let context = task_context(&pool);
+    let mut frames = plan
+        .execute(0, Arc::clone(&context))
+        .expect("partition 0 exists");
+    // Everything the first input has is delivered; the second input has contributed nothing, so no
+    // group is publishable and every chunk charge of the first input is still held. Poll the stream
+    // and let the tasks run until it has been idle for a while, keeping the largest charge seen.
+    let mut peak = 0usize;
+    let mut idle = 0usize;
+    while idle < 100 {
+        let state = futures::future::poll_fn(|cx| Poll::Ready(frames.as_mut().poll_next(cx))).await;
+        peak = peak.max(pool.reserved());
+        match state {
+            Poll::Ready(Some(Ok(_))) => idle = 0,
+            Poll::Ready(Some(Err(error))) => panic!("the raw read failed: {error}"),
+            Poll::Ready(None) => panic!("the read ended before the gated input was opened"),
+            Poll::Pending => idle += 1,
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    switch.open();
+    drop(frames);
+    // The timestamps of every chunk in the batch come from one buffer of at most SERIES * ROWS
+    // values. Charging that buffer per chunk would retain about SERIES times its size.
+    let batch_timestamps = SERIES * ROWS * std::mem::size_of::<i64>();
+    assert!(
+        peak < SERIES * batch_timestamps / 2,
+        "peak {peak} must stay well below the {SERIES}x over-charge of {batch_timestamps} bytes"
     );
 }
 
@@ -6048,6 +6163,7 @@ async fn raw_identity_groups_by_primary_key_not_labels() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
         RawPartition {
             chunks: vec![raw_chunk(
@@ -6058,6 +6174,7 @@ async fn raw_identity_groups_by_primary_key_not_labels() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
     ]);
     let plan = raw_node(child, 1);
@@ -6088,6 +6205,7 @@ async fn raw_pieces_of_one_key_must_agree_on_labels() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
         RawPartition {
             chunks: vec![raw_chunk(
@@ -6098,6 +6216,7 @@ async fn raw_pieces_of_one_key_must_agree_on_labels() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
     ]);
     let plan = raw_node(child, 1);
@@ -6124,6 +6243,7 @@ async fn a_raw_merge_conflict_fails_the_execution() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
         RawPartition {
             chunks: vec![raw_chunk(
@@ -6134,6 +6254,7 @@ async fn a_raw_merge_conflict_fails_the_execution() {
                 true,
             )],
             gate: None,
+            gate_chunks: false,
         },
     ]);
     let plan = raw_node(child, 1);

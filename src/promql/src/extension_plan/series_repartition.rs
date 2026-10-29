@@ -16,8 +16,8 @@
 //!
 //! Canonical routing hashes complete labels; matching routing hashes the evaluator's own PromQL
 //! matching key. Routing groups are not merge identities: evaluated series merge only by exact name
-//! and tags. Raw ownership is the complete primary key plus exact label agreement, and raw output
-//! waits for all input EOFs because per-stream `is_last` is not global finality.
+//! and tags. Raw ownership is the complete primary key plus exact label agreement; each input's
+//! complete chain or EOF establishes its contribution to a raw identity.
 //!
 //! Chains are transported intact to owners with their input-partition ID, followed by one charged
 //! normal-EOF message per live output from each completed input. Owners group exact identities and
@@ -148,7 +148,7 @@ use tokio::sync::mpsc;
 use twox_hash::XxHash64;
 
 use crate::grid_series::{label_set, merge_same_labelset};
-use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes, raw_bytes};
+use crate::native::execute::{merge_workspace_bytes, operand_chunk_bytes};
 use crate::source::merge_raw_identity;
 use datatypes::series::samples::DenseSamplesRef;
 
@@ -1283,7 +1283,11 @@ async fn read_raw_chains(
                         continue;
                     }
                     let charge = read_ahead.new_empty();
-                    if let Err(error) = charge.try_grow(raw_bytes(&chunk)) {
+                    let bytes = match raw_chunk_slice_bytes(&chunk) {
+                        Ok(bytes) => bytes,
+                        Err(error) => return Stop::Failed(Arc::new(error)),
+                    };
+                    if let Err(error) = charge.try_grow(bytes) {
                         return Stop::Failed(Arc::new(error));
                     }
                     chain.push((chunk, charge));
@@ -1579,6 +1583,48 @@ enum OwnerKey {
 /// Labels are deliberately not part of the key. Two pieces of one physical key must always meet in
 /// the same owner so a label disagreement can be rejected there, instead of being split across
 /// owners that would each look consistent on its own.
+fn raw_chunk_slice_bytes(chunk: &RawSeriesChunk) -> DataFusionResult<usize> {
+    use datafusion::arrow::array::Array;
+
+    let metric_bytes = chunk.metric.as_ref().map_or(0, |metric| {
+        metric
+            .name()
+            .map_or(0, |name| name.len())
+            .saturating_add(metric.tags().iter().fold(0usize, |bytes, tag| {
+                bytes
+                    .saturating_add(tag.name.len())
+                    .saturating_add(tag.value.len())
+            }))
+    });
+    let mut fields_bytes = 0usize;
+    for samples in chunk.fields.iter() {
+        let field_bytes = match samples.dense() {
+            Some(DenseSamplesRef::Float(values)) => values.to_data().get_slice_memory_size()?,
+            Some(DenseSamplesRef::Histogram(histograms)) => {
+                histogram_table_slice_bytes(histograms.batch())?
+            }
+            Some(DenseSamplesRef::Mixed(mixed)) => mixed
+                .floats()
+                .to_data()
+                .get_slice_memory_size()?
+                .saturating_add(histogram_table_slice_bytes(mixed.histograms().batch())?),
+            None => 0,
+        };
+        fields_bytes = fields_bytes.saturating_add(field_bytes);
+    }
+    Ok(std::mem::size_of::<RawSeriesChunk>()
+        .saturating_add(chunk.primary_key.len())
+        .saturating_add(metric_bytes)
+        .saturating_add(
+            chunk
+                .time
+                .as_buffer()
+                .len()
+                .saturating_mul(std::mem::size_of::<i64>()),
+        )
+        .saturating_add(fields_bytes))
+}
+
 fn raw_identity(chunk: &RawSeriesChunk) -> OwnerKey {
     OwnerKey::Raw(chunk.primary_key.as_slice().to_vec())
 }
@@ -1591,22 +1637,13 @@ struct PendingGroup {
     metadata: MemoryReservation,
 }
 
-/// Whether this owner may publish `key`'s group.
-///
-/// The two contents have different barriers. An evaluated identity is complete once every input
-/// either contributed it and closed that contribution, or ended; a chain's final chunk is the whole
-/// contribution of one input. A raw piece's `is_last` only closes that producer's own stream, and
-/// the same physical key may still arrive from another input, so a raw identity is complete only
-/// after EVERY input reached its normal EOF.
-fn group_ready(key: &OwnerKey, group: &PendingGroup, eof: &[bool]) -> bool {
-    match key {
-        OwnerKey::Evaluated(_) => group
-            .received
-            .iter()
-            .zip(eof)
-            .all(|(received, eof)| *received || *eof),
-        OwnerKey::Raw(_) => eof.iter().all(|eof| *eof),
-    }
+/// Whether every input has either contributed its complete chain or reached normal EOF.
+fn group_ready(group: &PendingGroup, eof: &[bool]) -> bool {
+    group
+        .received
+        .iter()
+        .zip(eof)
+        .all(|(received, eof)| *received || *eof)
 }
 
 enum ReadyOutput {
@@ -1885,10 +1922,10 @@ impl Stream for RepartitionStream {
                             std::ops::Bound::Unbounded,
                         ))
                         .find_map(|(key, group)| {
-                            group_ready(key, group, &this.eof).then(|| key.clone())
+                            group_ready(group, &this.eof).then(|| key.clone())
                         }),
                     None => this.groups.iter().find_map(|(key, group)| {
-                        group_ready(key, group, &this.eof).then(|| key.clone())
+                        group_ready(group, &this.eof).then(|| key.clone())
                     }),
                 };
                 match next {
@@ -2026,7 +2063,7 @@ impl Stream for RepartitionStream {
                             }
                         }
                     }
-                    if group_ready(&key, group, &this.eof)
+                    if group_ready(group, &this.eof)
                         && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));
