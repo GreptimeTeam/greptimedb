@@ -21,6 +21,7 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::error::{Error, UnexpectedSnafu};
 use common_query::WriteProgress;
 use futures::future;
+use tokio_util::sync::CancellationToken;
 
 use crate::write_dispatcher::{
     RoutedWrite, WriteAttempt, WriteDispatcher, get_peer, write_region_id,
@@ -40,6 +41,16 @@ impl WriteDispatcher {
         requests: Vec<TrackedWrite>,
         inputs: usize,
     ) -> Vec<WriteProgress> {
+        let (writes, progress) = self.prepare_tracked(requests, inputs).await;
+        self.execute_tracked(writes, progress, None).await
+    }
+
+    /// Resolves routes before tracked writes are detached from the caller.
+    pub(crate) async fn prepare_tracked(
+        &self,
+        requests: Vec<TrackedWrite>,
+        inputs: usize,
+    ) -> (Vec<RoutedWrite>, Vec<WriteProgress>) {
         let mut progress = vec![WriteProgress::default(); inputs];
         if requests
             .iter()
@@ -49,7 +60,10 @@ impl WriteDispatcher {
                 err_msg: "Write owner exceeds original input count",
             }
             .build();
-            return vec![WriteProgress::failed(BoxedError::new(error)); inputs];
+            return (
+                Vec::new(),
+                vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+            );
         }
         let regions = match requests
             .iter()
@@ -57,11 +71,21 @@ impl WriteDispatcher {
             .collect::<common_meta::error::Result<Vec<_>>>()
         {
             Ok(regions) => regions,
-            Err(error) => return vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+                );
+            }
         };
         let peers = match self.resolve_peers(&regions).await {
             Ok(peers) => peers,
-            Err(error) => return vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+            Err(error) => {
+                return (
+                    Vec::new(),
+                    vec![WriteProgress::failed(BoxedError::new(error)); inputs],
+                );
+            }
         };
         let mut pending = Vec::with_capacity(requests.len());
         for (write, region) in requests.into_iter().zip(regions) {
@@ -75,6 +99,16 @@ impl WriteDispatcher {
                 Err(error) => record_failure(&mut progress, &write.owners, error),
             }
         }
+        (pending, progress)
+    }
+
+    /// Drains in-flight writes while cancellation stops subsequent retries.
+    pub(crate) async fn execute_tracked(
+        &self,
+        mut pending: Vec<RoutedWrite>,
+        mut progress: Vec<WriteProgress>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Vec<WriteProgress> {
         let mut backoff = self.retry.as_ref().map(|retry| {
             ExponentialBuilder::default()
                 .with_min_delay(retry.options.initial_backoff)
@@ -84,7 +118,9 @@ impl WriteDispatcher {
                 .with_jitter()
                 .build()
         });
+        let mut failures = Vec::new();
         loop {
+            failures.clear();
             let attempts = future::join_all(pending.into_iter().map(|write| async {
                 let owners = write.owners.clone().unwrap_or_default();
                 let attempt = if let Some(retry) = &self.retry {
@@ -102,7 +138,8 @@ impl WriteDispatcher {
                 (owners, attempt)
             }))
             .await;
-            let mut failures = Vec::new();
+            pending = Vec::new();
+            let mut refresh = Vec::new();
             let mut terminal = false;
             for (owners, attempt) in attempts {
                 match attempt {
@@ -120,7 +157,14 @@ impl WriteDispatcher {
                     WriteAttempt::Failed {
                         error,
                         request: Some(write),
-                    } => failures.push((write, error)),
+                    } => {
+                        if error.retry_hint() == RetryHint::RetryAfterRouteRefresh {
+                            refresh.push(write);
+                        } else {
+                            pending.push(write);
+                        }
+                        failures.push((owners, error));
+                    }
                     WriteAttempt::Failed {
                         error,
                         request: None,
@@ -137,24 +181,19 @@ impl WriteDispatcher {
                 .then(|| backoff.as_mut().and_then(Iterator::next))
                 .flatten();
             let (Some(delay), Some(retry)) = (delay, &self.retry) else {
-                for (write, error) in failures {
-                    record_failure(
-                        &mut progress,
-                        write.owners.as_deref().unwrap_or_default(),
-                        error,
-                    );
-                }
                 break;
             };
-            tokio::time::sleep(delay).await;
-            pending = Vec::new();
-            let mut refresh = Vec::new();
-            for (write, error) in failures {
-                if error.retry_hint() == RetryHint::RetryAfterRouteRefresh {
-                    refresh.push(write);
-                } else {
-                    pending.push(write);
+            if let Some(cancellation) = cancellation {
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {}
                 }
+            } else {
+                tokio::time::sleep(delay).await;
+            }
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                break;
             }
             if !refresh.is_empty() {
                 let owners = refresh
@@ -166,9 +205,12 @@ impl WriteDispatcher {
                     Err(error) => record_failure(&mut progress, &owners, error),
                 }
             }
-            if pending.is_empty() {
+            if pending.is_empty() || cancellation.is_some_and(CancellationToken::is_cancelled) {
                 break;
             }
+        }
+        for (owners, error) in failures {
+            record_failure(&mut progress, &owners, error);
         }
         progress
     }

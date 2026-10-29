@@ -190,6 +190,7 @@ struct RecordingCacheInvalidator {
     inner: Option<CacheInvalidatorRef>,
     route_update: Mutex<Option<(KvBackendRef, TableRouteValue)>>,
     rename_and_recreate: Mutex<Option<KvBackendRef>>,
+    cancellation: Option<CancellationToken>,
 }
 
 #[async_trait::async_trait]
@@ -240,7 +241,11 @@ impl CacheInvalidator for RecordingCacheInvalidator {
                 .await?;
         }
         if let Some(inner) = &self.inner {
-            inner.invalidate(ctx, caches).await
+            inner.invalidate(ctx, caches).await?;
+            if let Some(cancellation) = &self.cancellation {
+                cancellation.cancel();
+            }
+            Ok(())
         } else {
             UnexpectedSnafu {
                 err_msg: "stop after recording route refresh",
@@ -793,6 +798,58 @@ async fn test_write_retry_cancellation_drains_inflight_requests() {
         ])
     );
     assert!(server.invalidator.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_tracked_cancellation_during_route_refresh_stops_retries() {
+    let server = RegionTestServer::start().await;
+    server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
+    let backend = test_util::prepare_mocked_backend().await;
+    test_util::create_partition_rule_manager(backend.clone()).await;
+    update_table_leader(&backend, &server.peer).await;
+    let (partition_manager, _, registry, catalog_manager) = create_routing_caches(backend);
+    let cancellation = CancellationToken::new();
+    let invalidator = Arc::new(RecordingCacheInvalidator {
+        inner: Some(registry),
+        cancellation: Some(cancellation.clone()),
+        ..Default::default()
+    });
+    let dispatcher = WriteDispatcher::new(Arc::new(NodeClients::default()), partition_manager)
+        .with_retry(build_retry_options(2), catalog_manager, invalidator.clone());
+    let (writes, progress) = dispatcher
+        .prepare_tracked(
+            vec![
+                TrackedWrite {
+                    request: build_partitioned_request(WriteKind::Insert, 1, None, &[70]),
+                    owners: vec![0],
+                },
+                TrackedWrite {
+                    request: build_partitioned_request(WriteKind::Insert, 2, None, &[20]),
+                    owners: vec![1],
+                },
+            ],
+            2,
+        )
+        .await;
+    let progress = dispatcher
+        .execute_tracked(writes, progress, Some(&cancellation))
+        .await;
+    assert!(cancellation.is_cancelled());
+    assert_eq!(invalidator.calls.lock().unwrap().len(), 2);
+    assert_eq!(progress[0].affected_rows, 1);
+    assert!(progress[0].error.is_none());
+    assert_eq!(progress[1].affected_rows, 0);
+    assert_eq!(
+        progress[1].error.as_ref().unwrap().retry_hint(),
+        RetryHint::RetryAfterRouteRefresh
+    );
+    assert_eq!(
+        server.attempt_counts(),
+        HashMap::from([
+            (RegionId::new(1, 1).as_u64(), 1),
+            (RegionId::new(1, 2).as_u64(), 1),
+        ])
+    );
 }
 
 #[tokio::test]
