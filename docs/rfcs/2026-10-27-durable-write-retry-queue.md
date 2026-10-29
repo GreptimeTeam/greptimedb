@@ -187,9 +187,19 @@ records past a bound, bounded by the burst.
 
 A lease is the head record of a key that is not in flight and has not expired.
 `complete` advances the watermark and frees the slot; `discard` does the same and
-reports a dead letter. TTL is checked at lease time and by a periodic sweep
-against a wall clock; `max_attempts` stops a permanently failing record quickly,
-and since attempts reset on restart, `ttl` is the hard bound.
+reports a dead letter. TTL is checked at lease time and by a periodic sweep.
+`enqueued_at_millis` has to be wall-clock time, because a monotonic clock means
+nothing across a restart and the record is persisted; it is read once, not
+consulted while the process runs. At startup the queue derives each record's
+age once from the stored timestamp, and from then on advances that age with a
+monotonic clock; a record enqueued by the running process starts its age at
+zero. A clock step during the process therefore cannot expire a record early or
+keep it alive longer. Across a restart there is no monotonic reference left, so
+a step between processes moves every record's age by that step: `ttl` is a
+tolerance bound, not an exact deadline, and assumes NTP-disciplined clocks.
+Backoff and RPC deadlines are durations and already use monotonic timers.
+`max_attempts` stops a permanently failing record quickly, and since attempts
+reset on restart, `ttl` is the bound that always applies.
 
 If enabled and the store cannot be opened or recovered, startup fails, because
 starting without the previous process's records would silently discard
