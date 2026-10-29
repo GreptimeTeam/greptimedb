@@ -136,9 +136,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
     Partitioning, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
 };
-use datatypes::series::frame::{
-    FrameContent, FrameLabelMode, LabelDecodeSpec, SeriesFrameDeclaration,
-};
+use datatypes::series::frame::{FrameContent, LabelDecodeSpec, SeriesFrameDeclaration};
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{Series, SeriesSchema};
 use datatypes::series::{SeriesLabels, SeriesOrdering};
@@ -283,11 +281,6 @@ impl SeriesRepartitionExec {
             }
             _ => {}
         }
-        if content == FrameContent::Raw && declaration.labels() != FrameLabelMode::Explicit {
-            return Err(DataFusionError::Plan(
-                "SeriesRepartition raw frames require explicit labels".into(),
-            ));
-        }
         let series_schema = Arc::new(declaration.series().clone());
         let ordering = if content == FrameContent::Raw {
             common_query::series_frame::series_frame_ordering(input.schema().as_ref())?
@@ -308,14 +301,23 @@ impl SeriesRepartitionExec {
                 pack_raw_series(Box::pin(source))?.schema()
             }
         };
-        if declared != input.schema() {
+        // The input is re-declared from what it says about itself, not from what this node
+        // publishes: the two differ whenever the child carries its labels in its keys.
+        let rebuilt_input = common_query::series_frame::frame_schema_with(
+            &series_schema,
+            declaration.labels(),
+            declaration.label_decode(),
+            ordering,
+        )
+        .map_err(|error| DataFusionError::Plan(error.to_string()))?;
+        if rebuilt_input != input.schema() {
             return Err(DataFusionError::Plan(
                 "SeriesRepartition input frame carries a schema this node cannot re-declare"
                     .to_string(),
             ));
         }
         let properties = PlanProperties::new(
-            EquivalenceProperties::new(input.schema()),
+            EquivalenceProperties::new(declared),
             Partitioning::UnknownPartitioning(outputs),
             // Each exact identity becomes final independently at its per-input close/EOF barrier.
             EmissionType::Incremental,
@@ -573,7 +575,13 @@ impl SharedExecution {
                     Some(Arc::clone(&series_schema)),
                 )?),
                 FrameContent::Raw => {
-                    RoutedInput::Raw(unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?)
+                    // The node publishes labels, so a child that names them by its key is decoded
+                    // here, where the frames are already unpacked. An already-labelled stream
+                    // passes through untouched.
+                    let stream = unpack_raw_series(frames, Some(Arc::clone(&series_schema)))?;
+                    let stream = crate::source::materialize_raw_labels(stream)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?;
+                    RoutedInput::Raw(stream)
                 }
             });
         }
