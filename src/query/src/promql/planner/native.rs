@@ -50,9 +50,12 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
 use promql::native::execute::NativeExecutionState;
-use promql::native::plan::{MapOp, NativeExpr, NativeNode, NativeType, reads_across_series};
+use promql::native::plan::{
+    BoundAggregate, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeType,
+    reads_across_series,
+};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
-use promql_parser::label::Matchers;
+use promql_parser::label::{METRIC_NAME, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
@@ -631,14 +634,29 @@ impl PromPlanner {
         // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
         // such a tree keeps its one-selector-or-decline behaviour, unchanged.
         let multi_input = selectors.len() > 1 && logical_ids_differ;
-        // A multi-input tree skips the split above, and the split is what refuses a tree the runtime
-        // cannot execute: `check_cut` declines a `quantile` and a grouping by a value field. The node
-        // is chosen while planning the logical plan, so a refusal the physical layer raises later is
-        // an error the statement reports rather than a fall back - which would turn a query the
-        // existing plan answers into a failure. Ask the runtime here instead, with the same
-        // construction the physical layer validates by, and keep the existing plan for whatever it
-        // refuses. Doing it this way is what makes the check cover every refusal the runtime has,
-        // including ones this planner does not know about.
+        // A multi-input tree skips the split below, so the refusals the split makes for reasons that
+        // are not about what the runtime computes have to be made here.
+        //
+        // The aggregate split keeps its prefix per-series, which is why it declines an operation
+        // whose answer depends on the order its input arrives in. A multi-input node reads its
+        // inputs' partitions in the order they became ready, so that refusal is repeated here.
+        if multi_input && depends_on_input_order(root) {
+            return Ok(None);
+        }
+        // The split names the columns its groups report from the existing planner. A grouping by the
+        // metric name keeps a label no column of the existing plan can name, so the schema the node
+        // declares would report one label set for groups the tree keeps apart.
+        if multi_input && groups_by_metric_name(root) {
+            return Ok(None);
+        }
+        // A multi-input tree also skips the split's own capability refusal: `check_cut` declines a
+        // `quantile` and a grouping by a value field. The node is chosen while planning the logical
+        // plan, so a refusal the physical layer raises later is an error the statement reports
+        // rather than a fall back - which would turn a query the existing plan answers into a
+        // failure. Ask the runtime here instead, with the same construction the physical layer
+        // validates by, and keep the existing plan for whatever it refuses. Doing it this way is
+        // what makes the check cover every refusal the runtime has, including ones this planner does
+        // not know about.
         if multi_input
             && NativeExecutionState::try_new(
                 &compiled.tree,
@@ -1046,6 +1064,86 @@ fn data_free(node: &NativeNode) -> bool {
         NativeExpr::Binary { left, right, .. } => data_free(left) && data_free(right),
         NativeExpr::VectorOf { input } => data_free(input),
         _ => false,
+    }
+}
+
+/// Whether `node` holds an operation whose answer depends on the order its input arrives in.
+///
+/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]).
+/// A node with more than one input reads its inputs' partitions through a gather that hands over
+/// whichever partition became ready first, so the schedule would decide which series a query keeps
+/// and the same data could answer differently between two runs. Prometheus defines the selection
+/// over a series set, not over an arrival order.
+///
+/// Every other vector operation orders its input itself before choosing - `topk` by label,
+/// `sort` by value, `limit_ratio` by a label hash - so only this one is asked about. The aggregate
+/// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
+fn depends_on_input_order(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. } => depends_on_input_order(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
+        NativeExpr::Vector { input, op } => {
+            matches!(op, BoundVectorOp::LimitK { .. }) || depends_on_input_order(input)
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            depends_on_input_order(left) || depends_on_input_order(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            depends_on_input_order(base) || depends_on_input_order(info)
+        }
+    }
+}
+
+/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
+///
+/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
+/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
+/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
+/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
+/// would drop the metric name the native aggregate kept, and two groups differing only in their
+/// metric would come out as two rows under one label set, which is a series identity lost rather
+/// than an answer given.
+///
+/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
+/// selector: it reads one metric, so every group it folds carries the same name and naming that name
+/// or dropping it cannot merge two groups. What the check is for is the tree that reads more than one
+/// metric, which is the one a multi-input node is bound for.
+fn groups_by_metric_name(node: &NativeNode) -> bool {
+    let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
+    match &node.expr {
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
+        NativeExpr::Aggregate { input, op } => {
+            grouping_names_metric(op) || groups_by_metric_name(input)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+        NativeExpr::Vector { input, .. } => groups_by_metric_name(input),
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            groups_by_metric_name(left) || groups_by_metric_name(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            groups_by_metric_name(base) || groups_by_metric_name(info)
+        }
     }
 }
 

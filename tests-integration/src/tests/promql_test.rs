@@ -4744,6 +4744,147 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
     }
 }
 
+/// A grouping by the metric name keeps series the schema would have no column for.
+///
+/// `sum by (__name__) (a or b)` folds two metrics into two groups that differ only in their metric
+/// name. The native aggregate keeps that name and folds by it, but the label set the node declares is
+/// taken from the existing planner's columns, and `__name__` is no column of any scan - so the two
+/// groups would be reported under one label set, as two rows a reader cannot tell apart. The number
+/// of rows and their full label sets are what this asserts: the values alone would still look
+/// plausible, and only the labels say the identity was lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_grouping_by_the_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_group_by_name",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_name_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_name_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_name_phy');
+        CREATE TABLE native_name_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_name_phy');
+        INSERT INTO native_name_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_name_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The two sides carry different hosts, so `or` keeps both series and the grouping has two groups
+    // whose only distinguishing label is the metric name.
+    let query = r#"sum by (__name__) (native_name_demo{host="a"} or native_name_other{host="b"})"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        !legacy_rows.is_empty(),
+        "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+    );
+
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{query}: the route must decline a grouping by the metric name, whose groups its declared \
+         schema cannot name"
+    );
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: the full label sets of every row, not only the values"
+    );
+}
+
+/// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
+///
+/// A node with more than one input hands its inputs' partitions over in the order they became ready,
+/// while `limitk` keeps the first `k` series of each group in input order: the schedule would decide
+/// which series a query keeps, where Prometheus defines the selection over a series set. The
+/// aggregate split declines it for the same reason, and that refusal is repeated for a multi-input
+/// node.
+///
+/// The existing planner cannot plan `limitk` at all - it has no kernel for the operator - so the
+/// statement fails on both routes today. What this pins is that the native route does not change
+/// that outcome by answering it, and in particular does not answer it differently between runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_limitk_order",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_order_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_order_left (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        CREATE TABLE native_order_right (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        INSERT INTO native_order_left (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = "native_order_left and on(host) limitk(1, native_order_right)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+
+    // The route declines, so the statement is planned by the one that was always its answer.
+    observer.clear();
+    let native = instance
+        .do_query(&sql, native_query_context(true, 4))
+        .await
+        .remove(0);
+    assert!(
+        observer.fused().is_none(),
+        "{query}: the route must decline a selection whose answer depends on arrival order"
+    );
+    let legacy = instance
+        .do_query(&sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    // Both routes report the same outcome: the decline leads to the plan this statement already had,
+    // not to an answer the schedule could change.
+    assert_eq!(
+        native.is_err(),
+        legacy.is_err(),
+        "{query}: the route must not change whether the statement is answerable"
+    );
+    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
+        assert_eq!(
+            native_error.to_string(),
+            legacy_error.to_string(),
+            "{query}: the decline must lead to the plan this statement already had"
+        );
+    }
+}
+
 /// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
 /// statement.
 ///
