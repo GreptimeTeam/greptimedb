@@ -140,7 +140,9 @@ This is target selection, not job admission. Job names, service modes, binary
 builds, time budgets, and diagnostics stay the same. The existing full binary
 archive is still built. Selection can reduce target executions, but does not
 claim to reduce build or cluster startup time. Suite-level admission remains
-separate from this selector.
+separate from this selector. The scope classifier admits jobs first; target
+selection only narrows the executions inside admitted groups. A selector result
+cannot start a job excluded by scope, event policy, or a failed script preflight.
 
 The complete group still identifies the corpus cache, even when only some
 targets execute. Unselected restored inputs are retained. The optional
@@ -148,11 +150,15 @@ targets execute. Unselected restored inputs are retained. The optional
 invalid decisions run the complete group. The first PR introducing the policy
 also runs everything because the script does not yet exist on its base.
 
-Manual fuzz runs always use the complete requested profile. Merge-queue and
-future scheduled fuzz runs use all eligible targets; this change does not
-enable those events. On PRs, the `ci:full` label or `CI_SCOPE_FORCE_ALL`
-repository variable disables narrowing. Logs show the decision, matched paths,
-and each group's final target list and smoke target.
+Manual fuzz runs use the complete requested profile, and scheduled fuzz runs
+use all targets. The upstream event policy runs PR fuzzing on opening a ready
+PR or marking it ready for review, skips ordinary pushes/reopening and merge
+groups, and keeps core integration checks on updates. On PRs, the `ci:full`
+label or `CI_SCOPE_FORCE_ALL` repository variable disables target narrowing;
+these overrides do not change job admission. See [Heavy CI scheduling](../.github/heavy-ci.md)
+for the event policy. Logs show the decision, matched paths, and each group's
+final target list and smoke target. The shared script-test action runs the
+selector tests before expensive jobs in Checks, Rust CI, and Integration CI.
 
 Test the selector with Python 3.11 or newer, without building Rust or starting
 services:

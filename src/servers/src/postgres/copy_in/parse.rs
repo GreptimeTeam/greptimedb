@@ -32,7 +32,7 @@ use pgwire::error::PgWireResult;
 use crate::postgres::copy_in::options::{CopyOptionSet, CopyOptionValue};
 use crate::postgres::copy_in::{bad_copy_data, copy_in_must_run_alone_error};
 
-/// A scanned `COPY tbl [(cols)] FROM STDIN [WITH (...)]` statement.
+/// A scanned `COPY [tbl [(cols)]] FROM STDIN [WITH (...)]` statement.
 ///
 /// Unquoted identifiers are folded to lowercase and quoted ones keep their
 /// case (`COPY Metrics` addresses the same table as `CREATE TABLE Metrics`,
@@ -41,7 +41,9 @@ use crate::postgres::copy_in::{bad_copy_data, copy_in_must_run_alone_error};
 #[derive(Debug)]
 pub(super) struct RawCopyFromStdin {
     /// Table name parts, as written (`t`, `schema.t`,
-    /// `catalog.schema.t`); quoted names keep their case.
+    /// `catalog.schema.t`); quoted names keep their case. Empty for
+    /// table-less formats whose records carry their own routing (e.g.
+    /// the influxdb line protocol names its measurement per line).
     pub(super) table: Vec<String>,
     /// Requested column list; empty means all columns in table order.
     pub(super) columns: Vec<String>,
@@ -89,13 +91,27 @@ pub(super) fn scan_copy_from_stdin(sql: &str) -> PgWireResult<CopyInScan> {
         return Ok(CopyInScan::NotCopyIn);
     }
 
-    let table = match parse_object_name(&mut cursor) {
-        Some(table) => table,
-        None => return Ok(CopyInScan::NotCopyIn),
+    // Table-less statements (`COPY FROM STDIN WITH (FORMAT influxdb) ...`)
+    // are table-format specific: the codec decides whether a missing
+    // table is legal. An unquoted `FROM` cannot be a table name (SQL
+    // would require quoting it), so peek instead of letting the
+    // identifier parser swallow the keyword. A column list without a
+    // table is not.
+    let table = if cursor.peek_keyword("from") {
+        Vec::new()
+    } else {
+        match parse_object_name(&mut cursor) {
+            Some(table) => table,
+            None => return Ok(CopyInScan::NotCopyIn),
+        }
     };
-    let columns = match parse_column_list(&mut cursor) {
-        Some(columns) => columns,
-        None => return Ok(CopyInScan::NotCopyIn),
+    let columns = if table.is_empty() {
+        Vec::new()
+    } else {
+        match parse_column_list(&mut cursor) {
+            Some(columns) => columns,
+            None => return Ok(CopyInScan::NotCopyIn),
+        }
     };
 
     if !cursor.take_keyword("from") || !cursor.take_keyword("stdin") {
@@ -151,15 +167,19 @@ impl<'a> Tokens<'a> {
 
     /// Consumes the next token if it is the unquoted keyword `keyword`.
     fn take_keyword(&mut self, keyword: &str) -> bool {
-        match self.peek() {
-            Some(Token::Word(w))
-                if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(keyword) =>
-            {
-                self.pos += 1;
-                true
-            }
-            _ => false,
+        if self.peek_keyword(keyword) {
+            self.pos += 1;
+            true
+        } else {
+            false
         }
+    }
+
+    /// Whether the next token is the unquoted keyword `keyword`, without
+    /// consuming it.
+    fn peek_keyword(&self, keyword: &str) -> bool {
+        matches!(self.tokens.get(self.pos), Some(Token::Word(w))
+            if w.quote_style.is_none() && w.value.eq_ignore_ascii_case(keyword))
     }
 }
 
@@ -273,6 +293,27 @@ mod tests {
             CopyInScan::CopyIn(raw) => Some(raw),
             CopyInScan::NotCopyIn => None,
         })
+    }
+
+    #[test]
+    fn test_scan_tableless() {
+        // Table-less statements: the codec decides whether a missing
+        // table is legal (the influxdb line protocol names its
+        // measurement per line).
+        let raw = scan("COPY FROM STDIN WITH (FORMAT influxdb, precision 'ns')")
+            .unwrap()
+            .unwrap();
+        assert!(raw.table.is_empty());
+        assert!(raw.columns.is_empty());
+
+        let raw = scan("copy from stdin (format influxdb)").unwrap().unwrap();
+        assert!(raw.table.is_empty());
+
+        // A column list without a table is not a copy-in statement.
+        assert!(scan("COPY (a, b) FROM STDIN").unwrap().is_none());
+        // COPY OUT and file COPY are unaffected.
+        assert!(scan("COPY (SELECT 1) TO STDOUT").unwrap().is_none());
+        assert!(scan("COPY t FROM '/tmp/x.csv'").unwrap().is_none());
     }
 
     #[test]

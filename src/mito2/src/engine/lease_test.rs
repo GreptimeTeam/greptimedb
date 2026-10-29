@@ -13,8 +13,10 @@
 // limitations under the License.
 
 //! Tests that a region acknowledges only writes whose WAL append completed within its leader
-//! lease.
+//! lease, and that Leader grants for heartbeats sent before a downgrade do not make it writable
+//! again.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,8 +26,11 @@ use common_error::ext::{BoxedError, ErrorExt};
 use common_recordbatch::RecordBatches;
 use rstest::rstest;
 use rstest_reuse::apply;
-use store_api::region_engine::{RegionEngine, RegionRole};
-use store_api::region_request::{RegionCatchupRequest, RegionPutRequest, RegionRequest};
+use store_api::region_engine::{RegionEngine, RegionRole, SettableRegionRoleState};
+use store_api::region_request::{
+    EnterStagingRequest, RegionCatchupRequest, RegionPutRequest, RegionRequest,
+    StagingPartitionDirective,
+};
 use store_api::storage::{RegionId, ScanRequest};
 use tokio::task::JoinHandle;
 
@@ -34,10 +39,11 @@ use crate::engine::MitoEngine;
 use crate::engine::basic_test::build_bulk_insert_request;
 use crate::engine::listener::WriteWalListener;
 use crate::error::Error;
+use crate::region::{RegionLeaderState, RegionRoleState};
 use crate::test_util::{
     CreateRequestBuilder, LogStoreFactory, TestEnv, build_rows, kafka_log_store_factory,
     multiple_log_store_factories, prepare_test_for_kafka_log_store, raft_engine_log_store_factory,
-    rows_schema,
+    reopen_region, rows_schema,
 };
 
 const LEASE: Duration = Duration::from_secs(10);
@@ -66,8 +72,16 @@ async fn create_region(
 
 fn grant(engine: &MitoEngine, role: RegionRole, deadline: Instant) {
     engine
-        .set_region_role_with_lease(REGION_ID, role, deadline)
+        .set_region_role_with_lease(REGION_ID, role, Instant::now(), deadline)
         .unwrap();
+}
+
+/// Grants Leader for a heartbeat sent at `sent_at`, and returns whether the role was applied.
+fn grant_leader_at(engine: &MitoEngine, sent_at: Instant) -> bool {
+    let deadline = Instant::now() + LEASE;
+    engine
+        .set_region_role_with_lease(REGION_ID, RegionRole::Leader, sent_at, deadline)
+        .unwrap()
 }
 
 /// Returns a request that writes rows `start..start + 3`.
@@ -281,4 +295,92 @@ async fn test_upgraded_region_writes_before_leader_grant() {
         .await
         .unwrap();
     put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+}
+
+#[rstest]
+#[case::downgrading(SettableRegionRoleState::DowngradingLeader)]
+#[case::follower(SettableRegionRoleState::Follower)]
+#[tokio::test]
+async fn test_stale_leader_grant_after_downgrade(#[case] downgraded_to: SettableRegionRoleState) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("stale-leader-grant").await;
+    let (_listener, engine, _schema) = create_region(&mut env, None).await;
+    let sent_before = Instant::now() - Duration::from_millis(1);
+    engine
+        .set_region_role_state_gracefully(REGION_ID, downgraded_to)
+        .await
+        .unwrap();
+    let downgraded = engine.get_region(REGION_ID).unwrap().state();
+    // Another downgrade raises the gate again, though the role does not change.
+    let sent_between = Instant::now();
+    engine
+        .set_region_role_state_gracefully(REGION_ID, downgraded_to)
+        .await
+        .unwrap();
+
+    // Grants for heartbeats sent before either downgrade arrive late.
+    assert!(!grant_leader_at(&engine, sent_before));
+    assert!(!grant_leader_at(&engine, sent_between));
+    assert_eq!(downgraded, engine.get_region(REGION_ID).unwrap().state());
+
+    assert!(grant_leader_at(&engine, Instant::now()));
+    assert!(engine.get_region(REGION_ID).unwrap().is_writable());
+}
+
+#[rstest]
+#[case::catchup(false)]
+#[case::close_and_open(true)]
+#[tokio::test]
+async fn test_reopened_region_ignores_earlier_grants(#[case] close: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("reopened-region-grant").await;
+    let (_listener, engine, schema) = create_region(&mut env, None).await;
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    // The memtable is not empty, so the catchup below reopens the region.
+    put(&engine, REGION_ID, &schema, 0).await.unwrap().unwrap();
+    let sent_before = Instant::now() - Duration::from_millis(1);
+    let region = engine.get_region(REGION_ID).unwrap();
+    if close {
+        let table_dir = CreateRequestBuilder::new().build().table_dir;
+        reopen_region(&engine, REGION_ID, table_dir, false, HashMap::new()).await;
+    } else {
+        engine
+            .set_region_role_state_gracefully(REGION_ID, SettableRegionRoleState::Follower)
+            .await
+            .unwrap();
+        let request = RegionRequest::Catchup(RegionCatchupRequest::default());
+        engine.handle_request(REGION_ID, request).await.unwrap();
+    }
+    assert!(!Arc::ptr_eq(
+        &region,
+        &engine.get_region(REGION_ID).unwrap()
+    ));
+
+    assert!(!grant_leader_at(&engine, sent_before));
+    assert!(!engine.get_region(REGION_ID).unwrap().is_writable());
+
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    assert!(engine.get_region(REGION_ID).unwrap().is_writable());
+}
+
+#[tokio::test]
+async fn test_leader_grant_exits_staging() {
+    common_telemetry::init_default_ut_logging();
+    let mut env = TestEnv::with_prefix("staging-leader-grant").await;
+    let (_listener, engine, _schema) = create_region(&mut env, None).await;
+    let request = EnterStagingRequest {
+        partition_directive: StagingPartitionDirective::RejectAllWrites,
+    };
+    engine
+        .handle_request(REGION_ID, RegionRequest::EnterStaging(request))
+        .await
+        .unwrap();
+    let state = || engine.get_region(REGION_ID).unwrap().state();
+    assert_eq!(RegionRoleState::Leader(RegionLeaderState::Staging), state());
+
+    grant(&engine, RegionRole::Leader, Instant::now() + LEASE);
+    assert_eq!(
+        RegionRoleState::Leader(RegionLeaderState::Writable),
+        state()
+    );
 }

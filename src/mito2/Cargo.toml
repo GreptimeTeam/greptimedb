@@ -159,3 +159,7 @@ required-features = ["testing"]
 name = "bench_compaction_merge"
 harness = false
 required-features = ["test"]
+
+[[bench]]
+name = "bench_sparse_write"
+harness = false

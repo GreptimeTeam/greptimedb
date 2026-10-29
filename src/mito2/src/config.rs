@@ -129,6 +129,10 @@ pub struct MitoConfig {
     pub experimental_compaction_memory_limit: MemoryLimit,
     /// Behavior when compaction cannot acquire memory from the budget.
     pub experimental_compaction_on_exhausted: OnExhaustedPolicy,
+    /// Default per-output parallelism for input decoding and SST column encoding,
+    /// bounded independently per stage. Values below 2 disable both.
+    /// Tables can override it with `compaction.experimental_output_parallelism`.
+    pub experimental_compaction_output_parallelism: usize,
 
     // Flush configs:
     /// Interval to auto flush a region if it has not flushed yet (default 10 min).
@@ -247,6 +251,7 @@ impl Default for MitoConfig {
             max_background_purges: get_total_cpu_cores(),
             experimental_compaction_memory_limit: MemoryLimit::Unlimited,
             experimental_compaction_on_exhausted: OnExhaustedPolicy::default(),
+            experimental_compaction_output_parallelism: 1,
             auto_flush_interval: Duration::from_secs(10 * 60),
             global_write_buffer_size: ReadableSize::gb(1),
             global_write_buffer_reject_size: ReadableSize::gb(2),
