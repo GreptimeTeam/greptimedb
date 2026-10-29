@@ -91,12 +91,10 @@ async fn send_batch(batch: &Batch, inserter: &Inserter) -> Result<Vec<WriteProgr
         .build()
     })?;
     let combined = combine_batches(batch.submissions.iter().map(|pending| &pending.batch))?;
-    let owners = batch
-        .submissions
-        .iter()
-        .enumerate()
-        .flat_map(|(owner, pending)| std::iter::repeat_n(owner, pending.batch.num_rows()))
-        .collect();
+    let mut owners = Vec::with_capacity(batch.total_rows);
+    for (owner, pending) in batch.submissions.iter().enumerate() {
+        owners.extend(std::iter::repeat_n(owner, pending.batch.num_rows()));
+    }
     inserter
         .flush_bulk_batch_tracked(
             first.table_info.clone(),

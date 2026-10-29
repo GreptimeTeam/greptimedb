@@ -2168,3 +2168,63 @@ async fn test_exemplar_progress_retains_success_and_unknown_acknowledgements() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_tracked_progress_counts_noncontiguous_owners() {
+    #[derive(Clone)]
+    struct CountRows;
+
+    #[async_trait::async_trait]
+    impl MockDatanodeHandler for CountRows {
+        async fn handle(
+            &self,
+            _: &Peer,
+            request: RegionRequest,
+        ) -> Result<api::region::RegionResponse> {
+            let Some(Body::Inserts(inserts)) = request.body else {
+                panic!("expected row inserts")
+            };
+            Ok(api::region::RegionResponse::new(
+                inserts
+                    .requests
+                    .into_iter()
+                    .map(|r| r.rows.unwrap().rows.len())
+                    .sum(),
+            ))
+        }
+
+        async fn handle_query(
+            &self,
+            _: &Peer,
+            _: QueryRequest,
+        ) -> Result<SendableRecordBatchStream> {
+            unreachable!()
+        }
+    }
+
+    let manager =
+        test_util::create_partition_rule_manager(test_util::prepare_mocked_backend().await).await;
+    let dispatcher = WriteDispatcher::new(Arc::new(MockDatanodeManager::new(CountRows)), manager);
+    for owners in [
+        vec![],
+        vec![0],
+        vec![0; 1024],
+        vec![0, 0, 2, 2, 1, 0, 0],
+        (0..129).map(|i| i % 3).collect(),
+    ] {
+        let request =
+            build_partitioned_request(WriteKind::Insert, 1, None, &vec![70; owners.len()]);
+        let mut expected = [0; 4];
+        for owner in &owners {
+            expected[*owner] += 1;
+        }
+        let progress = dispatcher
+            .dispatch_tracked(vec![TrackedWrite { request, owners }], 4)
+            .await;
+        assert!(progress.iter().all(|p| p.error.is_none()));
+        assert_eq!(
+            progress.iter().map(|p| p.affected_rows).collect::<Vec<_>>(),
+            expected
+        );
+    }
+}

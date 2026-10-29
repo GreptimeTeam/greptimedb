@@ -107,8 +107,8 @@ impl WriteDispatcher {
             for (owners, attempt) in attempts {
                 match attempt {
                     WriteAttempt::Success(response) if response.affected_rows == owners.len() => {
-                        for owner in owners {
-                            progress[owner].affected_rows += 1;
+                        for run in owners.chunk_by(|a, b| a == b) {
+                            progress[run[0]].affected_rows += run.len();
                         }
                     }
                     WriteAttempt::Success(response) => {

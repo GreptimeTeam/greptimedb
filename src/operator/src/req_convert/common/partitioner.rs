@@ -296,13 +296,16 @@ impl TablePartitioner {
         );
         let mut selected = HashMap::new();
         for (region, mask) in &masks {
+            let mut selected_owners = Vec::with_capacity(mask.selected_rows());
+            selected_owners.extend(
+                mask.array()
+                    .values()
+                    .set_indices()
+                    .map(|index| owners[index]),
+            );
             selected.insert(
                 RegionId::new(self.table_id, *region).as_u64(),
-                owners
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, owner)| mask.array().value(index).then_some(*owner))
-                    .collect::<Vec<_>>(),
+                selected_owners,
             );
         }
         self.build_bulk_insert_requests(batch, masks, None, skip_wal)?
@@ -670,7 +673,7 @@ mod tests {
     use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::rpc::router::{Region, RegionRoute};
     use common_meta::rpc::store::RangeResponse;
-    use datatypes::arrow::array::{Int32Array, StringArray};
+    use datatypes::arrow::array::{BooleanArray, Int32Array, StringArray};
     use datatypes::arrow::datatypes::{DataType, Field, Schema};
     use datatypes::arrow::record_batch::RecordBatch;
     use datatypes::data_type::ConcreteDataType;
@@ -1338,5 +1341,82 @@ mod tests {
             .await
             .context(error::InvalidPartitionSnafu)?;
         partitioner.rebuild_write_requests(request, &table_info)
+    }
+
+    #[tokio::test]
+    async fn test_tracked_bulk_owners_preserve_payload_alignment() {
+        let (manager, cache) = create_fixture().await;
+        let table_info = cache.get(1).await.unwrap().unwrap();
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
+            .await
+            .unwrap();
+        for len in [0, 1, 7, 64, 65, 257] {
+            let batch = RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)])),
+                vec![Arc::new(Int32Array::from_iter_values(0..len as i32))],
+            )
+            .unwrap();
+            let owners = (0..len)
+                .map(|i| [2, 2, 0, 1, 0, 0][i % 6])
+                .collect::<Vec<_>>();
+            for offset in [0, 1, 7, 65] {
+                for pattern in 0..3 {
+                    let values = (0..offset + len)
+                        .map(|i| match pattern {
+                            0 => false,
+                            1 => true,
+                            _ => i % 3 != 0,
+                        })
+                        .collect::<Vec<_>>();
+                    let expected = (0..len).filter(|i| values[offset + i]).collect::<Vec<_>>();
+                    let mask = BooleanArray::from(values).slice(offset, len);
+                    let requests = partitioner
+                        .build_tracked_bulk_insert_requests(
+                            batch.clone(),
+                            [(1, RegionMask::from(mask))].into_iter().collect(),
+                            owners.clone(),
+                            false,
+                        )
+                        .unwrap();
+                    if expected.is_empty() {
+                        assert!(requests.is_empty());
+                        continue;
+                    }
+                    assert_eq!(requests.len(), 1);
+                    let (request, selected_owners) = &requests[0];
+                    let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &request.body else {
+                        panic!("expected Arrow IPC")
+                    };
+                    let payload = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                        .unwrap()
+                        .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                        .unwrap();
+                    let actual_rows = payload
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<Int32Array>()
+                        .unwrap();
+                    assert_eq!(
+                        actual_rows
+                            .values()
+                            .iter()
+                            .map(|x| *x as usize)
+                            .collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_eq!(
+                        *selected_owners,
+                        expected.iter().map(|i| owners[*i]).collect::<Vec<_>>()
+                    );
+                }
+            }
+            let wrong = partitioner.build_tracked_bulk_insert_requests(
+                batch,
+                HashMap::new(),
+                vec![0; len + 1],
+                false,
+            );
+            assert!(wrong.is_err());
+        }
     }
 }
