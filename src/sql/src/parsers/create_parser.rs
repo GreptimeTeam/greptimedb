@@ -55,6 +55,7 @@ use crate::statements::create::{
     CreateTableLike, CreateView, Partitions, SqlOrTql, TableConstraint, VECTOR_OPT_DIM,
 };
 use crate::statements::statement::Statement;
+use crate::statements::tql::Tql;
 use crate::statements::transform::type_alias::get_data_type_by_alias_name;
 use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 use crate::util::{OptionValue, location_to_index, parse_option_string};
@@ -148,7 +149,18 @@ impl<'a> ParserContext<'a> {
             .expect_keyword(Keyword::AS)
             .context(SyntaxSnafu)?;
 
-        let query = self.parse_query()?;
+        let query = match self.parser.peek_token().token {
+            Token::Word(word)
+                if word.quote_style.is_none()
+                    && word.value.eq_ignore_ascii_case(tql_parser::TQL) =>
+            {
+                match self.parse_tql(false)? {
+                    Statement::Tql(tql @ Tql::Eval(_)) => Statement::Tql(tql),
+                    _ => return self.expected("TQL EVAL", self.parser.peek_token()),
+                }
+            }
+            _ => self.parse_query()?,
+        };
 
         Ok(Statement::CreateView(CreateView {
             name: view_name,
@@ -3311,6 +3323,67 @@ CREATE TABLE spans (
             assert!(
                 result.as_ref().is_err_and(|e| e.to_string().contains(err)),
                 "{sql}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_create_view_tql_eval() {
+        for (query, expected_lookback) in [
+            ("TQL EVAL (0, 15, '5s') metric", None),
+            ("TQL EVAL (0, 15, '5s', '5m') metric", Some("5m")),
+            ("TQL EVAL (0, 15, '5s', '300') metric", Some("300")),
+            (
+                "TQL EVAL ('2024-05-01T00:00:00Z', '2024-05-01T01:00:00Z', '5m') metric",
+                None,
+            ),
+            (
+                "TQL EVAL ('2024-05-01T00:00:00.5+08:00', '2024-05-01T01:00:00.25-05:00', '5m', '10m') metric",
+                Some("10m"),
+            ),
+            // Parser-only case: an embedded apostrophe in a parameter must be
+            // re-escaped by `Display` so the formatted statement reparses equal.
+            (
+                "TQL EVAL ('2024-05-01T00:00:00Z', '2024-05-01T01:00:00Z', '5m', '5m''ish') metric",
+                Some("5m'ish"),
+            ),
+        ] {
+            let sql = format!("CREATE VIEW test AS {query}");
+            let result = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            let Statement::CreateView(view) = &result[0] else {
+                panic!("expected CREATE VIEW, got {:?}", result[0]);
+            };
+            let Statement::Tql(Tql::Eval(eval)) = view.query.as_ref() else {
+                panic!("expected TQL EVAL, got {}", view.query);
+            };
+            assert_eq!(eval.lookback.as_deref(), expected_lookback);
+
+            let formatted = result[0].to_string();
+            let reparsed = ParserContext::create_with_dialect(
+                &formatted,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(reparsed[0], result[0], "{formatted}");
+        }
+
+        for sql in [
+            "CREATE VIEW test AS TQL EXPLAIN (0, 15, '5s') metric",
+            "CREATE VIEW test AS TQL ANALYZE (0, 15, '5s') metric",
+        ] {
+            assert!(
+                ParserContext::create_with_dialect(
+                    sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .is_err()
             );
         }
     }
