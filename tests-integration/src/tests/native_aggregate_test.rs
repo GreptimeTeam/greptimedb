@@ -66,32 +66,23 @@
 //! `and`/`or`/`unless` beside the aggregate keeps the existing plan. `time()` reads no data and runs
 //! natively without the split.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use common_base::Plugins;
 use common_query::OutputData;
 use common_recordbatch::RecordBatches;
 use common_recordbatch::util::collect_batches;
-use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::execution::TaskContext;
-use datafusion::physical_expr::PhysicalExpr;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion::physical_plan::coop::CooperativeExec;
 use datafusion::physical_plan::displayable;
 use datafusion::physical_plan::metrics::MetricValue;
 use datafusion::physical_plan::projection::ProjectionExec;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, SendableRecordBatchStream,
-};
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, Int64Array, StringArray};
 use datatypes::arrow::compute::cast;
 use datatypes::arrow::datatypes::DataType;
-use datatypes::arrow::record_batch::RecordBatch;
 use frontend::instance::Instance;
-use futures::StreamExt;
 use query::datafusion::QUERY_PARALLELISM_HINT;
 use query::dist_plan::MergeScanExec;
 use query::options::QueryOptions;
@@ -229,8 +220,6 @@ const HIST_SERIES: [(&str, &str, f64); 6] = [
 #[derive(Default)]
 struct NativePlanObserver {
     seen: Mutex<Vec<Arc<dyn ExecutionPlan>>>,
-    record_original_streams: bool,
-    partial_batches: Arc<Mutex<Vec<(usize, RecordBatch)>>>,
 }
 
 impl NativePlanObserver {
@@ -243,10 +232,6 @@ impl NativePlanObserver {
     fn since(&self, mark: usize) -> Vec<Arc<dyn ExecutionPlan>> {
         self.seen.lock().unwrap()[mark..].to_vec()
     }
-
-    fn partial_batches(&self) -> Vec<(usize, RecordBatch)> {
-        std::mem::take(&mut *self.partial_batches.lock().unwrap())
-    }
 }
 
 impl PhysicalPlanWrapper for NativePlanObserver {
@@ -255,84 +240,8 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn ExecutionPlan>,
         _ctx: QueryContextRef,
     ) -> Arc<dyn ExecutionPlan> {
-        if origin.name() == FUSED_EXEC_NAME && self.record_original_streams {
-            let recorder = Arc::new(PartialStateRecorder {
-                input: Arc::clone(&origin),
-                properties: Arc::clone(origin.properties()),
-                batches: Arc::clone(&self.partial_batches),
-            });
-            self.seen
-                .lock()
-                .unwrap()
-                .push(Arc::clone(&recorder) as Arc<dyn ExecutionPlan>);
-            recorder
-        } else {
-            self.seen.lock().unwrap().push(Arc::clone(&origin));
-            origin
-        }
-    }
-}
-
-/// Transparent test wrapper that records the fused producer's original partition streams.
-#[derive(Debug)]
-struct PartialStateRecorder {
-    input: Arc<dyn ExecutionPlan>,
-    properties: Arc<PlanProperties>,
-    batches: Arc<Mutex<Vec<(usize, RecordBatch)>>>,
-}
-
-impl DisplayAs for PartialStateRecorder {
-    fn fmt_as(&self, format: DisplayFormatType, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.input.fmt_as(format, f)
-    }
-}
-
-impl ExecutionPlan for PartialStateRecorder {
-    fn name(&self) -> &str {
-        "PartialStateRecorder"
-    }
-    fn properties(&self) -> &Arc<PlanProperties> {
-        &self.properties
-    }
-    fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
-        vec![&self.input]
-    }
-    fn apply_expressions(
-        &self,
-        f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion::common::Result<TreeNodeRecursion>,
-    ) -> datafusion::common::Result<TreeNodeRecursion> {
-        self.input.apply_expressions(f)
-    }
-    fn with_new_children(
-        self: Arc<Self>,
-        mut children: Vec<Arc<dyn ExecutionPlan>>,
-    ) -> datafusion::common::Result<Arc<dyn ExecutionPlan>> {
-        if children.len() != 1 {
-            return Err(datafusion::error::DataFusionError::Internal(
-                "PartialStateRecorder expects one child".into(),
-            ));
-        }
-        Ok(Arc::new(Self {
-            input: children.remove(0),
-            properties: Arc::clone(&self.properties),
-            batches: Arc::clone(&self.batches),
-        }))
-    }
-    fn execute(
-        &self,
-        partition: usize,
-        context: Arc<TaskContext>,
-    ) -> datafusion::common::Result<SendableRecordBatchStream> {
-        let stream = self.input.execute(partition, context)?;
-        let batches = Arc::clone(&self.batches);
-        let schema = stream.schema();
-        let recorded = stream.map(move |result| {
-            if let Ok(batch) = &result {
-                batches.lock().unwrap().push((partition, batch.clone()));
-            }
-            result
-        });
-        Ok(Box::pin(RecordBatchStreamAdapter::new(schema, recorded)))
+        self.seen.lock().unwrap().push(Arc::clone(&origin));
+        origin
     }
 }
 
@@ -1589,10 +1498,7 @@ async fn native_aggregate_topk_over_global_partitions() {
     const TABLE: &str = "native_topk_counters";
     const T1: i64 = BASE_SECS + 180;
     const T2: i64 = BASE_SECS + 600;
-    let observer = Arc::new(NativePlanObserver {
-        record_original_streams: true,
-        ..Default::default()
-    });
+    let observer = Arc::new(NativePlanObserver::default());
     let plugins = Plugins::new();
     plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
     let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_topk")
@@ -1660,7 +1566,6 @@ async fn native_aggregate_topk_over_global_partitions() {
     let (legacy, legacy_capture) = run(false).await;
     assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
     let (native, capture) = run(true).await;
-    let partial_batches = observer.partial_batches();
     assert_same_columns(&native, &legacy, &sql);
     assert_rows(
         &native.rows,
@@ -1728,50 +1633,11 @@ async fn native_aggregate_topk_over_global_partitions() {
             .all(|count| count.is_some_and(|count| count > 0)),
         "{per_partition:?}"
     );
-    // Prove the partition-local states overlap without decoding or summing their values: at each
-    // evaluation point, at least one selected hostname/point/field was emitted by distinct original
-    // producer partitions.
-    let mut owners = BTreeMap::<(String, u64, u32), BTreeSet<usize>>::new();
-    for (partition, batch) in &partial_batches {
-        let schema = batch.schema();
-        // `state_schema` names its fixed columns and labels `metric_name`, `tag_N`, `point` and
-        // `field`; use those names rather than baking their positions into this assertion.
-        let hostname = batch
-            .column(schema.index_of("tag_0").unwrap())
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        let batch_point = batch
-            .column(schema.index_of("point").unwrap())
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::UInt64Array>()
-            .unwrap();
-        let field = batch
-            .column(schema.index_of("field").unwrap())
-            .as_any()
-            .downcast_ref::<datafusion::arrow::array::UInt32Array>()
-            .unwrap();
-        for row in 0..batch.num_rows() {
-            owners
-                .entry((
-                    hostname.value(row).to_string(),
-                    batch_point.value(row),
-                    field.value(row),
-                ))
-                .or_default()
-                .insert(*partition);
-        }
-    }
-    for (point, expected_hosts) in [(0u64, 0..10), (1u64, 4..14)] {
-        assert!(
-            expected_hosts.into_iter().any(|host| {
-                owners
-                    .get(&(format!("host{host:02}"), point, 0))
-                    .is_some_and(|partitions| partitions.len() >= 2)
-            }),
-            "no selected hostname has rows from distinct original producer partitions at point {point}: {owners:?}"
-        );
-    }
+    // The cross-producer requirement lives in the deterministic fixture instead
+    // (`aggregate_finalize::exec_tests::topk_above_the_cut_sees_every_producer_contribution`).
+    // Which producer holds which series follows from the storage scheduler and a legal schedule can
+    // hand one partition every series but two, so asserting it here would pin a scheduling accident
+    // rather than the merge.
 }
 
 #[tokio::test(flavor = "multi_thread")]

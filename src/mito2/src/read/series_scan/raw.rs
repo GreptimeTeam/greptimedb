@@ -43,7 +43,7 @@ use datatypes::series::frame::LabelDecodeSpec;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use futures::stream::BoxStream;
-use futures::{Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use snafu::Location;
 use snafu::{IntoError, ResultExt};
 use store_api::region_engine::{RawLabelSource, RawSeriesStream, SendableRawSeriesStream};
@@ -219,6 +219,17 @@ fn continues_series(previous: &RecordBatch, next: &RecordBatch) -> bool {
     }
 }
 
+/// A scanned record together with whether it ends the flat package it came from.
+///
+/// The divider only emits a [`SeriesBatch::Flat`] once it holds every row of the series in it, so
+/// the record that ends such a package also ends the last series in it. A plain
+/// [`ScanBatch::RecordBatch`] carries no such fact: an Arrow batch boundary is not a series
+/// boundary, so its records always leave the flag clear.
+struct IncomingRecord {
+    batch: RecordBatch,
+    ends_package: bool,
+}
+
 pub(crate) fn make_stream(
     inner: ScanBatchStream,
     schema: Arc<SeriesSchema>,
@@ -233,6 +244,7 @@ pub(crate) fn make_stream(
     let stream = async_stream::stream! {
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
+        let mut last_package_key: Option<Buffer> = None;
         // Records waiting for one predicate pass, and the number of rows they hold.
         let mut buffered: Vec<RecordBatch> = Vec::new();
         let mut buffered_rows = 0;
@@ -241,44 +253,97 @@ pub(crate) fn make_stream(
         let coalesce_rows = if predicates.is_empty() { 1 } else { PREDICATE_BATCH_ROWS };
         // Records of the last scanned batch that are not buffered yet, and a record held back
         // because it continues the series the buffer ends with.
-        let mut incoming: VecDeque<RecordBatch> = VecDeque::new();
-        let mut held: Option<RecordBatch> = None;
+        let mut incoming: VecDeque<IncomingRecord> = VecDeque::new();
+        let mut held: Option<IncomingRecord> = None;
         let mut exhausted = false;
         // An upstream error is reported only after the records buffered before it are processed,
         // so the chunks that precede it are still yielded first.
         let mut upstream_error: Option<Error> = None;
         loop {
+            // The last complete package tail admitted to this predicate group, if any.
+            let mut group_last_package_key: Option<Buffer> = None;
             // Fill: pull records until one predicate pass is amortized by the group.
             while !exhausted && upstream_error.is_none() && buffered_rows < coalesce_rows {
                 let record = match held.take() {
                     Some(record) => record,
                     None => match incoming.pop_front() {
                         Some(record) => record,
-                        None => match input.next().await {
+                        None => {
+                            let next = if group_last_package_key.is_none() {
+                                input.next().await
+                            } else {
+                                match input.next().now_or_never() {
+                                    Some(next) => next,
+                                    None => break,
+                                }
+                            };
+                            match next {
                             Some(Ok(ScanBatch::Series(SeriesBatch::Flat(flat)))) => {
-                                incoming.extend(flat.batches.into_vec());
+                                // A package holds every row of the series in it, so the record that
+                                // ends it closes the last of them. Empty records carry no rows and no
+                                // series, which puts the flag on the last record that has rows; a
+                                // package without any ends no series and closes nothing.
+                                let ends_package = if ordering == SeriesOrdering::KeyThenTime {
+                                    flat.batches
+                                        .iter()
+                                        .rposition(|batch| batch.num_rows() > 0)
+                                } else {
+                                    None
+                                };
+                                for (index, batch) in flat.batches.into_iter().enumerate() {
+                                    if batch.num_rows() == 0 {
+                                        continue;
+                                    }
+                                    incoming.push_back(IncomingRecord {
+                                        batch,
+                                        ends_package: Some(index) == ends_package,
+                                    });
+                                }
                                 continue;
                             }
-                            Some(Ok(ScanBatch::RecordBatch(batch))) => batch,
+                            Some(Ok(ScanBatch::RecordBatch(batch))) => IncomingRecord {
+                                batch,
+                                ends_package: false,
+                            },
                             Some(Err(error)) => { upstream_error = Some(error); break; }
                             None => { exhausted = true; break; }
+                            }
                         },
                     },
                 };
-                if record.num_rows() == 0 { continue; }
+                if record.batch.num_rows() == 0 { continue; }
                 // A record that reaches the threshold alone is a full batch: concatenating it with
                 // what is buffered would copy it for no saving, since its predicate pass is paid
                 // once either way. Let it head its own group, where the single-record path takes it
                 // unchanged. A record that continues the buffered series is held back for the
                 // reason `continues_series` documents.
                 if let Some(previous) = buffered.last()
-                    && (record.num_rows() >= coalesce_rows || continues_series(previous, &record))
+                    && (record.batch.num_rows() >= coalesce_rows
+                        || continues_series(previous, &record.batch))
                 {
                     held = Some(record);
                     break;
                 }
-                buffered_rows += record.num_rows();
-                buffered.push(record);
+                if ordering == SeriesOrdering::KeyThenTime
+                    && let Some(previous) = last_package_key.as_ref()
+                    && let Some(first) = primary_key_at_row(&record.batch, 0)
+                    && first <= previous.as_slice()
+                {
+                    upstream_error = Some(InvalidRecordBatchSnafu {
+                        reason: "legacy series primary keys are not strictly increasing".to_string(),
+                    }.build());
+                    break;
+                }
+                buffered_rows += record.batch.num_rows();
+                if record.ends_package
+                    && let Some(key) = record.batch.num_rows().checked_sub(1)
+                        .and_then(|row| primary_key_at_row(&record.batch, row))
+                {
+                    let key = Buffer::from(key);
+                    last_package_key = Some(key.clone());
+                    group_last_package_key = Some(key);
+                }
+                buffered.push(record.batch);
             }
             if buffered.is_empty() { break; }
             // Take the rows out of the buffer before processing them, so an early return cannot
@@ -300,6 +365,7 @@ pub(crate) fn make_stream(
             // The concatenated arrays own their buffers, so the source records can go now instead of
             // staying alive across this round's filtering and per-chunk yields.
             drop(group);
+            // Completion metadata was captured before predicates, so a filtered tail still closes its package.
             for predicate in &predicates {
                 record = match filter::batch_filter(&record, predicate) {
                     Ok(record) => record,
@@ -318,75 +384,86 @@ pub(crate) fn make_stream(
                     break;
                 }
             }
-            if record.num_rows() == 0 {
-                continue;
-            }
-            let pk_column = record.column(primary_key_column_index(record.num_columns()));
-            let primary_key = match pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
-                Some(primary_key) => primary_key,
-                None => { yield Err(invalid("invalid primary-key array")); return; }
-            };
-            let values = match primary_key.values().as_any().downcast_ref::<BinaryArray>() {
-                Some(values) => values,
-                None => { yield Err(invalid("invalid primary-key dictionary")); return; }
-            };
-            let mut start = 0;
-            while start < record.num_rows() {
-                let index = if primary_key.keys().is_valid(start) {
-                    primary_key.keys().value(start).as_usize()
-                } else {
-                    yield Err(invalid("null primary key")); return;
+            // An emptied group contributes no chunk, and the chunk loop below yields nothing for it.
+            if record.num_rows() > 0 {
+                let pk_column = record.column(primary_key_column_index(record.num_columns()));
+                let primary_key = match pk_column.as_any().downcast_ref::<PrimaryKeyArray>() {
+                    Some(primary_key) => primary_key,
+                    None => { yield Err(invalid("invalid primary-key array")); return; }
                 };
-                if index >= values.len() || !values.is_valid(index) {
-                    yield Err(invalid("invalid primary-key dictionary value")); return;
-                }
-                let mut end = start + 1;
-                while end < record.num_rows() {
-                    let next_index = if primary_key.keys().is_valid(end) {
-                        primary_key.keys().value(end).as_usize()
+                let values = match primary_key.values().as_any().downcast_ref::<BinaryArray>() {
+                    Some(values) => values,
+                    None => { yield Err(invalid("invalid primary-key dictionary")); return; }
+                };
+                let mut start = 0;
+                while start < record.num_rows() {
+                    let index = if primary_key.keys().is_valid(start) {
+                        primary_key.keys().value(start).as_usize()
                     } else {
                         yield Err(invalid("null primary key")); return;
                     };
-                    if next_index >= values.len() || !values.is_valid(next_index) {
+                    if index >= values.len() || !values.is_valid(index) {
                         yield Err(invalid("invalid primary-key dictionary value")); return;
                     }
-                    if super::primary_key_at(primary_key, values, end)
-                        == super::primary_key_at(primary_key, values, start)
-                    {
-                        end += 1;
-                    } else {
-                        break;
+                    let mut end = start + 1;
+                    while end < record.num_rows() {
+                        let next_index = if primary_key.keys().is_valid(end) {
+                            primary_key.keys().value(end).as_usize()
+                        } else {
+                            yield Err(invalid("null primary key")); return;
+                        };
+                        if next_index >= values.len() || !values.is_valid(next_index) {
+                            yield Err(invalid("invalid primary-key dictionary value")); return;
+                        }
+                        if super::primary_key_at(primary_key, values, end)
+                            == super::primary_key_at(primary_key, values, start)
+                        {
+                            end += 1;
+                        } else {
+                            break;
+                        }
                     }
+                    let offsets = values.value_offsets();
+                    let value_start = offsets[index].as_usize();
+                    let value_len = offsets[index + 1].as_usize() - value_start;
+                    let key = values.values().slice_with_length(value_start, value_len);
+                    let begun = Instant::now();
+                    let current = match chunk(&record, start, end, key, &output_schema, &fields) {
+                        Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
+                    };
+                    metrics.inc_convert_batch_cost(begun.elapsed());
+                    if let Some(old) = pending.as_ref()
+                        && ordering == SeriesOrdering::KeyThenTime
+                        && old.primary_key.as_slice() != current.primary_key.as_slice()
+                        && current.primary_key.as_slice() <= old.primary_key.as_slice()
+                    {
+                        yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
+                    }
+                    if let Some(old) = pending.as_ref()
+                        && old.primary_key.as_slice() == current.primary_key.as_slice()
+                        && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
+                            .is_some_and(|(next, previous)| next <= previous)
+                    {
+                        yield Err(invalid("raw timestamps are not strictly increasing")); return;
+                    }
+                    // Legacy flat producers declare `KeyThenTime`; the ordered-key comparison
+                    // rejects a key that reopens after a package has completed it.
+                    if let Some(mut old) = pending.take() {
+                        if old.primary_key.as_slice() != current.primary_key.as_slice() {
+                            old.is_last = true;
+                        }
+                        yield Ok(old);
+                    }
+                    pending = Some(current);
+                    start = end;
                 }
-                let offsets = values.value_offsets();
-                let value_start = offsets[index].as_usize();
-                let value_len = offsets[index + 1].as_usize() - value_start;
-                let key = values.values().slice_with_length(value_start, value_len);
-                let begun = Instant::now();
-                let current = match chunk(&record, start, end, key, &output_schema, &fields) {
-                    Ok(chunk) => chunk, Err(error) => { yield Err(error); return; }
-                };
-                metrics.inc_convert_batch_cost(begun.elapsed());
-                if let Some(old) = pending.as_ref()
-                    && ordering == SeriesOrdering::KeyThenTime
-                    && old.primary_key.as_slice() != current.primary_key.as_slice()
-                    && current.primary_key.as_slice() <= old.primary_key.as_slice()
-                {
-                    yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
-                }
-                if let Some(old) = pending.as_ref()
-                    && old.primary_key.as_slice() == current.primary_key.as_slice()
-                    && current.time.timestamp(0).zip(old.time.timestamp(old.time.len() - 1))
-                        .is_some_and(|(next, previous)| next <= previous)
-                {
-                    yield Err(invalid("raw timestamps are not strictly increasing")); return;
-                }
-                if let Some(mut old) = pending.take() {
-                    if old.primary_key.as_slice() != current.primary_key.as_slice() { old.is_last = true; }
-                    yield Ok(old);
-                }
-                pending = Some(current);
-                start = end;
+            }
+            if let Some(package_last_key) = group_last_package_key
+                && pending.as_ref().is_some_and(|last| last.primary_key.as_slice() <= package_last_key.as_slice())
+                && let Some(mut last) = pending.take()
+            {
+                last.is_last = true;
+                yield Ok(last);
             }
         }
         if let Some(error) = upstream_error { yield Err(BoxedError::new(error)); return; }

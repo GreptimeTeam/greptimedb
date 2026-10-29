@@ -1128,3 +1128,122 @@ impl Barrier {
         self.polled.load(Ordering::SeqCst)
     }
 }
+
+/// The tag the top-k suffix selects on.
+const HOST: &str = "hostname";
+
+/// One producer's state for `(hostname, values)` pairs, folded by the producer's own fold.
+fn state_of_hosts(schema: &Arc<SeriesSchema>, groups: &[(&str, &[f64])]) -> Vec<RecordBatch> {
+    let chunks = groups
+        .iter()
+        .map(|(host, values)| host_series(schema, host, values))
+        .collect();
+    state_of_series(
+        schema,
+        cut_op_by(AggregateKind::Sum, &[HOST]),
+        &[HOST],
+        chunks,
+    )
+}
+
+/// One whole evaluated series of one hostname, from the first grid point on.
+fn host_series(schema: &Arc<SeriesSchema>, host: &str, values: &[f64]) -> Series {
+    let grid = Arc::clone(schema.eval_grid.as_ref().expect("the cut is on a grid"));
+    Series::try_new(
+        schema,
+        SeriesLabels::try_new(
+            Some(METRIC.into()),
+            vec![Label {
+                name: HOST.into(),
+                value: host.into(),
+            }],
+        )
+        .unwrap(),
+        TimeAxis::Grid(GridRange::try_new(grid, 0, values.len()).unwrap()),
+        SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+            values.to_vec(),
+        ))])
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// `topk(1, sum by (hostname)(...))` needs the merged value of every producer to pick its winner.
+///
+/// The integration test that covers the real scan cannot prove this on its own: which producer holds
+/// which series follows from the storage scheduler, and a legal schedule can hand one partition every
+/// series but two. Here the partition each contribution arrives on is fixed by the fixture, so the
+/// requirement holds on every run rather than on the schedules that happen to spread the winners.
+///
+/// The two points disagree about the winner, and neither can be found without folding across
+/// producers:
+///
+/// | point | producer 0 A/B/C | producer 1 A/B/C | merged winner |
+/// |---|---|---|---|
+/// | 0 | 6 / 10 / 0 | 6 / 0 / 10 | A = 12 |
+/// | 1 | 10 / 6 / 0 | 0 / 6 / 10 | B = 12 |
+///
+/// Two further producers contribute a small hostname each, so all four partitions carry state and a
+/// merge that drops one is visible. Taking `topk` inside a producer before the merge loses the winner
+/// in both points: producer 0 would keep `B` at point 0 and `A` at point 1, neither of which survives
+/// a merge with the other producer's `C`.
+#[tokio::test]
+async fn topk_above_the_cut_sees_every_producer_contribution() {
+    let grid = grid_of(2);
+    let schema = cut_schema_of(2);
+    let cut = aggregate_over(
+        map_over(window_on(&grid), vec![MathOp::Ceil]),
+        AggregateKind::Sum,
+        by(&[HOST]),
+        AggregateStage::Complete,
+    );
+    let output = cut.output.clone();
+    let root = NativeNode {
+        expr: NativeExpr::Vector {
+            input: Box::new(cut),
+            op: crate::native::plan::BoundVectorOp::TopK {
+                k: 1.0,
+                top: true,
+                group: by(&[]),
+            },
+        },
+        output,
+    };
+    let state = vec![
+        state_of_hosts(
+            &schema,
+            &[
+                ("hostA", &[6.0, 10.0]),
+                ("hostB", &[10.0, 6.0]),
+                ("hostC", &[0.0, 0.0]),
+            ],
+        ),
+        state_of_hosts(
+            &schema,
+            &[
+                ("hostA", &[6.0, 0.0]),
+                ("hostB", &[0.0, 6.0]),
+                ("hostC", &[10.0, 10.0]),
+            ],
+        ),
+        state_of_hosts(&schema, &[("hostD", &[1.0, 1.0])]),
+        state_of_hosts(&schema, &[("hostE", &[1.0, 1.0])]),
+    ];
+    let plan = finalize_with(
+        binding_of(&[HOST], 2),
+        root,
+        output_schema("topk(1, sum by (hostname)(rate(x[5m])))", &[HOST]),
+    )
+    .to_execution_plan(state_input_with(&[HOST], state))
+    .expect("the top-k suffix runs over the merged values");
+    let batches = collect(plan, SessionContext::default().task_ctx())
+        .await
+        .expect("the suffix runs");
+    assert_eq!(
+        rows(&batches),
+        [
+            (0, Some(12.0), Some("hostA".to_string())),
+            (GRID_STEP, Some(12.0), Some("hostB".to_string())),
+        ]
+    );
+}

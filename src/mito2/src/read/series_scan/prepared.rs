@@ -565,7 +565,9 @@ impl PreparedSeriesSource for ColumnarPreparedSource {
             }
             let mut merged = SeqScan::build_flat_reader_from_sources(&context, sources, None, Some(&metrics), false, 1).await?;
             while let Some(batch) = merged.try_next().await? {
-                yield ScanBatch::RecordBatch(batch);
+                if batch.num_rows() > 0 {
+                    yield ScanBatch::RecordBatch(batch);
+                }
             }
         };
         Ok(raw::make_stream(

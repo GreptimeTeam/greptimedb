@@ -1381,7 +1381,10 @@ impl SeriesCandidateDistributor {
     }
 }
 
-/// Batches of the same series.
+/// Batches of complete series.
+///
+/// A package may hold rows of more than one series, and every series in it is complete: no later
+/// package of the same stream holds more rows of those series.
 #[derive(Debug)]
 pub enum SeriesBatch {
     Flat(FlatSeriesBatch),
