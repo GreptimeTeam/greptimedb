@@ -1286,8 +1286,8 @@ async fn mixed_payload_roundtrips_without_dropping_either_kind() {
     assert_eq!(mixed.histograms().len(), 4);
     assert_eq!(
         mixed.histograms().batch().len(),
-        2,
-        "the referenced table survives whole"
+        1,
+        "only the referenced histogram row survives compaction"
     );
     match field.sample(0) {
         SampleRef::Float(value) => assert_eq!(value.to_bits(), 1.5_f64.to_bits()),
@@ -1297,10 +1297,12 @@ async fn mixed_payload_roundtrips_without_dropping_either_kind() {
         SampleRef::Histogram(histogram) => {
             assert_eq!(histogram.count.to_bits(), 17.25_f64.to_bits());
             assert_eq!(histogram.sum.to_bits(), (-9.5_f64).to_bits());
+            assert_eq!(histogram.start_timestamp, Some(-123));
         }
         _ => panic!("position 1 was a histogram"),
     }
     assert!(matches!(field.sample(2), SampleRef::Missing));
+    assert!(mixed.histograms().view_at(2).is_none());
     match field.sample(3) {
         // A NaN float stays a float value, and its histogram slot stays empty.
         SampleRef::Float(value) => assert!(value.is_nan()),
