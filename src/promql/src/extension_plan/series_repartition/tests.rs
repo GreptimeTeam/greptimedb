@@ -754,9 +754,8 @@ async fn one_output_keeps_every_chunk_and_its_chains_whole() {
         .expect("one output")
         .expect("the output decodes");
     assert_chains_are_whole(&chunks);
-    // The read rotates at every chain boundary, not at every input end: the first chain closes on
-    // partition 0, so the next chain read is partition 1's, and partition 0's remaining chain comes
-    // after it. Both label sets still reach the one output, whole.
+    // Both partitions contribute to the one output; their scheduling order is deliberately not
+    // asserted. Each label set's chains still reach the output whole.
     assert_eq!(
         unordered(&[
             (named(&shared), Some(0), 2, false),
@@ -1165,8 +1164,8 @@ async fn until_end(
 ///
 /// The child records the task that first polls each of its partitions, and what is asserted is that
 /// the two partitions were polled by two distinct tasks, neither of them the consumer's. That is the
-/// property `Forwarders::start` provides - one task per child partition - and it is what a partition
-/// count on its own cannot say: one task polling every partition in turn declares the same count.
+/// property the node provides - one task per child partition - and it is what a partition count on
+/// its own cannot say: one task polling every partition in turn declares the same count.
 ///
 /// Two distinct tasks is deliberately not a claim about simultaneous wall-clock execution: the two
 /// tasks may share a worker thread and be polled one after the other, and the read is correct either
@@ -1705,28 +1704,17 @@ fn labels_routed_to(output: usize, count: usize) -> Vec<SeriesLabels> {
 /// carries all of them. Composed as `outer(inner(child))`, the outer node's input 0 is the inner
 /// node's empty output, and what the read does with that is what this test states.
 ///
-/// The volume is chosen against the buffers in the path, not at random. Each output holds
-/// [`OUTPUT_CAPACITY`] chains and each input task holds the one chain it is assembling, so the whole
-/// composition absorbs a handful of chunks: measured against the router this test was written for,
-/// ten was what that path took and eleven already stopped. `SERIES` is two orders of magnitude above
-/// that, so no amount of buffering makes this test pass by swallowing the child whole, and a read that
-/// is merely slow is not what a failure here would be.
+/// The input has many more chains than the bounded output queues can hold, so the test needs the
+/// empty inner output to close through independent input-task progress rather than by buffering the
+/// child whole. Both outer outputs are drained concurrently, as required by the node.
 ///
 /// Both outputs of the outer node are read at once and each is drained to its end, so nothing here
 /// can be blamed on an output nobody drained - which is the one requirement this node states of its
 /// caller. The count that comes out is asserted against the count that went in, so a passing run is a
 /// run that lost nothing.
 ///
-/// What it caught is why the router is per input now: with one task routing every input, the outer
-/// read parked on its input 0 - the inner node's empty output, which does not close until the inner
-/// read finishes - so it routed nothing at all and both outputs stayed empty, while the inner read
-/// filled the outer node's input 1 after about ten chunks and parked on its output 1. Measured: 0 of
-/// 4096 series delivered, both outputs empty, timeout at 10 s. Giving the outer node's input 0 a
-/// single series of its own changed nothing, which is what says the wait was the problem rather than
-/// the volume; giving output 0 thousands of series of its own instead finished the same composition in
-/// under a second. With one task per input there is no such wait: the outer node's task 0 is parked on
-/// the inner node's empty output by itself, and its task 1 keeps routing everything the inner node
-/// sends on output 1, which is what lets the inner node finish and close output 0.
+/// Independent input tasks let the outer node route the inner node's non-empty output while its
+/// other task waits for the inner empty output to close, allowing that inner execution to finish.
 #[tokio::test]
 async fn composing_two_nodes_does_not_deadlock_when_the_inner_output_is_empty() {
     const SERIES: usize = 4096;
@@ -1858,6 +1846,106 @@ async fn same_canonical_key_chains_route_together_without_merging() {
             .expect("the other output decodes")
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn canonical_label_key_variants_route_consistently_without_merging_chains() {
+    let base = SeriesLabels::try_new(Some(Arc::from("cpu")), Vec::new()).unwrap();
+    let metric_name_change = SeriesLabels::try_new(Some(Arc::from("memory")), Vec::new()).unwrap();
+    let extra_tag = labels("host-a");
+    let empty_tag = SeriesLabels::try_new(
+        Some(Arc::from("cpu")),
+        vec![Label {
+            name: Arc::from("host"),
+            value: Arc::from(""),
+        }],
+    )
+    .unwrap();
+    let absent_tag = base.clone();
+    let no_name = SeriesLabels::try_new(None, Vec::new()).unwrap();
+    let empty_name = SeriesLabels::try_new(Some(Arc::from("")), Vec::new()).unwrap();
+
+    let cases = [
+        (
+            "metric name is part of key",
+            base.clone(),
+            metric_name_change,
+            false,
+        ),
+        (
+            "additional tag is part of key",
+            base.clone(),
+            extra_tag,
+            false,
+        ),
+        ("empty tag value is absent", empty_tag, absent_tag, true),
+        (
+            "missing and empty metric names canonicalize alike",
+            no_name,
+            empty_name,
+            true,
+        ),
+    ];
+    for (description, left, right, expected_same_key) in cases {
+        let left_key = label_set(&left);
+        let right_key = label_set(&right);
+        assert_eq!(
+            expected_same_key,
+            left_key == right_key,
+            "canonical keys follow the expected label semantics: {description}"
+        );
+        if expected_same_key {
+            assert_eq!(
+                Routing::new(5).output(&left),
+                Routing::new(5).output(&right),
+                "equal canonical keys must share an owner: {description}"
+            );
+            assert_eq!(
+                Routing::new(3).output(&left),
+                Routing::new(3).output(&right),
+                "canonical equivalence holds for any output count: {description}"
+            );
+        }
+
+        let child = Scripted::plan(vec![
+            vec![Step::chunk(chunk(left.clone(), 0, 1, true))],
+            vec![Step::chunk(chunk(right.clone(), 4, 1, true))],
+        ]);
+        let plan: Arc<dyn ExecutionPlan> = node(child, 5);
+        let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+        let seen = outputs
+            .iter()
+            .enumerate()
+            .flat_map(|(partition, output)| {
+                output
+                    .as_ref()
+                    .expect("output decodes")
+                    .iter()
+                    .map(move |(series, is_last)| {
+                        let owner = Routing::new(5).output(&series.metric);
+                        assert_eq!(
+                            partition, owner,
+                            "each returned chain is on its computed owner: {description}"
+                        );
+                        (label_set(&series.metric), *is_last)
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            2,
+            seen.len(),
+            "both independent closed chains survive: {description}"
+        );
+        assert!(seen.iter().all(|(_, is_last)| *is_last));
+        let mut expected_keys = vec![left_key, right_key];
+        expected_keys.sort();
+        let mut observed_keys = seen.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        observed_keys.sort();
+        assert_eq!(
+            expected_keys, observed_keys,
+            "each chain's canonical key remains observable: {description}"
+        );
+    }
 }
 
 /// T-E1: two sources whose chains belong on one output land there whole, never inside one another.
