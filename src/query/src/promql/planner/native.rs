@@ -1137,7 +1137,11 @@ fn groups_by_metric_name(node: &NativeNode) -> bool {
         NativeExpr::ParameterizedMap {
             input, parameters, ..
         } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
-        NativeExpr::Vector { input, .. } => groups_by_metric_name(input),
+        NativeExpr::Vector { input, op } => {
+            matches!(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
+                if names.iter().any(|name| name.as_ref() == METRIC_NAME))
+                || groups_by_metric_name(input)
+        }
         NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
             groups_by_metric_name(left) || groups_by_metric_name(right)
         }

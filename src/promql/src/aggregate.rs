@@ -582,16 +582,12 @@ pub fn aggregate_quantile(
     Ok(output)
 }
 
-/// `count_values(label, v)`: at each grid point, the number of samples in each group of series
-/// that share a value, with the value written to `label` in Prometheus' `FormatFloat(v, 'f', -1)`
-/// form, or for a native histogram as its `FloatHistogram.String`. With `by`, `label` is part of
-/// the grouping; with `without`, it is dropped if listed.
-pub fn count_values(
-    schema: &Arc<SeriesSchema>,
-    input: &[Series],
+/// Validates the schema-only requirements shared by the kernel and native runtime construction.
+pub(crate) fn validate_count_values(
+    schema: &SeriesSchema,
     label: &str,
     grouping: Grouping<'_>,
-) -> Result<Vec<Series>> {
+) -> Result<()> {
     // `by` may list the value label, which this operator writes itself, even when an input field
     // has that name; grouping by any other field name stays unsupported.
     let other_labels: Vec<&str>;
@@ -606,15 +602,29 @@ pub fn count_values(
         }
         without => without,
     };
-    // Unlike the other aggregations, this one reads histogram samples too.
     validate_grouping(schema, checked)?;
-    for series in input {
-        validate_grid_series(schema, series)?;
-    }
     if label.is_empty() {
         return Err(DataFusionError::Execution(format!(
             "invalid label name {label:?}"
         )));
+    }
+    Ok(())
+}
+
+/// `count_values(label, v)`: at each grid point, the number of samples in each group of series
+/// that share a value, with the value written to `label` in Prometheus' `FormatFloat(v, 'f', -1)`
+/// form, or for a native histogram as its `FloatHistogram.String`. With `by`, `label` is part of
+/// the grouping; with `without`, it is dropped if listed.
+pub fn count_values(
+    schema: &Arc<SeriesSchema>,
+    input: &[Series],
+    label: &str,
+    grouping: Grouping<'_>,
+) -> Result<Vec<Series>> {
+    validate_count_values(schema, label, grouping)?;
+    // Unlike the other aggregations, this one reads histogram samples too.
+    for series in input {
+        validate_grid_series(schema, series)?;
     }
     let by_labels: Vec<&str>;
     let grouping = match grouping {

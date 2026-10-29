@@ -3363,9 +3363,9 @@ async fn native_labelled_rows(
                 DataType::Timestamp(..) => {
                     time = Some(cast(column.as_ref(), &DataType::Int64).unwrap());
                 }
-                DataType::Float64 => {
+                DataType::Float64 | DataType::Int64 => {
                     assert!(value.is_none(), "one value column: {schema:?}");
-                    value = Some(column.clone());
+                    value = Some(cast(column.as_ref(), &DataType::Float64).unwrap());
                 }
                 _ => labels.push((
                     field.name().clone(),
@@ -4807,6 +4807,74 @@ async fn native_promql_declines_a_grouping_by_the_metric_name() {
         native_rows, legacy_rows,
         "{query}: the full label sets of every row, not only the values"
     );
+}
+
+/// Unsupported `count_values` groupings keep the legacy plan before labels are lost or execution
+/// reaches a kernel refusal. The outer `sum` prevents a final-schema check from masking the latter.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_count_values_groups",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_cv_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_cv_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_cv_phy');
+        CREATE TABLE native_cv_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_cv_phy');
+        INSERT INTO native_cv_demo (host, ts, val) VALUES ('a', 0, 1), ('b', 0, 1);
+        INSERT INTO native_cv_other (host, ts, val) VALUES ('a', 0, 1), ('b', 0, 1);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // `by (__name__)` names a label absent from the declared schema; the outer sum hides the
+    // unsupported `by (val)` grouping from the final schema.
+    let by_name = r#"count_values by (__name__) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"})"#;
+    let by_field = r#"sum(count_values by (val) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"}))"#;
+    for query in [by_name, by_field] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+        );
+
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a grouping its declared schema or kernel cannot honor"
+        );
+        assert_eq!(
+            native_rows, legacy_rows,
+            "{query}: the full label sets of every row, not only the values"
+        );
+        if query == by_field {
+            assert_eq!(
+                native_rows,
+                vec![(0, std::collections::BTreeMap::new(), 2.0)],
+                "the outer sum counts both input series"
+            );
+        }
+    }
 }
 
 /// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
