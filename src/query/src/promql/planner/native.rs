@@ -404,9 +404,10 @@ impl PromPlanner {
                 // existing plan is still the answer. A file-engine table is the concrete case: its
                 // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
                 // default `None`. A metric-engine selector is admitted through its verified logical
-                // rewrite, with no separate multi-selector exclusion: what is admitted is exactly a
-                // metric logical table served through that rewrite, one input per logical table, and
-                // the ids those rewrites carry are what tells two of them apart below.
+                // rewrite, with no separate multi-selector exclusion: each input is a metric logical
+                // table served through that rewrite, and the ids those rewrites carry are what tells
+                // two different ones apart below. Two occurrences of one logical table stay two
+                // scans of the one physical table, answered where that table's region runs them.
                 if !supports_native_raw_series(&table_meta.engine)
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
@@ -633,6 +634,12 @@ impl PromPlanner {
         // (`Categorizer::check_extension_plan` is `NonCommutative` for a cross-series node over more
         // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
         // such a tree keeps its one-selector-or-decline behaviour, unchanged.
+        //
+        // A selector whose scan carries no metric logical id - a Mito table's, for one - adds no
+        // id, so one Mito aggregate beside one metric aggregate is not a multi-input tree:
+        // `sum(m) + sum(mito)` keeps the existing plan. A second metric logical id does make the
+        // tree multi-input, and the one execution above then reads the Mito input through its own
+        // raw source as well.
         let multi_input = selectors.len() > 1 && logical_ids_differ;
         // A multi-input tree skips the split below, so the refusals the split makes for reasons that
         // are not about what the runtime computes have to be made here.
@@ -1070,8 +1077,10 @@ fn data_free(node: &NativeNode) -> bool {
 /// and the same data could answer differently between two runs. Prometheus defines the selection
 /// over a series set, not over an arrival order.
 ///
-/// Every other vector operation orders its input itself before choosing - `topk` by label,
-/// `sort` by value, `limit_ratio` by a label hash - so only this one is asked about. The aggregate
+/// Only this operation's *selection* depends on that order. `topk` breaks ties by label and
+/// `limit_ratio` selects by a label hash, so a reordered gather changes neither. The instant
+/// `sort`s keep tied series in the order they arrived, and a floating-point fold such as `stdvar`
+/// can differ in its last bits, but neither changes which series a statement keeps. The aggregate
 /// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
 fn depends_on_input_order(node: &NativeNode) -> bool {
     match &node.expr {

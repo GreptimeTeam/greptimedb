@@ -4587,6 +4587,64 @@ async fn native_promql_metric_logical_tables_are_isolated() {
     }
 }
 
+/// Two occurrences of one metric logical table bind two scans of the same physical table, each
+/// with its own offset. The pair is answered where that table's region runs, with no raw source
+/// per input, and matches the existing plan row for row.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_offset_pair_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_offset_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_offset_a (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_offset_phy');
+        INSERT INTO native_offset_a (host, ts, val) VALUES ('a', 0, 10), ('a', 60000, 12), ('a', 120000, 15);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The left occurrence reads each step's sample and the offset one reads a minute earlier:
+    // 12 - 10 = 2, then 15 - 12 = 3.
+    let sql = "TQL EVAL (60, 120, '1m') native_offset_a - native_offset_a offset 1m";
+    let expected = vec![
+        (60_000, "a".to_string(), 2.0),
+        (120_000, "a".to_string(), 3.0),
+    ];
+
+    observer.clear();
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "the existing plan must not hold a native node"
+    );
+    assert_eq!(legacy_rows, expected, "legacy");
+
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    assert_eq!(plan.children().len(), 2);
+    assert!(
+        observer.take_raw_sources().is_empty(),
+        "one logical table keeps both scans region-local instead of one raw source per input"
+    );
+    assert_eq!(native_rows, expected, "native");
+    assert_eq!(native_rows, legacy_rows);
+}
+
 /// What every name of the frontend-side merge a split aggregate runs in front of contains.
 const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
 
