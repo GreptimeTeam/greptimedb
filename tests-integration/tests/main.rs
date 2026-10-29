@@ -39,6 +39,7 @@ mod repartition_event;
 mod repartition_expr_version;
 mod export_logical_tables;
 mod mysql;
+mod native_prefix;
 mod object_store_wal;
 mod reconciliation_event;
 mod view_ddl_event;

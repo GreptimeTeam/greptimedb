@@ -80,7 +80,7 @@ use store_api::region_engine::RawLabelSource;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, MAX_TAG_COUNT, OutputColumn, POLL_BUDGET,
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -922,6 +922,86 @@ impl Drop for StagedStream {
             dropped.store(true, Ordering::SeqCst);
         }
     }
+}
+
+#[test]
+fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
+    let tree = rate_tree();
+    let original_binding = binding(&tree);
+    // A frame-output node is checked against the codec's own frame layout, so it is built with
+    // `canonical_frame_schema` rather than with the plain row `output_schema`.
+    let declared = canonical_frame_schema(&tree);
+    let node = FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree,
+        original_binding.clone(),
+        vec![input_plan(frame_schema())],
+        declared,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let bytes = node.serialize().unwrap();
+    let decoded = FusedSeries::deserialize(&bytes).unwrap();
+    assert_eq!(
+        crate::native::wire::encode_prefix(decoded.tree()).unwrap(),
+        crate::native::wire::encode_prefix(node.tree()).unwrap()
+    );
+    assert_eq!(decoded.binding(), node.binding());
+    assert_eq!(decoded.schema(), node.schema());
+    assert!(fused(rate_tree()).serialize().is_err());
+    let mut bad_version = bytes.clone();
+    bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
+    assert!(
+        FusedSeries::deserialize(&bad_version)
+            .unwrap_err()
+            .to_string()
+            .contains("version")
+    );
+    assert!(FusedSeries::deserialize(&bytes[..5]).is_err());
+}
+
+/// The `SeriesFrame` node of [`rate_tree`] declaring `tags` as its labels.
+///
+/// A `SeriesFrame` node is checked against the codec's own frame layout, so it is built with
+/// [`canonical_frame_schema`] rather than with the plain row [`output_schema`].
+fn envelope_node_with_tags(tags: Vec<String>) -> FusedSeries {
+    let tree = rate_tree();
+    let binding = binding_of(&tree, raw_schema(), tags);
+    let output_schema = canonical_frame_schema(&tree);
+    FusedSeries::try_new_with_format(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        output_schema,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .expect("the frame layout matches the evaluated root")
+}
+
+/// The largest tag count the envelope supports is written whole.
+#[test]
+fn fused_series_envelope_serializes_the_maximum_tag_count() {
+    let tags: Vec<String> = (0..MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
+    let node = envelope_node_with_tags(tags);
+    assert!(
+        node.serialize().is_ok(),
+        "the maximum tag count must still serialize"
+    );
+}
+
+/// The encoder must refuse the tag count, so it never writes a payload its own decoder rejects.
+#[test]
+fn fused_series_envelope_rejects_excess_tag_count() {
+    let tags: Vec<String> = (0..=MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
+    let node = envelope_node_with_tags(tags);
+    let message = node.serialize().unwrap_err().to_string();
+    assert!(message.contains("too many FusedSeries tags"), "{message}");
+    assert!(message.contains(&MAX_TAG_COUNT.to_string()), "{message}");
+    assert!(
+        message.contains(&(MAX_TAG_COUNT + 1).to_string()),
+        "{message}"
+    );
 }
 
 fn fused(tree: NativeTree) -> FusedSeries {
