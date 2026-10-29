@@ -57,7 +57,7 @@ pub use range_manipulate::{RangeManipulate, RangeManipulateExec, RangeManipulate
 pub use raw_series_source::{RawSeriesSource, RawSeriesSourceExec};
 pub use scalar_calculate::ScalarCalculate;
 pub use series_divide::{SeriesDivide, SeriesDivideExec, SeriesDivideStream};
-pub use series_repartition::SeriesRepartitionExec;
+pub use series_repartition::{SeriesRepartitionExec, SeriesRouting};
 pub use union_distinct_on::{UnionDistinctOn, UnionDistinctOnExec, UnionDistinctOnStream};
 
 pub type Millisecond = <TimestampMillisecondType as ArrowPrimitiveType>::Native;

@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod merge;
 #[cfg(test)]
 mod tests;
+
+pub(crate) use merge::merge_raw_identity;
 
 use std::pin::Pin;
 use std::sync::Arc;
