@@ -44,6 +44,14 @@ pub struct StorageConfig {
     /// Defaults to `<data_home>/copy` when `data_home` is a local path.
     /// Distributed deployments always disable SQL access to local files.
     pub copy_root: Option<String>,
+    /// Whether to probe every remote object storage when the datanode starts.
+    ///
+    /// The probe writes, reads, overwrites, lists and deletes an object under
+    /// `.greptime_probe/`, and a failure aborts startup. The probe lives at the
+    /// storage root, so the credentials must allow writes and deletes below the root.
+    /// Disable it when the credentials are scoped to narrower prefixes or when the
+    /// storage may be unavailable at startup.
+    pub probe_on_startup: bool,
     #[serde(flatten)]
     pub store: ObjectStoreConfig,
     /// Object storage providers
@@ -62,6 +70,7 @@ impl Default for StorageConfig {
         Self {
             data_home: DEFAULT_DATA_HOME.to_string(),
             copy_root: None,
+            probe_on_startup: true,
             store: ObjectStoreConfig::default(),
             providers: vec![],
         }
@@ -201,6 +210,19 @@ mod tests {
         let opts = DatanodeOptions::default();
         let toml_string = toml::to_string(&opts).unwrap();
         let _parsed: DatanodeOptions = toml::from_str(&toml_string).unwrap();
+    }
+
+    #[test]
+    fn test_probe_on_startup() {
+        assert!(DatanodeOptions::default().storage.probe_on_startup);
+
+        let toml_str = r#"
+            [storage]
+            type = "File"
+            probe_on_startup = false
+        "#;
+        let opts: DatanodeOptions = toml::from_str(toml_str).unwrap();
+        assert!(!opts.storage.probe_on_startup);
     }
 
     #[test]

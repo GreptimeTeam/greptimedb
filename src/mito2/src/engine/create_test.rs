@@ -118,6 +118,46 @@ async fn test_engine_column_compression_validation() {
 }
 
 #[tokio::test]
+async fn test_engine_create_sparse_requires_reserved_columns() {
+    let mut env = TestEnv::new().await;
+    let engine = env.create_engine(MitoConfig::default()).await;
+    let region_id = RegionId::new(1, 1);
+    let mut request = CreateRequestBuilder::new()
+        .insert_option("primary_key_encoding", "sparse")
+        .insert_option("sst_format", "flat")
+        .build();
+    let error = engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(StatusCode::InvalidArguments, error.status_code());
+    assert!(
+        error
+            .output_msg()
+            .contains("sparse primary keys must start with (__table_id, __tsid)")
+    );
+    assert!(!engine.is_region_exists(region_id));
+
+    let metadata = sst_region_metadata_with_encoding(PrimaryKeyEncoding::Sparse);
+    request.column_metadatas = metadata.column_metadatas;
+    request.primary_key = metadata.primary_key;
+    engine
+        .handle_request(region_id, RegionRequest::Create(request.clone()))
+        .await
+        .unwrap();
+    let expected = engine.get_region(region_id).unwrap().metadata();
+    reopen_region(
+        &engine,
+        region_id,
+        request.table_dir,
+        false,
+        request.options,
+    )
+    .await;
+    assert_eq!(expected, engine.get_region(region_id).unwrap().metadata());
+}
+
+#[tokio::test]
 async fn test_engine_create_new_region() {
     test_engine_create_new_region_with_format(false).await;
     test_engine_create_new_region_with_format(true).await;
@@ -470,7 +510,7 @@ async fn test_engine_create_preserves_manifest_on_open_error() -> WhateverResult
 }
 
 #[tokio::test]
-async fn test_engine_create_json2_sparse_requires_flat() -> WhateverResult<()> {
+async fn test_engine_create_json2_sparse_forces_flat() -> WhateverResult<()> {
     let mut env = TestEnv::with_prefix("create-json2-sparse").await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
@@ -489,21 +529,18 @@ async fn test_engine_create_json2_sparse_requires_flat() -> WhateverResult<()> {
     request.column_metadatas = metadata.column_metadatas.clone();
     request.primary_key = metadata.primary_key.clone();
     request.column_metadatas[4].column_schema = json_column;
-    let err = engine
-        .handle_request(region_id, RegionRequest::Create(request.clone()))
-        .await
-        .unwrap_err();
-    assert_eq!(StatusCode::InvalidArguments, err.status_code());
-    assert!(
-        err.output_msg()
-            .contains("JSON2 columns require sst_format=flat")
-    );
-    assert!(!engine.is_region_exists(region_id));
-
-    request.options.insert("sst_format".into(), "flat".into());
     engine
         .handle_request(region_id, RegionRequest::Create(request.clone()))
         .await?;
+    assert_eq!(
+        Some(FormatType::Flat),
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .options
+            .sst_format
+    );
     let schema = rows_schema(&request);
     let mut pk_schema = schema[0].clone();
     pk_schema.column_name = PRIMARY_KEY_COLUMN_NAME.into();

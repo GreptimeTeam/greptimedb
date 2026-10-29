@@ -60,7 +60,8 @@ fn input(shape: &Shape) -> (RegionMetadataRef, HashSet<ColumnId>, RecordBatch) {
     let mut pk = vec![ReservedColumnId::table_id(), ReservedColumnId::tsid()];
     let mut inverted_columns = HashSet::new();
     let mut add_tag = |id, name: String, data_type, indexed| {
-        let mut schema = ColumnSchema::new(name, data_type, true).with_inverted_index(false);
+        let mut schema = ColumnSchema::new(name, data_type, !ReservedColumnId::is_reserved(id))
+            .with_inverted_index(false);
         if indexed && shape.inverted {
             inverted_columns.insert(id);
         }

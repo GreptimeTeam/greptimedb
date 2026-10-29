@@ -77,7 +77,11 @@ fn metadata(tags: u32) -> RegionMetadataRef {
         primary_key.push(column_id);
         builder.push_column_metadata(ColumnMetadata {
             column_id,
-            column_schema: ColumnSchema::new(name, data_type, true),
+            column_schema: ColumnSchema::new(
+                name,
+                data_type,
+                !ReservedColumnId::is_reserved(column_id),
+            ),
             semantic_type: SemanticType::Tag,
         });
     }

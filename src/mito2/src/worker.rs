@@ -52,7 +52,7 @@ use rand::{Rng, rng};
 use snafu::ResultExt;
 use store_api::logstore::LogStore;
 use store_api::region_engine::{
-    RegionRole, SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
+    SetRegionRoleStateResponse, SetRegionRoleStateSuccess, SettableRegionRoleState,
 };
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -67,12 +67,13 @@ use crate::config::MitoConfig;
 use crate::error::{self, CreateDirSnafu, JoinSnafu, Result, WorkerStoppedSnafu};
 use crate::flush::{FlushScheduler, WriteBufferManagerImpl, WriteBufferManagerRef};
 use crate::gc::{GcLimiter, GcLimiterRef};
+use crate::lease::NodeLease;
 use crate::memtable::MemtableBuilderProvider;
 use crate::metrics::{REGION_COUNT, REQUEST_WAIT_TIME, WRITE_STALLING};
 use crate::region::opener::PartitionExprFetcherRef;
 use crate::region::{
-    CatchupRegions, CatchupRegionsRef, MitoRegionRef, NodeLease, OpeningRegions, OpeningRegionsRef,
-    RegionMap, RegionMapRef,
+    CatchupRegions, CatchupRegionsRef, MitoRegionRef, OpeningRegions, OpeningRegionsRef, RegionMap,
+    RegionMapRef,
 };
 use crate::request::{
     BackgroundNotify, BulkInsertRequest, DdlRequest, OptionOutputTx, SenderBulkRequest,
@@ -1516,8 +1517,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             ) {
                 // Fence writes here: writes the worker handles later see
                 // Downgrading, and earlier ones have finished. This only
-                // changes a writable or staging leader.
-                region.set_role(RegionRole::DowngradingLeader);
+                // changes a writable or staging leader, but always fences
+                // promotions issued before.
+                region.manifest_ctx.begin_downgrade(region_id);
             }
             #[cfg(feature = "hdfs-object-store")]
             let sweep_older_than = self.config.gc.unknown_file_lingering_time;

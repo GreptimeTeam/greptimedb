@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod recovery;
 mod runner;
 
 use std::collections::hash_map::Entry;
@@ -32,9 +33,9 @@ use tokio::sync::watch::{self, Receiver, Sender};
 use tokio::sync::{Mutex as TokioMutex, Notify};
 
 use crate::error::{
-    self, CheckStatusSnafu, DuplicateProcedureSnafu, Error, LoaderConflictSnafu,
-    ManagerNotStartSnafu, ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu,
-    Result, StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
+    CheckStatusSnafu, DuplicateProcedureSnafu, Error, LoaderConflictSnafu, ManagerNotStartSnafu,
+    ManagerPasuedSnafu, PoisonKeyNotDefinedSnafu, ProcedureNotFoundSnafu, Result,
+    StartRemoveOutdatedMetaTaskSnafu, StopRemoveOutdatedMetaTaskSnafu,
     TooManyRunningProceduresSnafu,
 };
 use crate::local::runner::Runner;
@@ -44,7 +45,8 @@ use crate::store::poison_store::PoisonStoreRef;
 use crate::store::{ProcedureMessage, ProcedureMessages, ProcedureStore, StateStoreRef};
 use crate::{
     BoxedProcedure, ContextProvider, EventTrigger, LockKey, PoisonKey, ProcedureContext,
-    ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId, StringKey, Watcher,
+    ProcedureId, ProcedureManager, ProcedureState, ProcedureWithId, StringKey,
+    SubprocedureRecovery, Watcher,
 };
 
 /// The expired time of a procedure's metadata.
@@ -81,6 +83,8 @@ pub(crate) struct ProcedureMeta {
     type_name: String,
     /// Parent procedure id.
     parent_id: Option<ProcedureId>,
+    /// Recovery policy captured when the procedure is submitted as a child.
+    subprocedure_recovery: SubprocedureRecovery,
     /// Context associated with the root submission.
     context: ProcedureContext,
     /// Notify to wait for subprocedures.
@@ -116,6 +120,7 @@ impl ProcedureMeta {
         ProcedureMeta {
             id,
             parent_id,
+            subprocedure_recovery: SubprocedureRecovery::Discard,
             context,
             child_notify: Notify::new(),
             lock_key,
@@ -127,6 +132,12 @@ impl ProcedureMeta {
             end_time_ms: AtomicI64::new(0),
             type_name: type_name.to_string(),
         }
+    }
+
+    /// Sets the recovery policy for this subprocedure.
+    fn with_subprocedure_recovery(mut self, recovery: SubprocedureRecovery) -> Self {
+        self.subprocedure_recovery = recovery;
+        self
     }
 
     /// Returns current [ProcedureState].
@@ -724,7 +735,6 @@ impl LocalManager {
         origin: RootSubmissionOrigin,
     ) -> Result<Watcher> {
         ensure!(self.manager_ctx.running(), ManagerNotStartSnafu);
-
         let meta = Arc::new(ProcedureMeta::new(
             procedure_id,
             procedure_state,
@@ -735,6 +745,16 @@ impl LocalManager {
             procedure.type_name(),
         ));
         let event_recorder = self.event_recorder.0.lock().unwrap();
+        // Serialize admission and registration so concurrent fresh submissions cannot
+        // exceed the limit. Recovery resumes already accepted work and bypasses it.
+        if matches!(origin, RootSubmissionOrigin::Fresh) {
+            ensure!(
+                self.manager_ctx.num_running_procedures() < self.config.max_running_procedures,
+                TooManyRunningProceduresSnafu {
+                    max_running_procedures: self.config.max_running_procedures,
+                }
+            );
+        }
         let runner = Runner {
             meta: meta.clone(),
             procedure,
@@ -750,21 +770,13 @@ impl LocalManager {
             rollback_retry_attempt: 0,
         };
 
-        let watcher = meta.state_receiver.clone();
-
-        ensure!(
-            self.manager_ctx.num_running_procedures() < self.config.max_running_procedures,
-            TooManyRunningProceduresSnafu {
-                max_running_procedures: self.config.max_running_procedures,
-            }
-        );
-
         // Inserts meta into the manager before actually spawnd the runner.
         ensure!(
             self.manager_ctx.try_insert_procedure(meta),
             DuplicateProcedureSnafu { procedure_id },
         );
 
+        let watcher = runner.meta.state_receiver.clone();
         let initial_event = runner.build_event(origin.event_trigger());
 
         let tracing_context = TracingContext::from_current_span();
@@ -773,7 +785,7 @@ impl LocalManager {
             self.manager_ctx.spawn_runner_task(procedure_id, || {
                 common_runtime::spawn_global(async move {
                     let span = tracing_context.attach(tracing::info_span!(
-                    "LocalManager::submit_root_procedure",
+                        "LocalManager::submit_root_procedure",
                         procedure_name = %runner.meta.type_name,
                         procedure_id = %runner.meta.id,
                     ));
@@ -798,60 +810,6 @@ impl LocalManager {
         Ok(watcher)
     }
 
-    fn submit_recovered_messages(
-        &self,
-        messages: HashMap<ProcedureId, ProcedureMessage>,
-        init_state: InitProcedureState,
-    ) {
-        for (procedure_id, message) in &messages {
-            if message.parent_id.is_none() {
-                // This is the root procedure. We only submit the root procedure as it will
-                // submit sub-procedures to the manager.
-                let Some(mut loaded_procedure) = self
-                    .manager_ctx
-                    .load_one_procedure_from_message(*procedure_id, message)
-                else {
-                    // Try to load other procedures.
-                    continue;
-                };
-
-                info!(
-                    "Recover root procedure {}-{}, step: {}",
-                    loaded_procedure.procedure.type_name(),
-                    procedure_id,
-                    loaded_procedure.step
-                );
-
-                let procedure_state = match init_state {
-                    InitProcedureState::RollingBack => ProcedureState::RollingBack {
-                        error: Arc::new(
-                            error::RollbackProcedureRecoveredSnafu {
-                                error: message.error.clone().unwrap_or("Unknown error".to_string()),
-                            }
-                            .build(),
-                        ),
-                    },
-                    InitProcedureState::Running => ProcedureState::Running,
-                };
-
-                if let Err(e) = loaded_procedure.procedure.recover() {
-                    error!(e; "Failed to recover procedure {}", procedure_id);
-                }
-
-                if let Err(e) = self.submit_root(
-                    *procedure_id,
-                    procedure_state,
-                    loaded_procedure.step,
-                    loaded_procedure.procedure,
-                    message.context.clone(),
-                    RootSubmissionOrigin::Recovery,
-                ) {
-                    error!(e; "Failed to recover procedure {}", procedure_id);
-                }
-            }
-        }
-    }
-
     /// Recovers unfinished procedures and reruns them.
     async fn recover(&self) -> Result<()> {
         info!("LocalManager start to recover");
@@ -862,9 +820,13 @@ impl LocalManager {
             rollback_messages,
             finished_ids,
         } = self.procedure_store.load_messages().await?;
-        // Submits recovered messages first.
-        self.submit_recovered_messages(rollback_messages, InitProcedureState::RollingBack);
-        self.submit_recovered_messages(messages, InitProcedureState::Running);
+        let rollback_messages = rollback_messages
+            .into_iter()
+            .map(|(id, message)| (id, message, InitProcedureState::RollingBack));
+        let messages = messages
+            .into_iter()
+            .map(|(id, message)| (id, message, InitProcedureState::Running));
+        self.submit_recovered_messages(rollback_messages.chain(messages));
 
         if !finished_ids.is_empty() {
             info!(
@@ -2349,6 +2311,79 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_root_submission_respects_limit() {
+        struct ConcurrentProcedure(Arc<std::sync::Barrier>);
+
+        #[async_trait::async_trait]
+        impl Procedure for ConcurrentProcedure {
+            fn type_name(&self) -> &str {
+                "ConcurrentProcedure"
+            }
+
+            async fn execute(&mut self, _ctx: &Context) -> Result<Status> {
+                std::future::pending().await
+            }
+
+            fn dump(&self) -> Result<String> {
+                Ok(String::new())
+            }
+
+            fn lock_key(&self) -> LockKey {
+                // Both submissions reach metadata construction before either registers.
+                self.0.wait();
+                LockKey::default()
+            }
+        }
+
+        let dir = create_temp_dir("concurrent_root_submission");
+        let state_store = Arc::new(ObjectStateStore::new(test_util::new_object_store(&dir)));
+        let manager = LocalManager::new(
+            ManagerConfig {
+                max_running_procedures: 1,
+                ..Default::default()
+            },
+            state_store,
+            Arc::new(InMemoryPoisonStore::new()),
+            None,
+            None,
+        );
+        manager.manager_ctx.start();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let barrier = barrier.clone();
+                    let manager = &manager;
+                    scope.spawn(move || {
+                        manager.submit_root(
+                            ProcedureId::random(),
+                            ProcedureState::Running,
+                            0,
+                            Box::new(ConcurrentProcedure(barrier)),
+                            ProcedureContext::default(),
+                            RootSubmissionOrigin::Fresh,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        manager.stop().await.unwrap();
+
+        assert_eq!(1, results.iter().filter(|result| result.is_ok()).count());
+        assert_eq!(
+            1,
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(Error::TooManyRunningProcedures { .. })))
+                .count()
         );
     }
 

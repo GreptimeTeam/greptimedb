@@ -12,57 +12,62 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The COPY FROM STDIN codec framework.
+//! The COPY FROM STDIN formats.
 //!
-//! A *codec* binds one COPY data format to its implementation. Codecs are
-//! stateless strategies: they validate the options they accept at
-//! statement-parse time, describe which column types they can ingest, and
-//! create the stateful [`RecordParser`] per stream.
-//!
-//! Formats are not limited to PostgreSQL's own — GreptimeDB-specific
-//! formats (a line protocol, a JSON-lines dialect, ...) register exactly
-//! like `csv` does, and may define their own options through the open
-//! `WITH (...)` clause.
+//! [`CopyFormat`] is the closed, explicit set of supported formats — a
+//! small enum over the real implementations rather than a generic
+//! format framework. Each variant carries its validated options and
+//! its rules are stated where they apply: a variant's match arms in
+//! the copy lifecycle (see the parent module) decide whether a target
+//! table is required, how the `CopyData` bytes are consumed, and which
+//! existing ingestion pipeline completes the copy. Adding a format is
+//! a normal extension: a new variant plus its arms.
 //!
 //! # Parsing and conversion
 //!
-//! A [`RecordParser`] consumes raw `CopyData` bytes and emits complete,
-//! insertable rows: one [`ParsedRow`] per record, in the order of the
-//! targeted columns. Parsers validate record shape (field counts) and
-//! convert field values themselves — `csv` delegates both splitting and
-//! typed conversion to arrow-csv's incremental decoder (the engine
-//! behind `COPY ... FROM 'file.csv'`) and turns decoded batches into
-//! rows with the shared `api::helper::vectors_to_rows`. A future format
-//! that carries values as text (e.g. a line protocol) would reintroduce
-//! shared field-conversion helpers here; see the removed `text` codec in
-//! git history for the shape they had.
+//! Table-bound formats parse incrementally through a [`RecordParser`]:
+//! it consumes raw `CopyData` bytes and emits complete, insertable
+//! rows — one [`ParsedRow`] per record, in the order of the targeted
+//! columns. `csv` delegates splitting and typed conversion to
+//! arrow-csv's incremental decoder (the engine behind
+//! `COPY ... FROM 'file.csv'`) and turns decoded batches into rows
+//! with the shared `api::helper::vectors_to_rows`.
+//!
+//! Formats that delegate to an existing ingestion pipeline (the
+//! influxdb line protocol) do not parse here at all: the whole payload
+//! is buffered as one bounded request body and completed through that
+//! pipeline, so record boundaries and values stay with the pipeline's
+//! own parser.
 //!
 //! # Options
 //!
 //! The `WITH (...)` clause is open: every `KEY value` entry the client
-//! writes is collected into a [`CopyOptionSet`] (see `options`) regardless
-//! of whether any format understands it — the statement is parsed
-//! textually (see `parse`) precisely so options beyond sqlparser's COPY
-//! grammar can reach the codecs. A codec builder takes the options it
-//! understands (`take_string`, `take_single_byte`, `take_flag`, or raw
-//! `take_value` for codec-specific shapes) and rejects the rest with
-//! `reject_leftovers`, so a future format like
-//! `COPY t FROM STDIN WITH (FORMAT influxdb_line, precision 'ns')` only
-//! needs its own codec and registry entry.
-//!
-//! To add a format:
-//!
-//! 1. implement [`CopyInCodec`] for a config struct holding the format's
-//!    validated options (see `csv::CsvCodec` for the example),
-//! 2. write a builder `fn(CopyOptionSet) -> PgWireResult<Arc<dyn
-//!    CopyInCodec>>` that applies defaults and rejects options the format
-//!    does not accept,
-//! 3. register the builder under every accepted `FORMAT` name (including
-//!    aliases) in `REGISTERED_FORMATS` in the parent module.
+//! writes is collected into a [`CopyOptionSet`] (see `options`)
+//! regardless of whether any format understands it — the statement is
+//! parsed textually (see `parse`) precisely so options beyond
+//! sqlparser's COPY grammar can reach the formats. A format builder
+//! takes the options it understands (`take_string`,
+//! `take_single_byte`, `take_flag`, or raw `take_value` for
+//! format-specific shapes) and rejects the rest with
+//! `reject_leftovers`.
 
-use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::ColumnSchema;
 use pgwire::error::PgWireResult;
+
+use crate::postgres::copy_in::csv::CsvCodec;
+use crate::postgres::copy_in::influxdb::InfluxdbOptions;
+
+/// A resolved COPY FROM STDIN format with its validated options.
+#[derive(Debug, Clone)]
+pub(super) enum CopyFormat {
+    /// Table-bound CSV: records are parsed incrementally against the
+    /// targeted table's columns and inserted in batches.
+    Csv(CsvCodec),
+    /// Table-less influxdb line protocol: the whole payload is one
+    /// bounded request body, completed through the line-protocol
+    /// pipeline the HTTP write endpoints use (one COPY statement is one
+    /// ingestion request; streaming ingest is not supported).
+    Influxdb(InfluxdbOptions),
+}
 
 /// A parsed, insertable row: one gRPC value per targeted column, in COPY
 /// field order. Every parser emits these directly, whatever mechanism it
@@ -82,35 +87,4 @@ pub(super) trait RecordParser: Send {
     /// Parses the buffered tail at `CopyDone`; returns no row when the
     /// stream ended exactly at a record boundary.
     fn finish(&mut self) -> PgWireResult<Vec<ParsedRow>>;
-}
-
-/// A COPY FROM STDIN data format implementation.
-///
-/// Implementations are shared per statement (hence `Send + Sync`) and must
-/// be stateless; per-stream state belongs to the [`RecordParser`] they
-/// create. Every method is tailored to the format: `check_column_type`
-/// declares the types the format can decode (csv is bounded by what
-/// arrow-csv supports).
-pub(super) trait CopyInCodec: Send + Sync + std::fmt::Debug {
-    /// The canonical format name, used in error messages.
-    fn name(&self) -> &'static str;
-    /// The format code advertised in the `CopyInResponse` header: 0 when
-    /// the client sends textual data (the default), 1 for binary.
-    fn format_code(&self) -> i8 {
-        0
-    }
-    /// Validates that a column of `data_type` can be ingested by this
-    /// format.
-    fn check_column_type(&self, data_type: &ConcreteDataType) -> PgWireResult<()>;
-    /// Creates the stateful parser for one copy stream over the targeted
-    /// columns (in COPY field order).
-    ///
-    /// `timezone` is the session timezone (an IANA name or a UTC offset):
-    /// formats that parse offset-free timestamp strings from text should
-    /// interpret them in this zone, matching SQL INSERT.
-    fn create_parser(
-        &self,
-        columns: &[ColumnSchema],
-        timezone: &str,
-    ) -> PgWireResult<Box<dyn RecordParser + Send>>;
 }

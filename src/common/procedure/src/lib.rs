@@ -33,5 +33,6 @@ pub use crate::procedure::{
     ContextProviderRef, EventContext, EventTrigger, LockKey, Output, ParseIdError, PoisonKey,
     PoisonKeys, Procedure, ProcedureContext, ProcedureId, ProcedureInfo, ProcedureManager,
     ProcedureManagerRef, ProcedureState, ProcedureWithId, RetryPhase, Status, StringKey,
+    SubprocedureRecovery,
 };
 pub use crate::watcher::Watcher;

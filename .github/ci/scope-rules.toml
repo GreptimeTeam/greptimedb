@@ -1,0 +1,285 @@
+# Rules for the integration CI admission gate.
+#
+# Data only: `ci_scope_rules.py` loads this file with the stdlib `tomllib`, and
+# `ci_scope.py` matches diffs against it. Edit this file, not the code, when a
+# suite's paths change.
+#
+# Conventions
+# -----------
+# - `**` crosses directories, `*` does not; a trailing `/**` covers everything
+#   under a directory.
+# - `@name` inside `suites.*.paths` expands `[groups].name`, and groups may
+#   reference other groups. Expansion is recursive.
+# - A suite id is `<gate>/<matrix group id>`; `gate` is the `$GITHUB_OUTPUT`
+#   key that switches the job, and it must equal the id prefix with `-`
+#   replaced by `_`.
+# - Everything here is a floor, never a filter: an unmatched `src/` path runs
+#   every suite, and a malformed file fails the classifier job, whose steps are
+#   `continue-on-error`, so the gated jobs run.
+
+[matching]
+# A changed file matching one of these runs every suite.
+# Put here anything that changes what the suites build or how they start.
+always_run = [
+  "Cargo.toml",
+  "Cargo.lock",
+  "rust-toolchain.toml",
+  ".cargo/**",
+  "tests-fuzz/**",
+  "tests-integration/**",
+  "config/**",
+  "docker/**",
+  ".github/ci/**",
+  ".github/workflows/integration.yml",
+  ".github/actions/**",
+  # Both run through a composite action, so neither appears in the workflow:
+  # `setup-kind` starts the cluster for the distributed and chaos jobs, and
+  # `fuzz-test` seeds the corpus every fuzz job starts from.
+  ".github/scripts/kind-with-registry.sh",
+  ".github/scripts/prepare-fuzz-corpus.sh",
+  ".github/scripts/run-fuzz-targets.sh",
+  ".github/scripts/collect-fuzz-target-artifacts.sh",
+  ".github/scripts/wait-kafka-ready.sh",
+  ".github/scripts/pull-test-deps-images.sh",
+]
+
+# A change under `src/` that no suite claims runs every suite: that is the net
+# for a crate added, split or renamed after these rules were written.
+src_tree = "src/"
+
+# Paths outside the gate's remit. They select no suite, and they do not count as
+# "no rule covers this" either, so they never widen the gate. Each needs a
+# `reason`: what CI covers them instead.
+[[matching.exempt]]
+path = "src/promql/"
+reason = "PromQL crate: rust.yml and the promql sqlness cases own it; the fuzz suites speak SQL."
+
+[[matching.exempt]]
+path = "src/query/src/promql/"
+reason = "PromQL module inside `src/query`, which `@server` claims as `src/query/**`."
+
+[[matching.exempt]]
+path = "src/flow/"
+reason = "Flow engine: rust.yml and the flow sqlness cases own it; no fuzz suite loads it."
+
+# Which job each gate switches. The keys are `$GITHUB_OUTPUT` names; the values
+# are job ids in `integration.yml`. The classifier cannot read YAML, so the
+# mapping is data here, and a test proves both directions line up.
+[gates]
+fuzz_standalone = "fuzztest"
+fuzz_unstable = "unstable-fuzztest"
+fuzz_distributed = "distributed-fuzztest"
+fuzz_chaos = "distributed-fuzztest-with-chaos"
+export_import_v2 = "export-import-v2-e2e"
+sqlness_kvbackend = "sqlness-kvbackend"
+
+[groups]
+server = [
+  "src/operator/**",
+  "src/sql/**",
+  "src/catalog/**",
+  "src/datatypes/**",
+  "src/table/**",
+  "src/store-api/**",
+  "src/session/**",
+  "src/api/**",
+  "src/servers/**",
+  "src/frontend/**",
+  # Also covers `src/query/src/promql/`, which is exempt (see
+  # `[[matching.exempt]]`): a PromQL-only change must not run the fuzz fleet.
+  "src/query/**",
+  "src/partition/**",
+  "src/index/**",
+  "src/object-store/**",
+  "src/cache/**",
+  "src/puffin/**",
+  "src/auth/**",
+  "src/client/**",
+  "src/log-query/**",
+  "src/pipeline/**",
+  "src/plugins/**",
+  "src/cmd/**",
+  "src/standalone/**",
+  "src/datanode/**",
+  "src/common/base/**",
+  "src/common/batcher/**",
+  "src/common/cache/**",
+  "src/common/catalog/**",
+  "src/common/config/**",
+  "src/common/datasource/**",
+  "src/common/decimal/**",
+  "src/common/error/**",
+  "src/common/event-recorder/**",
+  "src/common/frontend/**",
+  "src/common/function/**",
+  "src/common/grpc/**",
+  "src/common/grpc-expr/**",
+  "src/common/greptimedb-telemetry/**",
+  "src/common/macro/**",
+  "src/common/mem-prof/**",
+  "src/common/memory-manager/**",
+  "src/common/options/**",
+  "src/common/plugins/**",
+  "src/common/pprof/**",
+  "src/common/query/**",
+  "src/common/recordbatch/**",
+  "src/common/runtime/**",
+  "src/common/session/**",
+  "src/common/sql/**",
+  "src/common/stat/**",
+  "src/common/substrait/**",
+  "src/common/telemetry/**",
+  "src/common/test-util/**",
+  "src/common/time/**",
+  "src/common/version/**",
+  "src/common/workload/**",
+]
+
+# Storage engines and WAL.
+engine = [
+  "src/mito2/**",
+  "src/mito-codec/**",
+  "src/metric-engine/**",
+  "src/file-engine/**",
+  "src/log-store/**",
+  "src/common/wal/**",
+]
+
+# DDL and procedure code standalone executes in-process: it builds a
+# `DdlManager` and runs `LocalProcedureExecutor` without any metasrv.
+meta-core = [
+  "src/common/meta/**",
+  "src/common/procedure/**",
+  "src/common/procedure-test/**",
+]
+
+# Everything that sits on the KV backend the two sqlness KvBackend legs
+# exercise: the backend implementations, the metadata service and the startup
+# wiring that picks a backend.
+kv-backend = [
+  # The runner implements `--setup-pg`/`--setup-mysql`, which only these legs pass.
+  "tests/runner/**",
+  "src/common/meta/**",
+  "src/meta-srv/**",
+  "src/meta-client/**",
+  "src/common/procedure/**",
+  "src/cmd/**",
+  "src/common/config/**",
+  "src/common/options/**",
+]
+
+# Adds the metasrv/meta-client crates on top of the in-process DDL code.
+meta = [
+  "src/meta-srv/**",
+  "src/meta-client/**",
+  "@meta-core",
+]
+
+[suites."fuzz-standalone/database-and-regular-table"]
+gate = "fuzz_standalone"
+paths = [
+  "@server",
+  "@engine",
+  "@meta-core",
+]
+description = "Standalone-server black-box fuzz of CREATE DATABASE/TABLE, ALTER, INSERT over MySQL."
+
+[suites."fuzz-standalone/logical-table"]
+gate = "fuzz_standalone"
+paths = [
+  "@server",
+  "@engine",
+  "@meta-core",
+]
+description = "Standalone logical-table DDL/INSERT fuzz (mito2 logical tables)."
+
+[suites."fuzz-unstable/standalone"]
+gate = "fuzz_unstable"
+paths = [
+  "@server",
+  "@engine",
+  "@meta-core",
+]
+description = "Unstable standalone create-table fuzz (nix build feature)."
+
+[suites."fuzz-distributed/database-and-regular-table"]
+gate = "fuzz_distributed"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Distributed (frontend/datanode/metasrv, remote WAL) DDL/DML fuzz."
+
+[suites."fuzz-distributed/logical-table"]
+gate = "fuzz_distributed"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Distributed logical-table fuzz."
+
+[suites."fuzz-distributed/repartition"]
+gate = "fuzz_distributed"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Distributed repartition ALTER TABLE + GC fuzz."
+
+[suites."fuzz-distributed/logical-pruning"]
+gate = "fuzz_distributed"
+paths = [
+  "@engine",
+  "@meta",
+]
+description = "Remote-WAL logical table pruning of stale manifests."
+
+[suites."fuzz-chaos/migration"]
+gate = "fuzz_chaos"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Region migration under Chaos Mesh, mito and metric engines."
+
+[suites."fuzz-chaos/failover"]
+gate = "fuzz_chaos"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Region failover under Chaos Mesh, mito and metric engines."
+
+[suites."fuzz-chaos/repartition"]
+gate = "fuzz_chaos"
+paths = [
+  "@server",
+  "@engine",
+  "@meta",
+]
+description = "Repartition + GC under Chaos Mesh."
+
+[suites."export-import-v2"]
+gate = "export_import_v2"
+paths = [
+  "src/cli/**",
+  "@server",
+  "@engine",
+  "@meta-core",
+]
+description = "CLI COPY DATABASE export/import v2 end-to-end against S3."
+
+[suites."sqlness-kvbackend/metasrv-postgres"]
+gate = "sqlness_kvbackend"
+paths = ["@kv-backend"]
+description = "Sqlness with PostgreSQL as the metadata KV backend."
+
+[suites."sqlness-kvbackend/metasrv-mysql"]
+gate = "sqlness_kvbackend"
+paths = ["@kv-backend"]
+description = "Sqlness with MySQL as the metadata KV backend."

@@ -318,7 +318,8 @@ pub struct ScannerProperties {
     /// The target partitions of the scanner. 0 indicates using the number of partitions as target partitions.
     target_partitions: usize,
 
-    /// Whether the scanner is scanning a logical region.
+    /// Whether the scanner reads one logical metric region, including a physical
+    /// metric region constrained by a table-ID filter.
     logical_region: bool,
 
     /// Region id that should receive query-load metrics for this scanner.
@@ -392,7 +393,8 @@ impl ScannerProperties {
         self.total_rows_is_exact
     }
 
-    /// Returns whether the scanner is scanning a logical region.
+    /// Returns whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     pub fn is_logical_region(&self) -> bool {
         self.logical_region
     }
@@ -406,7 +408,7 @@ impl ScannerProperties {
         }
     }
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region.
     pub fn set_logical_region(&mut self, logical_region: bool) {
         self.logical_region = logical_region;
     }
@@ -535,7 +537,8 @@ pub trait RegionScanner: Debug + DisplayAs + Send {
     /// The default is a no-op and does not make inherently one-shot sources replayable.
     fn reset_state(&mut self) {}
 
-    /// Sets whether the scanner is reading a logical region.
+    /// Sets whether the scanner reads one logical metric region, including a
+    /// physical metric region constrained by a table-ID filter.
     fn set_logical_region(&mut self, logical_region: bool);
 
     /// Sets the region id that should receive query-load metrics.
@@ -1082,7 +1085,9 @@ pub trait RegionEngine: Send + Sync {
     /// take effect.
     fn set_region_role(&self, region_id: RegionId, role: RegionRole) -> Result<(), BoxedError>;
 
-    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`.
+    /// Sets [RegionRole] for a region from a lease the metasrv grants until `deadline`, in reply
+    /// to a heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because
+    /// the region was downgraded or (re)opened after `sent_at`.
     ///
     /// The region must not acknowledge a write whose WAL append completes at or after the
     /// deadline of its latest Leader or StagingLeader lease. Leases of other roles do not extend
@@ -1091,8 +1096,9 @@ pub trait RegionEngine: Send + Sync {
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: Instant,
         deadline: Instant,
-    ) -> Result<(), BoxedError>;
+    ) -> Result<bool, BoxedError>;
 
     /// Syncs the region manifest to the given manifest version.
     async fn sync_region(
