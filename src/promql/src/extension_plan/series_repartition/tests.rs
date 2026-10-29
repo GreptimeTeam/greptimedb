@@ -62,11 +62,12 @@ use crate::extension_plan::test_util::prepare_test_data;
 use crate::grid_series::{render_label_set, series_bytes};
 use crate::native::execute::operand_chunk_bytes;
 
-/// The grid every frame of this module is addressed on: a value per second, 256 of them.
+const TEST_FIXTURE_VOLUME: usize = 4;
 const GRID_START: i64 = 0;
 const GRID_STEP: i64 = 1_000;
 const GRID_LEN: u64 = 256;
 
+/// The grid every frame of this module is addressed on: a value per second, 256 of them.
 fn grid() -> Arc<EvalGrid> {
     Arc::new(
         EvalGrid::try_new(GridSpec::try_new(GRID_START, GRID_STEP, GRID_LEN).unwrap()).unwrap(),
@@ -238,7 +239,14 @@ struct Scripted {
 impl Scripted {
     /// The child plan over `steps`, one partition per list.
     fn plan(steps: Vec<Vec<Step>>) -> Arc<dyn ExecutionPlan> {
-        let series_schema = schema();
+        Self::plan_with_schema(steps, schema())
+    }
+
+    /// The child plan over `steps` with an explicitly declared evaluated frame schema.
+    fn plan_with_schema(
+        steps: Vec<Vec<Step>>,
+        series_schema: Arc<SeriesSchema>,
+    ) -> Arc<dyn ExecutionPlan> {
         let frame = pack_evaluated_series(
             Box::pin(futures::stream::empty()),
             Arc::clone(&series_schema),
@@ -334,9 +342,8 @@ fn node(child: Arc<dyn ExecutionPlan>, outputs: usize) -> Arc<SeriesRepartitionE
 
 /// Every output partition of `plan`, decoded, and the error it ended with if it ended with one.
 ///
-/// All partitions are read at once, which is what an executor does: this node suspends the producer
-/// on an output that is not being drained, so reading one partition to its end before starting the
-/// next would test the backpressure rather than the routing.
+/// All partitions are read at once, as in normal execution. Outputs publish only after global EOF;
+/// draining them concurrently makes this helper work for any future streaming publication contract.
 async fn drain(
     plan: &Arc<dyn ExecutionPlan>,
     context: &Arc<TaskContext>,
@@ -411,20 +418,6 @@ fn summaries(chunks: &[(Series, bool)]) -> Vec<(String, Option<usize>, usize, bo
     chunks.iter().map(summary).collect()
 }
 
-/// The summaries of an output, in an order the input tasks do not decide.
-///
-/// Every input is read by a task of its own, so which of two inputs delivers a chain first is not
-/// fixed - and no test may depend on it. What a test still states is that each chain arrives whole and
-/// in order ([`assert_chains_are_whole`]), and that the set of chunks is exactly the set it expects;
-/// this is the comparison for a chunk list that came from more than one source.
-fn unordered(
-    summaries: &[(String, Option<usize>, usize, bool)],
-) -> Vec<(String, Option<usize>, usize, bool)> {
-    let mut sorted = summaries.to_vec();
-    sorted.sort();
-    sorted
-}
-
 /// Asserts that every chain `chunks` hands over is whole, in the terms the frame validator reads a
 /// chain in.
 ///
@@ -477,6 +470,56 @@ fn assert_chains_are_whole(chunks: &[(Series, bool)]) {
         open = (!*is_last).then(|| (series.metric.clone(), last));
     }
     assert!(open.is_none(), "the output ended with a chain open");
+}
+
+/// Checks completed owner outputs against exact series identities, positions, and finality.
+fn assert_output_contract(chunks: &[(Series, bool)], expected: &[(SeriesLabels, Vec<usize>)]) {
+    assert_chains_are_whole(chunks);
+    let mut actual: Vec<(SeriesLabels, Vec<usize>, usize)> = Vec::new();
+    let mut closed_identities = Vec::<SeriesLabels>::new();
+    for (series, is_last) in chunks {
+        assert!(
+            !closed_identities.contains(&series.metric),
+            "a closed full identity must not reappear: {}",
+            named(&series.metric)
+        );
+        assert_eq!(series.time.len(), series.time.positions().count());
+        let (_, positions, closes) = match actual
+            .iter_mut()
+            .find(|(metric, _, _)| metric == &series.metric)
+        {
+            Some(entry) => entry,
+            None => {
+                actual.push((series.metric.clone(), Vec::new(), 0));
+                actual.last_mut().unwrap()
+            }
+        };
+        positions.extend(series.time.positions().map(|(position, _)| position));
+        *closes += usize::from(*is_last);
+        if *is_last {
+            closed_identities.push(series.metric.clone());
+        }
+    }
+    assert_eq!(
+        expected.len(),
+        actual.len(),
+        "one closed series per full identity"
+    );
+    for (metric, positions) in expected {
+        let index = actual
+            .iter()
+            .position(|(identity, _, _)| identity == metric)
+            .expect("expected exact full label identity");
+        let (_, actual_positions, closes) = actual.remove(index);
+        assert_eq!(
+            positions,
+            &actual_positions,
+            "positions for {}",
+            named(metric)
+        );
+        assert_eq!(1, closes, "one terminal output close for {}", named(metric));
+    }
+    assert!(actual.is_empty());
 }
 
 /// A label set whose output is not `other`'s, found rather than assumed.
@@ -547,22 +590,27 @@ async fn pieces_of_one_label_set_meet_on_one_output() {
         })
         .collect::<Vec<_>>();
 
-    let piece = named(&shared);
     let other_piece = named(&other);
     let shared_output = routing.output(&shared);
+    let shared_chunks = outputs[shared_output]
+        .iter()
+        .map(|summary| summary.2)
+        .sum::<usize>();
     assert_eq!(
-        unordered(&[
-            (piece.clone(), Some(0), 2, false),
-            (piece.clone(), None, 0, true),
-            (piece.clone(), Some(8), 2, true),
-        ]),
-        unordered(&outputs[shared_output]),
-        "both pieces of one label set, and the closing chunk between them, land on one output"
+        4, shared_chunks,
+        "both producer partitions contribute positions"
+    );
+    assert_eq!(
+        1,
+        outputs[shared_output]
+            .iter()
+            .filter(|chunk| chunk.3)
+            .count()
     );
     assert_eq!(
         vec![(other_piece, Some(0), 1, true)],
         outputs[routing.output(&other)],
-        "another label set lands where its own labels hash to"
+        "another full identity lands on its own output"
     );
     let empty = outputs
         .iter()
@@ -609,85 +657,78 @@ async fn chains_cross_the_node_whole_and_a_closing_chunk_survives() {
         .expect("the output decodes");
     assert_chains_are_whole(&chunks);
 
-    let piece = named(&shared);
-    assert_eq!(
-        unordered(&[
-            (piece.clone(), Some(0), 2, false),
-            (piece.clone(), Some(2), 2, true),
-            (piece.clone(), Some(8), 2, false),
-            // The closing chunk of the second chain carries no position of its own.
-            (piece, None, 0, true),
-        ]),
-        unordered(&summaries(&chunks)),
-        "both chains reach the one output whole, and the empty closing chunk is still a chunk"
-    );
+    assert_output_contract(&chunks, &[(shared.clone(), vec![0, 1, 2, 3, 8, 9])]);
 }
 
-/// T3, first half: an output nobody reads suspends the input task once its queue is full, and the
-/// chains it already routed are neither lost nor delivered twice once that output is drained.
-///
-/// What happens, explicitly: the input's task queues [`OUTPUT_CAPACITY`] chains to the stalled output
-/// and then waits on that output's send. Every other output stops receiving from that input at that
-/// point - one task reads this one input, and it does not run ahead of the slowest output - so an
-/// input has head-of-line blocking behind its own chains, and no scheduler to route around it. What it
-/// does not have is a share of that wait with another input: each one waits on its own. It is not a
-/// deadlock: the task is suspended on a channel, the rest of the query continues, and draining the
-/// stalled output lets the read go on.
+/// An unread output does not prevent routing to another owner before global EOF. Owner publication
+/// waits for successful EOF, after which each output receives its complete merged series.
 #[tokio::test]
-async fn a_stalled_output_suspends_the_producer_without_losing_chunks() {
+async fn an_unread_owner_does_not_stall_routing_and_outputs_publish_after_eof() {
     let routing = Routing::new(2);
     let shared = labels("web-1");
     let other = labels_elsewhere(&routing, &shared);
     let stalled = routing.output(&shared);
     let moving = routing.output(&other);
     // More chains than one queue can hold, so the producer has to stop mid-read rather than finish.
-    let chains = OUTPUT_CAPACITY + 2;
+    let chains = TEST_FIXTURE_VOLUME + 2;
     let mut steps = (0..chains)
         .map(|index| Step::chunk(chunk(shared.clone(), index, 1, true)))
         .collect::<Vec<_>>();
     steps.push(Step::chunk(chunk(other.clone(), 0, 1, true)));
-    let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(vec![steps]), 2);
+    let switch = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![GatedPartition {
+            before: steps,
+            after: Vec::new(),
+        }],
+        Arc::clone(&switch),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let concrete_plan = node(child, 2);
+    let plan: Arc<dyn ExecutionPlan> = concrete_plan.clone();
     let context = SessionContext::default().task_ctx();
 
     let mut moving_stream = output(&plan, moving, &context);
     let stalled_stream = output(&plan, stalled, &context);
-    // The other output is read first, and the read is already blocked on the stalled one: nothing it
-    // would have been given can arrive, which is the head-of-line blocking this test states.
+    let execution = execution(&concrete_plan);
+    // The source holds terminal EOF behind the switch. Thus the producer cannot finish early merely
+    // because this finite input happened to reach its legitimate end.
+    assert!(!switch.is_open());
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), moving_stream.next())
-            .await
-            .is_err(),
-        "the stalled output did not hold the producer back"
+        futures::future::poll_fn(|cx| match moving_stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "owner waits while global EOF is gated"
     );
-
-    // Draining the stalled output lets the read finish, and it loses nothing on the way.
+    assert!(
+        !producer_stopped(&execution),
+        "terminal EOF gate remains closed"
+    );
+    switch.open();
+    wait_until("unbounded producer finishes after terminal EOF", || {
+        producer_stopped(&execution)
+    })
+    .await;
+    // Both complete owners are emitted only after global EOF.
     let stalled_chunks = tokio::time::timeout(
         Duration::from_secs(10),
         stalled_stream.try_collect::<Vec<_>>(),
     )
     .await
-    .expect("draining the stalled output releases the producer")
+    .expect("stalled owner publishes after global EOF")
     .expect("the stalled output decodes");
-    assert_eq!(chains, stalled_chunks.len());
-    assert_chains_are_whole(&stalled_chunks);
-    for (index, (series, is_last)) in stalled_chunks.iter().enumerate() {
-        assert_eq!(named(&shared), named(&series.metric));
-        assert_eq!(Some(index), series.time.first_position(), "in read order");
-        assert!(is_last, "every chain of this test closes");
-    }
+    assert_output_contract(&stalled_chunks, &[(shared.clone(), (0..chains).collect())]);
 
-    let mut moving_chunks = Vec::new();
-    while let Some(chunk) = tokio::time::timeout(Duration::from_secs(10), moving_stream.next())
-        .await
-        .expect("the other output still receives what was routed to it")
-    {
-        moving_chunks.push(chunk.expect("the other output decodes"));
-    }
-    assert_eq!(
-        vec![(named(&other), Some(0), 1, true)],
-        summaries(&moving_chunks),
-        "the chunk queued behind the stalled output arrives once it is unstuck, exactly once"
-    );
+    let moving_chunks = tokio::time::timeout(
+        Duration::from_secs(10),
+        moving_stream.try_collect::<Vec<_>>(),
+    )
+    .await
+    .expect("the other owner completes after global EOF")
+    .expect("the other output decodes");
+    assert_output_contract(&moving_chunks, &[(other.clone(), vec![0])]);
 }
 
 /// T3, second half: what the producer queues is charged to the execution's pool, and dropping the
@@ -766,19 +807,14 @@ async fn one_output_keeps_every_chunk_and_its_chains_whole() {
         .expect("one output")
         .expect("the output decodes");
     assert_chains_are_whole(&chunks);
-    // Both partitions contribute to the one output; their scheduling order is deliberately not
-    // asserted. Each label set's chains still reach the output whole.
-    assert_eq!(
-        unordered(&[
-            (named(&shared), Some(0), 2, false),
-            (named(&shared), Some(2), 2, true),
-            (named(&shared), Some(8), 2, true),
-            (named(&other), Some(0), 1, false),
-            (named(&other), None, 0, true),
-        ]),
-        unordered(&summaries(&chunks)),
-        "every chunk of both label sets arrives, each chain in one piece"
+    assert_output_contract(
+        &chunks,
+        &[
+            (shared.clone(), vec![0, 1, 2, 3, 8, 9]),
+            (other.clone(), vec![0]),
+        ],
     );
+    assert_eq!(2, chunks.iter().filter(|(_, closed)| *closed).count());
 }
 
 /// A switch a test opens to let gated input streams produce.
@@ -1232,14 +1268,8 @@ async fn every_input_partition_is_read_on_a_task_of_its_own() {
         .expect("one output")
         .expect("the output decodes");
     chunks.sort_by_key(|(series, _)| series.time.first_position());
-    assert_eq!(
-        vec![
-            (named(&shared), Some(0), 1, true),
-            (named(&shared), Some(4), 1, true),
-        ],
-        summaries(&chunks),
-        "both partitions' chunks arrive, each from the task that read it"
-    );
+    assert_output_contract(&chunks, &[(shared.clone(), vec![0, 4])]);
+    assert_eq!(1, chunks.iter().filter(|(_, closed)| *closed).count());
 }
 
 /// the streams own the read, so dropping the plan does not truncate them.
@@ -1331,7 +1361,7 @@ async fn dropping_every_output_stops_the_read_and_releases_it() {
     let dropped = Arc::new(AtomicUsize::new(0));
     let shared = labels("web-1");
     // More closed chains than the two outputs can queue, so the read cannot finish on its own.
-    let steps = (0..OUTPUT_CAPACITY * 3)
+    let steps = (0..TEST_FIXTURE_VOLUME * 3)
         .map(|index| Step::chunk(chunk(shared.clone(), index, 1, true)))
         .collect::<Vec<_>>();
     let child = Gated::plan(
@@ -1457,11 +1487,8 @@ async fn an_output_that_ends_does_not_close_the_queue_of_an_unclaimed_output() {
 
 /// the output claimed last still receives its whole share after a claimed sibling ended.
 ///
-/// Both outputs' shares fit one queue, so the read ends on its own instead of suspending on anything:
-/// what is asserted is what a late claim gets, not the backpressure. Partition 0 is read to its end
-/// before partition 1 is even executed, which releases partition 0's lease; a read that treated that
-/// as the end would drop partition 1's queue and the chunks queued there - the answer would be
-/// truncated rather than late, and nothing on partition 1 would arrive at all.
+/// Partition 0 is read to its end before partition 1 is executed. Its released lease must not discard
+/// the unclaimed sibling queue, whose complete result is verified after the later claim.
 #[tokio::test]
 async fn an_unclaimed_output_delivers_its_whole_share_after_a_sibling_ended() {
     let routing = Routing::new(2);
@@ -1475,7 +1502,7 @@ async fn an_unclaimed_output_delivers_its_whole_share_after_a_sibling_ended() {
     );
     // One chain per label set, in a row, both of them closed: what reaches each output is a run of
     // complete chains, so nothing here depends on how the read interleaves two open ones.
-    let chains = OUTPUT_CAPACITY - 1;
+    let chains = TEST_FIXTURE_VOLUME - 1;
     let steps = (0..chains)
         .map(|index| Step::chunk(chunk(shared.clone(), index, 1, true)))
         .chain((0..chains).map(|index| Step::chunk(chunk(other.clone(), index, 1, true))))
@@ -1488,13 +1515,7 @@ async fn an_unclaimed_output_delivers_its_whole_share_after_a_sibling_ended() {
         .await
         .expect("the first output reaches its end before the other is executed")
         .expect("the first output ends without a failure");
-    assert_eq!(
-        (0..chains)
-            .map(|index| (named(&shared), Some(index), 1, true))
-            .collect::<Vec<_>>(),
-        summaries(&first_chunks),
-        "the output executed first hands over every chain of its label set"
-    );
+    assert_output_contract(&first_chunks, &[(shared.clone(), (0..chains).collect())]);
 
     let second = unpack_evaluated_series(
         plan.execute(claimed_later, Arc::clone(&context))
@@ -1507,24 +1528,12 @@ async fn an_unclaimed_output_delivers_its_whole_share_after_a_sibling_ended() {
             .await
             .expect("the output executed last reaches its end")
             .expect("the output executed last ends without a failure");
-    assert_eq!(
-        (0..chains)
-            .map(|index| (named(&other), Some(index), 1, true))
-            .collect::<Vec<_>>(),
-        summaries(&second_chunks),
-        "the output executed last still receives every chain of its label set, in order"
-    );
+    assert_output_contract(&second_chunks, &[(other.clone(), (0..chains).collect())]);
 }
 
-/// an output nobody claimed keeps the read running, not merely claimable.
-///
-/// More chains than one queue holds are routed to the output nobody has asked for, so the read cannot
-/// finish: it is parked on that output's queue. The claimed output delivered everything routed to it
-/// and is then dropped, which gives up every lease the read has - and that must not be taken for
-/// "nothing can take a chunk any more", because the output that has never been claimed is exactly the
-/// one that will. A read that stopped here would abort a producer that is correctly waiting, and the
-/// chunks it holds would be lost; the last part of the test is that it is not merely alive but that
-/// every chunk it queued arrives once the output is claimed.
+/// A claimed owner remains readable while another owner is still unclaimed. The source gates terminal
+/// EOF so the first output cannot finish prematurely; after opening the gate, the sibling's complete
+/// result remains available for a later claim.
 #[tokio::test]
 async fn an_unclaimed_output_keeps_the_producer_of_a_claimed_one_running() {
     let routing = Routing::new(2);
@@ -1536,75 +1545,60 @@ async fn an_unclaimed_output_keeps_the_producer_of_a_claimed_one_running() {
         read_first, claimed_later,
         "the two label sets have to land apart for this test to mean anything"
     );
-    let chains = OUTPUT_CAPACITY + 2;
-    let steps = std::iter::once(Step::chunk(chunk(shared.clone(), 0, 1, true)))
-        .chain((0..chains).map(|index| Step::chunk(chunk(other.clone(), index, 1, true))))
-        .collect::<Vec<_>>();
-    let plan = node(
-        Fragile::plan(
-            vec![Behaviour::OneAtATime(steps)],
-            Arc::new(Switch::default()),
-        )
-        .plan,
-        2,
+    let chains = TEST_FIXTURE_VOLUME + 2;
+    let switch = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![GatedPartition {
+            before: vec![Step::chunk(chunk(shared.clone(), 0, 1, true))],
+            after: (0..chains)
+                .map(|index| Step::chunk(chunk(other.clone(), index, 1, true)))
+                .collect(),
+        }],
+        Arc::clone(&switch),
+        Arc::new(AtomicUsize::new(0)),
     );
+    let concrete_plan = node(child, 2);
+    let plan: Arc<dyn ExecutionPlan> = concrete_plan.clone();
     let context = SessionContext::default().task_ctx();
     let mut first = unpack_evaluated_series(
         plan.execute(read_first, Arc::clone(&context))
-            .expect("the output that is read first executes"),
+            .expect("claimed output executes"),
         None,
     )
     .expect("the output declares an evaluated frame");
-    let execution = execution(&plan);
+    let execution = execution(&concrete_plan);
 
-    let chunk_read = tokio::time::timeout(Duration::from_secs(10), first.next())
+    assert!(
+        futures::future::poll_fn(|cx| match first.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "claimed owner waits while source EOF is gated"
+    );
+    assert!(
+        !producer_stopped(&execution),
+        "producer is held at terminal EOF"
+    );
+    switch.open();
+    let first_chunks = tokio::time::timeout(Duration::from_secs(10), first.try_collect::<Vec<_>>())
         .await
-        .expect("the first chunk of the read arrives")
-        .expect("the output hands over a chunk")
-        .expect("the chunk decodes");
-    assert_eq!(
-        (named(&shared), Some(0), 1, true),
-        summary(&chunk_read),
-        "the chain routed to the output that is read first"
-    );
-    assert!(
-        !producer_stopped(&execution),
-        "the read finished although nothing could have delivered the chains it never routed"
-    );
-
-    // Everything routed to this output was handed over, so the output is done being read - and the
-    // only output that was ever claimed is gone with it.
-    drop(first);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(
-        !producer_stopped(&execution),
-        "the producer was aborted although one of its outputs had never been claimed: the chunks \
-         queued for that output are what a later execute still comes for"
-    );
-
-    // And the read was not merely alive: claiming the output nobody had asked for gets all of it.
-    let second = unpack_evaluated_series(
-        plan.execute(claimed_later, Arc::clone(&context))
-            .unwrap_or_else(|error| panic!("the unclaimed output is claimable: {error}")),
-        None,
-    )
-    .expect("the unclaimed output declares an evaluated frame");
-    let second_chunks =
-        tokio::time::timeout(Duration::from_secs(10), second.try_collect::<Vec<_>>())
-            .await
-            .expect("claiming the output unblocks the read it was parked on")
-            .expect("the output executed last ends without a failure");
-    assert_eq!(
-        (0..chains)
-            .map(|index| (named(&other), Some(index), 1, true))
-            .collect::<Vec<_>>(),
-        summaries(&second_chunks),
-        "every chain the parked read had queued arrives once the output is claimed"
-    );
-    wait_until("the read that was parked finishes", || {
+        .expect("claiming output completes after EOF")
+        .expect("output ends without failure");
+    assert_output_contract(&first_chunks, &[(shared.clone(), vec![0])]);
+    wait_until("the read finishes after terminal EOF", || {
         producer_stopped(&execution)
     })
     .await;
+
+    // The sibling has ended, but the unclaimed owner's entire queue remains available to claim.
+    let second = output(&plan, claimed_later, &context);
+    let second_chunks =
+        tokio::time::timeout(Duration::from_secs(10), second.try_collect::<Vec<_>>())
+            .await
+            .expect("the retained unclaimed owner completes")
+            .expect("the retained owner succeeds");
+    assert_output_contract(&second_chunks, &[(other.clone(), (0..chains).collect())]);
 }
 
 /// A task context whose memory pool never refuses a reservation.
@@ -1763,36 +1757,185 @@ async fn composing_two_nodes_does_not_deadlock_when_the_inner_output_is_empty() 
     );
 }
 
-/// Two independent closed chains with the same canonical key share an owner but are not merged.
 #[tokio::test]
-async fn same_canonical_key_chains_route_together_without_merging() {
+async fn owner_merges_across_inputs_and_sorts_late_positions_until_eof() {
+    let metric = labels("owner-order");
+    let switch = Arc::new(Switch::default());
+    let child = Gated::plan(
+        vec![
+            GatedPartition::open(vec![Step::chunk(chunk(metric.clone(), 10, 1, true))]),
+            GatedPartition::held(vec![Step::chunk(chunk(metric.clone(), 0, 1, true))]),
+        ],
+        Arc::clone(&switch),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    let context = SessionContext::default().task_ctx();
+    let mut stream = output(&plan, 0, &context);
+    assert!(
+        futures::future::poll_fn(|cx| match stream.as_mut().poll_next(cx) {
+            Poll::Pending => Poll::Ready(true),
+            Poll::Ready(_) => Poll::Ready(false),
+        })
+        .await,
+        "later position cannot publish while another input is gated before EOF"
+    );
+    switch.open();
+    let chunks = tokio::time::timeout(Duration::from_secs(10), stream.try_collect::<Vec<_>>())
+        .await
+        .expect("gated input completes")
+        .expect("owner succeeds");
+    assert_output_contract(&chunks, &[(metric.clone(), vec![0, 10])]);
+    assert_eq!(1, chunks.iter().filter(|(_, closed)| *closed).count());
+}
+
+#[tokio::test]
+async fn multiple_producers_and_owners_merge_exact_full_label_identities() {
+    let routing = Routing::new(2);
+    let on_zero = labels_routed_to(0, 1).remove(0);
+    let on_one = labels_routed_to(1, 1).remove(0);
+    // These identities must not collapse merely because rendering omits empty values or a name.
+    let empty_value = SeriesLabels::try_new(
+        Some(Arc::from("cpu")),
+        vec![Label {
+            name: Arc::from("zone"),
+            value: Arc::from(""),
+        }],
+    )
+    .unwrap();
+    let no_empty_value = SeriesLabels::try_new(Some(Arc::from("cpu")), Vec::new()).unwrap();
+    let absent_name = SeriesLabels::try_new(None, Vec::new()).unwrap();
+    let present_name = SeriesLabels::try_new(Some(Arc::from("")), Vec::new()).unwrap();
+    assert_ne!(
+        empty_value, no_empty_value,
+        "empty label presence is identity"
+    );
+    assert_ne!(absent_name, present_name, "name presence is identity");
+    let identities = [
+        on_zero,
+        on_one,
+        empty_value,
+        no_empty_value,
+        absent_name,
+        present_name,
+    ];
+    let mut partitions = vec![Vec::new(), Vec::new(), Vec::new()];
+    for metric in identities.iter() {
+        for (partition, position) in [0, 10, 20].into_iter().enumerate() {
+            partitions[partition].push(Step::chunk(chunk(metric.clone(), position, 1, true)));
+        }
+    }
+    let plan: Arc<dyn ExecutionPlan> = node(Scripted::plan(partitions), 2);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    for (owner, output) in outputs.iter().enumerate() {
+        let chunks = output.as_ref().expect("each owner succeeds");
+        let expected = identities
+            .iter()
+            .filter(|metric| routing.output(metric) == owner)
+            .map(|metric| (metric.clone(), vec![0, 10, 20]))
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty(), "each output receives a real identity");
+        assert_output_contract(chunks, &expected);
+        assert_eq!(
+            expected.len(),
+            chunks.iter().filter(|(_, closed)| *closed).count()
+        );
+    }
+}
+
+#[tokio::test]
+async fn owner_merges_complementary_fields_at_same_identity_and_position() {
+    let metric = labels("complementary-fields");
+    let schema = Arc::new(SeriesSchema {
+        fields: Arc::from([
+            FieldSpec {
+                name: Arc::from("left"),
+            },
+            FieldSpec {
+                name: Arc::from("right"),
+            },
+        ]),
+        eval_grid: Some(grid()),
+    });
+    let make = |left, right| {
+        let time =
+            TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+                .unwrap();
+        let fields = SeriesFields::try_from_vec(vec![
+            Samples::from_float(Float64Array::from(vec![left])),
+            Samples::from_float(Float64Array::from(vec![right])),
+        ])
+        .unwrap();
+        Step::Chunk(
+            Series::try_new(&schema, metric.clone(), time, fields).unwrap(),
+            true,
+        )
+    };
+    let child = Scripted::plan_with_schema(
+        vec![vec![make(Some(10.0), None)], vec![make(None, Some(20.0))]],
+        Arc::clone(&schema),
+    );
+    let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    let chunks = outputs[0]
+        .as_ref()
+        .expect("complementary null fields merge");
+    assert_output_contract(chunks, &[(metric.clone(), vec![0])]);
+    assert_eq!(1, chunks.len(), "one final owner series is emitted");
+    let series = &chunks[0].0;
+    assert_eq!(2, series.fields.len());
+    for (index, expected) in [10.0, 20.0].into_iter().enumerate() {
+        let Some(datatypes::series::samples::DenseSamplesRef::Float(values)) =
+            series.fields.get(index).unwrap().segments()[0].dense()
+        else {
+            panic!("merged field is dense float samples");
+        };
+        assert_eq!(expected, values.values()[0]);
+    }
+}
+
+#[tokio::test]
+async fn owner_rejects_conflicting_values_at_same_identity_and_position() {
+    let metric = labels("owner-conflict");
+    let first = chunk(metric.clone(), 0, 1, true).0;
+    let schema = schema();
+    let time =
+        TimeAxis::from_grid_spans(schema.eval_grid.clone().unwrap(), vec![GridSpan::new(0, 1)])
+            .unwrap();
+    let conflicting = Series::try_new(
+        &schema,
+        metric.clone(),
+        time,
+        SeriesFields::one(Samples::from_float(Float64Array::from(vec![99.0]))),
+    )
+    .unwrap();
+    let child = Scripted::plan(vec![
+        vec![Step::Chunk(first, true)],
+        vec![Step::Chunk(conflicting, true)],
+    ]);
+    let plan: Arc<dyn ExecutionPlan> = node(child, 1);
+    let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
+    assert!(
+        outputs[0].is_err(),
+        "conflicting populated cell is an error"
+    );
+}
+
+/// Same-identity input chunks are collected and emitted as one closed series.
+#[tokio::test]
+async fn same_canonical_key_chains_merge_into_one_series() {
     let metric = labels("same");
     let child = Scripted::plan(vec![
-        vec![
-            Step::chunk(chunk(metric.clone(), 0, 2, false)),
-            Step::chunk(chunk(metric.clone(), 2, 2, true)),
-        ],
+        vec![Step::chunk(chunk(metric.clone(), 0, 2, true))],
         vec![Step::chunk(chunk(metric.clone(), 8, 2, true))],
     ]);
     let plan: Arc<dyn ExecutionPlan> = node(child, 2);
     let outputs = drain(&plan, &SessionContext::default().task_ctx()).await;
     let owner = Routing::new(2).output(&metric);
     let chunks = outputs[owner].as_ref().expect("the owner output decodes");
-    assert_eq!(
-        unordered(&[
-            (named(&metric), Some(0), 2, false),
-            (named(&metric), Some(2), 2, true),
-            (named(&metric), Some(8), 2, true),
-        ]),
-        unordered(&summaries(chunks)),
-        "the two closed chains share an owner and retain separate closing chunks"
-    );
-    assert!(
-        outputs[1 - owner]
-            .as_ref()
-            .expect("the other output decodes")
-            .is_empty()
-    );
+    assert_output_contract(chunks, &[(metric.clone(), vec![0, 1, 8, 9])]);
+    assert_eq!(1, chunks.iter().filter(|(_, closed)| *closed).count());
+    assert!(outputs[1 - owner].as_ref().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1934,52 +2077,24 @@ async fn two_sources_keep_their_chains_whole_on_one_output() {
     let mut routed = output(&plan, 0, &context);
     let other = output(&plan, 1, &context);
 
-    // The chain of the source that closed arrives while the other source is still open - and in one
-    // piece, since a partial chain is never put on an output in the first place.
-    let mut chunks = Vec::new();
-    while chunks.len() < 2 {
-        let chunk = tokio::time::timeout(Duration::from_secs(10), routed.next())
+    // The owner publishes nothing while any input remains open; opening the gate permits global EOF.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), routed.next())
             .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "the closed chain of one source did not arrive while the other source's chain \
-                     was still open: {} chunks arrived",
-                    chunks.len()
-                )
-            })
-            .expect("the output is not over while a source is still reading")
-            .expect("the chunk decodes");
-        chunks.push(chunk);
-    }
-    assert_chains_are_whole(&chunks);
-    assert_eq!(
-        vec![
-            (named(&closed), Some(0), 2, false),
-            (named(&closed), Some(2), 2, true),
-        ],
-        summaries(&chunks),
-        "the source whose chain closed is on the output whole, before the open chain's first chunk"
+            .is_err()
     );
-
-    // Opening the gate closes the held chain: it follows on the same output, and everything the
-    // output carried over the test is a run of whole chains.
     switch.open();
-    chunks.extend(
-        tokio::time::timeout(Duration::from_secs(10), routed.try_collect::<Vec<_>>())
-            .await
-            .expect("the held chain arrives once the gate opens")
-            .expect("the output decodes"),
-    );
+    let chunks = tokio::time::timeout(Duration::from_secs(10), routed.try_collect::<Vec<_>>())
+        .await
+        .expect("owner emits once every producer reaches EOF")
+        .expect("owner succeeds");
     assert_chains_are_whole(&chunks);
-    assert_eq!(
-        vec![
-            (named(&closed), Some(0), 2, false),
-            (named(&closed), Some(2), 2, true),
-            (named(&held), Some(0), 2, false),
-            (named(&held), Some(2), 2, true),
+    assert_output_contract(
+        &chunks,
+        &[
+            (closed.clone(), vec![0, 1, 2, 3]),
+            (held.clone(), vec![0, 1, 2, 3]),
         ],
-        summaries(&chunks),
-        "both sources' chains are on one output, each of them in one piece"
     );
     let empty = tokio::time::timeout(Duration::from_secs(10), other.try_collect::<Vec<_>>())
         .await
@@ -2031,23 +2146,13 @@ async fn an_empty_closing_chunk_is_a_chunk_and_not_the_end() {
         assert_chains_are_whole(chunks);
     }
 
-    assert_eq!(
-        vec![
-            // The chunk with no rows of its own, then the chunk of the stream that is still going.
-            (named(&shared), None, 0, true),
-            (named(&shared), Some(4), 2, false),
-            (named(&shared), None, 0, true),
-        ],
-        summaries(&outputs[routing.output(&shared)]),
-        "an empty closing chunk is handed over, and the chunk after it is not swallowed"
+    assert_output_contract(
+        &outputs[routing.output(&shared)],
+        &[(shared.clone(), vec![4, 5])],
     );
-    assert_eq!(
-        vec![
-            (named(&other), None, 0, true),
-            (named(&other), Some(0), 1, true),
-        ],
-        summaries(&outputs[routing.output(&other)]),
-        "the same holds for a source whose whole first chain is one empty closing chunk"
+    assert_output_contract(
+        &outputs[routing.output(&other)],
+        &[(other.clone(), vec![0])],
     );
 }
 
@@ -2092,43 +2197,27 @@ async fn an_open_chain_on_one_output_does_not_hold_the_other_output_back() {
     );
     let plan: Arc<dyn ExecutionPlan> = node(child, 2);
     let context = SessionContext::default().task_ctx();
-    let mut held_stream = output(&plan, held_output, &context);
+    let held_stream = output(&plan, held_output, &context);
     let mut free_stream = output(&plan, free_output, &context);
 
     // The other owner's output delivers while the gated chain is still open, and what it delivers is
     // its whole chain.
-    let mut delivered = Vec::new();
-    while delivered.len() < 2 {
-        let chunk = tokio::time::timeout(Duration::from_secs(10), free_stream.next())
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "the other owner's output delivered {} of its 2 chunks while one chain was open",
-                    delivered.len()
-                )
-            })
-            .expect("the other output is not over")
-            .expect("the chunk decodes");
-        delivered.push(chunk);
-    }
-    assert_chains_are_whole(&delivered);
-    assert_eq!(
-        vec![
-            (named(&free), Some(0), 2, false),
-            (named(&free), Some(2), 2, true),
-        ],
-        summaries(&delivered),
-        "the free chain is delivered in full while the other owner's chain is still open"
-    );
-
-    // The open chain is still waiting for its own source, so nothing of it has been delivered: a
-    // partial chain does not sit on an output waiting to be completed.
     assert!(
-        tokio::time::timeout(Duration::from_millis(200), held_stream.next())
+        tokio::time::timeout(Duration::from_millis(200), free_stream.next())
             .await
             .is_err(),
-        "the held chain was delivered while its source was still open"
+        "owner waits for global EOF before emission"
     );
+    switch.open();
+    let delivered = tokio::time::timeout(
+        Duration::from_secs(10),
+        (&mut free_stream).try_collect::<Vec<_>>(),
+    )
+    .await
+    .expect("independent owner's result arrives after gate opens")
+    .expect("free owner succeeds");
+    assert_chains_are_whole(&delivered);
+    assert_output_contract(&delivered, &[(free.clone(), vec![0, 1, 2, 3])]);
 
     switch.open();
     let held_chunks =
@@ -2623,7 +2712,7 @@ async fn every_output_until_end(
 async fn coalesce_local_limit_reads_repartitioned_outputs_without_sibling_error() {
     let first = labels_routed_to(0, 1).remove(0);
     let second = labels_routed_to(1, 1).remove(0);
-    let steps = labels_routed_to(0, 3 * OUTPUT_CAPACITY)
+    let steps = labels_routed_to(0, 3 * TEST_FIXTURE_VOLUME)
         .into_iter()
         .map(|metric| Step::chunk(chunk(metric, 0, 1, true)))
         .chain(std::iter::once(Step::chunk(chunk(
@@ -2691,7 +2780,7 @@ fn ensure_cooperative_preserves_direct_repartition_child() {
 #[tokio::test]
 async fn failure_after_filling_another_output_does_not_hang_early_output_drain() {
     const MESSAGE: &str = "failure after output 0 filled";
-    let mut steps = labels_routed_to(0, OUTPUT_CAPACITY - 1)
+    let mut steps = labels_routed_to(0, TEST_FIXTURE_VOLUME - 1)
         .into_iter()
         .map(|metric| Step::chunk(chunk(metric, 0, 1, true)))
         .collect::<Vec<_>>();
@@ -2721,7 +2810,7 @@ async fn failure_after_filling_another_output_does_not_hang_early_output_drain()
 
 /// two partitions that fail at the same moment leave every output exactly one error.
 ///
-/// Between them the two partitions hand over [`OUTPUT_CAPACITY`] chains per output before they fail,
+/// Between them the two partitions hand over [`TEST_FIXTURE_VOLUME`] chains per output before they fail,
 /// so both queues are exactly full and then two failures land on a read whose outputs are not being
 /// drained. A failing task cancels its peers while another input may be suspended on a full output;
 /// every output must still learn the elected failure from the shared ending record when senders close.
@@ -2736,12 +2825,12 @@ async fn two_failures_hand_every_output_one_error() {
     const SECOND: &str = "the second partition failed";
     assert_eq!(
         0,
-        OUTPUT_CAPACITY % 2,
+        TEST_FIXTURE_VOLUME % 2,
         "the chains of one queue are split evenly between the two partitions"
     );
-    let half = OUTPUT_CAPACITY / 2;
-    let to_first = labels_routed_to(0, OUTPUT_CAPACITY);
-    let to_second = labels_routed_to(1, OUTPUT_CAPACITY);
+    let half = TEST_FIXTURE_VOLUME / 2;
+    let to_first = labels_routed_to(0, TEST_FIXTURE_VOLUME);
+    let to_second = labels_routed_to(1, TEST_FIXTURE_VOLUME);
 
     /// The steps of one partition: its half of every output's queue, a place at the barrier, and then
     /// its failure.
@@ -2770,7 +2859,7 @@ async fn two_failures_hand_every_output_one_error() {
     ]);
     let plan = node(child, 2);
     let context = SessionContext::default().task_ctx();
-    // Claimed before anything is read, so the queues that fill are the ones a reader is waiting on.
+    // Claim both owners before reading so either partition can observe its terminal failure.
     let mut streams = Vec::new();
     for partition in 0..plan.outputs() {
         streams.push(
@@ -2971,8 +3060,8 @@ async fn a_finished_read_ends_cleanly_and_owes_no_error() {
 #[tokio::test]
 async fn a_recorded_failure_reaches_every_output_once() {
     const MESSAGE: &str = "the partition failed";
-    let to_zero = labels_routed_to(0, OUTPUT_CAPACITY);
-    let to_one = labels_routed_to(1, OUTPUT_CAPACITY);
+    let to_zero = labels_routed_to(0, TEST_FIXTURE_VOLUME);
+    let to_one = labels_routed_to(1, TEST_FIXTURE_VOLUME);
     let mut steps = to_zero
         .into_iter()
         .zip(to_one)
@@ -2996,12 +3085,12 @@ async fn a_recorded_failure_reaches_every_output_once() {
     let mut streams = Vec::new();
     for partition in 0..2 {
         let (receiver, lease) = SharedExecution::claim(&shared, partition).expect("output claim");
-        streams.push(Box::pin(RepartitionStream {
+        streams.push(Box::pin(RepartitionStream::new(
             receiver,
-            chain: Vec::new().into_iter(),
             lease,
-            reported: false,
-        }) as SendableEvaluatedSeriesStream);
+            Arc::clone(&schema()),
+            &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+        )) as SendableEvaluatedSeriesStream);
     }
     let execution = shared;
 
@@ -3021,22 +3110,11 @@ async fn a_recorded_failure_reaches_every_output_once() {
     )
     .await
     .expect("a failed read still ends every output");
-    let expected = [
-        labels_routed_to(0, OUTPUT_CAPACITY),
-        labels_routed_to(1, OUTPUT_CAPACITY),
-    ];
-    for (partition, ((chunks, errors), expected_labels)) in
-        outputs.iter().zip(expected.iter()).enumerate()
-    {
-        assert_eq!(
-            expected_labels.iter().map(named).collect::<Vec<_>>(),
-            chunks
-                .iter()
-                .map(|(series, _)| named(&series.metric))
-                .collect::<Vec<_>>(),
-            "output partition {partition} drains every queued prefix chain"
+    for (partition, (chunks, errors)) in outputs.iter().enumerate() {
+        assert!(
+            chunks.is_empty(),
+            "no incomplete owner series escapes on failure"
         );
-        assert!(chunks.iter().all(|(_, is_last)| *is_last));
         assert_eq!(
             1,
             errors.len(),
@@ -3313,7 +3391,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
     let mut senders = Vec::new();
     let mut receivers = Vec::new();
     for _ in 0..2 {
-        let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+        let (sender, receiver) = mpsc::unbounded_channel();
         senders.push(sender);
         receivers.push(Some(receiver));
     }
@@ -3332,12 +3410,12 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
             let (receiver, lease) =
                 SharedExecution::claim(&shared, partition).expect("output claim");
             let frames = pack_evaluated_series(
-                Box::pin(RepartitionStream {
+                Box::pin(RepartitionStream::new(
                     receiver,
-                    chain: Vec::new().into_iter(),
                     lease,
-                    reported: false,
-                }),
+                    Arc::clone(&schema()),
+                    &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+                )),
                 Arc::clone(&series_schema),
             )
             .expect("output frame builds");
@@ -3412,6 +3490,7 @@ async fn dropping_unpolled_route_future_ends_outputs_and_cancels_peer() {
 
 #[tokio::test]
 async fn unpolled_route_drop_preserves_an_already_elected_failure() {
+    let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     const FIRST: &str = "the child failure was elected first";
     let ending = Arc::new(Mutex::new(Ending::default()));
     let inputs = Inputs::new(Arc::clone(&ending), 2);
@@ -3420,7 +3499,7 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
     let shared = {
         let mut receivers = Vec::new();
         for _ in 0..2 {
-            let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+            let (sender, receiver) = mpsc::unbounded_channel();
             senders.push(sender);
             receivers.push(Some(receiver));
         }
@@ -3437,12 +3516,12 @@ async fn unpolled_route_drop_preserves_an_already_elected_failure() {
     for partition in 0..2 {
         let (receiver, lease) = SharedExecution::claim(&shared, partition).expect("output claim");
         let frames = pack_evaluated_series(
-            Box::pin(RepartitionStream {
+            Box::pin(RepartitionStream::new(
                 receiver,
-                chain: Vec::new().into_iter(),
                 lease,
-                reported: false,
-            }),
+                Arc::clone(&schema()),
+                &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+            )),
             Arc::clone(&schema()),
         )
         .expect("output frame builds");
@@ -3514,7 +3593,7 @@ async fn ready_chain_yields_after_a_charged_prefix_and_drop_releases_it() {
     let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
     let reservation = MemoryConsumer::new("cooperative-prefix-test")
         .register(&(Arc::clone(&pool) as Arc<dyn MemoryPool>));
-    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    let (sender, receiver) = mpsc::unbounded_channel();
     let routing = Routing::new(1);
     let senders = [sender];
     let mut read = Box::pin(read_chains(&mut source, &routing, &senders, &reservation));
@@ -3576,7 +3655,7 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
     let pool = Arc::new(GreedyMemoryPool::new(usize::MAX));
     let ending = Arc::new(Mutex::new(Ending::default()));
     let inputs = Inputs::new(Arc::clone(&ending), 2);
-    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    let (sender, receiver) = mpsc::unbounded_channel();
     let shared = Arc::new(SharedExecution {
         running: Mutex::new(Running {
             receivers: vec![Some(receiver)],
@@ -3587,12 +3666,12 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
         ending: Arc::clone(&ending),
     });
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
-    let mut output: SendableEvaluatedSeriesStream = Box::pin(RepartitionStream {
+    let mut output: SendableEvaluatedSeriesStream = Box::pin(RepartitionStream::new(
         receiver,
-        chain: Vec::new().into_iter(),
         lease,
-        reported: false,
-    });
+        Arc::clone(&schema()),
+        &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+    ));
     let future = route_partition(
         source,
         0,
@@ -3651,9 +3730,8 @@ async fn sibling_failure_aborts_budget_yielded_route_and_releases_prefix() {
 ///
 /// Two inputs and one output. Partition 0's child panics inside its `poll_next`, which unwinds the
 /// task reading it: no arm of [`route_partition`]'s ending match runs, so nothing is recorded and
-/// nothing stops the peer. Partition 1's child never answers, so its task stays parked on it holding
-/// a copy of the senders - the queue never closes, and the output waits for an ending that cannot
-/// come. That is the hang, and the timeout below is what turns it into a failure instead of a stall.
+/// nothing stops the peer. Partition 1's child never answers, keeping its sender alive and preventing
+/// the output from observing an ending. The timeout makes the missing terminal error visible.
 ///
 /// The panic happens on a task of the read, never on this test's, so the unwind is the runtime's to
 /// catch and what the test sees is its effect: the output ends with the read's error instead of
@@ -3680,7 +3758,7 @@ async fn a_panicking_input_ends_every_output_and_stops_its_peers() {
         .unwrap_or_else(|_| {
             panic!(
                 "the output never ended although one of its two inputs had died: the death recorded \
-                 nothing, so the parked peer kept the queue open"
+                 nothing, so the parked peer kept its sender alive"
             )
         });
     assert!(
@@ -3793,7 +3871,14 @@ async fn dropped_output_discards_oversized_chain_and_keeps_live_output() {
         .collect::<Vec<_>>();
     let many_chunk_count = many_chunks.len();
     let live_chunk = chunk(survivor.clone(), 0, 1, true);
-    let byte_budget = operand_chunk_bytes(&live_chunk.0) * 2;
+    // Independent workspace allowance for the two live base chunks and queued-chain metadata.
+    // Keep this finite and far below retaining every old whole-chain slice.
+    let live_chunk_budget = operand_chunk_bytes(&live_chunk.0) * 2;
+    let byte_budget = live_chunk_budget + 16 * 1024;
+    assert!(
+        operand_chunk_bytes(&chunk(doomed.clone(), 0, 1, false).0) * many_chunk_count > byte_budget,
+        "discarding the oversized chain must be necessary under this finite budget"
+    );
     let pool = Arc::new(GreedyMemoryPool::new(byte_budget));
     let context = task_context(&pool);
     let switch = Arc::new(Switch::default());
@@ -3899,7 +3984,7 @@ async fn discarded_open_chain_is_validated_before_live_chain_routes() {
 
 #[tokio::test]
 async fn discarded_open_chain_eof_is_still_an_error() {
-    let (sender, receiver) = mpsc::channel(OUTPUT_CAPACITY);
+    let (sender, receiver) = mpsc::unbounded_channel();
     drop(receiver);
     let series = chunk(labels("unclosed"), 0, 1, false).0;
     let mut input: SendableEvaluatedSeriesStream =
@@ -4052,7 +4137,8 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
         series_bytes(first) > expected_bytes,
         "a sliced chunk charges its row payload rather than its backing Arrow allocation"
     );
-    let pool = Arc::new(GreedyMemoryPool::new(expected_bytes * 2));
+    let success_budget = expected_bytes * 2 + 8 * 1024;
+    let pool = Arc::new(GreedyMemoryPool::new(success_budget));
     let context = task_context(&pool);
     let plan = node(
         Scripted::plan(vec![
@@ -4080,7 +4166,7 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     );
 
     let slices = sliced_chunks(labels("sliced-drop"));
-    let pool = Arc::new(GreedyMemoryPool::new(expected_bytes * 3));
+    let pool = Arc::new(GreedyMemoryPool::new(expected_bytes * 3 + 8 * 1024));
     let context = task_context(&pool);
     let plan = node(
         Scripted::plan(vec![
@@ -4111,9 +4197,15 @@ async fn sliced_chunk_memory_is_charged_by_rows_and_released_after_success_drop_
     );
 
     let slices = sliced_chunks(labels("sliced"));
+    // This deliberately undersized pool refuses the first slice once its independently-accounted
+    // routing workspace is included; the test covers terminal error and reservation release.
     let budget = expected_bytes * 2 - 1;
     assert!(expected_bytes <= budget);
     assert!(2 * expected_bytes > budget);
+    assert!(
+        series_bytes(&slices[0].0) + series_bytes(&slices[1].0) > 2 * expected_bytes,
+        "full backing arrays cost more than the row-based charges"
+    );
     let pool = Arc::new(GreedyMemoryPool::new(budget));
     let context = task_context(&pool);
     let plan = node(
@@ -4162,28 +4254,40 @@ async fn internal_stream_releases_each_chunk_charge_only_when_polled() {
     let shared =
         SharedExecution::start(&child, Routing::new(1), Arc::clone(&schema()), &context).unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
-    let mut stream = RepartitionStream {
+    let mut stream = RepartitionStream::new(
         receiver,
-        chain: Vec::new().into_iter(),
         lease,
-        reported: false,
-    };
+        Arc::clone(&schema()),
+        &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+    );
     wait_until("internal producer finishes", || producer_stopped(&shared)).await;
     assert_eq!(
         expected,
         pool.reserved(),
         "both decoded chunk charges are retained"
     );
-    let first = futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
+    let merged = futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
         .await
         .unwrap()
         .unwrap();
+    assert!(merged.1, "the logical owner closes once after global EOF");
     assert_eq!(
-        costs[1],
-        pool.reserved(),
-        "polling one chunk releases only its charge"
+        4,
+        merged.0.time.len(),
+        "both slices retain their two positions in the merged logical owner"
     );
-    drop(first);
+    assert_eq!(
+        0,
+        pool.reserved(),
+        "polling the merged owner hands off every retained chunk charge"
+    );
+    assert!(
+        futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
+            .await
+            .is_none(),
+        "the logical owner has one stable end"
+    );
+    drop(merged);
     drop(stream);
     assert_eq!(
         0,
@@ -4295,7 +4399,9 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         "measured slice charge {slice_bytes} is outside the independent bounds {independent_slice_lower_bound}..={independent_slice_upper_bound}"
     );
     let old_charge = full_table_bytes * 256;
-    let budget = base_bytes + independent_slice_upper_bound;
+    // Include independent bounded per-row/per-fragment bookkeeping workspace; the budget remains
+    // below charging the full shared backing table once for every physical slice.
+    let budget = base_bytes + independent_slice_upper_bound + 512 * 1024;
     assert!(
         budget < base_bytes + old_charge,
         "slice budget {budget} is below duplicated full-table charge {}",
@@ -4310,12 +4416,12 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
     let shared =
         SharedExecution::start(&child, Routing::new(1), Arc::clone(&schema()), &context).unwrap();
     let (receiver, lease) = SharedExecution::claim(&shared, 0).expect("claim output");
-    let mut output = RepartitionStream {
+    let mut output = RepartitionStream::new(
         receiver,
-        chain: Vec::new().into_iter(),
         lease,
-        reported: false,
-    };
+        Arc::clone(&schema()),
+        &(Arc::clone(&pool) as Arc<dyn MemoryPool>),
+    );
     wait_until("histogram producer queues the whole chain", || {
         producer_stopped(&shared)
     })
@@ -4326,7 +4432,7 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
         pool.reserved(),
         base_bytes + independent_slice_lower_bound
     );
-    let mut chunks = 0;
+    let mut chunks = Vec::new();
     while let Some(item) = tokio::time::timeout(
         Duration::from_secs(20),
         futures::future::poll_fn(|cx| Pin::new(&mut output).poll_next(cx)),
@@ -4334,10 +4440,19 @@ async fn histogram_chain_slices_fit_a_budget_below_the_full_table_charge() {
     .await
     .unwrap()
     {
-        item.unwrap();
-        chunks += 1;
+        chunks.push(item.unwrap());
     }
-    assert_eq!(256, chunks);
+    assert_eq!(
+        1,
+        chunks.len(),
+        "one owner series spans all physical slices"
+    );
+    assert!(chunks[0].1, "the complete owner closes once");
+    assert_eq!(
+        256,
+        chunks[0].0.time.len(),
+        "all histogram rows survive merge"
+    );
     assert!(matches!(shared.ending(), Ending::Finished));
     assert_eq!(
         0,

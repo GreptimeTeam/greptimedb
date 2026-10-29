@@ -243,7 +243,7 @@ fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usi
 ///
 /// Existing values and histogram tables remain shared with the fragments, whose estimates already
 /// account for their payloads.
-fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize {
+pub(crate) fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize {
     let sorted_rows = rows.saturating_mul(
         std::mem::size_of::<(usize, usize, usize)>() + std::mem::size_of::<usize>(),
     );
