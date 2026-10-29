@@ -37,7 +37,7 @@
 //! 26 ClampMin(min), 27 ClampMax(max), 28-35 Date(DayOfMonth, DayOfWeek, DayOfYear,
 //! DaysInMonth, Hour, Minute, Month, Year), in that order.
 
-//! Maximum payload is 1 MiB, maximum recursive node depth is 128, maximum field count of one raw
+//! Maximum payload is 1 MiB, maximum recursive node depth is 32, maximum field count of one raw
 //! samples schema is 128, and maximum operation count of one Map is 128. The encoder refuses every
 //! payload that exceeds one of these, so a payload it produces is always decodable by this version.
 
@@ -62,7 +62,8 @@ use std::{convert::TryInto, sync::Arc};
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 const MAX_BYTES: usize = 1_048_576;
 /// Maximum recursive nesting depth of a node tree, counted from the root as depth 0.
-const MAX_DEPTH: usize = 128;
+/// Kept low to leave ample stack headroom in debug builds on default-sized test threads.
+const MAX_DEPTH: usize = 32;
 /// Maximum number of fields in one raw samples schema (an [`NativeExpr::Input`]'s output).
 const MAX_FIELD_COUNT: usize = 128;
 /// Maximum number of operations in one [`NativeExpr::Map`].
@@ -375,12 +376,21 @@ fn enc_range(f: RangeFunction, w: &mut W) -> Result<(), String> {
 }
 fn node_name(e: &NativeExpr) -> &'static str {
     match e {
-        NativeExpr::Binary { .. } => "Binary",
+        NativeExpr::Input(_) => "Input",
+        NativeExpr::Scalar(_) => "Scalar",
+        NativeExpr::Instant { .. } => "Instant",
+        NativeExpr::Window { .. } => "Window",
+        NativeExpr::Merge { .. } => "Merge",
+        NativeExpr::Map { .. } => "Map",
+        NativeExpr::Timestamp { .. } => "Timestamp",
         NativeExpr::Aggregate { .. } => "Aggregate",
         NativeExpr::Vector { .. } => "Vector",
-        NativeExpr::Scalar(_) => "Scalar",
-        NativeExpr::Timestamp { .. } => "Timestamp",
-        _ => "unsupported",
+        NativeExpr::Binary { .. } => "Binary",
+        NativeExpr::EvalTime { .. } => "EvalTime",
+        NativeExpr::VectorOf { .. } => "VectorOf",
+        NativeExpr::ParameterizedMap { .. } => "ParameterizedMap",
+        NativeExpr::Set { .. } => "Set",
+        NativeExpr::Info { .. } => "Info",
     }
 }
 /// Decode and validate a supported prefix tree.
@@ -959,7 +969,7 @@ mod tests {
     }
     #[test]
     fn map_chain_depth_boundary_is_enforced_on_encode_and_decode() {
-        // 127 maps plus the selection and input fit the protocol's depth boundary.
+        // Maps up to the configured node-depth boundary fit alongside the selection and input.
         let allowed = encode_prefix(&make_map_chain(MAX_DEPTH - 1)).unwrap();
         let decoded = decode_prefix(&allowed).unwrap();
         assert_eq!(encode_prefix(&decoded).unwrap(), allowed);
@@ -1311,9 +1321,22 @@ mod tests {
         assert!(!err.contains("field count"), "{err}");
     }
 
-    /// The decoder walks depth 128, then refuses depth 129 at its recursion limit.
     #[test]
-    fn nesting_boundary_is_128() {
+    fn unsupported_operation_names_node_kind() {
+        let error = encode_prefix(
+            &NativeTree::try_new(NativeNode {
+                expr: NativeExpr::Scalar(crate::native::plan::BoundScalar { value: 1.0 }),
+                output: NativeType::Scalar(grid()),
+            })
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error, "unsupported operation: Scalar");
+    }
+
+    /// The decoder walks to the configured depth, then refuses one level beyond it.
+    #[test]
+    fn nesting_boundary_is_enforced() {
         let allowed = decode_prefix(&nested_instants(MAX_DEPTH)).unwrap_err();
         assert!(!allowed.contains("nesting"), "{allowed}");
         let refused = decode_prefix(&nested_instants(MAX_DEPTH + 1)).unwrap_err();

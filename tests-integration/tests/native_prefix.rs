@@ -30,6 +30,7 @@ use promql::native::plan::{
     BoundInput, BoundWindow, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use promql::range_eval::{RangeFunction, RangeWindow};
+use query::options::QueryOptions;
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContext;
@@ -52,6 +53,172 @@ fn evaluated_frame_schema(tree: &NativeTree) -> datafusion::common::DFSchemaRef 
         datafusion::common::DFSchema::try_from(stream.schema())
             .expect("the frame schema converts to a logical schema"),
     )
+}
+
+// Reproduction from the review: 16 hosts × 20k samples, `rate[10s]`, and 16 DN
+// partitions produces four batches per chain and fails while unpacking because
+// `CoalescePartitionsExec` interleaves their batches, so a chain is cut and the frames no
+// longer decode. This test asserts that failure, which is why it runs rather than being
+// ignored: it keeps the boundary honest until the frontend region merge becomes
+// chain-atomic, and it is the test to change when that fix lands. The parallelism-one
+// path is exercised by `native_prefix_executes_over_real_mito_region`.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_prefix_multi_partition_series_chains() {
+    let instance = GreptimeDbStandaloneBuilder::new("native_prefix_partitioned_chains")
+        .with_query_options(QueryOptions {
+            parallelism: 16,
+            ..Default::default()
+        })
+        .with_auto_create_table(false)
+        .build()
+        .await;
+    let fe = instance.fe_instance();
+    execute_sql(fe, "CREATE TABLE native_prefix_partitioned (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING, PRIMARY KEY(host))").await;
+    let mut values = String::new();
+    for host in 0..16 {
+        for sample in 0..20_000 {
+            let timestamp = sample as u64 * 1_000;
+            let value = sample as f64;
+            values.push_str(&format!("('host{host}', {value}, {timestamp}),"));
+        }
+    }
+    values.pop();
+    execute_sql(
+        fe,
+        &format!("INSERT INTO native_prefix_partitioned(host, val, ts) VALUES {values}"),
+    )
+    .await;
+    execute_sql(fe, "ADMIN FLUSH_TABLE('native_prefix_partitioned')").await;
+
+    let ctx = QueryContext::arc();
+    let statement =
+        QueryLanguageParser::parse_sql("SELECT * FROM native_prefix_partitioned", &ctx).unwrap();
+    let planned = fe
+        .query_engine()
+        .planner()
+        .plan(&statement, ctx.clone())
+        .await
+        .unwrap();
+    let LogicalPlan::Projection(projection) = planned else {
+        panic!("expected projection");
+    };
+    let LogicalPlan::TableScan(scan) = projection.input.as_ref() else {
+        panic!("expected table scan");
+    };
+    let scan = scan.clone();
+    let child = LogicalPlan::TableScan(datafusion::logical_expr::logical_plan::TableScan {
+        projection: Some((0..scan.projected_schema.fields().len()).collect()),
+        ..scan
+    });
+    let grid = Arc::new(EvalGrid::try_new(GridSpec::try_new(20_000, 1_000, 1).unwrap()).unwrap());
+    let raw = Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from("val"),
+        }]),
+        eval_grid: None,
+    });
+    let evaluated = Arc::new(SeriesSchema {
+        fields: Arc::clone(&raw.fields),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let raw_type = NativeType::Samples(raw);
+    let tree = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(NativeNode {
+                expr: NativeExpr::Input(BoundInput {
+                    source_index: 0,
+                    output: raw_type.clone(),
+                    ordering: SeriesOrdering::KeyThenTime,
+                }),
+                output: raw_type,
+            }),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: 10_000,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: grid.clone(),
+            },
+        },
+        output: NativeType::Samples(evaluated),
+    })
+    .unwrap();
+    let binding = FusedSeriesBinding {
+        grid,
+        metric_name: Some(Arc::from("native_prefix_partitioned")),
+        time_index: "ts".into(),
+        tags: vec!["host".into()],
+    };
+    let frame_schema = evaluated_frame_schema(&tree);
+    let fused = FusedSeries::try_new_with_format(
+        Arc::from("rate(native_prefix_partitioned[10s])"),
+        tree,
+        binding,
+        vec![child],
+        frame_schema,
+        FusedOutputFormat::SeriesFrame,
+    )
+    .unwrap();
+    let plan = LogicalPlan::Extension(Extension {
+        node: Arc::new(fused),
+    });
+    let bytes = DFLogicalSubstraitConvertor
+        .encode(&plan, DefaultSerializer)
+        .unwrap()
+        .to_vec();
+    let region = instance
+        .mito_engine
+        .regions()
+        .into_iter()
+        .find(|region| {
+            region
+                .metadata()
+                .column_metadatas
+                .iter()
+                .any(|column| column.column_schema.name == "host")
+        })
+        .unwrap();
+    let metadata = region.metadata();
+    let mut stream = instance
+        .datanode
+        .region_server()
+        .handle_remote_read(
+            QueryRequest {
+                header: Some(RegionRequestHeader {
+                    query_context: Some((&*ctx).into()),
+                    ..Default::default()
+                }),
+                region_id: metadata.region_id.as_u64(),
+                plan: bytes,
+            },
+            ctx,
+        )
+        .await
+        .unwrap();
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next().await {
+        batches.push(batch.unwrap());
+    }
+    let schema = batches.first().expect("evaluated frames").schema.clone();
+    let batches = RecordBatches::try_new(schema, batches).unwrap();
+    let error = common_query::series_frame::unpack_evaluated_series(
+        Box::pin(DfRecordBatchStreamAdapter::new(batches.as_stream())),
+        None,
+    )
+    .unwrap()
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("evaluated series identity changed before its chain closed"),
+        "{error}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -204,11 +371,6 @@ async fn native_prefix_executes_over_real_mito_region() {
         Some("a")
     );
     assert_eq!(series.time.timestamps().unwrap().as_ref(), &[3000, 4000]);
-    // At 3000 ms the (0, 3000] window has samples 0, 10, 20: increase 20 over
-    // 2 observed seconds. Prometheus extrapolates the 1s left-boundary gap and
-    // 0s right-boundary gap to the full 3s range: 20 * (3 / 2) / 3 = 10/s.
-    // At 4000 ms, (1000, 4000] has 10, 20, 30: increase 20 over 2 seconds,
-    // likewise extrapolated to 10/s.
     let values = series.fields.get(0).unwrap();
     // At 3000 ms the window holds 0, 10, 20: an increase of 20 over 2 observed
     // seconds. Prometheus would keep the 1 s leading gap (below the 1.1x average
