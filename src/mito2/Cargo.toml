@@ -28,6 +28,7 @@ bytemuck.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 common-base.workspace = true
+common-cache.workspace = true
 common-datasource.workspace = true
 common-error.workspace = true
 common-function.workspace = true

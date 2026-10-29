@@ -873,7 +873,9 @@ pub async fn delete_files(
     if let Some(cache) = &cache_manager {
         for (file_id, _) in file_ids {
             cache.invalidate_range_results(*file_id);
-            cache.remove_parquet_meta_data(RegionFileId::new(region_id, *file_id));
+            cache
+                .remove_parquet_meta_data(RegionFileId::new(region_id, *file_id))
+                .await;
         }
     }
     let mut attempted_files = Vec::with_capacity(file_ids.len());

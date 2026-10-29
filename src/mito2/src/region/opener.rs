@@ -1299,7 +1299,7 @@ async fn preload_parquet_meta_cache_for_files(
                 }
                 match metadata {
                     SstMetaPreparation::Prepared(metadata) => {
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
@@ -1342,7 +1342,7 @@ async fn preload_parquet_meta_cache_for_files(
                     Ok(SstMetaPreparation::Prepared(metadata)) => {
                         // Preload the compact canonical entry only. Query traffic promotes decoded
                         // entries into the separate acceleration tier according to actual demand.
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
@@ -1801,6 +1801,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1877,6 +1878,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1896,6 +1898,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
     }
@@ -1950,6 +1953,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 

@@ -636,7 +636,8 @@ mod tests {
         move |expr| {
             let _d = &d;
             let cache = Arc::new(InvertedIndexCache::new(10, 10, 100));
-            let puffin_metadata_cache = Arc::new(PuffinMetadataCache::new(10, &CACHE_BYTES));
+            let puffin_metadata_cache =
+                Arc::new(PuffinMetadataCache::new(10, CACHE_BYTES.gauges()));
             let applier = InvertedIndexApplierBuilder::new(
                 table_dir.clone(),
                 PathType::Bare,

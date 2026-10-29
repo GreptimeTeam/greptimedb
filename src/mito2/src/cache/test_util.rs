@@ -15,11 +15,13 @@
 //! Utilities for testing cache.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use datatypes::arrow::array::{ArrayRef, Int64Array};
 use datatypes::arrow::record_batch::RecordBatch;
 use object_store::ObjectStore;
+use object_store::layers::mock;
 use object_store::services::Fs;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -30,6 +32,33 @@ use store_api::metadata::RegionMetadataRef;
 
 use crate::sst::parquet::PARQUET_METADATA_KEY;
 use crate::test_util::sst_util::sst_region_metadata;
+
+/// Holds storage reads until every concurrent caller has been polled.
+pub(crate) struct GatedStorageReader {
+    pub(crate) inner: mock::oio::Reader,
+    pub(crate) gate: Arc<tokio::sync::Semaphore>,
+    pub(crate) reads: Arc<AtomicUsize>,
+}
+
+impl mock::oio::Read for GatedStorageReader {
+    async fn open(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, Box<dyn mock::oio::ReadStreamDyn>)> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.gate.acquire().await.unwrap().forget();
+        self.inner.open(range).await
+    }
+
+    async fn read(
+        &self,
+        range: mock::BytesRange,
+    ) -> object_store::Result<(mock::RpRead, object_store::Buffer)> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.gate.acquire().await.unwrap().forget();
+        self.inner.read(range).await
+    }
+}
 
 /// Returns a parquet meta data.
 pub(crate) fn parquet_meta() -> Arc<ParquetMetaData> {
@@ -60,7 +89,9 @@ fn parquet_file_data() -> Vec<u8> {
     parquet_file_data_inner(None)
 }
 
-fn parquet_file_data_with_region_metadata(region_metadata: &RegionMetadataRef) -> Vec<u8> {
+pub(crate) fn parquet_file_data_with_region_metadata(
+    region_metadata: &RegionMetadataRef,
+) -> Vec<u8> {
     let json = region_metadata.to_json().unwrap();
     let key_value = KeyValue::new(PARQUET_METADATA_KEY.to_string(), json);
     parquet_file_data_inner(Some(vec![key_value]))

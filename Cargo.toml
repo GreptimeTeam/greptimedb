@@ -301,6 +301,7 @@ client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
 common-batcher = { path = "src/common/batcher" }
+common-cache = { path = "src/common/cache" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
