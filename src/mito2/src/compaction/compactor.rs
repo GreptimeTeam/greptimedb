@@ -201,28 +201,26 @@ pub struct OpenCompactionRegionRequest {
     pub plugins: Plugins,
 }
 
-/// Open a compaction region from a compaction request.
-/// It's simple version of RegionOpener::open().
-pub async fn open_compaction_region(
-    req: &OpenCompactionRegionRequest,
-    mito_config: &MitoConfig,
+/// Opens manifest-backed compaction regions using executor-owned index resources.
+///
+/// Create one opener per auxiliary directory before accepting jobs and reuse it
+/// for the executor's lifetime. Initialization recovers staging files and removes
+/// stale intermediate files, so repeating it can delete another job's live files.
+#[derive(Clone)]
+pub struct CompactionRegionOpener {
+    mito_config: Arc<MitoConfig>,
     object_store_manager: ObjectStoreManagerRef,
-    ttl_provider: Either<TimeToLive, SchemaMetadataManagerRef>,
-) -> Result<CompactionRegion> {
-    let object_store = {
-        let name = &req.region_options.storage;
-        if let Some(name) = name {
-            object_store_manager
-                .find(name)
-                .with_context(|| ObjectStoreNotFoundSnafu {
-                    object_store: name.clone(),
-                })?
-        } else {
-            object_store_manager.default_object_store()
-        }
-    };
+    puffin_manager_factory: PuffinManagerFactory,
+    intermediate_manager: IntermediateManager,
+}
 
-    let access_layer = {
+impl CompactionRegionOpener {
+    /// Initializes the executor's index resources. The config must be sanitized
+    /// and its auxiliary directory must not be owned by another engine or opener.
+    pub async fn new(
+        mito_config: MitoConfig,
+        object_store_manager: ObjectStoreManagerRef,
+    ) -> Result<Self> {
         let puffin_manager_factory = PuffinManagerFactory::new(
             &mito_config.index.aux_path,
             mito_config.index.staging_size.as_bytes(),
@@ -231,95 +229,131 @@ pub async fn open_compaction_region(
         )
         .await?;
         let intermediate_manager =
-            IntermediateManager::init_fs(mito_config.index.aux_path.clone()).await?;
+            IntermediateManager::init_fs(&mito_config.index.aux_path).await?;
 
-        Arc::new(AccessLayer::new(
+        Ok(Self {
+            mito_config: Arc::new(mito_config),
+            object_store_manager,
+            puffin_manager_factory,
+            intermediate_manager,
+        })
+    }
+
+    /// Opens a region without reinitializing or cleaning shared index resources.
+    pub async fn open(
+        &self,
+        req: &OpenCompactionRegionRequest,
+        ttl_provider: Either<TimeToLive, SchemaMetadataManagerRef>,
+    ) -> Result<CompactionRegion> {
+        let mito_config = &self.mito_config;
+        let object_store = {
+            let name = &req.region_options.storage;
+            if let Some(name) = name {
+                self.object_store_manager
+                    .find(name)
+                    .with_context(|| ObjectStoreNotFoundSnafu {
+                        object_store: name.clone(),
+                    })?
+            } else {
+                self.object_store_manager.default_object_store()
+            }
+        };
+
+        let access_layer = Arc::new(AccessLayer::new(
             &req.table_dir,
             req.path_type,
             object_store.clone(),
-            puffin_manager_factory,
-            intermediate_manager,
-        ))
-    };
+            self.puffin_manager_factory.clone(),
+            self.intermediate_manager.clone(),
+        ));
 
-    let manifest_manager = {
-        let region_dir = region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
-        let region_manifest_options =
-            RegionManifestOptions::new(mito_config, &region_dir, object_store);
+        let manifest_manager = {
+            let region_dir =
+                region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type);
+            let region_manifest_options =
+                RegionManifestOptions::new(mito_config, &region_dir, object_store);
 
-        RegionManifestManager::open(region_manifest_options, &Default::default())
-            .await?
-            .with_context(|| EmptyRegionDirSnafu {
-                region_id: req.region_id,
-                region_dir: region_dir_from_table_dir(&req.table_dir, req.region_id, req.path_type),
-            })?
-    };
+            RegionManifestManager::open(region_manifest_options, &Default::default())
+                .await?
+                .with_context(|| EmptyRegionDirSnafu {
+                    region_id: req.region_id,
+                    region_dir: region_dir_from_table_dir(
+                        &req.table_dir,
+                        req.region_id,
+                        req.path_type,
+                    ),
+                })?
+        };
 
-    let manifest = manifest_manager.manifest();
-    let region_metadata = manifest.metadata.clone();
-    let hook: Option<RegionHookRef> = req.plugins.get();
-    let manifest_ctx = Arc::new(ManifestContext::new(
-        manifest_manager,
-        RegionRoleState::Leader(RegionLeaderState::Writable),
-        hook,
-    ));
+        let manifest = manifest_manager.manifest();
+        let region_metadata = manifest.metadata.clone();
+        let hook: Option<RegionHookRef> = req.plugins.get();
+        let manifest_ctx = Arc::new(ManifestContext::new(
+            manifest_manager,
+            RegionRoleState::Leader(RegionLeaderState::Writable),
+            hook,
+        ));
 
-    let file_purger = {
-        let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_purges));
-        Arc::new(LocalFilePurger::new(
-            purge_scheduler.clone(),
-            access_layer.clone(),
-            None,
-        ))
-    };
+        let file_purger = {
+            let purge_scheduler = Arc::new(LocalScheduler::new(mito_config.max_background_purges));
+            Arc::new(LocalFilePurger::new(
+                purge_scheduler.clone(),
+                access_layer.clone(),
+                None,
+            ))
+        };
 
-    let current_version = {
-        let mut ssts = SstVersion::new(region_metadata.clone());
-        ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
-        CompactionVersion {
-            metadata: region_metadata.clone(),
-            options: req.region_options.clone(),
-            ssts: Arc::new(ssts),
-            // Remote execution uses an already picked output. A manifest-only
-            // opener cannot prove that a new LastNonNull pick is memtable-safe.
-            memtable_min_sequence: Some(0),
-            compaction_time_window: manifest.compaction_time_window,
-        }
-    };
+        let current_version = {
+            let mut ssts = SstVersion::new(region_metadata.clone());
+            ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
+            CompactionVersion {
+                metadata: region_metadata.clone(),
+                options: req.region_options.clone(),
+                ssts: Arc::new(ssts),
+                // Remote execution uses an already picked output. A manifest-only
+                // opener cannot prove that a new LastNonNull pick is memtable-safe.
+                memtable_min_sequence: Some(0),
+                compaction_time_window: manifest.compaction_time_window,
+            }
+        };
 
-    let ttl = match ttl_provider {
-        // Use the specified ttl.
-        Either::Left(ttl) => ttl,
-        // Get the ttl from the schema metadata manager.
-        Either::Right(schema_metadata_manager) => {
-            let (_, ttl) =
-                find_dynamic_options(req.region_id, &req.region_options, &schema_metadata_manager)
-                    .await
-                    .unwrap_or_else(|e| {
-                        warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
-                        (
-                            crate::region::options::CompactionOptions::default(),
-                            TimeToLive::default(),
-                        )
-                    });
-            ttl
-        }
-    };
+        let ttl = match ttl_provider {
+            // Use the specified ttl.
+            Either::Left(ttl) => ttl,
+            // Get the ttl from the schema metadata manager.
+            Either::Right(schema_metadata_manager) => {
+                let (_, ttl) = find_dynamic_options(
+                    req.region_id,
+                    &req.region_options,
+                    &schema_metadata_manager,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    warn!(e; "Failed to get ttl for region: {}", region_metadata.region_id);
+                    (
+                        crate::region::options::CompactionOptions::default(),
+                        TimeToLive::default(),
+                    )
+                });
+                ttl
+            }
+        };
 
-    Ok(CompactionRegion {
-        region_id: req.region_id,
-        region_options: req.region_options.clone(),
-        engine_config: Arc::new(mito_config.clone()),
-        region_metadata: region_metadata.clone(),
-        cache_manager: Arc::new(CacheManager::default()),
-        access_layer,
-        manifest_ctx,
-        current_version,
-        file_purger: Some(file_purger),
-        ttl: Some(ttl),
-        max_parallelism: req.max_parallelism,
-        plugins: req.plugins.clone(),
-    })
+        Ok(CompactionRegion {
+            region_id: req.region_id,
+            region_options: req.region_options.clone(),
+            engine_config: self.mito_config.clone(),
+            region_metadata: region_metadata.clone(),
+            cache_manager: Arc::new(CacheManager::default()),
+            access_layer,
+            manifest_ctx,
+            current_version,
+            file_purger: Some(file_purger),
+            ttl: Some(ttl),
+            max_parallelism: req.max_parallelism,
+            plugins: req.plugins.clone(),
+        })
+    }
 }
 
 impl CompactionRegion {
