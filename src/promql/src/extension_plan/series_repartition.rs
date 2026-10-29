@@ -157,6 +157,8 @@ use datatypes::series::samples::DenseSamplesRef;
 pub enum SeriesRouting {
     /// Hash the canonical label set.
     CanonicalLabels,
+    /// Hash the exact PromQL matching key, so both sides of a vector operation meet.
+    Matching(crate::vector_match::MatchingLabels),
     /// Route raw frames by their complete stored primary key.
     RawPrimaryKey,
 }
@@ -276,7 +278,7 @@ impl SeriesRepartitionExec {
             }
             (FrameContent::Raw, SeriesRouting::CanonicalLabels) => {
                 return Err(DataFusionError::Plan(
-                    "SeriesRepartition raw frames require RawPrimaryKey routing".into(),
+                    "SeriesRepartition raw frames cannot use CanonicalLabels routing".into(),
                 ));
             }
             _ => {}
@@ -553,10 +555,11 @@ impl SharedExecution {
         series_schema: Arc<SeriesSchema>,
         context: &Arc<TaskContext>,
     ) -> DataFusionResult<Arc<Self>> {
-        let content = match routing.policy {
-            SeriesRouting::RawPrimaryKey => FrameContent::Raw,
-            _ => FrameContent::Evaluated,
-        };
+        // What the child carries is what it declares, not what the policy suggests: a raw frame
+        // can be routed by a match key too, so the policy no longer names the content.
+        let content = SeriesFrameDeclaration::parse(input.schema().as_ref())
+            .map_err(|error| DataFusionError::Plan(error.to_string()))?
+            .content();
         let partitions = input.properties().partitioning.partition_count();
         let mut streams = Vec::with_capacity(partitions);
         for child_partition in 0..partitions {
@@ -1266,8 +1269,21 @@ async fn read_raw_chains(
             };
             match next {
                 Some(Ok(chunk)) => {
-                    let output = *destination
-                        .get_or_insert_with(|| routing.output_key(chunk.primary_key.as_slice()));
+                    let output = *destination.get_or_insert_with(|| match &routing.policy {
+                        SeriesRouting::Matching(_) => chunk
+                            .metric
+                            .as_ref()
+                            .map_or_else(
+                                || {
+                                    Err(DataFusionError::Execution(
+                                        "a matching-routed raw chain has no labels".into(),
+                                    ))
+                                },
+                                |labels| Ok(routing.output_labels(labels)),
+                            )
+                            .unwrap_or_else(|_| routing.output_key(chunk.primary_key.as_slice())),
+                        _ => routing.output_key(chunk.primary_key.as_slice()),
+                    });
                     let final_chunk = chunk.is_last;
                     if senders[output].is_closed() {
                         chain.clear();
@@ -2179,7 +2195,11 @@ impl Routing {
         let mut hasher = XxHash64::with_seed(self.seed);
         match &self.policy {
             SeriesRouting::CanonicalLabels => label_set(metric).hash(&mut hasher),
-            SeriesRouting::RawPrimaryKey => unreachable!("raw routing uses output_key"),
+            SeriesRouting::Matching(policy) => {
+                crate::vector_match::group_key(metric, policy).hash(&mut hasher)
+            }
+            // Raw frames hash their stored key by default; a match key hashes their labels.
+            SeriesRouting::RawPrimaryKey => {}
         }
         (hasher.finish() % self.outputs as u64) as usize
     }

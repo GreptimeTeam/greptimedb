@@ -708,6 +708,15 @@ impl ExecutionPlan for RawScripted {
     }
 }
 
+/// The raw owner over `child` routing by an explicit policy.
+fn raw_node_with_routing(
+    child: Arc<dyn ExecutionPlan>,
+    outputs: usize,
+    routing: SeriesRouting,
+) -> DataFusionResult<SeriesRepartitionExec> {
+    SeriesRepartitionExec::try_new_with_routing(child, outputs, routing)
+}
+
 /// The raw owner over `child` grouping by complete stored primary key.
 fn raw_node(child: Arc<dyn ExecutionPlan>, outputs: usize) -> Arc<SeriesRepartitionExec> {
     Arc::new(
@@ -6007,6 +6016,104 @@ async fn a_chain_that_outgrows_the_pool_ends_every_output_and_releases_it() {
         pool.reserved() == 0
     })
     .await;
+}
+
+#[tokio::test]
+async fn raw_matching_routing_groups_by_match_key() {
+    use crate::vector_match::MatchingLabels;
+
+    let with_zone = |zone: &str| {
+        SeriesLabels::try_new(
+            Some(Arc::from("m")),
+            vec![
+                Label {
+                    name: Arc::from("host"),
+                    value: Arc::from("h"),
+                },
+                Label {
+                    name: Arc::from("zone"),
+                    value: Arc::from(zone),
+                },
+            ],
+        )
+        .expect("legal labels")
+    };
+    let child = RawScripted::plan(vec![
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "ka",
+                Some(with_zone("a")),
+                &[1],
+                vec![Some(1.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+        RawPartition {
+            chunks: vec![raw_chunk(
+                "kb",
+                Some(with_zone("b")),
+                &[1],
+                vec![Some(2.0)],
+                true,
+            )],
+            gate: None,
+            gate_chunks: false,
+        },
+    ]);
+    let plan = Arc::new(
+        raw_node_with_routing(
+            child,
+            3,
+            SeriesRouting::Matching(MatchingLabels::On(vec![Arc::from("host")])),
+        )
+        .expect("raw matching routing is accepted"),
+    );
+    let context = task_context(&Arc::new(GreedyMemoryPool::new(8 << 20)));
+    let mut owner = None;
+    let mut identities = std::collections::HashSet::new();
+    for output in 0..plan.outputs() {
+        let frames = plan
+            .execute(output, Arc::clone(&context))
+            .expect("output exists");
+        let mut stream = unpack_raw_series(frames, Some(raw_schema())).expect("frame decodes");
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.expect("matching-routed raw stream succeeds");
+            identities.insert(chunk.primary_key.as_slice().to_vec());
+            if !chunk.is_last {
+                continue;
+            }
+            if [b"ka".to_vec(), b"kb".to_vec()].contains(&chunk.primary_key.as_slice().to_vec()) {
+                assert!(
+                    owner
+                        .replace(output)
+                        .is_none_or(|previous| previous == output),
+                    "both match-key identities share an output partition"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        identities,
+        [b"ka".to_vec(), b"kb".to_vec()].into_iter().collect()
+    );
+    assert!(
+        owner.is_some(),
+        "both identities were published by their common owner"
+    );
+}
+
+#[test]
+fn raw_canonical_labels_routing_is_refused() {
+    let child = RawScripted::plan(vec![RawPartition {
+        chunks: vec![],
+        gate: None,
+        gate_chunks: false,
+    }]);
+    let error = raw_node_with_routing(child, 1, SeriesRouting::CanonicalLabels)
+        .expect_err("raw canonical labels routing must remain unsupported");
+    assert!(error.to_string().contains("cannot use CanonicalLabels"));
 }
 
 #[tokio::test]
