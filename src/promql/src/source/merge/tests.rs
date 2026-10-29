@@ -21,7 +21,15 @@ use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{Samples, SeriesFields, SeriesSchema};
 use datatypes::series::{Label, SeriesLabels};
 
-use super::merge_raw_identity;
+use super::merge_raw_identity_charging;
+
+/// The same merge, with accounting the tests do not measure.
+fn merge_raw_identity(
+    schema: &SeriesSchema,
+    chunks: &[RawSeriesChunk],
+) -> datatypes::error::Result<RawSeriesChunk> {
+    merge_raw_identity_charging(schema, chunks, &mut |_| Ok(()))
+}
 
 fn schema(count: usize) -> SeriesSchema {
     SeriesSchema {

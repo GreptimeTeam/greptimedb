@@ -22,15 +22,8 @@ use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema};
 
-/// Rebuilds one raw series from every piece of one complete physical identity.
-pub(crate) fn merge_raw_identity(
-    schema: &SeriesSchema,
-    chunks: &[RawSeriesChunk],
-) -> Result<RawSeriesChunk> {
-    merge_raw_identity_charging(schema, chunks, &mut |_| Ok(()))
-}
-
-/// The same rebuild, reporting each allocation before it happens.
+/// Rebuilds one raw series from every piece of one complete physical identity, reporting each
+/// allocation before it happens.
 ///
 /// Reconstruction holds three intermediate vectors whose sizes depend on how the pieces interleave,
 /// so what it needs cannot be known up front. The caller charges `reserve` as the work grows
