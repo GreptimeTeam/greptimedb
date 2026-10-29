@@ -31,6 +31,7 @@ use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
     Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
+use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
@@ -38,15 +39,29 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::logical_expr::{Extension, UserDefinedLogicalNodeCore, col};
+use datafusion::physical_plan::ExecutionPlan;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
-use datatypes::series::SeriesOrdering;
-use promql::extension_plan::{AggregateFinalize, FusedSeries, HistogramFold, RawSeriesSource};
-use promql::native::plan::NativeExpr;
+use datatypes::series::frame::{
+    FrameContent, FrameLabelMode, pack_raw_series_chunk, raw_series_frame_schema,
+};
+use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
+use datatypes::series::samples::{FieldSpec, Samples, SeriesFields, SeriesSchema};
+use datatypes::series::{Label, SeriesLabels, SeriesOrdering};
+use promql::extension_plan::{
+    AggregateFinalize, FusedSeries, HistogramFold, PromExtensionPlanner, RawSeriesSource,
+    SeriesRepartitionExec,
+};
+use promql::native::plan::{
+    NativeExpr, NativeNode, needs_single_execution, output_has_metric_name,
+};
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
+use store_api::region_engine::RawLabelSource;
 use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
@@ -71,6 +86,15 @@ fn find_instant_manipulate(plan: &LogicalPlan) -> Option<&InstantManipulate> {
 }
 
 fn build_query_engine_state() -> QueryEngineState {
+    build_query_engine_state_with_parallelism(0)
+}
+
+/// The engine state a test plans and executes with, at a stated parallelism.
+///
+/// `parallelism` is the query engine's own option, which only reaches DataFusion's target partition
+/// count when it is positive: zero leaves DataFusion's default in place, which is what every test
+/// that does not care about partitioning keeps.
+fn build_query_engine_state_with_parallelism(parallelism: usize) -> QueryEngineState {
     QueryEngineState::new(
         new_memory_catalog_manager().unwrap(),
         None,
@@ -80,7 +104,10 @@ fn build_query_engine_state() -> QueryEngineState {
         None,
         false,
         Plugins::default(),
-        QueryOptions::default(),
+        QueryOptions {
+            parallelism,
+            ..Default::default()
+        },
     )
 }
 
@@ -799,6 +826,15 @@ fn assert_normal_metric_schema(plan: &LogicalPlan) {
 async fn build_test_table_provider_with_distinct_tags(
     table_tags: &[(&str, &[&str])],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_distinct_tags_on(DEFAULT_ENGINE, table_tags).await
+}
+
+/// The same fixture on the engine the test names, so the native route's engine gate is what a test
+/// can hold constant.
+async fn build_test_table_provider_with_distinct_tags_on(
+    engine: &str,
+    table_tags: &[(&str, &[&str])],
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (table_name, tags) in table_tags {
         let mut columns = tags
@@ -827,6 +863,7 @@ async fn build_test_table_provider_with_distinct_tags(
         let table_meta = TableMetaBuilder::empty()
             .schema(Arc::new(Schema::new(columns)))
             .primary_key_indices((0..tags.len()).collect())
+            .engine(engine.to_string())
             .next_column_id(1024)
             .build()
             .unwrap();
@@ -856,6 +893,28 @@ async fn build_test_table_provider_with_distinct_tags(
         DummyDecoder::arc(),
         false,
     )
+}
+
+/// Two metrics, `m1` and `m2`, each with the tag `ns` and one `Float64` value field.
+///
+/// Both are on the engine the native route accepts, so a pair of selectors over them is offered to
+/// it, and `ns` is the tag a split match's two folds group by.
+async fn build_dual_metric_provider() -> DfTableSourceProvider {
+    build_test_table_provider_with_distinct_tags_on(
+        NATIVE_ENGINE,
+        &[("m1", &["ns"]), ("m2", &["ns"])],
+    )
+    .await
+}
+
+/// The raw series layout both metrics of [`build_dual_metric_provider`] share: one `Float64` field.
+fn dual_metric_schema() -> Arc<SeriesSchema> {
+    Arc::new(SeriesSchema {
+        fields: Arc::from([FieldSpec {
+            name: Arc::from(greptime_value()),
+        }]),
+        eval_grid: None,
+    })
 }
 
 fn contains_histogram_fold(plan: &LogicalPlan) -> bool {
@@ -1857,6 +1916,247 @@ fn find_fused_series(plan: &LogicalPlan) -> Option<&FusedSeries> {
     }
 
     plan.inputs().into_iter().find_map(find_fused_series)
+}
+
+/// Every [`FusedSeries`] node in `plan`, outermost first.
+fn fused_series_nodes(plan: &LogicalPlan) -> Vec<&FusedSeries> {
+    fn walk<'a>(plan: &'a LogicalPlan, out: &mut Vec<&'a FusedSeries>) {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fused) = node.as_any().downcast_ref::<FusedSeries>()
+        {
+            out.push(fused);
+        }
+        for input in plan.inputs() {
+            walk(input, out);
+        }
+    }
+
+    let mut nodes = Vec::new();
+    walk(plan, &mut nodes);
+    nodes
+}
+
+/// The outer node of a split match, and its two producers.
+///
+/// The outer node is the only one with two children: each producer folds one metric and reads that
+/// metric's scan, and nothing else in the plan has more than one input.
+fn split_match(plan: &LogicalPlan) -> (&FusedSeries, [&FusedSeries; 2]) {
+    let nodes = fused_series_nodes(plan);
+    let outer = nodes
+        .iter()
+        .copied()
+        .find(|fused| fused.children().len() == 2)
+        .unwrap_or_else(|| panic!("no node of `{plan:?}` matches two producers"));
+    let producers = outer
+        .children()
+        .iter()
+        .map(|child| {
+            let LogicalPlan::Extension(Extension { node }) = child else {
+                panic!("a producer of `{plan:?}` is not an extension node");
+            };
+            node.as_any()
+                .downcast_ref::<FusedSeries>()
+                .unwrap_or_else(|| panic!("a child of the match is not a fused node: {child:?}"))
+        })
+        .collect::<Vec<_>>();
+    (outer, [producers[0], producers[1]])
+}
+
+/// The raw series schema `fused`'s tree reads: the binding of its one input leaf.
+fn tree_input_schema(fused: &FusedSeries) -> Arc<SeriesSchema> {
+    fn walk(node: &NativeNode) -> Option<Arc<SeriesSchema>> {
+        match &node.expr {
+            NativeExpr::Input(input) => input.output.samples().cloned(),
+            NativeExpr::Scalar(_) => None,
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => walk(input),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => walk(left).or_else(|| walk(right)),
+        }
+    }
+
+    walk(fused.tree().root()).unwrap_or_else(|| panic!("`{}` reads no input", fused.promql()))
+}
+
+/// A plan producing `batches` as explicit-label raw frames of `schema`, in one partition.
+///
+/// This is the child a producer would be given by a region scan. A unit test in this crate has no
+/// region to scan, so the frames are packed here; the producer above them, the routing the planner
+/// inserts and the node that runs the match are the planner's own.
+fn raw_frame_plan(schema: &SeriesSchema, batches: Vec<RecordBatch>) -> Arc<dyn ExecutionPlan> {
+    let frame = raw_series_frame_schema(schema, FrameLabelMode::Explicit)
+        .expect("a raw series schema has an explicit-label frame");
+    Arc::new(DataSourceExec::new(Arc::new(
+        MemorySourceConfig::try_new(&[batches], frame, None)
+            .expect("the frames declare the schema"),
+    )))
+}
+
+/// The physical plan the extension planner builds for `outer` over its two producers.
+///
+/// The producers are planned here, from raw frames a test packs; everything above them - the
+/// [`SeriesRepartitionExec`] pair the planner inserts and the node that runs the match - is reached
+/// through the same [`ExtensionPlanner`] entry DataFusion's physical planner calls, so what this
+/// returns is what a query plan would hold under each producer's scan.
+async fn plan_split_match(
+    state: &QueryEngineState,
+    outer: &FusedSeries,
+    producers: [(&FusedSeries, Vec<RecordBatch>); 2],
+) -> Arc<dyn ExecutionPlan> {
+    let mut physical: Vec<Arc<dyn ExecutionPlan>> = Vec::with_capacity(2);
+    for (producer, batches) in producers {
+        let input = raw_frame_plan(&tree_input_schema(producer), batches);
+        let planned = producer
+            .to_execution_plan(vec![(
+                input,
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            )])
+            .expect("a producer plans over the raw frames of its scan");
+        physical.push(planned);
+    }
+    let session = state.session_state();
+    PromExtensionPlanner
+        .plan_extension(
+            &DefaultPhysicalPlanner::default(),
+            outer,
+            &[],
+            physical.as_slice(),
+            &session,
+            &PhysicalPlanningContext::default(),
+        )
+        .await
+        .expect("the planner has everything it asks its children for")
+        .expect("a co-partitioned match of two name-free producers is a shape it plans")
+}
+
+/// Whether `plan`'s output is an evaluated series frame, which is what a `SeriesFrame` producer
+/// writes and what the routing above it reads.
+fn produces_evaluated_frame(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    datatypes::series::frame::SeriesFrameDeclaration::parse(plan.schema().as_ref())
+        .is_ok_and(|declaration| declaration.content() == FrameContent::Evaluated)
+}
+
+/// The grid the dual-metric fixtures are evaluated on: five points, five seconds apart.
+const DUAL_GRID_TIMES: [i64; 5] = [0, 5_000, 10_000, 15_000, 20_000];
+
+/// The statement these tests plan: the grid above, one second of lookback.
+fn dual_grid_stmt(query: &str) -> EvalStmt {
+    EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH,
+        end: UNIX_EPOCH
+            .checked_add(Duration::from_millis(20_000))
+            .unwrap(),
+        interval: Duration::from_secs(5),
+        lookback_delta: Duration::from_secs(1),
+    }
+}
+
+/// One raw frame batch per `series` entry of `metric`: samples of one value at every grid point.
+///
+/// A series is one chunk here, which is the input contract: its labels name it, its last chunk says
+/// so, and its timestamps ascend.
+fn metric_frames(schema: &SeriesSchema, metric: &str, series: &[(&str, f64)]) -> Vec<RecordBatch> {
+    series
+        .iter()
+        .map(|(ns, value)| {
+            let labels = SeriesLabels::try_new(
+                Some(Arc::from(metric)),
+                vec![Label {
+                    name: Arc::from("ns"),
+                    value: Arc::from(*ns),
+                }],
+            )
+            .expect("one label is a label set");
+            let chunk = RawSeriesChunk::try_new(
+                schema,
+                Buffer::from_slice_ref(ns.as_bytes()),
+                Some(labels),
+                RawTimestamps::try_new(ScalarBuffer::from(DUAL_GRID_TIMES.to_vec()))
+                    .expect("the grid ascends"),
+                SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(vec![
+                    Some(*value);
+                    DUAL_GRID_TIMES.len()
+                ]))])
+                .expect("one value per grid point"),
+                true,
+            )
+            .expect("one series' samples are a legal raw chunk");
+            let mut batches = pack_raw_series_chunk(schema, FrameLabelMode::Explicit, None, &chunk)
+                .expect("a chunk of this schema packs into a frame");
+            assert_eq!(1, batches.len(), "one small chunk is one frame batch");
+            batches.remove(0)
+        })
+        .collect()
+}
+
+/// The rows of a plain-row output: `(grid timestamp, ns, value)`.
+fn ns_rows(batches: &[RecordBatch]) -> Vec<(i64, String, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let times = batch
+                .column_by_name(greptime_timestamp())
+                .expect("the output's time column")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("millisecond timestamps");
+            let ns = batch
+                .column_by_name("ns")
+                .expect("the output's tag column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("a utf8 tag");
+            let values = batch
+                .column_by_name(greptime_value())
+                .expect("the output's value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("a float64 value");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        times.value(row),
+                        ns.value(row).to_string(),
+                        values.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| (left.0, &left.1).cmp(&(right.0, &right.1)));
+    rows
+}
+
+/// The statement's plan over two metrics, each tagged `ns` and carrying one value field.
+///
+/// The table shape is the one the native route accepts: the millisecond time index `timestamp`, one
+/// `Float64` value column, and the tag the match groups by.
+async fn build_dual_metric_plan(
+    state: &QueryEngineState,
+    query: &str,
+    native_fused: bool,
+) -> LogicalPlan {
+    PromPlanner::stmt_to_plan_with_annotations(
+        build_dual_metric_provider().await,
+        &dual_grid_stmt(query),
+        state,
+        None,
+        native_fused,
+    )
+    .await
+    .unwrap()
 }
 
 /// Timestamp over raw and evaluated vectors both use native execution, with anchors and offsets retained.
@@ -3161,25 +3461,18 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     );
 }
 
-/// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
-/// samples, a binary operation whose sibling is data would match one side's series before the merge,
-/// a sibling a call computes has no native node at all, and a group by a value field cannot be named
-/// by the state rows. A literal scalar sibling is not one of them: the operation is computed per
-/// series below the fold, or rebuilt over the merged values above it.
+/// A shape the split cannot carry and the route cannot plan as one execution keeps the existing
+/// plan: a group by a value field cannot be named by the columns the node declares, and a sibling a
+/// call computes has no native node at all.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
-        "quantile(0.5, some_metric)",
-        "sum(quantile(0.5, some_metric))",
-        // The sibling is data rather than a literal scalar, so the operation would pair each series
-        // with the aggregate's series before the merge.
-        "sum(some_metric) / some_metric",
         // A scalar a call computes is not a literal the split could keep: `scalar(...)` has no
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
+        // The group key names a value field, which is not a label set any series carries - see
+        // `group_key_tags` - so the node cannot declare the columns it would need.
         "sum by (field_0) (some_metric)",
-        "timestamp(sum(some_metric))",
-        "sum(timestamp(abs(some_metric)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;
@@ -3193,52 +3486,352 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
     }
 }
 
-/// `clamp` is not a function the existing planner has a kernel for, so an aggregate over it fails
-/// while the legacy plan is being built - before either route is chosen, and the same way on both.
+/// A shape the split cannot carry but the route can plan as one execution now takes the route,
+/// because an aggregate's group key is a label set the node can declare.
 ///
-/// The native route only reads the legacy plan's column names, which means it inherits that refusal
-/// rather than answering a query the existing path would reject. Both the split template
-/// (`clamp(x, 1, 2)`) and the empty range (`clamp(x, 2, 1)`) fail here, so neither is claimed as
-/// supported.
+/// The split is still refused for each of these - a quantile's state is the group's samples, a
+/// binary operation whose sibling is data would match one side's series before the merge, and a
+/// wrapper above a fold is not the fold - so the placement that plans them is the single execution
+/// `needs_single_execution` names. That is correct for them and not a weaker answer: one execution
+/// over every input partition is exactly the `Complete` aggregate's contract.
 #[tokio::test]
-async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
+async fn native_fused_unsplittable_aggregate_plans_one_execution() {
     for query in [
-        "sum(clamp(some_metric, 1, 2))",
-        "sum(clamp(some_metric, 2, 1))",
+        "quantile(0.5, some_metric)",
+        "sum(quantile(0.5, some_metric))",
+        "timestamp(sum(some_metric))",
+        "sum(timestamp(abs(some_metric)))",
     ] {
-        for native_fused in [true, false] {
-            // Each attempt needs its own provider: planning moves the one it is given.
-            let table_provider = build_test_table_provider_with_options(
-                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-                1,
-                1,
-                vec![],
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-                ConcreteDataType::float64_datatype(),
-                NATIVE_ENGINE,
-            )
-            .await;
-            let eval_stmt = build_eval_stmt(query);
-            let error = PromPlanner::stmt_to_plan_with_annotations(
-                table_provider,
-                &eval_stmt,
-                &build_query_engine_state(),
-                None,
-                native_fused,
-            )
-            .await
-            .unwrap_err();
+        let native = build_native_fused_plan(query, true).await;
+        let fused = find_fused_series(&native)
+            .unwrap_or_else(|| panic!("`{query}` must take the native route: {native:?}"));
+        assert!(
+            find_aggregate_finalize(&native).is_none(),
+            "`{query}`: the split it cannot carry is not built"
+        );
+        assert!(
+            needs_single_execution(fused.tree().root()),
+            "`{query}` reads the whole vector, so it is one execution: {native:?}"
+        );
+        assert_ne!(
+            native.display_indent().to_string(),
+            build_native_fused_plan(query, false)
+                .await
+                .display_indent()
+                .to_string(),
+            "`{query}` must not be the existing plan"
+        );
+    }
+}
 
-            assert!(
-                matches!(
-                    &error,
-                    crate::promql::error::Error::UnsupportedExpr { name, .. } if name == "clamp"
-                ),
-                "`{query}` with the flag {native_fused}: {error}"
+/// A fold on each side of a default one-to-one match is planned as three nodes, and the physical
+/// plan the planner builds for them is the one the co-partitioned match was written for: two
+/// evaluated-frame producers, two routings that split identically, and a match that runs once per
+/// output of that routing rather than once over all of it.
+///
+/// This is as far end to end as a unit test in this crate reaches. The logical plan is the planner's
+/// own, and everything above each producer's scan is the physical layer's own - the node below the
+/// routing is built by asking `plan_extension`, which is the entry DataFusion's physical planner
+/// calls. What is not covered is the recursion *into* the streams: the two producers' children are
+/// the raw frames a region scan would hand over, packed here, because a unit test in this crate has
+/// no region to scan.
+#[tokio::test]
+async fn native_fused_dual_aggregate_match_plans_routed_producers() {
+    const PARALLELISM: usize = 4;
+    let state = build_query_engine_state_with_parallelism(PARALLELISM);
+    let plan = build_dual_metric_plan(&state, "sum by(ns)(m1) / sum by(ns)(m2)", true).await;
+
+    // The logical shape: one node per fold, and the match over them.
+    let (outer, producers) = split_match(&plan);
+    assert_eq!(
+        3,
+        fused_series_nodes(&plan).len(),
+        "the match and its two producers are the whole plan: {plan:?}"
+    );
+    // The match's own tree is a default one-to-one match over two evaluated inputs, indexed by its
+    // children and not by the statement's selectors.
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &outer.tree().root().expr
+    else {
+        panic!("the outer node does not run a match: {plan:?}");
+    };
+    assert!(matches!(
+        &matching.labels,
+        promql::vector_match::MatchingLabels::Ignoring(names) if names.is_empty()
+    ));
+    for (operand, expected) in [(left, 0), (right, 1)] {
+        let NativeExpr::Input(input) = &operand.expr else {
+            panic!("the match does not read an evaluated input: {plan:?}");
+        };
+        assert_eq!(expected, input.source_index);
+        assert!(
+            input
+                .output
+                .samples()
+                .is_some_and(|schema| schema.eval_grid.is_some()),
+            "an operand reads values a producer decided, not a scan: {plan:?}"
+        );
+    }
+    // Each producer folds one metric, and that fold is the node's whole tree.
+    for producer in producers {
+        assert!(
+            matches!(&producer.tree().root().expr, NativeExpr::Aggregate { .. }),
+            "a producer does more than fold its metric: {plan:?}"
+        );
+        assert_eq!(1, producer.children().len(), "a producer reads one scan");
+    }
+
+    // The physical shape: the routing the planner inserts, and the node above it.
+    let physical = plan_split_match(
+        &state,
+        outer,
+        [
+            (
+                producers[0],
+                metric_frames(&tree_input_schema(producers[0]), "m1", &[("a", 1.0)]),
+            ),
+            (
+                producers[1],
+                metric_frames(&tree_input_schema(producers[1]), "m2", &[("a", 1.0)]),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!("FusedSeriesExec", physical.name());
+    assert_eq!(
+        PARALLELISM,
+        physical.properties().partitioning.partition_count(),
+        "the match runs once per routed output"
+    );
+    let children = physical.children();
+    assert_eq!(2, children.len(), "{physical:?}");
+    let routings = children
+        .iter()
+        .map(|child| {
+            child
+                .downcast_ref::<SeriesRepartitionExec>()
+                .unwrap_or_else(|| panic!("the match's children are not routings: {child:?}"))
+        })
+        .collect::<Vec<_>>();
+    // Equal `outputs()`, read as the declared partition count: two routings are one routing only
+    // when they split into the same number of outputs, which is the proof the pair rests on.
+    assert_eq!(
+        routings[0].properties().partitioning.partition_count(),
+        routings[1].properties().partitioning.partition_count()
+    );
+    assert_eq!(
+        PARALLELISM,
+        routings[0].properties().partitioning.partition_count(),
+        "the routing splits into the session's target partitions"
+    );
+    for routing in routings {
+        let producers = routing.children();
+        assert_eq!(1, producers.len(), "{routing:?}");
+        assert_eq!("FusedSeriesExec", producers[0].name());
+        assert!(
+            produces_evaluated_frame(producers[0]),
+            "a producer hands over an evaluated frame: {routing:?}"
+        );
+    }
+}
+
+/// The parallelism is not degenerate: `M > 1`, the two groups of the match land in two different
+/// non-empty owner partitions, and every value is the one the arithmetic owes.
+///
+/// The data is two metrics of four `ns` groups each, so a routing into four outputs has four label
+/// sets to place. The reference is the arithmetic itself - `sum by(ns)(m1) / sum by(ns)(m2)` is each
+/// group's `m1` value divided by its `m2` value at every grid point - which is what a serial
+/// evaluation of the same two folds answers. Reading every output partition at once is the routing's
+/// own contract: an unread output parks the input tasks whose chains hash to it, so the partitions
+/// are polled concurrently rather than one to completion.
+#[tokio::test]
+async fn native_fused_dual_aggregate_match_runs_per_owner_partition() {
+    const PARALLELISM: usize = 4;
+    let state = build_query_engine_state_with_parallelism(PARALLELISM);
+    let plan = build_dual_metric_plan(&state, "sum by(ns)(m1) / sum by(ns)(m2)", true).await;
+    let (outer, producers) = split_match(&plan);
+
+    // One series per group, held at a different level in each metric: the quotient is the group's
+    // ratio at every grid point.
+    let left = [("a", 10.0f64), ("b", 2.0), ("c", 6.0), ("d", 8.0)];
+    let right = [("a", 2.0f64), ("b", 1.0), ("c", 3.0), ("d", 2.0)];
+    let physical = plan_split_match(
+        &state,
+        outer,
+        [
+            (
+                producers[0],
+                metric_frames(&tree_input_schema(producers[0]), "m1", &left),
+            ),
+            (
+                producers[1],
+                metric_frames(&tree_input_schema(producers[1]), "m2", &right),
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(
+        PARALLELISM,
+        physical.properties().partitioning.partition_count()
+    );
+
+    // Every output is polled at once, and each one's rows are kept apart so the routing's placement
+    // can be read off the answer instead of being recomputed here.
+    let context = state.session_state().task_ctx();
+    let streams =
+        datafusion::physical_plan::execute_stream_partitioned(Arc::clone(&physical), context)
+            .expect("the match is executable");
+    let partitions = futures::future::try_join_all(
+        streams
+            .into_iter()
+            .map(futures_util::TryStreamExt::try_collect::<Vec<_>>),
+    )
+    .await
+    .expect("every output of the routing ends");
+
+    let mut owner = HashMap::<String, usize>::new();
+    let mut non_empty = 0usize;
+    for (partition, batches) in partitions.iter().enumerate() {
+        let rows = ns_rows(batches);
+        if rows.is_empty() {
+            continue;
+        }
+        non_empty += 1;
+        for (time, ns, value) in rows {
+            // The ratio each group owes at every grid point.
+            let expected = left
+                .iter()
+                .find(|(group, _)| *group == ns)
+                .map(|(_, value)| *value)
+                .expect("the group is one of the data's")
+                / right
+                    .iter()
+                    .find(|(group, _)| *group == ns)
+                    .map(|(_, value)| *value)
+                    .expect("the group is one of the data's");
+            assert_eq!(expected, value, "{ns} at {time} in partition {partition}");
+            // A match group is one label set, so every output holding it holds the whole of it.
+            assert_eq!(
+                partition,
+                *owner.entry(ns.clone()).or_insert(partition),
+                "`{ns}` is answered by more than one owner partition"
             );
         }
     }
+    assert!(
+        non_empty > 1,
+        "the groups all landed in {non_empty} output(s), so this run proves nothing about the routing"
+    );
+    assert_eq!(
+        left.len(),
+        owner.len(),
+        "every group has an owner: {owner:?}"
+    );
+}
+
+/// `m1 / m2` has no folds, so there is nothing to lift: both sides keep their metric name, which is
+/// what makes the canonical key the routing groups by differ from the match key. The pair is the
+/// per-partition shape the route already planned, one node reading both scans.
+#[tokio::test]
+async fn native_fused_pair_without_folds_stays_one_node() {
+    let state = build_query_engine_state_with_parallelism(4);
+    let plan = build_dual_metric_plan(&state, "m1 / m2", true).await;
+    let nodes = fused_series_nodes(&plan);
+    assert_eq!(1, nodes.len(), "{plan:?}");
+    let fused = nodes[0];
+    assert_eq!(2, fused.children().len(), "{plan:?}");
+    // The tree is the match of the two scans themselves: no fold was lifted out of it, so there is
+    // no producer to route.
+    let NativeExpr::Binary { left, right, .. } = &fused.tree().root().expr else {
+        panic!("the pair does not run a match: {plan:?}");
+    };
+    assert!(
+        matches!(&left.expr, NativeExpr::Instant { .. }),
+        "`m1` is not read by a fold: {plan:?}"
+    );
+    assert!(
+        matches!(&right.expr, NativeExpr::Instant { .. }),
+        "`m2` is not read by a fold: {plan:?}"
+    );
+    assert!(
+        output_has_metric_name(left).is_none() && output_has_metric_name(right).is_none(),
+        "both sides keep their metric name, so one execution is the answer"
+    );
+}
+
+/// A match that is not the default one keeps the existing path: its key is the modifiers' and not the
+/// canonical key, so the proof a co-partitioned pair gives would be about a key the match does not
+/// read.
+#[tokio::test]
+async fn native_fused_folded_match_with_a_narrower_key_stays_one_node() {
+    for query in [
+        "sum by(ns)(m1) / on(ns) sum by(ns)(m2)",
+        "sum by(ns)(m1) / ignoring(ns) sum by(ns)(m2)",
+        "sum by(ns)(m1) / on(ns) group_left sum by(ns)(m2)",
+    ] {
+        let state = build_query_engine_state_with_parallelism(4);
+        let plan = build_dual_metric_plan(&state, query, true).await;
+        // A two-selector tree that is neither per-series work nor this split has no placement at
+        // all, so the existing planner answers it: no producer is routed and no match is lifted.
+        assert!(
+            fused_series_nodes(&plan).is_empty(),
+            "`{query}` was split: {plan:?}"
+        );
+        assert_eq!(
+            plan.display_indent().to_string(),
+            build_dual_metric_plan(&state, query, false)
+                .await
+                .display_indent()
+                .to_string(),
+            "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// A fold that keeps the metric name cannot be lifted: `by(__name__)` re-labels each group under the
+/// name it read, so the canonical key the routing groups by still holds a name the match key drops.
+///
+/// `output_has_metric_name` is the fact this rests on, and it answers `Some(true)` - never `None`,
+/// which would only say "not proved here" - which is why the split's condition is `Some(false)`.
+#[tokio::test]
+async fn native_fused_fold_keeping_the_metric_name_stays_one_node() {
+    let state = build_query_engine_state_with_parallelism(4);
+    let query = "sum by(__name__)(m1) / sum by(__name__)(m2)";
+    let plan = build_dual_metric_plan(&state, query, true).await;
+    assert!(
+        fused_series_nodes(&plan).is_empty(),
+        "the folds were split: {plan:?}"
+    );
+    // The tree the refusal is about, compiled the way the route compiles it.
+    let compiled = crate::promql::native_compile::compile_selectors(
+        &dual_grid_stmt(query),
+        &|_| Ok(Arc::clone(&dual_metric_schema())),
+        SeriesOrdering::Contiguous,
+    )
+    .expect("the statement compiles")
+    .tree;
+    let NativeExpr::Binary { left, right, .. } = &compiled.root().expr else {
+        panic!("the statement is not a match: {compiled}");
+    };
+    for operand in [left, right] {
+        assert_eq!(
+            None,
+            output_has_metric_name(operand),
+            "a fold grouped by `__name__` keeps the name it read: {compiled}"
+        );
+    }
+    // And the statement keeps the existing plan, which is the answer for a shape the route cannot
+    // place: two selectors that are not per-series work and not this split.
+    assert_eq!(
+        plan.display_indent().to_string(),
+        build_dual_metric_plan(&state, query, false)
+            .await
+            .display_indent()
+            .to_string()
+    );
 }
 
 /// A label rewrite stays on the existing plan, which is the one that projects its new label.

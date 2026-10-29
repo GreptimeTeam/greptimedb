@@ -2870,13 +2870,9 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
     let shared = grid(0, 60_000, 4);
     let selected = || instant_over(raw_input_at(0), InstantValue::Sample, Arc::clone(&shared));
 
-    // A scan of one metric hands its series over under that metric's name. A value another execution
-    // produced carries whatever that execution left on it, and this tree does not hold that
-    // execution, so the answer is `None` rather than a guess in either direction: reading it as "no
-    // name" is what would make a named match look name-free and run it per partition. That is why the
-    // match proof takes the fact on [`CoPartitionedPair::name_free`], from the layer that built the
-    // producers, instead of deriving it here.
-    assert_eq!(output_has_metric_name(&raw_input_at(0)), Some(true));
+    // This proof is deliberately narrow: only a Complete aggregate's group key establishes that
+    // its output has no metric name. Input provenance and all other operators are inconclusive.
+    assert_eq!(output_has_metric_name(&raw_input_at(0)), None);
     assert_eq!(
         output_has_metric_name(&input_on_at(0, Arc::clone(&shared))),
         None
@@ -2884,14 +2880,14 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
 
     // A selection answers the label set it read, except `timestamp(x)`, which rebuilds the labels
     // through `drop_metric_name`. Over an evaluated input the same selection follows it into `None`.
-    assert_eq!(output_has_metric_name(&selected()), Some(true));
+    assert_eq!(output_has_metric_name(&selected()), None);
     assert_eq!(
         output_has_metric_name(&instant_over(
             raw_input_at(0),
             InstantValue::InfoTimestamp,
             Arc::clone(&shared)
         )),
-        Some(true)
+        None
     );
     assert_eq!(
         output_has_metric_name(&instant_over(
@@ -2899,7 +2895,7 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
             InstantValue::Timestamp,
             Arc::clone(&shared)
         )),
-        Some(false)
+        None
     );
     assert_eq!(
         output_has_metric_name(&instant_over(
@@ -2918,7 +2914,7 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
             None,
             Arc::clone(&shared)
         )),
-        Some(false)
+        None
     );
     assert_eq!(
         output_has_metric_name(&window_with(
@@ -2927,18 +2923,18 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
             None,
             Arc::clone(&shared)
         )),
-        Some(true)
+        None
     );
 
     // An aggregate answers its group key: `by(ns)` and `without(...)` drop `__name__`, and
-    // `by("__name__")` keeps the name the input had.
+    // A Complete aggregate drops the name only when its group key excludes it.
     assert_eq!(
         output_has_metric_name(&sum_by(selected(), by(&["ns"]))),
         Some(false)
     );
     assert_eq!(
         output_has_metric_name(&sum_by(selected(), by(&["__name__"]))),
-        Some(true)
+        None
     );
     assert_eq!(
         output_has_metric_name(&sum_by(selected(), without(&["ns"]))),
@@ -2946,16 +2942,13 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
     );
 
     // A timestamp reports a position under the name dropped, and a merge writes no label of its own.
-    assert_eq!(
-        output_has_metric_name(&timestamp_of(selected())),
-        Some(false)
-    );
-    assert_eq!(output_has_metric_name(&merge_over(selected())), Some(true));
+    assert_eq!(output_has_metric_name(&timestamp_of(selected())), None);
+    assert_eq!(output_has_metric_name(&merge_over(selected())), None);
 
     // A map of `map_math`/`map_native_histogram` drops the name, while a label rewrite writes a label
     // of its own choosing - `__name__` included - and can clear it.
     let mapped = map_over(selected());
-    assert_eq!(output_has_metric_name(&mapped), Some(false));
+    assert_eq!(output_has_metric_name(&mapped), None);
     assert_eq!(
         output_has_metric_name(&map_rewriting_labels(selected())),
         None
@@ -2972,23 +2965,23 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
         },
         output: evaluated(Arc::new([]), Arc::clone(&shared)),
     };
-    assert_eq!(output_has_metric_name(&absent), Some(false));
-    assert_eq!(output_has_metric_name(&sorted(selected())), Some(true));
+    assert_eq!(output_has_metric_name(&absent), None);
+    assert_eq!(output_has_metric_name(&sorted(selected())), None);
 
     // A two-vector match drops the name for arithmetic and for a `bool` comparison, keeps the many
     // side's labels for a filtering comparison under the default modifiers, and drops them under
     // `on(host)`, which keeps only the labels it names.
     let two_vectors = |modifiers: BinaryMatching| binary_with(selected(), selected(), modifiers);
-    assert_eq!(output_has_metric_name(&two_vectors(add())), Some(false));
+    assert_eq!(output_has_metric_name(&two_vectors(add())), None);
     assert_eq!(
         output_has_metric_name(&two_vectors(matching(BinaryOp::Gt, false))),
-        Some(true)
+        None
     );
     assert_eq!(
         output_has_metric_name(&two_vectors(matching(BinaryOp::Gt, true))),
-        Some(false)
+        None
     );
-    assert_eq!(output_has_metric_name(&two_vectors(on_host())), Some(false));
+    assert_eq!(output_has_metric_name(&two_vectors(on_host())), None);
 
     // A broadcast answers the vector side's series, and the operation decides whether the labels
     // survive it.
@@ -2999,7 +2992,7 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
             constant(),
             matching(BinaryOp::Mul, false)
         )),
-        Some(false)
+        None
     );
     assert_eq!(
         output_has_metric_name(&binary_with(
@@ -3007,7 +3000,7 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
             constant(),
             matching(BinaryOp::Gt, false)
         )),
-        Some(true)
+        None
     );
 
     // A set operation keeps each side's samples, so it answers only when both sides agree.
@@ -3022,10 +3015,7 @@ fn the_metric_name_fact_follows_what_each_shape_does_to_a_label_set() {
         },
         output: evaluated(Arc::new([]), Arc::clone(&shared)),
     };
-    assert_eq!(
-        output_has_metric_name(&set(selected(), selected())),
-        Some(true)
-    );
+    assert_eq!(output_has_metric_name(&set(selected(), selected())), None);
     assert_eq!(
         output_has_metric_name(&set(selected(), sum_by(selected(), by(&["ns"])))),
         None
@@ -3066,8 +3056,8 @@ fn a_match_of_two_named_sides_needs_one_execution_whatever_the_routing_proved() 
             InstantValue::Sample,
             Arc::clone(&shared)
         )),
-        Some(true),
-        "a scan of one metric hands its series over under that metric's name"
+        None,
+        "producer name is not inferred outside Complete aggregates"
     );
     assert_eq!(
         output_has_metric_name(&instant_over(
@@ -3075,7 +3065,7 @@ fn a_match_of_two_named_sides_needs_one_execution_whatever_the_routing_proved() 
             InstantValue::Sample,
             Arc::clone(&shared)
         )),
-        Some(true)
+        None
     );
     assert!(
         needs_single_execution_in_co(

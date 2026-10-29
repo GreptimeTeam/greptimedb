@@ -89,8 +89,9 @@ use crate::grid_series::series_bytes;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, BoundAggregate, CanonicalOwner, CoPartitionedPair, Grouping, NativeExpr,
-    NativeNode, NativeProperties, NativeTree, NativeType, merges_are_placeable_in,
-    needs_single_execution_in_co, output_has_metric_name, reads_across_series,
+    NativeNode, NativeProperties, NativeTree, NativeType, match_is_co_partitioned,
+    merges_are_placeable_in, needs_single_execution_in_co, output_has_metric_name,
+    reads_across_series,
 };
 use crate::source::materialize_raw_labels;
 
@@ -299,6 +300,23 @@ impl FusedSeries {
             partial_fold: None,
             format,
         })
+    }
+
+    /// The output schema a [`FusedOutputFormat::SeriesFrame`] node over `tree` has to declare.
+    ///
+    /// This is the frame codec's own layout for the tree's evaluated root, which
+    /// [`Self::try_new_with_format`] checks a caller's schema against. A planner that builds a frame
+    /// producer asks here instead of re-deriving the layout, so the schema it passes in and the one
+    /// the constructor validates cannot disagree about it.
+    pub fn series_frame_schema(tree: &NativeTree) -> DataFusionResult<DFSchemaRef> {
+        let frame = series_frame_output_schema(evaluated_output(tree)?.as_ref())?;
+        Ok(Arc::new(
+            datafusion::common::DFSchema::try_from(frame).map_err(|error| {
+                DataFusionError::Plan(format!(
+                    "FusedSeries cannot declare its frame schema as a logical schema: {error}"
+                ))
+            })?,
+        ))
     }
 
     /// Creates a one-source node that exports partition-local state for a complete aggregate.
@@ -819,34 +837,24 @@ fn input_boundary(
 fn co_partitioned_pairs(
     inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)],
 ) -> Vec<CoPartitionedPair> {
-    let mut pairs = Vec::new();
-    for (left_index, (left, _, _)) in inputs.iter().enumerate() {
-        let Some(left) = left.downcast_ref::<SeriesRepartitionExec>() else {
-            continue;
-        };
-        for (right_index, (right, _, _)) in inputs.iter().enumerate().skip(left_index + 1) {
-            let Some(right) = right.downcast_ref::<SeriesRepartitionExec>() else {
-                continue;
-            };
-            // Two routings are one routing only when they split into the same number of outputs. A
-            // partner routed into three outputs is not in the partition its two-output counterpart
-            // is, so its half of the match would be missing here while it exists elsewhere, and the
-            // pair is not the fact the match needs.
-            if left.outputs() != right.outputs() {
-                continue;
-            }
-            pairs.push(CoPartitionedPair {
-                left: left_index,
-                right: right_index,
-                // A pair whose producer half fails proves nothing: [`match_is_co_partitioned`]
-                // answers `pair.name_free`, so stating the pair with the failing half named is what
-                // makes one named side break it. Dropping the pair instead would hide which
-                // conjunct decided the fallback.
-                name_free: producer_is_name_free(left) && producer_is_name_free(right),
-            });
-        }
+    if inputs.len() != 2 {
+        return Vec::new();
     }
-    pairs
+    let Some(left) = inputs[0].0.downcast_ref::<SeriesRepartitionExec>() else {
+        return Vec::new();
+    };
+    let Some(right) = inputs[1].0.downcast_ref::<SeriesRepartitionExec>() else {
+        return Vec::new();
+    };
+    // Two routings are one routing only when they split into the same number of outputs.
+    if left.outputs() != right.outputs() {
+        return Vec::new();
+    }
+    vec![CoPartitionedPair {
+        left: 0,
+        right: 1,
+        name_free: producer_is_name_free(left) && producer_is_name_free(right),
+    }]
 }
 
 /// Whether `repartition`'s producer answers series that carry no metric name.
@@ -1428,10 +1436,37 @@ impl ExecutionPlan for FusedSeriesExec {
             .zip(&self.inputs)
             .map(|(child, (_, label_source, ordering))| (child, label_source.clone(), *ordering))
             .collect();
-        // A replaced child can take the proof away: a canonical repartition swapped for a plain
-        // multi-partition child hands the pieces of a label set to different executions again. The
-        // rebuilt node therefore asks the placement question over the children it was handed, and
-        // never inherits the answer the old ones gave.
+        // Freeze child placement only when this node's parallel execution depends on the
+        // two-child co-partitioned vector-match proof. Other trees (notably Complete aggregates)
+        // are rebuilt against their new positive partition count and validated normally by build.
+        let relies_on_match_proof =
+            |inputs: &[(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)]| {
+                let NativeExpr::Binary {
+                    left,
+                    right,
+                    matching,
+                } = &self.tree.root().expr
+                else {
+                    return false;
+                };
+                match_is_co_partitioned(left, right, matching, &co_partitioned_pairs(inputs))
+            };
+        if relies_on_match_proof(&self.inputs) {
+            let same_partition_contract =
+                children
+                    .iter()
+                    .zip(&self.inputs)
+                    .all(|((child, _, _), (original, _, _))| {
+                        child.properties().partitioning.partition_count()
+                            == original.properties().partitioning.partition_count()
+                    });
+            if !same_partition_contract || !relies_on_match_proof(&children) {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries replacement children violate the original partition/routing contract"
+                        .into(),
+                ));
+            }
+        }
         Self::reject_unplaceable_merges(
             Self::requires_single_execution(&children, &self.tree),
             &children,

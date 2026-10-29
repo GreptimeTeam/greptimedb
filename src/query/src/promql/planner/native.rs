@@ -46,11 +46,14 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
+use datatypes::series::time::EvalGrid;
+use promql::extension_plan::{
+    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, RawSeriesSource,
+};
 use promql::native::canonicalize::insert_native_merge_inside_current_fused;
 use promql::native::plan::{
-    NativeExpr, NativeNode, NativeProperties, NativeTree, merges_are_placeable_in,
-    needs_single_execution, reads_across_series,
+    AggregateStage, BoundInput, Grouping, NativeExpr, NativeNode, NativeProperties, NativeTree,
+    merges_are_placeable_in, needs_single_execution, output_has_metric_name, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::Matchers;
@@ -561,6 +564,10 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags)| tags.clone())
             .collect::<Vec<_>>();
+        let source_metrics = prepared
+            .iter()
+            .map(|(_, _, metric, _, _)| metric.clone())
+            .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags)| {
@@ -583,6 +590,26 @@ impl PromPlanner {
             })
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
+        // A fold on each side of a default one-to-one match is planned as three nodes rather than
+        // one, and it is decided here: before the placement below, because that question is asked of
+        // a tree that folds across series on both sides, and this tree answers it with "one
+        // execution" (a `Complete` aggregate requires one unconditionally). The one execution is
+        // exactly what the split takes off the match: each side is given a node of its own to fold
+        // in, and the match above them reads two evaluated inputs, which is the shape
+        // `match_is_co_partitioned` proves from the physical children. The split is offered the
+        // children this route already prepared, so each producer reads its scan exactly as the
+        // single-selector route would have it read.
+        if let Some(plan) = plan_dual_aggregate_match(
+            prom_expr,
+            &compiled.tree,
+            &children,
+            &source_metrics,
+            &source_tags,
+            &grid,
+            &time,
+        )? {
+            return Ok(Some((plan, single_input_context)));
+        }
         // Where the tree is placed is decided on the tree exactly as the compiler produced it, and
         // before anything is inserted into it. A merge reads across series, so a decision taken
         // afterwards would answer for the rewrite rather than for the query: the prefix of `sum(x)`
@@ -874,9 +901,15 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 /// They follow Prometheus' result labels: a one-to-one match keeps the left side's labels, narrowed
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a constant or a function
-/// of each value keeps its operand's. `None` for a node whose labels this walk does not derive - an
-/// aggregate's groups, or a whole-vector operation - so a tree holding one is declined rather than
-/// given its input's labels.
+/// of each value keeps its operand's; an aggregate reports the group key it re-labels its groups to.
+/// `None` for a node whose labels this walk does not derive - a whole-vector operation, whose kernel
+/// writes labels this walk does not read off the tree - so a tree holding one is declined rather
+/// than given its input's labels.
+///
+/// The metric name is not one of the columns this answers for: on this route a scan's tag columns
+/// never name it, and the name a series carries travels with the binding
+/// ([`FusedSeriesBinding::metric_name`]) rather than in a column, so an operator that drops or keeps
+/// `__name__` changes no column here.
 fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -890,7 +923,22 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
         // did not read are not a label set the node invents either: what it emits spans fewer label
         // sets than it read, never more.
         NativeExpr::Merge { input } => fused_output_tags(input, source_tags),
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } => None,
+        // An aggregate re-labels every group's output series to its group key, so the labels it
+        // reports are the ones that key keeps: `by` keeps the names it lists that the input carries,
+        // `without` keeps the input's other labels, and no modifier is a `by` with an empty list -
+        // one group and no label at all. [`group_key_tags`] is that derivation.
+        //
+        // Taken from commit `8ee7c649ec0` of the `f-wiring` worktree, where the same walk answered
+        // this question for the same reason. The `Vector` arm that commit added beside it is
+        // deliberately not here: a whole-vector kernel's labels are that shape's problem.
+        NativeExpr::Aggregate { input, op } => {
+            let input_tags = fused_output_tags(input, source_tags)?;
+            // A complete aggregate keeps its input's value fields, and those are the names its group
+            // key must not name; see [`group_key_tags`].
+            let fields = node.output.samples()?;
+            group_key_tags(input_tags, &op.group, &fields.fields, None)
+        }
+        NativeExpr::Vector { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -960,6 +1008,381 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
             Some(tags)
         }
     }
+}
+
+/// The labels `group` keeps out of `tags`: an aggregate's group key.
+///
+/// `fields` are the value fields of the node the grouping applies to, and `written` is the label the
+/// operator writes itself before it groups (`count_values`'), which is the one name its `by` list may
+/// share with a value field.
+///
+/// `None` when the grouping names a value field. A field varies between the samples of one series,
+/// so it is not a label a series carries: grouping by it needs a per-point label adapter, which the
+/// kernels refuse (`aggregate::Grouping::validate`) and the existing plan answers instead. The names
+/// alone cannot tell such a group from one over a label no series carries - the first is not
+/// executable at all, the second keeps nothing - so this declines rather than answer for both.
+///
+/// Taken from commit `8ee7c649ec0` of the `f-wiring` worktree, together with the reasoning: a value
+/// field a group names is the one case the names cannot decide, so it is declined rather than
+/// silently projected away.
+fn group_key_tags(
+    tags: Vec<String>,
+    group: &Grouping,
+    fields: &[FieldSpec],
+    written: Option<&str>,
+) -> Option<Vec<String>> {
+    let named = |names: &[Arc<str>]| -> Vec<String> {
+        tags.iter()
+            .filter(|tag| names.iter().any(|name| name.as_ref() == tag.as_str()))
+            .cloned()
+            .collect()
+    };
+    match group {
+        Grouping::By(names) => {
+            let names_a_field = names.iter().any(|name| {
+                written.is_none_or(|written| written != name.as_ref())
+                    && fields.iter().any(|field| field.name == *name)
+            });
+            (!names_a_field).then(|| named(names))
+        }
+        // `without` keeps every label the input carries other than the ones it names. Its own doc
+        // also drops `__name__`, which costs nothing here: a name is not a scan tag column and never
+        // reaches this walk, so nothing has to remove it.
+        Grouping::Without(names) => Some(
+            tags.into_iter()
+                .filter(|tag| !names.iter().any(|name| name.as_ref() == tag.as_str()))
+                .collect(),
+        ),
+    }
+}
+
+/// The two `Complete` aggregate operands of a default one-to-one match, each with the source it
+/// reads, or `None` when `root` is another shape.
+///
+/// `sum by(ns)(m1) / sum by(ns)(m2)` compiles to one tree - a [`NativeExpr::Binary`] over one
+/// aggregate per side - and that tree answers two questions badly. It is one execution, because
+/// [`needs_single_execution_in_co`](promql::native::plan::needs_single_execution_in_co) answers `true`
+/// for a `Complete` aggregate unconditionally, so no parallelism survives in it. And the match in it
+/// cannot be proven co-partitioned: [`match_is_co_partitioned`] reads its operands, and an aggregate
+/// is not the routed input it would have to be - correctly, because a fold invents the key identity
+/// the routing never saw.
+///
+/// Both facts are about the tree as compiled and both stop applying once the match is lifted off the
+/// folds: the match then reads two evaluated inputs, and each fold reads one metric whole inside a
+/// producer of its own. What this predicate checks is that the lift is available - the match is the
+/// default one, each side is exactly one fold, the two folds read different sources, and each fold's
+/// output carries no metric name.
+///
+/// Every conjunct is required:
+///
+/// 1. the match is the default one - [`MatchingLabels::Ignoring`] with no label, whose key is every
+///    label but `__name__` - and one-to-one, which is what `match_is_co_partitioned` needs the tree
+///    above the producers to be (§4 of its documentation);
+/// 2. each operand is one [`AggregateStage::Complete`] fold;
+/// 3. each fold's subtree reads exactly one source, and the two are different: two producers over
+///    the same source would be two scans of it, and the co-partitioned proof is about two routings
+///    of two different metrics (`CoPartitionedPair` names two sources);
+/// 4. each fold's output carries no metric name ([`output_has_metric_name`] is `Some(false)`): that
+///    is what makes the canonical key the routing groups by and the match key one key. `None` -
+///    "not proved here" - is not accepted, and neither is `Some(true)`, which is `by(__name__)`;
+/// 5. the groups can be named as output columns ([`fused_output_tags`] answers `Some`), because the
+///    node above the producers declares them.
+fn dual_aggregate_match<'a>(
+    root: &'a NativeNode,
+    source_tags: &[Vec<String>],
+) -> Option<((&'a NativeNode, usize), (&'a NativeNode, usize))> {
+    let NativeExpr::Binary {
+        left,
+        right,
+        matching,
+    } = &root.expr
+    else {
+        return None;
+    };
+    if matching.cardinality != Cardinality::OneToOne {
+        return None;
+    }
+    if !matches!(&matching.labels, MatchingLabels::Ignoring(names) if names.is_empty()) {
+        return None;
+    }
+    let complete_fold = |node: &NativeNode| {
+        matches!(
+            &node.expr,
+            NativeExpr::Aggregate { op, .. } if op.stage == AggregateStage::Complete
+        )
+    };
+    if !complete_fold(left) || !complete_fold(right) {
+        return None;
+    }
+    let left_source = only_source(left)?;
+    let right_source = only_source(right)?;
+    if left_source == right_source {
+        return None;
+    }
+    if output_has_metric_name(left) != Some(false) || output_has_metric_name(right) != Some(false) {
+        return None;
+    }
+    fused_output_tags(root, source_tags)?;
+    Some(((left, left_source), (right, right_source)))
+}
+
+/// The one source the subtree below `node` reads, or `None` when it reads several or none.
+fn only_source(node: &NativeNode) -> Option<usize> {
+    fn collect(node: &NativeNode, sources: &mut Vec<usize>) {
+        match &node.expr {
+            NativeExpr::Input(input) => sources.push(input.source_index),
+            NativeExpr::Scalar(_) => {}
+            NativeExpr::Instant { input, .. }
+            | NativeExpr::Merge { input }
+            | NativeExpr::Window { input, .. }
+            | NativeExpr::Map { input, .. }
+            | NativeExpr::Timestamp { input }
+            | NativeExpr::Aggregate { input, .. }
+            | NativeExpr::Vector { input, .. } => collect(input, sources),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
+                collect(left, sources);
+                collect(right, sources);
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    collect(node, &mut sources);
+    let (&first, rest) = sources.split_first()?;
+    rest.iter().all(|source| *source == first).then_some(first)
+}
+
+/// `node` with every input leaf bound to `source`.
+///
+/// A producer tree is a subtree of the statement's compiled tree, whose leaves index the statement's
+/// selectors. The producer has one child, so its leaf has to name child 0: that index is how the node
+/// files the frames its child hands it, and
+/// [`collect_source_schemas`](promql::extension_plan) requires the indexes to be dense from zero.
+fn rebind_to_source(node: &NativeNode, source: usize) -> NativeNode {
+    let single = |input: &NativeNode| Box::new(rebind_to_source(input, source));
+    let expr = match &node.expr {
+        NativeExpr::Input(input) => NativeExpr::Input(BoundInput {
+            source_index: source,
+            output: input.output.clone(),
+            ordering: input.ordering,
+        }),
+        NativeExpr::Scalar(scalar) => NativeExpr::Scalar(scalar.clone()),
+        NativeExpr::Instant { input, op } => NativeExpr::Instant {
+            input: single(input),
+            op: op.clone(),
+        },
+        NativeExpr::Merge { input } => NativeExpr::Merge {
+            input: single(input),
+        },
+        NativeExpr::Window { input, op } => NativeExpr::Window {
+            input: single(input),
+            op: op.clone(),
+        },
+        NativeExpr::Map { input, op } => NativeExpr::Map {
+            input: single(input),
+            op: op.clone(),
+        },
+        NativeExpr::Timestamp { input } => NativeExpr::Timestamp {
+            input: single(input),
+        },
+        NativeExpr::Aggregate { input, op } => NativeExpr::Aggregate {
+            input: single(input),
+            op: op.clone(),
+        },
+        NativeExpr::Vector { input, op } => NativeExpr::Vector {
+            input: single(input),
+            op: op.clone(),
+        },
+        NativeExpr::Binary {
+            left,
+            right,
+            matching,
+        } => NativeExpr::Binary {
+            left: single(left),
+            right: single(right),
+            matching: matching.clone(),
+        },
+        NativeExpr::Set { left, right, op } => NativeExpr::Set {
+            left: single(left),
+            right: single(right),
+            op: op.clone(),
+        },
+        NativeExpr::Info {
+            base,
+            info,
+            selector,
+        } => NativeExpr::Info {
+            base: single(base),
+            info: single(info),
+            selector: selector.clone(),
+        },
+    };
+    NativeNode {
+        expr,
+        output: node.output.clone(),
+    }
+}
+
+/// Plans a dual-aggregate match as three fused nodes, or `None` when the tree is another shape.
+///
+/// `sum by(ns)(m1) / sum by(ns)(m2)` becomes
+///
+/// ```text
+/// B  = FusedSeries { tree: Binary { Input(0), Input(1) }, PlainRows } over [A1, A2]
+/// A1 = FusedSeries { tree: sum by(ns)(Input 0), SeriesFrame } over the scan of m1
+/// A2 = FusedSeries { tree: sum by(ns)(Input 0), SeriesFrame } over the scan of m2
+/// ```
+///
+/// `[dual_aggregate_match]` decides whether the shape is one this can be built for. Each producer is
+/// a whole fold over one metric, so it runs in one execution - which is what a `Complete` aggregate
+/// asks for unconditionally - and it hands its answer over as an evaluated series frame. The match
+/// above them reads those two frames as its own two inputs, which is why it is the one node whose
+/// placement the physical layer can prove: two name-free producers of a default one-to-one match are
+/// [`CoPartitionedPair`](promql::native::plan::CoPartitionedPair)s, and the match above them then
+/// runs once per output of the routing the physical layer inserts between them.
+///
+/// Nothing about this shape is decided by rewriting the tree: three nodes are built, and the existing
+/// per-node reasoning applies to each of them unchanged.
+fn plan_dual_aggregate_match(
+    prom_expr: &PromExpr,
+    tree: &NativeTree,
+    children: &[LogicalPlan],
+    source_metrics: &[Option<Arc<str>>],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+) -> Result<Option<LogicalPlan>> {
+    let Some(((left_operand, left_source), (right_operand, right_source))) =
+        dual_aggregate_match(tree.root(), source_tags)
+    else {
+        return Ok(None);
+    };
+    // Each producer is named after its own half of the query, so `EXPLAIN` says which fold it runs.
+    let (left_promql, right_promql) = match prom_expr {
+        PromExpr::Binary(binary) => (binary.lhs.to_string(), binary.rhs.to_string()),
+        // A statement whose written form is not the match itself - it is parenthesised - is named by
+        // the text it was written as; the tree below each node still says what it computes.
+        _ => (prom_expr.to_string(), prom_expr.to_string()),
+    };
+    let mut producers = Vec::with_capacity(2);
+    for (operand, source, side_promql) in [
+        (left_operand, left_source, left_promql),
+        (right_operand, right_source, right_promql),
+    ] {
+        let (Some(scan), Some(metric), Some(tags)) = (
+            children.get(source),
+            source_metrics.get(source),
+            source_tags.get(source),
+        ) else {
+            return Err(DataFusionError::Internal(format!(
+                "the matched operand reads source {source}, which the planner did not prepare"
+            )))
+            .context(DataFusionPlanningSnafu);
+        };
+        // The fold alone, over the one source this producer is given.
+        let tree =
+            NativeTree::try_new(rebind_to_source(operand, 0)).context(DataFusionPlanningSnafu)?;
+        // The producer's root is a `Complete` aggregate, so the execution the physical layer
+        // confirms for it is a single one (`needs_single_execution_in_co` is unconditional about that
+        // stage): it reads every input partition at once. That is the placement whose tree the
+        // insertion pass may rewrite, so it runs here - and it inserts nothing for the shapes this
+        // split admits, because a fold reads its input one contribution at a time
+        // (`canonicalize`'s per-consumer table).
+        let tree =
+            insert_native_merge_inside_current_fused(&tree, &[NativeProperties::source_pieces()])
+                .context(DataFusionPlanningSnafu)?;
+        let output_schema =
+            FusedSeries::series_frame_schema(&tree).context(DataFusionPlanningSnafu)?;
+        let node = FusedSeries::try_new_with_format(
+            Arc::from(side_promql),
+            tree,
+            FusedSeriesBinding {
+                grid: Arc::clone(grid),
+                time_index: time_index.to_string(),
+                tags: tags.clone(),
+                metric_name: metric.clone(),
+            },
+            vec![scan.clone()],
+            output_schema,
+            FusedOutputFormat::SeriesFrame,
+        )
+        .context(DataFusionPlanningSnafu)?;
+        producers.push(LogicalPlan::Extension(Extension {
+            node: Arc::new(node),
+        }));
+    }
+    // The match over the two producers. Each operand is a leaf over *this* node's children, so its
+    // index numbers them and not the statement's selectors; both read evaluated frames, which is what
+    // a producer's frame output is and what this node's input nodes are bound to.
+    let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
+        return Err(DataFusionError::Internal(
+            "a matched dual-aggregate tree is not a binary operation".into(),
+        ))
+        .context(DataFusionPlanningSnafu);
+    };
+    let evaluated_leaf = |source_index: usize, side: &NativeNode| NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            source_index,
+            output: side.output.clone(),
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: side.output.clone(),
+    };
+    let outer = NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(evaluated_leaf(0, left_operand)),
+            right: Box::new(evaluated_leaf(1, right_operand)),
+            matching: matching.clone(),
+        },
+        output: tree.root().output.clone(),
+    })
+    .context(DataFusionPlanningSnafu)?;
+    let root_fields = outer
+        .root()
+        .output
+        .samples()
+        .ok_or_else(|| DataFusionError::Internal("native tree root has no samples".into()))
+        .context(DataFusionPlanningSnafu)?
+        .fields
+        .iter()
+        .map(|field| field.name.to_string())
+        .collect::<Vec<_>>();
+    let Some(output_tags) = fused_output_tags(tree.root(), source_tags) else {
+        return Ok(None);
+    };
+    let mut column_names = std::collections::HashSet::new();
+    if !std::iter::once(time_index)
+        .chain(root_fields.iter().map(String::as_str))
+        .chain(output_tags.iter().map(String::as_str))
+        .all(|name| column_names.insert(name))
+    {
+        return Ok(None);
+    }
+    let output_schema = fused_output_schema(&root_fields, &output_tags, time_index)?;
+    let node = FusedSeries::try_new(
+        Arc::from(prom_expr.to_string()),
+        outer,
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: output_tags,
+            // This node reads two producers rather than a scan, so it binds no metric name: each
+            // name was dropped inside the producer that read the metric it belonged to.
+            metric_name: None,
+        },
+        producers,
+        output_schema,
+    )
+    .context(DataFusionPlanningSnafu)?;
+    Ok(Some(LogicalPlan::Extension(Extension {
+        node: Arc::new(node),
+    })))
 }
 
 /// How the route places a tree on the scan partitions, decided on the tree as it was compiled.
@@ -1237,15 +1660,17 @@ mod tests {
     use promql::native::canonicalize::insert_native_merge_inside_current_fused;
     use promql::native::execute::{NativeExecutionState, NativeExecutor};
     use promql::native::plan::{
-        NativeExpr, NativeNode, NativeProperties, NativeTree, merges_are_placeable_in,
-        needs_single_execution, reads_across_series,
+        CoPartitionedPair, NativeExpr, NativeNode, NativeProperties, NativeTree,
+        match_is_co_partitioned, merges_are_placeable_in, needs_single_execution,
+        needs_single_execution_in_co, output_has_metric_name, reads_across_series,
     };
     use session::context::QueryContextBuilder;
 
     use super::{
         NATIVE_PROMQL_EXTENSION_KEY, NativePlacement, admitted_selector, admitted_single_selector,
-        collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
-        native_promql_requested, scan_time_filter,
+        collect_selectors, dual_aggregate_match, fused_output_tags, hybrid_binary_admitted,
+        independent_scan_pair, native_promql_requested, only_source, rebind_to_source,
+        scan_time_filter,
     };
 
     /// The raw layout [`compiled_test_tree`] binds every selector to: one float field, no grid.
@@ -1257,6 +1682,12 @@ mod tests {
     }
 
     fn compiled_test_tree(query: &str) -> NativeTree {
+        compiled_test_tree_with_fields(query, &["v0"])
+    }
+
+    /// `query`'s tree with every selector bound to a raw schema of `fields`, so a test can say what
+    /// the input's value fields are named.
+    fn compiled_test_tree_with_fields(query: &str, fields: &[&str]) -> NativeTree {
         let statement = promql_parser::parser::EvalStmt {
             expr: promql_parser::parser::parse(query).unwrap(),
             start: UNIX_EPOCH,
@@ -1264,7 +1695,16 @@ mod tests {
             interval: Duration::from_secs(5),
             lookback_delta: Duration::from_secs(5),
         };
-        let schema = raw_test_schema();
+        let schema = Arc::new(SeriesSchema {
+            fields: fields
+                .iter()
+                .map(|name| FieldSpec {
+                    name: Arc::from(*name),
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            eval_grid: None,
+        });
         crate::promql::native_compile::compile_selectors(
             &statement,
             &|_| Ok(Arc::clone(&schema)),
@@ -1484,9 +1924,200 @@ mod tests {
                 "{query}"
             );
         }
-        // An aggregate's labels are its groups, which this walk does not derive.
+        // An aggregate's labels are its group key, which the walk derives from the names the
+        // grouping keeps: `by(host)` names the one label it keeps out of these sources' tags.
         let aggregate = compiled_test_tree("sum by (host) (x)");
-        assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
+        assert_eq!(
+            Some(vec!["host".to_string()]),
+            fused_output_tags(aggregate.root(), &sources[..1])
+        );
+    }
+
+    /// [`fused_output_tags`] names an aggregate's group key, and declines the two groupings a list
+    /// of label *names* cannot describe.
+    ///
+    /// The `by` and `without` answers are the labels the operator re-labels its groups to, read off
+    /// the input's own tags: a name the input does not carry takes no column, because Prometheus
+    /// builds a group key out of the labels a series has. The decline is the value-field case: `le`
+    /// is a field of the input here, and a field varies between the samples of one series, so it is
+    /// not a label any series carries and the kernels refuse the grouping
+    /// (`aggregate::Grouping::validate`). The names alone cannot tell that group from one over a
+    /// label no series carries - the second is executable and keeps nothing - so it declines.
+    #[test]
+    fn aggregate_output_tags_are_the_group_key() {
+        let sources = [vec![
+            "host".to_string(),
+            "instance".to_string(),
+            "zone".to_string(),
+        ]];
+        for (query, expected) in [
+            ("sum by (host) (m1)", vec!["host"]),
+            ("sum by (zone, host) (m1)", vec!["host", "zone"]),
+            ("sum by (missing) (m1)", vec![]),
+            ("sum(m1)", vec![]),
+            // `without` keeps every label the input carries other than the ones it names.
+            ("sum without (instance) (m1)", vec!["host", "zone"]),
+            ("sum without (instance, host) (m1)", vec!["zone"]),
+        ] {
+            assert_eq!(
+                Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
+                fused_output_tags(compiled_test_tree(query).root(), &sources),
+                "{query}"
+            );
+        }
+        // A grouping that names a value field of its input is nothing a column list can be: the
+        // field varies within one series, so `by(le)` is not a label set.
+        let bounded = compiled_test_tree_with_fields("sum by (le) (m1)", &["le"]);
+        assert_eq!(None, fused_output_tags(bounded.root(), &sources));
+        // ... while the same grouping over an input whose fields are named otherwise still names
+        // the label, which is what keeps the guard about the field rather than about the name.
+        let plain = compiled_test_tree_with_fields("sum by (le) (m1)", &["v0"]);
+        assert_eq!(
+            Some(vec!["le".to_string()]),
+            fused_output_tags(plain.root(), &[vec!["le".to_string()]])
+        );
+    }
+
+    /// The predicate that decides a dual-aggregate match, on the queries it is written for.
+    ///
+    /// Every refusal below is one conjunct of [`dual_aggregate_match`]: the match has to be the
+    /// default one and one-to-one, each side exactly one `Complete` fold over exactly one source, and
+    /// the two sources different, and each fold's output name-free because that is what makes the
+    /// canonical key the routing groups by and the match key one key.
+    #[test]
+    fn a_dual_aggregate_match_is_recognised_by_its_shape() {
+        let two_sources = || vec![vec!["ns".to_string()], vec!["ns".to_string()]];
+        let accepted = compiled_test_tree("sum by (ns) (m1) / sum by (ns) (m2)");
+        let ((_, left_source), (_, right_source)) =
+            dual_aggregate_match(accepted.root(), &two_sources())
+                .expect("the default one-to-one match of two folds is the shape");
+        assert_eq!((0, 1), (left_source, right_source));
+        // The same shape under either `without` grouping, and under no grouping at all.
+        for query in [
+            "sum without (instance) (m1) / sum without (instance) (m2)",
+            "sum(m1) / sum(m2)",
+        ] {
+            assert!(
+                dual_aggregate_match(compiled_test_tree(query).root(), &two_sources()).is_some(),
+                "{query}"
+            );
+        }
+
+        for (query, reason) in [
+            // Both sides keep their metric name, so the canonical key and the match key differ.
+            ("m1 / m2", "the operands are not folds"),
+            (
+                "sum by (ns) (m1) / on(host) sum by (ns) (m2)",
+                "the match is not the default one",
+            ),
+            (
+                "sum by (ns) (m1) / ignoring(zone) sum by (ns) (m2)",
+                "the match names labels to ignore",
+            ),
+            (
+                "sum by (ns) (m1) / on(host) group_left sum by (ns) (m2)",
+                "the match is many-to-one",
+            ),
+            (
+                "sum by (__name__) (m1) / sum by (__name__) (m2)",
+                "the folds keep the metric name",
+            ),
+            ("sum by (ns) (m1) / m2", "the right operand is not a fold"),
+            // One side reads two sources, so there is no single producer to give it.
+            (
+                "sum by (ns) (m1 + m2) / sum by (ns) (m3)",
+                "the left fold reads two sources",
+            ),
+            // `v0` is a value field of the input, so its groups cannot be named as columns.
+            (
+                "sum by (v0) (m1) / sum by (v0) (m2)",
+                "the grouping names a value field",
+            ),
+        ] {
+            assert!(
+                dual_aggregate_match(compiled_test_tree(query).root(), &two_sources()).is_none(),
+                "`{query}`: {reason}"
+            );
+        }
+    }
+
+    /// The two facts the split rests on, on the trees it builds: the folds are name-free, and the
+    /// match above the two producers is co-partitioned only because they are.
+    #[test]
+    fn a_split_match_is_co_partitioned_by_its_producers() {
+        let tree = compiled_test_tree("sum by (ns) (m1) / sum by (ns) (m2)");
+        let ((left, left_source), (right, right_source)) =
+            dual_aggregate_match(tree.root(), &[vec!["ns".into()], vec!["ns".into()]])
+                .expect("the default one-to-one match of two folds is the shape");
+        assert_eq!((0, 1), (left_source, right_source));
+        // `output_has_metric_name` is the fact the physical layer reads off each producer in turn.
+        assert_eq!(Some(false), output_has_metric_name(left));
+        assert_eq!(Some(false), output_has_metric_name(right));
+        // `by(__name__)` is the one grouping that keeps the name, and it is exactly the answer the
+        // split refuses: `Some(true)` proves the canonical key is not the match key.
+        let named = compiled_test_tree("sum by (__name__) (m1)");
+        assert_eq!(None, output_has_metric_name(named.root()));
+
+        // The producers' trees name child 0, and the match above them reads them as its children 0
+        // and 1: the indexes are dense from zero, which is what `collect_source_schemas` requires.
+        let producer =
+            NativeTree::try_new(rebind_to_source(left, 0)).expect("the fold alone is legal");
+        assert_eq!(Some(0), only_source(producer.root()));
+        assert_eq!(Some(0), only_source(producer.root()));
+
+        // What the match above the producers needs of its execution, asked with the pair the
+        // physical layer proves: same outputs on both routings, both producers name-free.
+        let evaluated_leaf = |source_index: usize, side: &NativeNode| NativeNode {
+            expr: NativeExpr::Input(promql::native::plan::BoundInput {
+                source_index,
+                output: side.output.clone(),
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: side.output.clone(),
+        };
+        let NativeExpr::Binary { matching, .. } = &tree.root().expr else {
+            unreachable!("the shape is a binary operation")
+        };
+        let outer = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Binary {
+                left: Box::new(evaluated_leaf(0, left)),
+                right: Box::new(evaluated_leaf(1, right)),
+                matching: matching.clone(),
+            },
+            output: tree.root().output.clone(),
+        })
+        .expect("a match over two evaluated inputs is legal");
+        let boundary = vec![source_pieces(), source_pieces()];
+        let pair = |name_free| {
+            vec![CoPartitionedPair {
+                left: 0,
+                right: 1,
+                name_free,
+            }]
+        };
+        let NativeExpr::Binary {
+            left: outer_left,
+            right: outer_right,
+            matching: outer_matching,
+        } = &outer.root().expr
+        else {
+            unreachable!("the split tree is a binary operation")
+        };
+        assert!(
+            match_is_co_partitioned(outer_left, outer_right, outer_matching, &pair(true)),
+            "two name-free producers of the default match are one pair"
+        );
+        assert!(
+            !needs_single_execution_in_co(outer.root(), &boundary, &pair(true)),
+            "a co-partitioned match of two name-free producers runs per partition"
+        );
+        assert!(
+            needs_single_execution_in_co(outer.root(), &boundary, &pair(false)),
+            "one named producer is enough to make the match one execution"
+        );
+        // And with no boundary facts at all it is one execution, which is why the split has to
+        // reach the physical layer with the pair rather than decide the placement itself.
+        assert!(needs_single_execution(outer.root()));
     }
 
     /// What a caller knows about a fused input: this execution holds one scan partition's pieces of
@@ -1555,8 +2186,9 @@ mod tests {
                     return "per-partition";
                 }
                 // A single execution is handed to the fused node like any other tree, so the labels
-                // that node declares have to be derivable for its root. Nothing has taught the walk
-                // to name them for a whole-vector root, so a tree rooted at one is declined there.
+                // that node declares have to be derivable for its root. An aggregate's group key is
+                // named ([`fused_output_tags`]); a whole-vector root's labels are not, so a tree
+                // rooted at one is declined there.
                 match fused_output_tags(handed.root(), sources) {
                     Some(_) => "single execution",
                     None => "legacy plan",
@@ -1713,13 +2345,17 @@ mod tests {
     /// aggregate folds a group point by point, and the root is not canonicalized by default. The
     /// tree is therefore handed over exactly as compiled.
     ///
-    /// The route declines it anyway, and for a reason the pass cannot reach: the labels the fused
-    /// node must declare are derived by [`fused_output_tags`], which names none for an aggregate or
-    /// a vector root. So even a tree carrying a merge would not be built, which is why no plan the
-    /// route produces today carries one.
+    /// What the route then answers splits by root: an aggregate's group key is named by
+    /// [`fused_output_tags`] and the placement plans it, while a whole-vector root names no labels
+    /// this walk derives and keeps the existing plan.
     #[test]
-    fn a_single_execution_tree_gains_no_merge_and_the_route_declines_it() {
-        for query in ["topk(1, x)", "sort(x)", "absent(x)", "quantile(0.9, x)"] {
+    fn a_single_execution_tree_gains_no_merge_and_the_route_answers_it_by_root() {
+        for (query, answer) in [
+            ("topk(1, x)", "legacy plan"),
+            ("sort(x)", "legacy plan"),
+            ("absent(x)", "legacy plan"),
+            ("quantile(0.9, x)", "single execution"),
+        ] {
             let compiled = compiled_test_tree(query);
             assert_eq!(
                 Some(NativePlacement::SingleExecution),
@@ -1754,17 +2390,15 @@ mod tests {
                 fused_output_tags(routed.root(), &one_source_tags()),
                 "`{query}`: the pass changed the labels the node declares"
             );
-            // And the route still leaves it to the existing planner, because the labels a root of
-            // this shape reports are not the ones the fused node can declare.
+            // The route answers the same thing for the compiled tree and for the one the pass left
+            // alone, because the placement and the labels are the same questions they were.
             assert_eq!(
-                "legacy plan",
+                answer,
                 route_answer(&compiled, 1, &one_source_tags()),
                 "`{query}`"
             );
-            // The insertion itself changes nothing about the route's answer: the placement and the
-            // labels are the same questions they were for the compiled tree.
             assert_eq!(
-                "legacy plan",
+                answer,
                 route_answer(&routed, 1, &one_source_tags()),
                 "`{query}`: the insertion changed the route's answer:\n{routed}"
             );

@@ -5115,6 +5115,24 @@ fn abs_over_evaluated_input_tree() -> NativeTree {
     .expect("a map over an evaluated input is a legal tree")
 }
 
+/// A Complete aggregate over evaluated input, whose grouping proves __name__ is absent.
+fn complete_aggregate_over_evaluated_input_tree() -> NativeTree {
+    let input = evaluated_input();
+    let output = input.output.samples().unwrap().clone();
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Aggregate {
+            input: Box::new(input),
+            op: BoundAggregate {
+                kind: AggregateKind::Sum,
+                group: Grouping::By(Arc::from([Arc::from(HOST)])),
+                stage: AggregateStage::Complete,
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("a Complete aggregate over evaluated input is legal")
+}
+
 /// `abs(rate(x[5m]))`: the raw-fed tree that answers what [`abs_over_evaluated_input_tree`] answers
 /// once its child has decided `rate(x[5m])`.
 fn abs_rate_tree() -> NativeTree {
@@ -5789,6 +5807,55 @@ fn a_whole_vector_tree_over_a_repartitioning_child_reports_one_execution() {
             "a whole-vector tree reads every partition in one execution"
         );
     }
+}
+
+#[tokio::test]
+async fn complete_aggregate_rebuild_accepts_a_different_positive_child_partition_count() {
+    let tree = evaluated_complete_aggregate_tree();
+    let contribution = |value| {
+        evaluated_chunk_with(
+            &metric(&[(HOST, "web-1")], Some(METRIC)),
+            0,
+            vec![Some(value); GRID_LEN as usize],
+            true,
+        )
+    };
+    let exec = plan_of(
+        evaluated_node(&tree),
+        ScriptedEvaluated::plan(vec![vec![contribution(1.0)], vec![contribution(2.0)]]),
+    )
+    .expect("the Complete aggregate reads all input partitions");
+    assert_eq!(1, exec.properties().partitioning.partition_count());
+
+    let rebuilt = Arc::clone(&exec)
+        .replace_children(
+            vec![ScriptedEvaluated::plan(vec![
+                vec![contribution(1.0)],
+                vec![],
+                vec![contribution(2.0)],
+            ])],
+            ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
+        )
+        .expect("a Complete aggregate accepts another positive input partition count");
+    assert_eq!(1, rebuilt.properties().partitioning.partition_count());
+
+    let original = rows(
+        &collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    let replacement = rows(
+        &collect(rebuilt, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    let expected = grid_timestamps()
+        .into_iter()
+        .map(|timestamp| (timestamp, Some(3.0), Some("web-1".to_string()), None))
+        .collect::<Vec<_>>();
+    assert_eq!(expected, original);
+    assert_eq!(expected, replacement);
+    assert_eq!(original, replacement);
 }
 
 /// A Fused completes over a repartitioning child whose routed chain does not fit one output's queue.
@@ -7600,7 +7667,7 @@ fn name_free_producer(host: &str, value: f64) -> Arc<dyn ExecutionPlan> {
         true,
     )];
     frame_producer(
-        &abs_over_evaluated_input_tree(),
+        &complete_aggregate_over_evaluated_input_tree(),
         ScriptedEvaluated::plan(vec![chunks]),
     )
 }
@@ -7735,40 +7802,54 @@ async fn rebuilding_over_an_unrouted_child_drops_the_pair_proof() {
             ReplaceChildrenOptions::new(ChildrenPropertiesMode::Recompute),
         )
     };
-    let unrouted = rebuilt(vec![
+    let error = rebuilt(vec![
         name_free_producer("web-1", 12.0),
         routed_into(name_free_producer("web-1", 4.0), 3),
     ])
-    .expect("an unrouted producer is still a legal child");
-    assert_eq!(
-        1,
-        unrouted.properties().partitioning.partition_count(),
-        "a child that is not a routing proves no pair, so the rebuilt node falls back to one \
-         execution"
+    .expect_err("replacing a routed child must reject the changed parallel contract");
+    assert!(
+        error
+            .to_string()
+            .contains("original partition/routing contract")
     );
+
+    for replacement in [
+        routed_into(named_producer("web-1"), 3),
+        routed_into(unprovable_producer("web-1"), 3),
+    ] {
+        let error = rebuilt(vec![
+            replacement,
+            routed_into(name_free_producer("web-1", 4.0), 3),
+        ])
+        .expect_err("replacement producer without a name-free proof must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("original partition/routing contract")
+        );
+    }
 
     // Both sides are routings again, but into a different number of outputs: neither is in the
     // partition the other's partner is in, so the pair is not the fact the match needs either.
-    let mismatched = rebuilt(vec![
+    let error = rebuilt(vec![
         routed_into(name_free_producer("web-1", 12.0), 2),
         routed_into(name_free_producer("web-1", 4.0), 3),
     ])
-    .expect("two routings of different widths are legal children");
-    assert_eq!(
-        1,
-        mismatched.properties().partitioning.partition_count(),
-        "routings that split into different output counts cannot be read in step, so the rebuilt \
-         node falls back to one execution"
+    .expect_err("replacing children with unequal routing widths must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("original partition/routing contract")
     );
 
-    // And the proof is derived, not spent: rebuilt over two equal-width routings it holds again.
+    // The original width and proof remain valid when both original routings are unchanged.
     let restored = rebuilt(vec![
-        routed_into(name_free_producer("web-1", 12.0), 2),
-        routed_into(name_free_producer("web-1", 4.0), 2),
+        routed_into(name_free_producer("web-1", 12.0), 3),
+        routed_into(name_free_producer("web-1", 4.0), 3),
     ])
     .expect("two routings of one width are the proven shape");
     assert_eq!(
-        2,
+        3,
         restored.properties().partitioning.partition_count(),
         "the pair is read off the children on every build, so a rebuild that routes both sides \
          identically proves it again"

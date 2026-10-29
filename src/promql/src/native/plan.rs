@@ -1072,6 +1072,11 @@ pub fn match_is_co_partitioned(
     else {
         return false;
     };
+    if !matches!(left_input.output, NativeType::Samples(ref schema) if schema.eval_grid.is_some())
+        || !matches!(right_input.output, NativeType::Samples(ref schema) if schema.eval_grid.is_some())
+    {
+        return false;
+    }
     let (left_source, right_source) = (left_input.source_index, right_input.source_index);
     let Some(pair) = co_partitioned
         .iter()
@@ -1658,207 +1663,28 @@ fn broadcast_drops_labels(matching: &BinaryMatching) -> bool {
 /// - `None`: this walk cannot decide, which is not a claim in either direction: a consumer that
 ///   needs the fact must read it as "not proved here" rather than as an answer.
 ///
-/// The answer is derived from the node and the kernels it is bound to, never from a boundary, so a
-/// shape whose output labels are decided outside the tree answers `None`. The shapes decided in every
-/// case are the ones whose kernel writes the name away for whatever it read: `timestamp`, a window
-/// running any function but `last_over_time`/`first_over_time`, a map of the two dropping operations,
-/// an aggregate or `count_values` whose grouping does not list `__name__`, `absent`, the histogram
-/// functions, and a two-vector arithmetic or `bool` comparison. The shapes that follow their input
-/// are the ones that only carry labels through. Four answers are deliberately not given: a
-/// `label_replace`/`label_join` may write `__name__` or clear it, an input of evaluated samples hands
-/// on a value another execution built, a one-side-name-free `or`/`and`/`unless` keeps both sides'
-/// samples, and a `group_left`/`group_right` may copy a name from its one side. Each of those is a
-/// later fact's question, not this walk's.
+/// This proof is intentionally narrow: only a concrete `Complete` aggregate producing samples can
+/// prove name absence. Its `By` group must exclude `__name__`, or it may use any `Without` group,
+/// which always drops the metric name. Every other shape returns `None`; this includes aggregates
+/// grouped by `__name__` and operators whose output labels may preserve or restore that name.
 pub fn output_has_metric_name(node: &NativeNode) -> Option<bool> {
-    match &node.expr {
-        // A scan of raw samples reads one metric: the selector it was bound from names the metric, so
-        // every series it hands over carries that name, and raw samples are the only thing a scan
-        // hands over. The name itself is not in the tree - `BoundInput` holds the source index, the
-        // output type and the ordering, and the compiler keeps the name beside them - so this is the
-        // one input shape the tree can answer for: which type an input is decides whether anything
-        // above it can name a series at all.
-        //
-        // Evaluated samples at an input are another execution's answer: whether its label sets still
-        // carry a name was decided by the node that built them, which is not in this tree. Aggregate
-        // state is not a series at all, and no consumer of this fact has an operand of that type.
-        NativeExpr::Input(binding) => match binding.output.samples() {
-            Some(schema) if schema.eval_grid.is_none() => Some(true),
-            _ => None,
-        },
-        // A constant is one value per grid point and holds no label set, so it carries no name.
-        NativeExpr::Scalar(_) => Some(false),
-        // A selection answers the label set it read, except `timestamp(x)`: `output_metric` in
-        // [`execute`](crate::native::execute) rewrites the labels through `map::drop_metric_name` for
-        // `InstantValue::Timestamp` and clones them for `Sample` and `InfoTimestamp`, which is the
-        // selection `info` reads.
-        NativeExpr::Instant { input, op } => match op.value {
-            InstantValue::Sample | InstantValue::InfoTimestamp => output_has_metric_name(input),
-            InstantValue::Timestamp => Some(false),
-        },
-        // A merge groups the fragments it read by canonical label set and hands each set on as it
-        // arrived, so it writes no label of its own and what it emits carries the name the fragments
-        // carried.
-        NativeExpr::Merge { input } => output_has_metric_name(input),
-        // A window folds values and keeps the label set of the series it read, unless the function
-        // drops the metric name: `RangeFunction::drops_metric_name` holds for every function but
-        // `last_over_time` and `first_over_time`, and `RangeEvaluator::emit` applies it by removing
-        // `METADATA_LABELS` from the label set it hands over.
-        NativeExpr::Window { input, op } => {
-            if op.function.drops_metric_name() {
-                Some(false)
-            } else {
-                output_has_metric_name(input)
-            }
-        }
-        // A map rewrites the label set of every series it is handed. `map_math` and
-        // `map_native_histogram` both end with `drop_metric_name` (see
-        // [`preserves_canonical_identity`]), so their output carries no name whatever it read, while
-        // `label_replace`/`label_join` write a label of the caller's choosing - `__name__` included -
-        // and can empty it, so what a series ends under is not this node's to answer.
-        NativeExpr::Map { input, op } => {
-            if op.ops.is_empty() {
-                // A map with no operation rewrites nothing; `validate` refuses the shape, and
-                // following the input keeps the answer exact rather than reporting a rewrite that is
-                // not there.
-                output_has_metric_name(input)
-            } else if op
-                .ops
-                .iter()
-                .all(|op| matches!(op, MapOp::Math(_) | MapOp::Histogram(_)))
-            {
-                Some(false)
-            } else {
-                None
-            }
-        }
-        // A timestamp reports each sample's position, and `NativeNode::timestamp` rebuilds the labels
-        // through `map::drop_metric_name` on the way: its output carries no name.
-        NativeExpr::Timestamp { .. } => Some(false),
-        // An aggregate answers its group key, which is `GroupingLabels::apply` in
-        // [`aggregate`](crate::aggregate): `by(names)` keeps the name only when `names` lists it
-        // (`SeriesLabels::keep_only` clears a name the list does not hold) and `without(_)` removes it
-        // whatever `names` says. Partial state is not a series at all, so it carries none.
-        NativeExpr::Aggregate { input, op } => match &node.output {
-            NativeType::Samples(_) => {
-                grouping_keeps_metric_name(&op.group, output_has_metric_name(input))
-            }
-            NativeType::Scalar(_) | NativeType::AggregateState(_) => Some(false),
-        },
-        // A vector operation is decided one operator at a time.
-        //
-        // `topk`, `bottomk`, `limitk`, `limit_ratio` and `sort` hand back series they read under the
-        // labels those series arrived with - `select.rs` rewrites no label - so the input's answer is
-        // theirs. `absent` builds its labels from the argument's matchers and skips `__name__`
-        // (`absent_labels`), `histogram_quantile`/`histogram_fraction` remove `METADATA_LABELS` from
-        // each group they read (`histogram_eval`), and `count_values` answers a grouping's label sets
-        // as an aggregate does.
-        NativeExpr::Vector { input, op } => match op {
-            BoundVectorOp::TopK { .. }
-            | BoundVectorOp::LimitK { .. }
-            | BoundVectorOp::LimitRatio { .. }
-            | BoundVectorOp::Sort(_) => output_has_metric_name(input),
-            BoundVectorOp::Absent { .. } | BoundVectorOp::Histogram(_) => Some(false),
-            BoundVectorOp::CountValues { group, .. } => {
-                grouping_keeps_metric_name(group, output_has_metric_name(input))
-            }
-        },
-        // A binary operation answers under the label set `result_metric` builds in
-        // [`vector_match`](crate::vector_match), which is the many side's labels and the modifiers'
-        // rewrite of them.
-        NativeExpr::Binary {
-            left,
-            right,
-            matching,
-        } => match (&left.output, &right.output) {
-            // Two constants make a constant, which holds no label set.
-            (NativeType::Scalar(_), NativeType::Scalar(_)) => Some(false),
-            // A broadcast reaches each series of its vector side as it is, unless the operation drops
-            // the metric name on the way: arithmetic and a `bool` comparison do, a filtering
-            // comparison keeps the label set it read (`BroadcastRuntime::drops_labels`, which
-            // [`broadcast_drops_labels`] restates).
-            (NativeType::Scalar(_), _) | (_, NativeType::Scalar(_)) => {
-                let vector = if left.output.samples().is_some() {
-                    left
-                } else {
-                    right
-                };
-                if broadcast_drops_labels(matching) {
+    // Only this aggregate shape is a sufficient proof for producer routing: a complete
+    // aggregate emits its group key, and By/Without excluding __name__ necessarily drops it.
+    // Other operations may restore the name (count_values and binary include modifiers), so
+    // do not infer absence through them.
+    match (&node.expr, &node.output) {
+        (NativeExpr::Aggregate { op, .. }, NativeType::Samples(_))
+            if op.stage == AggregateStage::Complete =>
+        {
+            match &op.group {
+                Grouping::By(names) if !names.iter().any(|name| &**name == "__name__") => {
                     Some(false)
-                } else {
-                    output_has_metric_name(vector)
                 }
-            }
-            // Two vectors are matched by the kernel, which files each pairing under the many side's
-            // labels with the name removed unless the operation is a filtering comparison: `drop_name`
-            // in `vector_match` is `!op.is_comparison() || return_bool`, the same rule the broadcast
-            // applies. One-to-one then rewrites that label set by the modifiers - `on(names)` keeps
-            // only `names`, `ignoring(names)` drops them - and `group_left`/`group_right` keep it as
-            // it is and copy the `include` labels of the one side instead.
-            (_, _) => {
-                if broadcast_drops_labels(matching) {
-                    return Some(false);
-                }
-                match &matching.cardinality {
-                    Cardinality::OneToOne => {
-                        let keeps_name = match &matching.labels {
-                            MatchingLabels::On(names) => {
-                                names.iter().any(|name| &**name == "__name__")
-                            }
-                            MatchingLabels::Ignoring(names) => {
-                                !names.iter().any(|name| &**name == "__name__")
-                            }
-                        };
-                        if keeps_name {
-                            output_has_metric_name(left)
-                        } else {
-                            Some(false)
-                        }
-                    }
-                    Cardinality::ManyToOne(include) => {
-                        if include.iter().any(|name| &**name == "__name__") {
-                            // The included name of the one side replaces the many side's.
-                            None
-                        } else {
-                            output_has_metric_name(left)
-                        }
-                    }
-                    Cardinality::OneToMany(include) => {
-                        if include.iter().any(|name| &**name == "__name__") {
-                            None
-                        } else {
-                            output_has_metric_name(right)
-                        }
-                    }
-                }
-            }
-        },
-        // A set operation keeps each side's samples under the label set they arrived with
-        // (`set_vectors` rewrites no label), so a name survives it only if both sides carry one and a
-        // name is absent only if both sides lack it. Sides that disagree settle nothing: `or` keeps
-        // both sides' samples and `and`/`unless` keep the left side's, so the answer would be a claim
-        // about one operator rather than about the shape.
-        NativeExpr::Set { left, right, .. } => {
-            match (output_has_metric_name(left), output_has_metric_name(right)) {
-                (Some(left), Some(right)) if left == right => Some(left),
+                Grouping::Without(_) => Some(false),
                 _ => None,
             }
         }
-        // `info` enriches each base series with the data labels of the info series that share its
-        // identifying labels: `add_data_labels` copies the info series' ordinary tags only, never the
-        // name, so each result keeps the name its base series had.
-        NativeExpr::Info { base, .. } => output_has_metric_name(base),
-    }
-}
-
-/// What a grouping does to the metric name of the series it is handed.
-///
-/// `by(names)` keeps the name only when `names` lists it and `without(_)` removes it, which is
-/// `GroupingLabels::apply` in [`aggregate`](crate::aggregate): `keep_only` clears a name the list does
-/// not hold, and the `without` arm removes `__name__` after removing its own labels.
-fn grouping_keeps_metric_name(group: &Grouping, input: Option<bool>) -> Option<bool> {
-    match group {
-        Grouping::By(names) if names.iter().any(|name| &**name == "__name__") => input,
-        Grouping::By(_) | Grouping::Without(_) => Some(false),
+        _ => None,
     }
 }
 
