@@ -2002,6 +2002,28 @@ fn assert_delta_rows(
     }
 }
 
+/// The series scan one fused source reads.
+///
+/// A segment that matches two vectors, or that folds across series, routes its inputs before
+/// reading them, so the scan is no longer the fused node's direct child. Everything between is a
+/// pass-through for this purpose, which is what the walk skips.
+fn series_scan_below<'a>(
+    mut plan: &'a Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> &'a SeriesScanExec {
+    loop {
+        if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+            return scan;
+        }
+        match plan.children().as_slice() {
+            [only] => plan = only,
+            children => panic!(
+                "{} children below {plan:?}, not one series scan",
+                children.len()
+            ),
+        }
+    }
+}
+
 fn assert_two_source_native_plan(
     plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
     require_multiple_nonempty_partitions: bool,
@@ -2009,8 +2031,20 @@ fn assert_two_source_native_plan(
     use datafusion::physical_plan::metrics::MetricValue;
 
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.output_partitioning().partition_count(), 1);
     assert_eq!(plan.children().len(), 2);
+    // Both sides are routed by one matching key into one width, so every output partition owns
+    // complete match groups and the node answers as many partitions as it routes. Collapsing them
+    // into one would be the gather this shape exists to avoid.
+    let widths = plan
+        .children()
+        .iter()
+        .map(|child| child.output_partitioning().partition_count())
+        .collect::<Vec<_>>();
+    assert!(
+        widths.windows(2).all(|pair| pair[0] == pair[1]),
+        "both sides must route to the same width: {widths:?}"
+    );
+    assert_eq!(plan.output_partitioning().partition_count(), widths[0]);
     let schema = plan.schema();
     assert_eq!(
         schema.fields().len(),
@@ -2024,12 +2058,7 @@ fn assert_two_source_native_plan(
     assert!(!Arc::ptr_eq(children[0], children[1]));
     for (source, child) in children.iter().enumerate() {
         assert_eq!(child.output_partitioning().partition_count(), 4);
-        let scan = child
-            .downcast_ref::<CooperativeExec>()
-            .map_or(*child, |cooperative| cooperative.input());
-        let scan = scan.downcast_ref::<SeriesScanExec>().unwrap_or_else(|| {
-            panic!("source {source} is not a SeriesScanExec: {scan:?}; plan={plan:?}")
-        });
+        let scan = series_scan_below(child);
         let metrics = scan.metrics().expect("series scan metrics");
         assert!(metrics.output_rows().expect("series scan output rows") > 0);
         let mut nonempty_partitions = [false; 4];
@@ -3032,10 +3061,7 @@ async fn native_promql_set_operators_read_both_scans_whole() {
         assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
         let children = plan.children();
         assert_eq!(children.len(), 2, "{query}");
-        let left = children[0]
-            .downcast_ref::<CooperativeExec>()
-            .map_or(children[0], |cooperative| cooperative.input());
-        let left = left.downcast_ref::<SeriesScanExec>().unwrap();
+        let left = series_scan_below(&children[0]);
         assert_eq!(left.properties().partitioning.partition_count(), 4);
         let nonempty = left
             .metrics()
@@ -4635,8 +4661,12 @@ async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
     let native_rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
     let plan = observer.take();
     assert_eq!(plan.name(), "FusedSeriesExec");
-    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    // Both selectors are routed by the same matching key, so the pair is answered in the
+    // partitions they were scanned in rather than gathered into one.
     assert_eq!(plan.children().len(), 2);
+    let width = plan.children()[0].output_partitioning().partition_count();
+    assert!(width > 1, "the pair must keep the scan's partitioning");
+    assert_eq!(plan.output_partitioning().partition_count(), width);
     assert!(
         observer.take_raw_sources().is_empty(),
         "one logical table keeps both scans region-local instead of one raw source per input"
