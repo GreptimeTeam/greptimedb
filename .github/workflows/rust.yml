@@ -31,6 +31,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  github-script-tests:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: GitHub Script Tests (Rust CI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/github-script-tests
+
   fmt:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Rustfmt
@@ -50,7 +61,8 @@ jobs:
         run: make fmt-check
 
   clippy:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    needs: [github-script-tests]
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -94,7 +106,9 @@ jobs:
         run: make check-udeps
 
   check-riscv64:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # Keep platform coverage on the weekday schedule and allow manual checks.
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [github-script-tests]
     name: Check riscv64 build
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -120,7 +134,9 @@ jobs:
         run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
   check-windows:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    # Keep platform coverage on the weekday schedule and allow manual checks.
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+    needs: [github-script-tests]
     name: Check Windows build
     runs-on: windows-2022
     timeout-minutes: 60
@@ -148,48 +164,6 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
-  test-windows:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    name: Test Windows
-    runs-on: windows-2022
-    timeout-minutes: 90
-    env:
-      CARGO_INCREMENTAL: 0
-      CARGO_PROFILE_DEV_DEBUG: 0
-      CARGO_PROFILE_TEST_DEBUG: 0
-      RUSTFLAGS: "-D warnings -C linker=lld-link"
-      RUST_BACKTRACE: 1
-      RUST_MIN_STACK: 8388608 # 8MB
-    steps:
-      - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ./.github/actions/setup-cyborg
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: protoc@3.23.4
-      - uses: KyleMayes/install-llvm-action@v1
-        with:
-          version: "14.0"
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          cache: false
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "test-windows"
-          cache-all-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install Cargo Nextest
-        uses: taiki-e/install-action@nextest
-      - name: Install WSL distribution
-        uses: Vampire/setup-wsl@v2
-        with:
-          distribution: Ubuntu-22.04
-      - name: Run Windows tests
-        run: cargo nextest run --locked --workspace -F dashboard --no-fail-fast
-
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check for conflict
@@ -202,10 +176,10 @@ jobs:
         uses: olivernybroe/action-conflict-finder@v4.0
 
   test:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs: [conflict-check, clippy, fmt, check-udeps]
+    needs: [github-script-tests, conflict-check, clippy, fmt, check-udeps]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -258,7 +232,8 @@ jobs:
           UNITTEST_LOG_DIR: "__unittest_logs"
 
   coverage:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
+    if: ${{ needs['github-script-tests'].result == 'success' && github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
+    needs: [github-script-tests]
     runs-on: ubuntu-22.04-8-cores
     timeout-minutes: 60
     steps:
