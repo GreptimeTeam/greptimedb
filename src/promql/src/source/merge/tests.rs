@@ -238,6 +238,86 @@ fn histogram_duplicates_compare_every_float_property() {
     );
 }
 
+/// One histogram whose every non-float property is a parameter, so a test can change exactly one.
+fn histogram_with(
+    reset_hint: CounterResetHint,
+    start_timestamp: Option<i64>,
+    custom_values: &[f64],
+) -> Samples {
+    let mut builder = HistogramBatchBuilder::new();
+    let side = BucketSideView {
+        span_offsets: &[],
+        span_lengths: &[],
+        buckets: &[],
+    };
+    let index = builder
+        .push(datatypes::series::histogram::HistogramView {
+            schema: 1,
+            zero_threshold: 0.5,
+            sum: 2.0,
+            count: 1.0,
+            zero_count: 0.0,
+            reset_hint,
+            start_timestamp,
+            custom_values,
+            positive: side,
+            negative: side,
+        })
+        .unwrap();
+    Samples::try_from_histogram(
+        UInt32Array::from(vec![Some(index)]),
+        builder.finish().unwrap(),
+    )
+    .unwrap()
+}
+
+/// Two histograms are duplicates only when every property matches, not only the float ones.
+///
+/// Each case changes exactly one non-float property between two otherwise equal samples: the merge
+/// must report a conflict, because dropping such a sample as a duplicate would lose data.
+///
+/// The bucket side is not covered here: a legal sample has to satisfy `span_lengths` summing to the
+/// bucket count and a cursor that stays in range, so a sample differing in exactly one bucket field
+/// is a different shape rather than a different value. Its comparison is exercised by the
+/// histogram round-trip tests instead.
+#[test]
+fn histogram_duplicates_compare_every_property() {
+    let schema = schema(1);
+    let make = |sample| RawSeriesChunk {
+        primary_key: Buffer::from(b"k".to_vec()),
+        metric: Some(labels("v")),
+        time: RawTimestamps::try_new(vec![1].into()).unwrap(),
+        fields: SeriesFields::one(sample),
+        is_last: false,
+    };
+    let baseline = || histogram_with(CounterResetHint::Unknown, None, &[]);
+    // The identical pair merges, which is what makes each difference below meaningful.
+    assert!(
+        merge_raw_identity(&schema, &[make(baseline()), make(baseline())]).is_ok(),
+        "identical histograms are duplicates"
+    );
+    let cases: Vec<(&str, Samples)> = vec![
+        (
+            "reset hint",
+            histogram_with(CounterResetHint::CounterReset, None, &[]),
+        ),
+        (
+            "start timestamp",
+            histogram_with(CounterResetHint::Unknown, Some(7), &[]),
+        ),
+        (
+            "custom values",
+            histogram_with(CounterResetHint::Unknown, None, &[1.5]),
+        ),
+    ];
+    for (what, changed) in cases {
+        assert!(
+            merge_raw_identity(&schema, &[make(baseline()), make(changed)]).is_err(),
+            "two histograms differing only in {what} are a conflict, not a duplicate"
+        );
+    }
+}
+
 #[test]
 fn rejects_empty_and_shape_mismatch() {
     assert!(merge_raw_identity(&schema(1), &[]).is_err());

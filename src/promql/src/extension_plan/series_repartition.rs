@@ -1672,9 +1672,22 @@ struct PendingGroup {
 /// order only when it publishes them together: an identity that is complete while a smaller one is
 /// still waiting would go out first and break that promise. Such a frame therefore waits for every
 /// input to end, which is when the scan over the owned keys can hand them all out in order.
-fn group_ready(group: &PendingGroup, eof: &[bool], ordering: SeriesOrdering) -> bool {
+fn group_ready(
+    group: &PendingGroup,
+    eof: &[bool],
+    last_key_from: &[Option<Vec<u8>>],
+    ordering: SeriesOrdering,
+    key: &OwnerKey,
+) -> bool {
     if ordering == SeriesOrdering::KeyThenTime {
-        return eof.iter().all(|eof| *eof);
+        let OwnerKey::Raw(key) = key else {
+            return false;
+        };
+        return group.received.iter().zip(eof).zip(last_key_from).all(
+            |((received, eof), last_key)| {
+                *received || *eof || last_key.as_ref().is_some_and(|last| last > key)
+            },
+        );
     }
     group
         .received
@@ -1709,6 +1722,7 @@ struct RepartitionStream {
     ordering: SeriesOrdering,
     groups: BTreeMap<OwnerKey, PendingGroup>,
     eof: Vec<bool>,
+    last_key_from: Vec<Option<Vec<u8>>>,
     eof_metadata: Option<MemoryReservation>,
     inputs: usize,
     output: VecDeque<ReadySeries>,
@@ -1789,6 +1803,7 @@ impl RepartitionStream {
             pool: Arc::clone(pool),
             groups: BTreeMap::new(),
             eof: Vec::new(),
+            last_key_from: vec![None; inputs],
             eof_metadata: None,
             inputs,
             output: VecDeque::new(),
@@ -1867,6 +1882,19 @@ impl RepartitionStream {
             return Err(DataFusionError::Execution(
                 "raw identity pieces disagree on their explicit labels".to_string(),
             ));
+        }
+        if group.raw_chunks.len() == 1 {
+            let mut chunk = group.raw_chunks.into_iter().next().expect("one raw chunk");
+            chunk.is_last = true;
+            self.output.push_back(ReadySeries {
+                series: ReadyOutput::Raw(chunk),
+                charges: ReadyCharges {
+                    _charges: group.charges,
+                    _metadata: group.metadata,
+                    _workspace: None,
+                },
+            });
+            return Ok(());
         }
         let rows = group
             .raw_chunks
@@ -1963,10 +1991,12 @@ impl Stream for RepartitionStream {
                             std::ops::Bound::Unbounded,
                         ))
                         .find_map(|(key, group)| {
-                            group_ready(group, &this.eof, this.ordering).then(|| key.clone())
+                            group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
+                                .then(|| key.clone())
                         }),
                     None => this.groups.iter().find_map(|(key, group)| {
-                        group_ready(group, &this.eof, this.ordering).then(|| key.clone())
+                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
+                                .then(|| key.clone())
                     }),
                 };
                 match next {
@@ -2036,6 +2066,14 @@ impl Stream for RepartitionStream {
                                 )));
                                 continue;
                             }
+                            if let OwnerKey::Raw(raw_key) = &key
+                                && this.ordering == SeriesOrdering::KeyThenTime
+                            {
+                                let last = &mut this.last_key_from[input];
+                                if last.as_ref().is_none_or(|last| raw_key > last) {
+                                    *last = Some(raw_key.clone());
+                                }
+                            }
                             (key, RoutedChain::Raw(chain))
                         }
                     };
@@ -2104,7 +2142,10 @@ impl Stream for RepartitionStream {
                             }
                         }
                     }
-                    if group_ready(group, &this.eof, this.ordering)
+                    if this.ordering == SeriesOrdering::KeyThenTime {
+                        this.rescan = true;
+                        this.resume_after = None;
+                    } else if group_ready(group, &this.eof, &this.last_key_from, this.ordering, &key)
                         && let Err(error) = this.finish_group(&key)
                     {
                         this.lease.fail(Arc::new(error));
