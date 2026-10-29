@@ -47,6 +47,17 @@ pub(in crate::batcher::table) async fn flush_batch(
     match result {
         Ok(progress) => {
             FLUSH_TOTAL.inc();
+            if let Some(first) = batch.submissions.first() {
+                notifier.notify(
+                    first.table_info.clone(),
+                    batch
+                        .submissions
+                        .iter()
+                        .zip(&progress)
+                        .filter(|(_, result)| result.error.is_none())
+                        .map(|(pending, _)| &pending.batch),
+                );
+            }
             for (pending, result) in batch.submissions.into_iter().zip(progress) {
                 if let Some(counter) = pending.ctx.write_progress() {
                     counter.add_written(result.affected_rows);
@@ -59,8 +70,6 @@ pub(in crate::batcher::table) async fn flush_batch(
                     FLUSH_FAILURES.inc();
                     FLUSH_DROPPED_ROWS
                         .inc_by((pending.batch.num_rows() - result.affected_rows) as u64);
-                } else {
-                    notifier.notify(pending.table_info, &pending.batch);
                 }
                 let _ = pending.response_tx.send(result);
             }

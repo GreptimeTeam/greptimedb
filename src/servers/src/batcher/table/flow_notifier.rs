@@ -56,18 +56,25 @@ impl FlowNotifier {
         Some(Self { notifier })
     }
 
+    /// Enqueues one notification for batches from the same table.
     /// Never waits for queue capacity or delivery and never changes the write result.
-    pub fn notify(&self, table_info: TableInfoRef, batch: &RecordBatch) {
+    pub fn notify<'a>(
+        &self,
+        table_info: TableInfoRef,
+        batches: impl IntoIterator<Item = &'a RecordBatch>,
+    ) {
         let Some(timestamp_column) = table_info.meta.schema.timestamp_column() else {
             return;
         };
-        let timestamps = match extract_timestamps(batch, &timestamp_column.name) {
-            Ok(timestamps) => timestamps,
-            Err(error) => {
-                error!(error; "Failed to extract flow notification timestamps, table_id: {}", table_info.table_id());
-                return;
+        let mut timestamps = Vec::new();
+        for batch in batches {
+            match extract_timestamps(batch, &timestamp_column.name) {
+                Ok(batch_timestamps) => timestamps.extend(batch_timestamps),
+                Err(error) => {
+                    error!(error; "Failed to extract flow notification timestamps, table_id: {}", table_info.table_id());
+                }
             }
-        };
+        }
         if timestamps.is_empty() {
             return;
         }
@@ -87,20 +94,170 @@ mod tests {
     use std::sync::Arc;
 
     use api::helper::ColumnDataTypeWrapper;
-    use api::v1::ColumnDataType;
+    use api::region::RegionResponse;
+    use api::v1::helper::{tag_column_schema, time_index_column_schema};
+    use api::v1::region::{RegionRequest, bulk_insert_request, region_request};
+    use api::v1::value::ValueData;
+    use api::v1::{ColumnDataType, Row, Rows, Value};
     use arrow::array::{
-        ArrayRef, TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray,
+        ArrayRef, Int32Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
     };
     use arrow::record_batch::RecordBatch;
+    use catalog::memory::MemoryCatalogManager;
+    use common_grpc::flight::FlightDecoder;
+    use common_meta::error::Result as MetaResult;
+    use common_meta::peer::Peer;
+    use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
+    use common_query::request::QueryRequest;
+    use common_recordbatch::SendableRecordBatchStream;
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
-    use operator::test_util::new_test_table_info;
+    use operator::insert::Inserter;
+    use operator::req_convert::insert::rows_to_record_batch;
+    use operator::test_util::{
+        create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
+    };
+    use session::context::QueryContext;
+    use tokio::sync::{Semaphore, oneshot};
 
     use crate::batcher::flow_notifier::FlowNotifier as NotificationQueue;
+    use crate::batcher::table::batch::{Batch, flush_batch};
     use crate::batcher::table::flow_notifier::{
         FLOW_NOTIFICATION_DROPPED, FlowNotification, FlowNotifier,
     };
+    use crate::batcher::table::pending_batch::PendingBatch;
+    use crate::batcher::test_util::mock_table_flownode_cache;
+
+    #[tokio::test]
+    async fn test_flush_coalesces_notifications_for_successful_submissions() {
+        #[derive(Clone)]
+        struct PartialHandler;
+
+        #[async_trait::async_trait]
+        impl MockDatanodeHandler for PartialHandler {
+            async fn handle(&self, _: &Peer, request: RegionRequest) -> MetaResult<RegionResponse> {
+                let Some(region_request::Body::BulkInsert(request)) = request.body else {
+                    panic!("expected bulk insert")
+                };
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                    panic!("expected Arrow IPC")
+                };
+                let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    .unwrap()
+                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                    .unwrap();
+                let values = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                if values.values().contains(&20) {
+                    return common_meta::error::UnexpectedSnafu {
+                        err_msg: "lost acknowledgement",
+                    }
+                    .fail();
+                }
+                Ok(RegionResponse::new(batch.num_rows()))
+            }
+
+            async fn handle_query(
+                &self,
+                _: &Peer,
+                _: QueryRequest,
+            ) -> MetaResult<SendableRecordBatchStream> {
+                unreachable!()
+            }
+        }
+
+        let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
+        let inserter = Arc::new(Inserter::new(
+            MemoryCatalogManager::new(),
+            partitions,
+            Arc::new(MockDatanodeManager::new(PartialHandler)),
+            mock_table_flownode_cache(1, vec![]).await,
+            true,
+        ));
+        let table = Arc::new(new_test_table_info(1, "table_1", [1, 2, 3].into_iter()));
+        let cases = [
+            (
+                vec![vec![1], vec![2]],
+                vec![(1, false), (1, false)],
+                vec![60_000, 120_000],
+            ),
+            (
+                vec![vec![1, 20], vec![2], vec![3]],
+                vec![(1, true), (1, false), (1, false)],
+                vec![120_000, 180_000],
+            ),
+            (vec![vec![20], vec![20]], vec![(0, true), (0, true)], vec![]),
+        ];
+        for (inputs, expected_progress, expected_timestamps) in cases {
+            let permits = Arc::new(Semaphore::new(inputs.len()));
+            let mut submissions = Vec::new();
+            let mut completions = Vec::new();
+            let mut total_rows = 0;
+            for values in inputs {
+                let rows = Rows {
+                    schema: vec![
+                        tag_column_schema("a", ColumnDataType::Int32),
+                        time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    ],
+                    rows: values
+                        .into_iter()
+                        .map(|value| Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(ValueData::I32Value(value)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::TimestampMillisecondValue(
+                                        i64::from(value) * 60_000,
+                                    )),
+                                },
+                            ],
+                        })
+                        .collect(),
+                };
+                total_rows += rows.rows.len();
+                let (response_tx, response_rx) = oneshot::channel();
+                submissions.push(PendingBatch {
+                    table_info: table.clone(),
+                    batch: rows_to_record_batch(&rows, &table).unwrap(),
+                    ctx: Arc::new(QueryContext::arc().with_confirmed_writes()),
+                    response_tx,
+                    _permit: Arc::new(permits.clone().acquire_owned().await.unwrap()),
+                });
+                completions.push(response_rx);
+            }
+            // Keep a one-slot queue undrained so per-submission notifications lose timestamps.
+            let (notifier, mut notifications) =
+                NotificationQueue::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+            flush_batch(
+                Batch {
+                    submissions,
+                    total_rows,
+                },
+                inserter.clone(),
+                FlowNotifier { notifier },
+            )
+            .await;
+
+            for (completion, (affected_rows, failed)) in
+                completions.into_iter().zip(expected_progress)
+            {
+                let progress = completion.await.unwrap();
+                assert_eq!(progress.affected_rows, affected_rows);
+                assert_eq!(progress.error.is_some(), failed);
+            }
+            if !expected_timestamps.is_empty() {
+                let notification = notifications.try_recv().unwrap();
+                assert_eq!(notification.table_id, 1);
+                assert_eq!(notification.timestamps, expected_timestamps);
+            }
+            assert!(notifications.try_recv().is_err());
+        }
+    }
 
     #[test]
     fn test_full_and_closed_queues_do_not_block() {
@@ -158,10 +315,11 @@ mod tests {
                 .unwrap();
             let (notifier, mut receiver) =
                 NotificationQueue::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
-            FlowNotifier { notifier }.notify(Arc::new(table), &batch);
+            FlowNotifier { notifier }.notify(Arc::new(table), [&batch, &batch]);
             let notification = receiver.try_recv().unwrap();
             assert_eq!(notification.table_id, 1);
-            assert_eq!(notification.timestamps, vec![42]);
+            assert_eq!(notification.timestamps, vec![42, 42]);
+            assert!(receiver.try_recv().is_err());
         }
     }
 }
