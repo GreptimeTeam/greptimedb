@@ -23,9 +23,8 @@
 //! operation states about its input, which is what lets a new combination of supported operations
 //! be an ordinary tree instead of another hand-written shape.
 //!
-//! What the tree cannot express yet is deliberate for this stage: [`NativeExpr::Scalar`] holds a
-//! constant, so `time()` and `scalar(v)` have no node. The legality below is therefore about the
-//! operations that exist, not about PromQL's whole surface.
+//! What the tree cannot express yet is deliberate for this stage: `scalar(v)` has no node. The
+//! legality below is therefore about the operations that exist, not about PromQL's whole surface.
 
 use std::sync::Arc;
 
@@ -35,8 +34,10 @@ use datatypes::series::time::EvalGrid;
 use datatypes::series::{SeriesLabels, SeriesOrdering};
 
 use crate::histogram_eval::{HistogramFunction, NativeHistogramFunction};
+use crate::info::InfoSelector;
 use crate::map::MathOp;
 use crate::map_label::LabelRewrite;
+use crate::map_time::DateFunction;
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::select::SortOrder;
 use crate::vector_match::{BinaryMatching, MatchingLabels, SetOp};
@@ -143,8 +144,8 @@ pub struct BoundInput {
 /// A constant scalar bound for broadcast or a statement root.
 ///
 /// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
-/// keeps a binary operation from label-matching it is its type, not its constness. This binding
-/// only holds the constant case.
+/// keeps a binary operation from label-matching it is its type, not its constness. The varying
+/// ones are [`NativeExpr::EvalTime`] and a binary operation between scalars.
 #[derive(Clone, Debug)]
 pub struct BoundScalar {
     /// The constant value.
@@ -160,10 +161,22 @@ pub struct BoundInstant {
     pub offset_ms: i64,
     /// Anchored selection instant; samples are selected at this time for every grid point.
     pub at_ms: Option<i64>,
-    /// Emit the selected sample timestamp in seconds rather than its value.
-    pub timestamp: bool,
+    /// What the selection reports for the sample it selects.
+    pub value: InstantValue,
     /// The grid the selection produces values on.
     pub output_grid: Arc<EvalGrid>,
+}
+
+/// What an instant selection reports at a grid point for the sample it selected there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstantValue {
+    /// The sample itself.
+    Sample,
+    /// `timestamp(x)`: the sample's own time in seconds, without the metric name.
+    Timestamp,
+    /// The info series `info()` reads: the sample's own time in milliseconds, under all of its
+    /// labels, as Prometheus' `evalSeries` records it for `info`.
+    InfoTimestamp,
 }
 
 /// A window function over raw samples or over an evaluated input.
@@ -187,6 +200,31 @@ pub struct BoundWindow {
 pub struct BoundMap {
     /// The operations, applied in order.
     pub ops: Arc<[MapOp]>,
+}
+
+/// A math function whose scalar parameters are bound as nodes, because at least one of them varies
+/// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
+/// function is a [`MathOp`] in a [`BoundMap`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterizedOp {
+    /// `round(v, to_nearest)`.
+    Round,
+    /// `clamp(v, min, max)`.
+    Clamp,
+    /// `clamp_min(v, min)`.
+    ClampMin,
+    /// `clamp_max(v, max)`.
+    ClampMax,
+}
+
+impl ParameterizedOp {
+    /// How many parameters the function reads after its vector.
+    pub fn arity(self) -> usize {
+        match self {
+            Self::Clamp => 2,
+            Self::Round | Self::ClampMin | Self::ClampMax => 1,
+        }
+    }
 }
 
 /// One operation of a map, applied to each series on its own: math over its float values, a
@@ -326,6 +364,15 @@ pub enum NativeExpr {
     Input(BoundInput),
     /// A constant scalar, evaluated on the statement's grid.
     Scalar(BoundScalar),
+    /// The evaluation time of each grid point, as `time()` reads it in seconds, or a date function
+    /// of it, as a date function called without an argument reads it.
+    ///
+    /// A date function is bound here rather than over `time()`: Prometheus reads the calendar from
+    /// the evaluation timestamp truncated to whole seconds, which the float `time()` does not carry
+    /// exactly for every timestamp.
+    EvalTime { date: Option<DateFunction> },
+    /// `vector(s)`: the scalar as one series without labels.
+    VectorOf { input: Box<NativeNode> },
     /// An instant selection over its input.
     Instant {
         input: Box<NativeNode>,
@@ -342,6 +389,13 @@ pub enum NativeExpr {
     Map {
         input: Box<NativeNode>,
         op: BoundMap,
+    },
+    /// A point-wise math function over its input whose parameters are scalar nodes, in argument
+    /// order.
+    ParameterizedMap {
+        input: Box<NativeNode>,
+        op: ParameterizedOp,
+        parameters: Vec<NativeNode>,
     },
     /// The timestamp of an evaluated input, in seconds.
     Timestamp { input: Box<NativeNode> },
@@ -369,6 +423,14 @@ pub enum NativeExpr {
         right: Box<NativeNode>,
         op: BoundSetOp,
     },
+    /// `info(base, {selector})`: the series of `base` with the data labels of the info series that
+    /// share their identifying labels. `info` is the instant selection of those info series, whose
+    /// values are the times of the samples it selected ([`InstantValue::InfoTimestamp`]).
+    Info {
+        base: Box<NativeNode>,
+        info: Box<NativeNode>,
+        selector: InfoSelector,
+    },
 }
 
 /// One node of a bound tree.
@@ -383,39 +445,46 @@ pub struct NativeNode {
 /// Whether `node` reads the whole input vector at a point rather than one series at a time.
 ///
 /// An `Aggregate` folds every series of its group, a `Binary` and a `Set` pair two vectors' series
-/// by label, and a `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`,
-/// ...) reorders or reads the whole vector at a grid point.
+/// by label, an `Info` looks the info series of each series up by its identifying labels, and a
+/// `Vector` operation (`sort`, `absent`, `topk`, `limitk`, `histogram_quantile`, ...) reorders or
+/// reads the whole vector at a grid point.
 ///
 /// `Merge` answers one series per label set, and the label sets it answers span every input series:
 /// two of them can collapse into the one it emits. It is therefore whole-vector too, which is why it
 /// also cannot be moved below a boundary that holds only part of a metric. Everything else - an
-/// input, a scalar, a selection, a window, a map, and a binary operation with a constant on one
-/// side, whose broadcast reaches each series the other side answers - answers one series from one
-/// series' rows.
+/// input, a constant or `time()`, a selection, a window, a map, `vector(s)`, and a binary operation
+/// with a scalar on one side, whose broadcast reaches each series the other side answers - answers
+/// one series from one series' rows, as long as its own operands do.
 ///
 /// Both a region-side placement and the native route's admission ask this, and they must agree: a
 /// tree admitted here but refused there becomes a node the physical layer cannot build, and one
 /// refused here but admitted there would be pushed to a region that holds part of the metric.
 pub fn reads_across_series(node: &NativeNode) -> bool {
     match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => false,
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => false,
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Map { input, .. }
-        | NativeExpr::Timestamp { input } => reads_across_series(input),
-        NativeExpr::Binary { left, right, .. } => match (&left.expr, &right.expr) {
-            // Two constants answer the same value for every series there is, so the operation reads
-            // none of them; one constant is broadcast over the other side's series unchanged, so what
-            // the operation reads is what that side reads.
-            (NativeExpr::Scalar(_), NativeExpr::Scalar(_)) => false,
-            (NativeExpr::Scalar(_), _) => reads_across_series(right),
-            (_, NativeExpr::Scalar(_)) => reads_across_series(left),
-            // Two vectors are matched by label, which pairs series of the whole vector.
-            (_, _) => true,
-        },
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::VectorOf { input } => reads_across_series(input),
+        NativeExpr::Binary { left, right, .. } => {
+            // A scalar side has no labels and is broadcast over the other side's series unchanged,
+            // so the operation reads what its two sides read. Two vectors are matched by label,
+            // which pairs series of the whole vector.
+            let scalar = |side: &NativeNode| matches!(side.output, NativeType::Scalar(_));
+            if scalar(left) || scalar(right) {
+                reads_across_series(left) || reads_across_series(right)
+            } else {
+                true
+            }
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => reads_across_series(input) || parameters.iter().any(reads_across_series),
         NativeExpr::Aggregate { .. }
         | NativeExpr::Vector { .. }
         | NativeExpr::Set { .. }
+        | NativeExpr::Info { .. }
         | NativeExpr::Merge { .. } => true,
     }
 }
@@ -470,11 +539,23 @@ impl NativeNode {
                     ));
                 }
             }
-            NativeExpr::Scalar(_) => {
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {
                 // A scalar's output is the scalar type: one value per grid point and no labels.
                 if !matches!(self.output, NativeType::Scalar(_)) {
                     return Err(invalid("a scalar node does not produce a scalar"));
                 }
+            }
+            NativeExpr::VectorOf { input } => {
+                input.validate()?;
+                let NativeType::Scalar(input_grid) = &input.output else {
+                    return Err(invalid(&format!(
+                        "vector() consumes a scalar, not {}",
+                        input.output.describe()
+                    )));
+                };
+                let output = ensure_samples(&self.output, "vector()")?;
+                ensure_field_count(output.fields.len(), 1, "vector()")?;
+                ensure_grid(&self.output, input_grid, "vector()")?;
             }
             NativeExpr::Instant { input, op } => {
                 input.validate()?;
@@ -562,6 +643,38 @@ impl NativeNode {
                 };
                 if op.ops.is_empty() {
                     return Err(invalid("a map holds no operation"));
+                }
+                ensure_samples(&self.output, "a map")?;
+                ensure_same_fields(&input.output, &self.output, "a map")?;
+                ensure_grid(&self.output, input_grid, "a map")?;
+            }
+            NativeExpr::ParameterizedMap {
+                input,
+                op,
+                parameters,
+            } => {
+                input.validate()?;
+                let Some((_, input_grid)) = evaluated_vector(&input.output) else {
+                    return Err(invalid(&format!(
+                        "a map consumes an evaluated vector, not {}",
+                        input.output.describe()
+                    )));
+                };
+                if parameters.len() != op.arity() {
+                    return Err(invalid(&format!(
+                        "{op:?} reads {} parameter(s), but {} are bound",
+                        op.arity(),
+                        parameters.len()
+                    )));
+                }
+                for parameter in parameters {
+                    parameter.validate()?;
+                    if !matches!(&parameter.output, NativeType::Scalar(grid) if grid.spec() == input_grid.spec())
+                    {
+                        return Err(invalid(
+                            "a map parameter is not a scalar on its input's grid",
+                        ));
+                    }
                 }
                 ensure_samples(&self.output, "a map")?;
                 ensure_same_fields(&input.output, &self.output, "a map")?;
@@ -778,6 +891,44 @@ impl NativeNode {
                 ensure_samples(&self.output, "a set operation")?;
                 ensure_same_fields(&left.output, &self.output, "a set operation")?;
                 ensure_grid(&self.output, left_grid, "a set operation")?;
+            }
+            NativeExpr::Info { base, info, .. } => {
+                base.validate()?;
+                info.validate()?;
+                let Some((_, base_grid)) = evaluated_vector(&base.output) else {
+                    return Err(invalid(&format!(
+                        "info consumes an evaluated vector, not {}",
+                        base.output.describe()
+                    )));
+                };
+                // The kernel reads the info side's values as sample times, which only an instant
+                // selection that reports them produces.
+                let NativeExpr::Instant { op, .. } = &info.expr else {
+                    return Err(invalid(
+                        "info reads its info series from an instant selection",
+                    ));
+                };
+                if op.value != InstantValue::InfoTimestamp {
+                    return Err(invalid(
+                        "info reads the sample times of its info series, not their values",
+                    ));
+                }
+                let Some((info_schema, info_grid)) = evaluated_vector(&info.output) else {
+                    return Err(invalid("info's info series are not an evaluated vector"));
+                };
+                if info_schema.fields.len() != 1 {
+                    return Err(invalid(&format!(
+                        "info reads one sample time per info series, and its info series carry {} \
+                         fields",
+                        info_schema.fields.len()
+                    )));
+                }
+                if base_grid.spec() != info_grid.spec() {
+                    return Err(invalid("info aligns two different grids"));
+                }
+                ensure_samples(&self.output, "info")?;
+                ensure_same_fields(&base.output, &self.output, "info")?;
+                ensure_grid(&self.output, base_grid, "info")?;
             }
         }
         Ok(())

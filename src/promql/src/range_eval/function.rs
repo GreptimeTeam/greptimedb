@@ -72,6 +72,23 @@ impl RangeFunction {
         !matches!(self, Self::LastOverTime | Self::FirstOverTime)
     }
 
+    /// Whether a window holding native histograms can answer with one; every other function
+    /// reduces it to a float.
+    pub(crate) fn yields_histograms(self) -> bool {
+        matches!(
+            self,
+            Self::Rate
+                | Self::Increase
+                | Self::Delta
+                | Self::Irate
+                | Self::Idelta
+                | Self::AvgOverTime
+                | Self::SumOverTime
+                | Self::LastOverTime
+                | Self::FirstOverTime
+        )
+    }
+
     /// Whether the evaluator has to index counter resets for this function.
     ///
     /// This must hold for exactly the kernels that read [`FloatWindow::counter_resets`], which is

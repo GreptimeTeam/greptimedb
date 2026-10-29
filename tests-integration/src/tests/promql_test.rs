@@ -3523,6 +3523,135 @@ async fn native_promql_cross_table_pairs_over_different_schemas() {
     }
 }
 
+/// A tree of three selectors binds one input per occurrence: above one merge scan per selector
+/// when they read three tables, in the region over three scans when they read one, and an outer
+/// `on(host)` keeps only `host` of the labels the inner match reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_three_selector_trees_bind_every_occurrence() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_three_selectors",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    // At second `t` of host `h`: `a` is `10 * h + t`, `b` is `2 * t` and `c` is `100 + h`, each in
+    // its own table and as kinds `x`, `y` and `z` of one table.
+    fn a(host: i64, second: i64) -> i64 {
+        10 * host + second
+    }
+    fn b(_: i64, second: i64) -> i64 {
+        2 * second
+    }
+    fn c(host: i64, _: i64) -> i64 {
+        100 + host
+    }
+    let values = [
+        ("native_3_a", "x", a as fn(i64, i64) -> i64),
+        ("native_3_b", "y", b),
+        ("native_3_c", "z", c),
+    ];
+    let mut shared = Vec::new();
+    for (table, kind, value) in values {
+        execute_all(
+            &instance,
+            &format!(
+                "CREATE TABLE {table} (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, \
+                 val DOUBLE, PRIMARY KEY(host, kind))"
+            ),
+            QueryContext::arc(),
+        )
+        .await;
+        let mut rows = Vec::new();
+        for host in 0..3 {
+            for second in 0..6 {
+                let sample = value(host, second);
+                rows.push(format!("('h{host}', 'x', {}, {sample})", second * 1_000));
+                shared.push(format!(
+                    "('h{host}', '{kind}', {}, {sample})",
+                    second * 1_000
+                ));
+            }
+        }
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", rows.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+    execute_all(
+        &instance,
+        "CREATE TABLE native_3_s (host STRING, kind STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, \
+         PRIMARY KEY(host, kind))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        &format!("INSERT INTO native_3_s VALUES {}", shared.join(", ")),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let at_five = |value: fn(f64) -> f64| {
+        (0..3)
+            .map(|host| (5_000, format!("h{host}"), value(host as f64)))
+            .collect::<Vec<_>>()
+    };
+    for (query, raw_sources, columns, expected) in [
+        (
+            "native_3_a + native_3_b + native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| 10.0 * h + 5.0 + 10.0 + (100.0 + h)),
+        ),
+        (
+            "(native_3_a - native_3_b) / on(host) native_3_c",
+            3,
+            vec!["host", "ts", "val"],
+            at_five(|h| (10.0 * h + 5.0 - 10.0) / (100.0 + h)),
+        ),
+        (
+            "native_3_s{kind=\"x\"} - on(host) native_3_s{kind=\"y\"} + on(host) \
+             native_3_s{kind=\"z\"}",
+            0,
+            vec!["host", "ts", "val"],
+            at_five(|h| 10.0 * h + 5.0 - 10.0 + (100.0 + h)),
+        ),
+        (
+            "native_3_a{host=\"h0\"} and native_3_b or native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| if h == 0.0 { 5.0 } else { 100.0 + h }),
+        ),
+        (
+            "(native_3_a{host=\"h0\"} or native_3_b) + native_3_c",
+            3,
+            vec!["host", "kind", "ts", "val"],
+            at_five(|h| if h == 0.0 { 5.0 } else { 10.0 } + (100.0 + h)),
+        ),
+    ] {
+        let sql = format!("TQL EVAL (5, 5, '1s') {query}");
+        observer.clear();
+        let native = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 3, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), raw_sources, "{query}");
+        let mut plan_columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        plan_columns.sort();
+        assert_eq!(plan_columns, columns, "{query}");
+        assert_eq!(native, expected, "{query}");
+        let legacy = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(native, legacy, "legacy: {query}");
+    }
+}
+
 /// A comparison between two tables runs above both regions: without `bool` it keeps the left
 /// sample where the comparison holds, with `bool` it reports 1 or 0 at every matched point, and
 /// `on(host)` narrows the labels to `host` either way.
@@ -3602,6 +3731,141 @@ async fn native_promql_cross_table_comparisons() {
     }
 }
 
+/// `info()` over a base table and a `target_info` table whose time index and field are named
+/// differently, answered natively above both regions with Prometheus' answer, which the existing
+/// plan does not give: it has no `info`.
+///
+/// `target_info` holds `version="v1"` for `a` from 0s to 4s and `version="v2"` from 6s, and `v1` for
+/// `b` throughout; `c` has none. With a 2s lookback, `a` reads `v1` up to 5s and `v2` from 6s.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_info_enriches_from_the_info_table() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_info")).await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE native_info_up (instance STRING, job STRING, ts TIMESTAMP TIME INDEX, \
+         val DOUBLE, PRIMARY KEY(instance, job))",
+        QueryContext::arc(),
+    )
+    .await;
+    execute_all(
+        &instance,
+        "CREATE TABLE target_info (instance STRING, job STRING, \"version\" STRING, \
+         greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE, \
+         PRIMARY KEY(instance, job, \"version\"))",
+        QueryContext::arc(),
+    )
+    .await;
+    let mut up = Vec::new();
+    let mut info = Vec::new();
+    for second in 0..10_i64 {
+        for (target, job, base) in [("a", "j", 0), ("b", "j", 100), ("c", "k", 200)] {
+            up.push(format!(
+                "('{target}', '{job}', {}, {})",
+                second * 1_000,
+                base + second
+            ));
+        }
+        let a_version = match second {
+            0..=4 => Some("v1"),
+            5 => None,
+            _ => Some("v2"),
+        };
+        for (target, version) in [("a", a_version), ("b", Some("v1"))] {
+            if let Some(version) = version {
+                info.push(format!(
+                    "('{target}', 'j', '{version}', {}, 1)",
+                    second * 1_000
+                ));
+            }
+        }
+    }
+    for (table, values) in [("native_info_up", up), ("target_info", info)] {
+        execute_all(
+            &instance,
+            &format!("INSERT INTO {table} VALUES {}", values.join(", ")),
+            QueryContext::arc(),
+        )
+        .await;
+    }
+
+    let row = |second: i64, labels: &[(&str, &str)], value: i64| {
+        (
+            second * 1_000,
+            labels
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+            value as f64,
+        )
+    };
+    let a = |version| [("instance", "a"), ("job", "j"), ("version", version)];
+    let b = [("instance", "b"), ("job", "j"), ("version", "v1")];
+    let c = [("instance", "c"), ("job", "k")];
+    // `a` takes the version current at each step, `b` keeps `v1`, and `c`, which no info series
+    // matches, passes through unless the selector requires a version.
+    let mut enriched = Vec::new();
+    let mut v1_only = Vec::new();
+    let mut shifted = Vec::new();
+    for second in 3..10_i64 {
+        let version = if second <= 5 { "v1" } else { "v2" };
+        enriched.push(row(second, &a(version), second));
+        enriched.push(row(second, &b, 100 + second));
+        enriched.push(row(second, &c, 200 + second));
+        if second <= 5 {
+            v1_only.push(row(second, &a("v1"), second));
+        }
+        v1_only.push(row(second, &b, 100 + second));
+        // An offset moves the info series along with the base: each step reads both a second back.
+        let version = if second <= 6 { "v1" } else { "v2" };
+        shifted.push(row(second, &a(version), second - 1));
+        shifted.push(row(second, &b, 99 + second));
+        shifted.push(row(second, &c, 199 + second));
+    }
+    for (query, columns, mut expected) in [
+        (
+            "info(native_info_up)",
+            vec!["instance", "job", "ts", "val", "version"],
+            enriched,
+        ),
+        (
+            "info(native_info_up, {version=\"v1\"})",
+            vec!["instance", "job", "ts", "val", "version"],
+            v1_only,
+        ),
+        (
+            "info(native_info_up offset 1s)",
+            vec!["instance", "job", "ts", "val", "version"],
+            shifted,
+        ),
+    ] {
+        expected.sort_by(|left, right| (&left.1, left.0).cmp(&(&right.1, right.0)));
+        let sql = format!("TQL EVAL (3, 9, '1s', '2s') {query}");
+        observer.clear();
+        let (native_columns, native) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(observer.take_raw_sources().len(), 2, "{query}");
+        assert_eq!(native_columns, columns, "{query}");
+        assert_eq!(native, expected, "{query}");
+
+        // The existing plan refuses `info`: "Unsupported expr type: info" for one argument, and
+        // "Cannot accept multiple vector as function input" for two.
+        let legacy = instance
+            .do_query(&sql, native_query_context(false, 4))
+            .await
+            .remove(0);
+        assert!(
+            legacy.is_err(),
+            "{query}: the existing plan answered `info`"
+        );
+    }
+}
+
 /// A two-selector query over a table split into regions never fuses the binary itself.
 ///
 /// A fused node with more than one input has no placement on such a table — the dist analyzer
@@ -3641,6 +3905,15 @@ async fn native_promql_two_selectors_on_a_partitioned_table_keep_the_binary_unfu
             vec![
                 (5_000, "h0".to_string(), -1.0),
                 (5_000, "h2".to_string(), -1.0),
+            ],
+        ),
+        // Three selectors: the inner pair may take the hybrid route under the outer join.
+        (
+            "native_partitioned_pair{kind=\"a\"} - on(host) native_partitioned_pair{kind=\"b\"} \
+             + on(host) native_partitioned_pair{kind=\"a\"}",
+            vec![
+                (5_000, "h0".to_string(), 0.0),
+                (5_000, "h2".to_string(), 2.0),
             ],
         ),
     ] {
@@ -4821,5 +5094,210 @@ async fn native_promql_columnar_partial_index_float64_matches_legacy(
     assert_eq!(
         native_rows, legacy_rows,
         "{stage}: same rows on both routes"
+    );
+}
+
+/// One row of a native or legacy answer as (time, host, value): the host is empty for an unlabelled
+/// series, and the value is rendered so a NaN compares equal to a NaN.
+async fn dynamic_scalar_rows(output: Output) -> Vec<(i64, String, String)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut rows = Vec::new();
+    for batch in batches.iter() {
+        let schema = batch.df_record_batch().schema();
+        let column = |accept: &dyn Fn(&DataType) -> bool| {
+            schema
+                .fields()
+                .iter()
+                .position(|field| accept(field.data_type()))
+                .map(|index| batch.column(index).clone())
+        };
+        let timestamps = column(&|ty| matches!(ty, DataType::Timestamp(_, _))).unwrap();
+        let timestamps = timestamps
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        let values = column(&|ty| ty == &DataType::Float64).unwrap();
+        let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+        let hosts = batch
+            .column_by_name("host")
+            .map(|hosts| cast(hosts.as_ref(), &DataType::Utf8).unwrap());
+        for row in 0..batch.num_rows() {
+            let host = hosts
+                .as_ref()
+                .map(|hosts| {
+                    let hosts = hosts.as_any().downcast_ref::<StringArray>().unwrap();
+                    hosts.value(row).to_string()
+                })
+                .unwrap_or_default();
+            let value = if values.is_null(row) {
+                "null".to_string()
+            } else {
+                format!("{:?}", values.value(row))
+            };
+            rows.push((timestamps.value(row), host, value));
+        }
+    }
+    rows.sort();
+    rows
+}
+
+fn expected_rows(rows: &[(i64, &str, f64)]) -> Vec<(i64, String, String)> {
+    let mut rows = rows
+        .iter()
+        .map(|(ts, host, value)| (*ts, host.to_string(), format!("{value:?}")))
+        .collect::<Vec<_>>();
+    rows.sort();
+    rows
+}
+
+/// Dynamic scalars run natively and answer what Prometheus answers: a varying scalar is broadcast
+/// over a vector, and `time()` needs no scan. The existing planner refuses `vector(time())` and a
+/// date function without an argument.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_dynamic_scalar_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dyn_scalar (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO dyn_scalar (host, ts, val) VALUES \
+         ('a', 0, 1), ('a', 10000, 2), ('a', 20000, 3), ('b', 20000, 10), ('b', 30000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // (query, Prometheus answer, scan children, whether the existing planner agrees, or `None`
+    // where it refuses the query)
+    type Case = (
+        &'static str,
+        Vec<(i64, &'static str, f64)>,
+        usize,
+        Option<bool>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "TQL EVAL (0, 40, '10s', '5s') time() - timestamp(dyn_scalar)",
+            vec![
+                (0, "a", 0.0),
+                (10_000, "a", 0.0),
+                (20_000, "a", 0.0),
+                (20_000, "b", 0.0),
+                (30_000, "b", 0.0),
+            ],
+            1,
+            Some(true),
+        ),
+        (
+            "TQL EVAL (0, 20, '10s') time() * 2",
+            vec![(0, "", 0.0), (10_000, "", 20.0), (20_000, "", 40.0)],
+            0,
+            Some(true),
+        ),
+        (
+            "TQL EVAL (0, 20, '10s') vector(time())",
+            vec![(0, "", 0.0), (10_000, "", 10.0), (20_000, "", 20.0)],
+            0,
+            None,
+        ),
+        (
+            "TQL EVAL (3590, 3610, '10s') hour()",
+            vec![
+                (3_590_000, "", 0.0),
+                (3_600_000, "", 1.0),
+                (3_610_000, "", 1.0),
+            ],
+            0,
+            None,
+        ),
+    ];
+    for (sql, expected, children, legacy_agrees) in cases {
+        observer.clear();
+        let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{sql}");
+        assert_eq!(plan.children().len(), children, "{sql}");
+        assert_eq!(native, expected_rows(&expected), "{sql}");
+        let Some(legacy_agrees) = legacy_agrees else {
+            continue;
+        };
+        let legacy = dynamic_scalar_rows(native_tql_output(&instance, sql, false).await).await;
+        assert_eq!(
+            native == legacy,
+            legacy_agrees,
+            "{sql}: legacy answered {legacy:?}"
+        );
+    }
+
+    // `count_values` names a label no scan carries, so the statement keeps a plan that reports it.
+    let sql = "TQL EVAL (0, 0, '1s') count_values(\"bucket\", vector(1))";
+    let pretty = |output: Output| async {
+        match output.data {
+            OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+            OutputData::RecordBatches(batches) => batches,
+            _ => unreachable!("TQL EVAL returns record batches"),
+        }
+        .pretty_print()
+        .unwrap()
+    };
+    let native = pretty(native_tql_output(&instance, sql, true).await).await;
+    let legacy = pretty(native_tql_output(&instance, sql, false).await).await;
+    assert!(native.contains("bucket"), "{native}");
+    assert_eq!(native, legacy);
+}
+
+/// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
+/// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
+/// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
+/// has no answer to compare.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_map_with_varying_parameters_matches_prometheus() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_varying_parameter_e2e")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE dyn_param (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO dyn_param (host, ts, val) VALUES \
+         ('a', 0, 1), ('a', 10000, 2), ('a', 20000, 3), ('b', 20000, 10), ('b', 30000, 20)",
+        QueryContext::arc(),
+    )
+    .await;
+    // The nearest is 1, 2, 4 and 8 at the four steps that hold samples.
+    let sql = "TQL EVAL (0, 40, '10s', '5s') round(dyn_param, 2 ^ (time() / 10))";
+    observer.clear();
+    let native = dynamic_scalar_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.children().len(), 1);
+    assert_eq!(plan.output_partitioning().partition_count(), 4);
+    assert_eq!(
+        native,
+        expected_rows(&[
+            (0, "a", 1.0),
+            (10_000, "a", 2.0),
+            (20_000, "a", 4.0),
+            (20_000, "b", 12.0),
+            (30_000, "b", 24.0),
+        ])
     );
 }

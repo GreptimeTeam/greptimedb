@@ -91,7 +91,7 @@ fn instant() -> NativeNode {
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: crate::native::plan::InstantValue::Sample,
                 output_grid: grid(),
             },
         },
@@ -611,17 +611,32 @@ fn the_prefix_and_the_suffix_each_name_their_own_source_zero() {
                     .cloned()
                     .and_then(|schema| schema.eval_grid.clone()),
             )),
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => inputs(input, found),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => inputs(input, found),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 inputs(left, found);
                 inputs(right, found);
+            }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                inputs(input, found);
+                for parameter in parameters {
+                    inputs(parameter, found);
+                }
             }
         }
     }

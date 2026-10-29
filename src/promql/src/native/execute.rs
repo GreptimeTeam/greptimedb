@@ -40,20 +40,25 @@ use crate::grid_series::{
     GridSample, GridSeriesBuilder, LabelSet, fields_bytes, label_set, merge_same_labelset, owned,
     series_bytes, table_bytes,
 };
+use crate::histogram_eval::float_histogram::FloatHistogram;
 use crate::histogram_eval::{evaluate_histograms, map_native_histogram};
+use crate::info::{InfoSelector, info_with_reservation};
 use crate::instant_eval::{
-    select_instant_at, select_instants, timestamp_of_evaluated, timestamp_of_selection,
+    info_sample_times, select_instant_at, select_instants, timestamp_of_evaluated,
+    timestamp_of_selection,
 };
 use crate::map::{
-    ArithmeticOp, Comparison, ComparisonOp, ScalarOperand, drop_metric_name, map_arithmetic,
-    map_compare, map_math,
+    ArithmeticOp, Comparison, ComparisonOp, ParameterizedMath, ScalarOperand, ScalarSeriesOperand,
+    drop_metric_name, is_float_series, map_arithmetic, map_arithmetic_series, map_compare,
+    map_compare_series, map_math, map_math_with_parameters,
 };
+use crate::map_time::{self, DateFunction};
 use crate::native::aggregate::AggregateRuntime;
 use crate::native::batch::EvaluatedChunk;
 use crate::native::metrics::NodeMetrics;
 use crate::native::plan::{
-    BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode,
-    NativeTree, NativeType,
+    BoundInstant, BoundScalar, BoundSetOp, BoundVectorOp, Grouping, InstantValue, MapOp,
+    NativeExpr, NativeNode, NativeTree, NativeType, ParameterizedOp,
 };
 #[cfg(test)]
 pub(crate) use crate::native::runs::absorb_rebuilds;
@@ -967,7 +972,9 @@ impl InstantRuntime {
         // The grid's own points are what the selection decides, so the range and the step it is
         // asked for are the grid's: `start..=start + (len - 1) * step`, step by step.
         if let Some(at_ms) = self.selection.at_ms {
-            let timestamp_window = if self.selection.timestamp && self.selection.lookback_ms >= 0 {
+            let timestamp_window = if self.selection.value == InstantValue::Timestamp
+                && self.selection.lookback_ms >= 0
+            {
                 let anchor = at_ms as i128;
                 let shifted = anchor - self.selection.offset_ms as i128;
                 let lower = anchor.max(shifted) - self.selection.lookback_ms as i128;
@@ -992,38 +999,23 @@ impl InstantRuntime {
                 &fields,
                 selection_at,
                 selection_lookback,
-                if self.selection.timestamp {
+                if self.selection.value == InstantValue::Timestamp {
                     0
                 } else {
                     self.selection.offset_ms
                 },
             )?
             else {
-                let metric = if self.selection.timestamp {
-                    drop_metric_name(&metric)?
-                } else {
-                    metric
-                };
-                return no_row_chunk(&self.schema, metric);
+                return no_row_chunk(&self.schema, self.output_metric(&metric)?);
             };
             let grid_len = usize::try_from(spec.len).unwrap_or(usize::MAX);
-            if self.selection.timestamp {
+            if self.selection.value != InstantValue::Sample {
                 let indices = vec![index; grid_len];
                 let timestamps = grid
                     .timestamps()
                     .map_err(crate::grid_series::external)?
                     .to_vec();
-                return match timestamp_of_selection(
-                    &self.schema,
-                    &metric,
-                    &time,
-                    &fields,
-                    &indices,
-                    &timestamps,
-                )? {
-                    Some(series) => EvaluatedChunk::try_new(series, true),
-                    None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
-                };
+                return self.project(&metric, &time, &fields, &indices, &timestamps);
             }
             self.output.begin_series();
             let mut cursors: Vec<RowCursor<'_>> = fields.iter().map(Samples::cursor).collect();
@@ -1051,18 +1043,8 @@ impl InstantRuntime {
             self.selection.lookback_ms,
             self.selection.offset_ms,
         )?;
-        if self.selection.timestamp {
-            return match timestamp_of_selection(
-                &self.schema,
-                &metric,
-                &time,
-                &fields,
-                &indices,
-                &timestamps,
-            )? {
-                Some(series) => EvaluatedChunk::try_new(series, true),
-                None => no_row_chunk(&self.schema, drop_metric_name(&metric)?),
-            };
+        if self.selection.value != InstantValue::Sample {
+            return self.project(&metric, &time, &fields, &indices, &timestamps);
         }
         self.output.begin_series();
         // One cursor per field, so a row is read as the field holds it rather than by walking the
@@ -1093,6 +1075,42 @@ impl InstantRuntime {
         match self.output.finish(metric.clone())? {
             Some(series) => EvaluatedChunk::try_new(series, true),
             None => no_row_chunk(&self.schema, metric),
+        }
+    }
+
+    /// The labels this selection reports a series under: `timestamp(x)` drops the metric name.
+    fn output_metric(&self, metric: &SeriesLabels) -> Result<SeriesLabels> {
+        match self.selection.value {
+            InstantValue::Timestamp => drop_metric_name(metric),
+            InstantValue::Sample | InstantValue::InfoTimestamp => Ok(metric.clone()),
+        }
+    }
+
+    /// The sample times of a selection, for a selection that reports them rather than the samples.
+    fn project(
+        &self,
+        metric: &SeriesLabels,
+        time: &RawTimestamps,
+        fields: &SeriesFields,
+        indices: &[u64],
+        timestamps: &[i64],
+    ) -> Result<EvaluatedChunk> {
+        let projected = match self.selection.value {
+            InstantValue::Timestamp => {
+                timestamp_of_selection(&self.schema, metric, time, fields, indices, timestamps)?
+            }
+            InstantValue::InfoTimestamp => {
+                info_sample_times(&self.schema, metric, time, fields, indices, timestamps)?
+            }
+            InstantValue::Sample => {
+                return Err(DataFusionError::Internal(
+                    "an instant selection of samples has no sample times to project".to_string(),
+                ));
+            }
+        };
+        match projected {
+            Some(series) => EvaluatedChunk::try_new(series, true),
+            None => no_row_chunk(&self.schema, self.output_metric(metric)?),
         }
     }
 }
@@ -1430,6 +1448,8 @@ enum PairKernel {
     Binary(Arc<BinaryMatching>),
     /// `and`, `or` or `unless`, which keeps samples of either side as they are.
     Set(BoundSetOp),
+    /// `info`, whose left operand is the base and right operand the info series' sample times.
+    Info(InfoSelector),
 }
 
 impl PairKernel {
@@ -1438,6 +1458,7 @@ impl PairKernel {
         match self {
             Self::Binary(_) => "the binary node",
             Self::Set(_) => "the set node",
+            Self::Info(_) => "the info node",
         }
     }
 }
@@ -1644,6 +1665,11 @@ impl BinaryRuntime {
                     right,
                     &mut reserve,
                 ),
+                // The result keeps the base's fields on the base's grid, so the base's layout is
+                // the one the kernel builds it on.
+                PairKernel::Info(selector) => {
+                    info_with_reservation(left_schema, left, right, selector, &mut reserve)
+                }
             }
         };
         // The operands and the assembled series have been handed to the kernel and the reservation
@@ -1913,22 +1939,92 @@ enum BroadcastOp {
     Compare(Comparison),
 }
 
-/// What a binary node holds when one operand is a constant: the operation, its scalar operand and
-/// the layout of the vector side.
+/// The scalar side of a broadcast.
+enum BroadcastScalar {
+    /// A constant, read off the scalar node's binding, at its position in the operation.
+    Literal(ScalarOperand),
+    /// A scalar that varies per grid point: the one closed chunk its node hands over.
+    ///
+    /// It is read whole before any vector chunk is answered, because a point of the vector side
+    /// can only be computed with the scalar's value at that point.
+    Dynamic {
+        /// Whether the scalar is the left operand.
+        left: bool,
+        value: Option<Series>,
+    },
+}
+
+/// What a binary node holds when one operand is a scalar: the operation, its scalar operand and
+/// the layout of the side it is broadcast over.
 ///
 /// A broadcast applies to each chunk as it arrives; unlike [`BinaryRuntime`], it does not retain
-/// both operands for whole-vector matching.
+/// both operands for whole-vector matching. The side it is broadcast over is the vector side, or
+/// the varying side of an operation between two scalars, which is one unlabelled series too.
 struct BroadcastRuntime {
     /// The scalar and its position in the operation.
-    operand: ScalarOperand,
+    scalar: BroadcastScalar,
+    /// Whether the side broadcast over is the left operand.
+    vector_left: bool,
     /// The operation applied to every value of the vector.
     op: BroadcastOp,
     /// The layout of the vector side: the fields a chunk of it carries, on the grid it is addressed
     /// on. A chunk of the vector side is checked against it by the kernel itself.
     sample_schema: Arc<SeriesSchema>,
+    /// The bytes charged for the scalar's value, which [`BroadcastScalar::Dynamic`] keeps.
+    scalar_bytes: usize,
+}
+
+/// What a map with scalar parameters holds: its function and output layout, and each parameter's
+/// value once it has arrived.
+struct ParameterizedMapRuntime {
+    op: ParameterizedOp,
+    schema: Arc<SeriesSchema>,
+    /// A constant parameter's value, which its node does not hand over as a chunk.
+    literals: Vec<Option<f64>>,
+    /// Each parameter's one unlabelled series, in argument order.
+    values: Vec<Option<Series>>,
+    /// The bytes charged for `values`.
+    parameter_bytes: usize,
+}
+
+impl ParameterizedMapRuntime {
+    fn ready(&self) -> bool {
+        self.values.iter().all(Option::is_some)
+    }
+
+    /// Applies the function to one chunk with each parameter read at each point.
+    fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
+        let value = |index: usize| {
+            self.values
+                .get(index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "the map was applied before its parameters arrived".to_string(),
+                    )
+                })
+        };
+        let function = match self.op {
+            ParameterizedOp::Round => ParameterizedMath::Round {
+                to_nearest: value(0)?,
+            },
+            ParameterizedOp::Clamp => ParameterizedMath::Clamp {
+                min: value(0)?,
+                max: value(1)?,
+            },
+            ParameterizedOp::ClampMin => ParameterizedMath::ClampMin { min: value(0)? },
+            ParameterizedOp::ClampMax => ParameterizedMath::ClampMax { max: value(0)? },
+        };
+        map_math_with_parameters(&self.schema, &chunk.series, function)
+    }
 }
 
 impl BroadcastRuntime {
+    /// Whether the scalar varies per point and has not arrived yet.
+    fn awaits_scalar(&self) -> bool {
+        matches!(self.scalar, BroadcastScalar::Dynamic { value: None, .. })
+    }
+
     /// Whether the operation rewrites the label set of what it hands out.
     ///
     /// Arithmetic and a `bool` comparison drop the metric name, so two input series can become one
@@ -1962,15 +2058,37 @@ impl BroadcastRuntime {
     /// is answered even then — with a series carrying no row — because a consumer tells "nothing
     /// more here" from "no more input" by that chunk alone.
     fn apply(&self, chunk: &EvaluatedChunk) -> Result<Option<Series>> {
-        let output = match self.op {
-            BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
-                &self.sample_schema,
-                &chunk.series,
-                op,
-                self.operand,
-            )?),
-            BroadcastOp::Compare(comparison) => {
-                map_compare(&self.sample_schema, &chunk.series, comparison, self.operand)?
+        let output = match &self.scalar {
+            BroadcastScalar::Literal(operand) => match self.op {
+                BroadcastOp::Arithmetic(op) => Some(map_arithmetic(
+                    &self.sample_schema,
+                    &chunk.series,
+                    op,
+                    *operand,
+                )?),
+                BroadcastOp::Compare(comparison) => {
+                    map_compare(&self.sample_schema, &chunk.series, comparison, *operand)?
+                }
+            },
+            BroadcastScalar::Dynamic { left, value } => {
+                let value = value.as_ref().ok_or_else(|| {
+                    DataFusionError::Execution(
+                        "the binary node broadcast a scalar that has not arrived".to_string(),
+                    )
+                })?;
+                let operand = if *left {
+                    ScalarSeriesOperand::Left(value)
+                } else {
+                    ScalarSeriesOperand::Right(value)
+                };
+                match self.op {
+                    BroadcastOp::Arithmetic(op) => {
+                        map_arithmetic_series(&self.sample_schema, &chunk.series, op, operand)?
+                    }
+                    BroadcastOp::Compare(comparison) => {
+                        map_compare_series(&self.sample_schema, &chunk.series, comparison, operand)?
+                    }
+                }
             }
         };
         match output {
@@ -2048,11 +2166,6 @@ fn histogram_row_bytes(field: &Samples) -> Option<usize> {
 /// because a histogram handed on unchanged keeps its layout through
 /// [`crate::histogram_eval::float_histogram::FloatHistogram::push_to`].
 fn histogram_bytes(view: &HistogramView<'_>) -> usize {
-    // Schema, zero threshold, sum, count, zero count, reset hint and start timestamp, the narrow
-    // columns counted at the width of the widest.
-    let scalars = 7 * std::mem::size_of::<i64>();
-    // One offset per list column: custom bounds, two span columns and one bucket column per side.
-    let list_offsets = 7 * std::mem::size_of::<u32>();
     let custom = view
         .custom_values
         .len()
@@ -2071,11 +2184,17 @@ fn histogram_bytes(view: &HistogramView<'_>) -> usize {
                 )
         })
         .fold(0usize, usize::saturating_add);
-    scalars
-        .saturating_add(list_offsets)
+    HISTOGRAM_ROW_HEADER_BYTES
         .saturating_add(custom)
         .saturating_add(sides)
 }
+
+/// The bytes a histogram table row takes before its bucket lists: the schema, zero threshold, sum,
+/// count, zero count, reset hint and start timestamp, the narrow columns counted at the width of
+/// the widest, and one offset per list column -- custom bounds, two span columns and one bucket
+/// column per side.
+const HISTOGRAM_ROW_HEADER_BYTES: usize =
+    7 * std::mem::size_of::<i64>() + 7 * std::mem::size_of::<u32>();
 
 /// The last timestamp of `spec`, which is inclusive: its `len` points step from its start.
 ///
@@ -2105,21 +2224,255 @@ fn grid_position(grid: &EvalGrid, timestamp: i64) -> Result<usize> {
     Ok(position as usize)
 }
 
-/// One unlabelled constant value per statement grid point, closed on its only chunk.
-fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
-    let schema = SeriesSchema {
+/// The layout of a scalar's value carrier: one field on `grid`.
+fn scalar_schema(grid: Arc<EvalGrid>) -> SeriesSchema {
+    SeriesSchema {
         fields: Arc::from([FieldSpec {
             name: "value".into(),
         }]),
-        eval_grid: Some(Arc::clone(&grid)),
+        eval_grid: Some(grid),
+    }
+}
+
+/// The bytes one value per point of `grid` takes in a chunk of its own, reserved before it exists.
+fn grid_chunk_bytes(grid: &EvalGrid) -> Result<usize> {
+    let len = usize::try_from(grid.spec().len).map_err(|_| {
+        DataFusionError::Execution("scalar grid length does not fit memory size".into())
+    })?;
+    std::mem::size_of::<EvaluatedChunk>()
+        .checked_add(std::mem::size_of::<Float64Array>())
+        .and_then(|bytes| {
+            len.checked_mul(std::mem::size_of::<f64>())
+                .and_then(|values| bytes.checked_add(values))
+        })
+        .ok_or_else(|| DataFusionError::Execution("scalar allocation size overflow".into()))
+}
+
+/// An upper bound of what the operations of a map allocate for the series they write over
+/// `series`.
+///
+/// Each operation that writes values reads the series the one before it wrote, which stays alive
+/// until the next one is written, so the bound is the largest of the first one's workspace and of
+/// two consecutive ones'. Math over a series of floats maps its segments; math over native
+/// histograms and histogram functions build a subset of its rows. Every such operation writes
+/// floats only, at no more rows than it read, so a later math operation maps no more than the
+/// input's segments hold; a later histogram function is bounded without assuming the runs of what
+/// it reads.
+fn map_workspace_bytes(ops: &[MapOp], series: &Series) -> Result<usize> {
+    let (mut previous, mut bound) = (0usize, 0usize);
+    let mut first = true;
+    for op in ops {
+        let workspace = match op {
+            MapOp::Label(_) => continue,
+            MapOp::Math(_) if !first || is_float_series(series) => mapped_workspace_bytes(series)?,
+            _ if first => built_series_workspace_bytes(series)?,
+            _ => built_workspace_bytes(series.time.len(), series.time.len(), series.fields.len())?,
+        };
+        let live = previous
+            .checked_add(workspace)
+            .ok_or_else(|| workspace_overflow(series.time.len(), series.fields.len()))?;
+        bound = bound.max(live);
+        previous = workspace;
+        first = false;
+    }
+    Ok(bound)
+}
+
+/// An upper bound of what a kernel that maps each dense segment of `series` into a float array of
+/// its length allocates: float math over a series of floats and arithmetic against a constant.
+///
+/// A mapped segment holds its values, rounded up to Arrow's 64-byte alignment, behind the header
+/// of the allocation they share, and keeps the input's validity and axis; the result is assembled
+/// as [`assembly_bytes`] counts it.
+fn mapped_workspace_bytes(series: &Series) -> Result<usize> {
+    let segments = series
+        .fields
+        .iter()
+        .map(|field| field.segments().len())
+        .fold(0usize, usize::saturating_add);
+    let bound = || {
+        let mut bytes = assembly_bytes(series.fields.len(), segments, &series.metric)?;
+        for segment in series.fields.iter().flat_map(|field| field.segments()) {
+            bytes = segment
+                .len()
+                .checked_mul(std::mem::size_of::<f64>())?
+                .checked_add(64 + BUFFER_HEADER_BYTES)?
+                .checked_add(bytes)?;
+        }
+        Some(bytes)
     };
+    bound().ok_or_else(|| workspace_overflow(series.time.len(), series.fields.len()))
+}
+
+/// An upper bound of what a kernel that pushes a subset of the rows of `series` into a
+/// [`GridSeriesBuilder`] allocates: [`built_workspace_bytes`] over the series' rows and runs, and
+/// the result's assembly ([`assembly_bytes`]), one segment per field.
+fn built_series_workspace_bytes(series: &Series) -> Result<usize> {
+    let fields = series.fields.len();
+    let rows = built_workspace_bytes(series.time.len(), series.time.runs().count(), fields)?;
+    assembly_bytes(fields, fields, &series.metric)
+        .and_then(|assembly| assembly.checked_add(rows))
+        .ok_or_else(|| workspace_overflow(series.time.len(), fields))
+}
+
+/// The bytes a result of `fields` fields over `segments` segments is assembled from, beside its
+/// values: the descriptor lists and the label set rebuilt from `metric`.
+///
+/// A list collected or pushed without knowing its length starts at four entries and doubles, so a
+/// list of `n` descriptors holds at most `2 * n + 4`. Each field goes through up to three segment
+/// lists -- the mapped segments, the flattened ones and the copy a chunked field keeps -- and the
+/// series through two field lists. The label set keeps the input's labels or fewer.
+fn assembly_bytes(fields: usize, segments: usize, metric: &SeriesLabels) -> Option<usize> {
+    let descriptors = segments
+        .checked_mul(6)?
+        .checked_add(fields.checked_mul(16)?)?
+        .checked_add(8)?
+        .checked_mul(std::mem::size_of::<Samples>())?;
+    descriptors
+        .checked_add(std::mem::size_of_val(metric.tags()))?
+        .checked_add(BUFFER_HEADER_BYTES + std::mem::size_of::<Series>())
+}
+
+/// An allowance for the shared header an Arrow buffer or a label list is allocated behind.
+const BUFFER_HEADER_BYTES: usize = 64;
+
+/// An upper bound of the bytes a [`GridSeriesBuilder`] allocates for a result of `fields` float
+/// fields whose positions are a subset of `rows` positions making up `runs` runs.
+///
+/// The kernels that build their result this way are math over native histograms, histogram
+/// functions (one float per histogram), filters, math with scalar parameters, arithmetic and
+/// comparison against a varying scalar, `timestamp` and range windows. A label rewrite writes no
+/// row; the map admits the labels it writes itself.
+///
+/// For a result of `kept` rows in `split` runs, the builder's row indices and each field's values
+/// grow by doubling, so each holds at most `2 * kept + 4` entries, and a field's validity at most
+/// twice its bits plus one 64-byte block. Finishing turns each run into a span, which the axis
+/// copies once, beside the first row of each span. Dropping one position from a set of positions
+/// splits at most one run in two, so `split <= min(kept, runs + rows - kept)`. The cost is linear
+/// in `kept` and `split`, so over that region it is largest at `kept = rows, split = runs` or at
+/// `kept = split = (rows + runs) / 2`, and the bound is the larger of the two. A caller that cannot
+/// say the result's positions are the input's passes `runs = rows`, which assumes nothing.
+///
+/// The builder is not told the row count up front: its values become the result's arrays without a
+/// copy, so a capacity reserved for every input row would stay with the result of a filter that
+/// kept few of them, and every consumer charging that result by its capacity would pay for it.
+///
+/// The transient second copy a reallocation makes is not counted.
+fn built_workspace_bytes(rows: usize, runs: usize, fields: usize) -> Result<usize> {
+    let cost = |kept: usize, split: usize| {
+        let capacity = kept.checked_mul(2)?.checked_add(4)?;
+        let indices = capacity.checked_mul(std::mem::size_of::<usize>())?;
+        let validity = kept.div_ceil(8).checked_mul(2)?.checked_add(64)?;
+        let field = capacity
+            .checked_mul(std::mem::size_of::<f64>())?
+            .checked_add(validity)?;
+        let spans = split
+            .checked_mul(2 * std::mem::size_of::<GridSpan>() + 2 * std::mem::size_of::<usize>())?;
+        fields
+            .checked_mul(field)?
+            .checked_add(indices)?
+            .checked_add(spans)
+    };
+    let runs = runs.min(rows);
+    let fragmented = rows.checked_add(runs).map(|total| total.div_ceil(2));
+    fragmented
+        .and_then(|fragmented| Some(cost(rows, runs)?.max(cost(fragmented, fragmented)?)))
+        .ok_or_else(|| workspace_overflow(rows, fields))
+}
+
+fn workspace_overflow(rows: usize, fields: usize) -> DataFusionError {
+    DataFusionError::Execution(format!(
+        "the workspace for {rows} rows of {fields} fields does not fit one address space"
+    ))
+}
+
+/// An upper bound of what `window`'s next push allocates for the rows it hands out, for input
+/// whose last sample is at `last_ts`, closing its series when `last`, with `fields`, of the series
+/// `metric` names.
+///
+/// The rows are bounded by [`RangeEvaluator::output_rows_bound`] and written as
+/// [`built_workspace_bytes`] counts them; the points they sit on are the output grid's, not a
+/// subset of the input's, so each may be a run of its own. A function that can answer with a
+/// native histogram also writes, per field and row, a histogram index -- buffered as an
+/// `Option<u32>` and copied into an index array -- and a table row grown by doubling, with one
+/// boxed result per field in flight. A table row is bounded by the widest histogram the evaluator retains or `fields`
+/// carries: `first_over_time` and `last_over_time` copy one, and the others combine the window's
+/// histograms, whose layouts nest while a counter only grows. A combination of disjoint layouts --
+/// across a counter reset, or a `sum_over_time` of gauge histograms -- can exceed that row; it is
+/// not bounded here.
+fn window_workspace_bytes(
+    window: &RangeEvaluator,
+    last_ts: Option<i64>,
+    last: bool,
+    fields: &SeriesFields,
+    metric: &SeriesLabels,
+) -> Result<usize> {
+    let rows = window.output_rows_bound(last_ts, last);
+    let width = window.output_schema().fields.len();
+    let floats = assembly_bytes(width, width, metric)
+        .ok_or_else(|| workspace_overflow(rows, width))?
+        .checked_add(built_workspace_bytes(rows, rows, width)?)
+        .ok_or_else(|| workspace_overflow(rows, width))?;
+    if !window.yields_histograms() {
+        return Ok(floats);
+    }
+    let retained = window
+        .widest_retained_histogram()
+        .map(|heap| heap.saturating_add(HISTOGRAM_ROW_HEADER_BYTES));
+    let incoming = fields.iter().filter_map(histogram_row_bytes).max();
+    let Some(widest) = retained.max(incoming) else {
+        return Ok(floats);
+    };
+    let histograms = || {
+        let row = widest
+            .checked_mul(2)?
+            .checked_add(2 * std::mem::size_of::<Option<u32>>() + std::mem::size_of::<u32>() + 1)?;
+        let in_flight = widest.checked_add(std::mem::size_of::<FloatHistogram>())?;
+        rows.checked_mul(row)?
+            .checked_add(in_flight)?
+            .checked_mul(width)?
+            .checked_add(floats)
+    };
+    histograms().ok_or_else(|| {
+        DataFusionError::Execution(format!(
+            "the histogram workspace for {rows} rows of {width} fields does not fit one address \
+             space"
+        ))
+    })
+}
+
+/// The time of the last sample a chunk carries, on its own timeline.
+fn last_sample_ms(chunk: &NativeChunk) -> Option<i64> {
+    match chunk {
+        NativeChunk::Raw(chunk) => chunk.time.as_buffer().last().copied(),
+        NativeChunk::Evaluated(chunk) => last_series_ms(&chunk.series),
+    }
+}
+
+/// The time of the last row `series` carries.
+fn last_series_ms(series: &Series) -> Option<i64> {
+    let row = series.time.len().checked_sub(1)?;
+    series.time.timestamp(row)
+}
+
+/// One unlabelled constant value per statement grid point, closed on its only chunk.
+fn scalar_chunk(grid: Arc<EvalGrid>, value: f64) -> Result<EvaluatedChunk> {
+    scalar_chunk_on(&scalar_schema(Arc::clone(&grid)), grid, value)
+}
+
+/// [`scalar_chunk`] under `schema`, which names the one field.
+fn scalar_chunk_on(
+    schema: &SeriesSchema,
+    grid: Arc<EvalGrid>,
+    value: f64,
+) -> Result<EvaluatedChunk> {
     let len = grid.spec().len as usize;
     let time = GridRange::try_new(grid, 0, len).map_err(series_error)?;
     let values = Float64Array::from(vec![value; len]);
     let fields = SeriesFields::one(Samples::from_float(values));
     let metric = SeriesLabels::try_new(None, Vec::new()).map_err(series_error)?;
     let series =
-        Series::try_new(&schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
+        Series::try_new(schema, metric, TimeAxis::Grid(time), fields).map_err(series_error)?;
     EvaluatedChunk::try_new(series, true)
 }
 
@@ -2153,6 +2506,22 @@ struct RuntimeNode {
 enum RuntimeOp {
     Input(InputId),
     Scalar,
+    /// The evaluation time or a date function of it, produced once as one closed chunk.
+    EvalTime {
+        grid: Arc<EvalGrid>,
+        date: Option<DateFunction>,
+        produced: bool,
+        state: NodeState,
+    },
+    /// A scalar handed on as a vector. A constant input has no chunk of its own, so its value is
+    /// produced here, once.
+    VectorOf {
+        input: Box<RuntimeNode>,
+        literal: Option<f64>,
+        produced: bool,
+        schema: Arc<SeriesSchema>,
+        state: NodeState,
+    },
     Instant {
         input: Box<RuntimeNode>,
         instant: Option<InstantRuntime>,
@@ -2172,6 +2541,12 @@ enum RuntimeOp {
     Map {
         input: Box<RuntimeNode>,
         map: Option<MapRuntime>,
+        state: NodeState,
+    },
+    ParameterizedMap {
+        input: Box<RuntimeNode>,
+        parameters: Vec<RuntimeNode>,
+        map: Option<ParameterizedMapRuntime>,
         state: NodeState,
     },
     Timestamp {
@@ -2286,6 +2661,50 @@ impl RuntimeNode {
                 (RuntimeOp::Input(id), false)
             }
             NativeExpr::Scalar(_) => (RuntimeOp::Scalar, false),
+            NativeExpr::EvalTime { date } => {
+                let NativeType::Scalar(grid) = &node.output else {
+                    return Err(DataFusionError::Execution(
+                        "the evaluation time does not produce a scalar".to_string(),
+                    ));
+                };
+                (
+                    RuntimeOp::EvalTime {
+                        grid: Arc::clone(grid),
+                        date: *date,
+                        produced: false,
+                        state: NodeState::new(
+                            format!("native.time at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
+                    false,
+                )
+            }
+            NativeExpr::VectorOf { input } => {
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("vector() does not produce samples".to_string())
+                })?;
+                let literal = match &input.expr {
+                    NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                    _ => None,
+                };
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
+                (
+                    RuntimeOp::VectorOf {
+                        input: Box::new(child),
+                        literal,
+                        produced: false,
+                        schema,
+                        state: NodeState::new(
+                            format!("native.vector_of at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
+                    false,
+                )
+            }
             NativeExpr::Instant { input, op } => {
                 let (child, shared) =
                     Self::build(input, pool, inputs, format!("{location}.input"))?;
@@ -2304,13 +2723,13 @@ impl RuntimeNode {
                                 Arc::clone(&metrics),
                                 pool,
                             );
-                            if op.timestamp {
+                            if op.value == InstantValue::Timestamp {
                                 state.emitted = Some(Emitted::default());
                             }
                             state
                         },
                     },
-                    shared || op.timestamp,
+                    shared || op.value == InstantValue::Timestamp,
                 )
             }
             NativeExpr::Merge { input } => {
@@ -2384,6 +2803,57 @@ impl RuntimeNode {
                     true,
                 )
             }
+            NativeExpr::ParameterizedMap {
+                input,
+                op,
+                parameters,
+            } => {
+                let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
+                let schema = node.output.samples().cloned().ok_or_else(|| {
+                    DataFusionError::Execution("map does not produce samples".to_string())
+                })?;
+                let literals = parameters
+                    .iter()
+                    .map(|parameter| match &parameter.expr {
+                        NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+                        _ => None,
+                    })
+                    .collect();
+                let nodes = parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        Self::build(
+                            parameter,
+                            pool,
+                            inputs,
+                            format!("{location}.parameter{index}"),
+                        )
+                        .map(|(node, _)| node)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut state = NodeState::new(
+                    format!("native.map at {location}"),
+                    Arc::clone(&metrics),
+                    pool,
+                );
+                state.emitted = Some(Emitted::default());
+                (
+                    RuntimeOp::ParameterizedMap {
+                        input: Box::new(child),
+                        parameters: nodes,
+                        map: Some(ParameterizedMapRuntime {
+                            op: *op,
+                            schema,
+                            literals,
+                            values: vec![None; parameters.len()],
+                            parameter_bytes: 0,
+                        }),
+                        state,
+                    },
+                    true,
+                )
+            }
             NativeExpr::Timestamp { input } => {
                 let (child, _) = Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let schema = node.output.samples().cloned().ok_or_else(|| {
@@ -2445,7 +2915,7 @@ impl RuntimeNode {
                     ),
                     (None, Some(broadcast)) => {
                         let shared = broadcast.drops_labels()
-                            || if left_schema.is_some() {
+                            || if broadcast.vector_left {
                                 left_shared
                             } else {
                                 right_shared
@@ -2498,6 +2968,39 @@ impl RuntimeNode {
                         binary: Some(set),
                         state: NodeState::new(
                             format!("native.set at {location}"),
+                            Arc::clone(&metrics),
+                            pool,
+                        ),
+                    },
+                    false,
+                )
+            }
+            NativeExpr::Info {
+                base,
+                info,
+                selector,
+            } => {
+                let (Some(base_schema), Some(info_schema)) =
+                    (base.output.samples(), info.output.samples())
+                else {
+                    return Err(DataFusionError::Execution(
+                        "info consumes two vectors".to_string(),
+                    ));
+                };
+                let runtime = BinaryRuntime::new(
+                    PairKernel::Info(selector.clone()),
+                    [Arc::clone(base_schema), Arc::clone(info_schema)],
+                );
+                let (base_node, _) = Self::build(base, pool, inputs, format!("{location}.base"))?;
+                let (info_node, _) = Self::build(info, pool, inputs, format!("{location}.info"))?;
+                // The kernel merges the results that share a label set, so its output shares none.
+                (
+                    RuntimeOp::Binary {
+                        left: Box::new(base_node),
+                        right: Box::new(info_node),
+                        binary: Some(runtime),
+                        state: NodeState::new(
+                            format!("native.info at {location}"),
                             Arc::clone(&metrics),
                             pool,
                         ),
@@ -2586,19 +3089,28 @@ impl RuntimeNode {
     fn register_metrics(&self, name: &str, set: &ExecutionPlanMetricsSet, partition: usize) {
         self.metrics.register(name, set, partition);
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => {}
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Merge { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => {
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => {
                 input.register_metrics(&format!("{name}.input"), set, partition)
             }
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.register_metrics(&format!("{name}.left"), set, partition);
                 right.register_metrics(&format!("{name}.right"), set, partition);
+            }
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.register_metrics(&format!("{name}.input"), set, partition);
+                for (index, parameter) in parameters.iter().enumerate() {
+                    parameter.register_metrics(&format!("{name}.parameter{index}"), set, partition);
+                }
             }
         }
     }
@@ -2606,13 +3118,15 @@ impl RuntimeNode {
     fn reserved_bytes(&self) -> usize {
         match &self.op {
             RuntimeOp::Input(_) | RuntimeOp::Scalar => 0,
+            RuntimeOp::EvalTime { state, .. } => state.buffer.reservation.size(),
             RuntimeOp::Instant { input, state, .. }
             | RuntimeOp::Window { input, state, .. }
             | RuntimeOp::Merge { input, state, .. }
             | RuntimeOp::Map { input, state, .. }
             | RuntimeOp::Timestamp { input, state, .. }
             | RuntimeOp::Aggregate { input, state, .. }
-            | RuntimeOp::Vector { input, state, .. } => state
+            | RuntimeOp::Vector { input, state, .. }
+            | RuntimeOp::VectorOf { input, state, .. } => state
                 .buffer
                 .reservation
                 .size()
@@ -2628,6 +3142,19 @@ impl RuntimeNode {
                 .size()
                 .saturating_add(left.reserved_bytes())
                 .saturating_add(right.reserved_bytes()),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                state,
+                ..
+            } => parameters.iter().fold(
+                state
+                    .buffer
+                    .reservation
+                    .size()
+                    .saturating_add(input.reserved_bytes()),
+                |total, parameter| total.saturating_add(parameter.reserved_bytes()),
+            ),
         }
     }
 }
@@ -2665,6 +3192,60 @@ impl RuntimeNode {
             // value is the constant on the tree, which the consumer reads off its own binding. A
             // pull of it is therefore empty by construction and says nothing has stalled.
             RuntimeOp::Scalar => Ok(None),
+            RuntimeOp::EvalTime {
+                grid,
+                date,
+                produced,
+                state,
+            } => {
+                if !std::mem::replace(produced, true) {
+                    let schema = scalar_schema(Arc::clone(grid));
+                    state
+                        .produce(grid, || match date {
+                            None => map_time::time(&schema),
+                            Some(date) => map_time::date_of_eval_time(*date, &schema),
+                        })
+                        .map_err(|error| state.context(error))?;
+                }
+                state.pop_queued(evaluated_values)
+            }
+            RuntimeOp::VectorOf {
+                input,
+                literal,
+                produced,
+                schema,
+                state,
+            } => {
+                if let Some(value) = literal {
+                    if !std::mem::replace(produced, true) {
+                        let grid = schema.eval_grid.clone().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "vector() produces values without a grid".to_string(),
+                            )
+                        })?;
+                        state
+                            .produce(&grid, || {
+                                Ok(scalar_chunk_on(schema, Arc::clone(&grid), *value)?.series)
+                            })
+                            .map_err(|error| state.context(error))?;
+                    }
+                    return state.pop_queued(evaluated_values);
+                }
+                // A scalar is already one unlabelled series; only the layout it is named by changes.
+                let Some(chunk) = input.pull(inputs, inputs_finished)? else {
+                    return Ok(None);
+                };
+                let NativeChunk::Evaluated(EvaluatedChunk { series, is_last }) = chunk else {
+                    return Err(DataFusionError::Execution(
+                        "vector() consumes an evaluated scalar, not raw samples".to_string(),
+                    ));
+                };
+                let series = Series::try_new(schema, series.metric, series.time, series.fields)
+                    .map_err(series_error)?;
+                Ok(Some(NativeChunk::Evaluated(EvaluatedChunk::try_new(
+                    series, is_last,
+                )?)))
+            }
             RuntimeOp::Instant {
                 input,
                 instant,
@@ -2762,6 +3343,65 @@ impl RuntimeNode {
                     }
                 }
             }
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                let Some(operation) = map.as_mut() else {
+                    return Err(no_map());
+                };
+                // Every parameter is read whole first, as a broadcast reads its scalar; a constant
+                // one is materialized from its binding.
+                for (index, parameter) in parameters.iter_mut().enumerate() {
+                    let slot = &mut operation.values[index];
+                    if slot.is_some() {
+                        continue;
+                    }
+                    if let Some(value) = operation.literals[index] {
+                        let grid = operation.schema.eval_grid.clone().ok_or_else(|| {
+                            DataFusionError::Execution(
+                                "a map produces values without a grid".to_string(),
+                            )
+                        })?;
+                        state
+                            .hold_constant(&mut operation.parameter_bytes, slot, grid, value)
+                            .map_err(|error| state.context(error))?;
+                        continue;
+                    }
+                    while let Some(chunk) = parameter.pull(inputs, inputs_finished)? {
+                        state
+                            .hold_scalar(&mut operation.parameter_bytes, slot, chunk)
+                            .map_err(|error| state.context(error))?;
+                    }
+                }
+                // A parameter reads no data, so it hands its value over on its first pull and is
+                // always ready by now.
+                if !operation.ready() {
+                    return Err(DataFusionError::Execution(
+                        "a map parameter did not hand over its value when it was read".to_string(),
+                    ));
+                }
+                loop {
+                    let chunk = match input.pull(inputs, inputs_finished)? {
+                        Some(NativeChunk::Evaluated(chunk)) => chunk,
+                        Some(NativeChunk::Raw(_)) => {
+                            return Err(DataFusionError::Execution(
+                                "the map node consumes an evaluated chunk, not raw samples"
+                                    .to_string(),
+                            ));
+                        }
+                        None => return Ok(None),
+                    };
+                    if let Some(output) = state
+                        .parameterized_map(operation, chunk)
+                        .map_err(|error| state.context(error))?
+                    {
+                        return Ok(Some(NativeChunk::Evaluated(output)));
+                    }
+                }
+            }
             RuntimeOp::Timestamp {
                 input,
                 schema,
@@ -2831,14 +3471,32 @@ impl RuntimeNode {
                 let Some(operation) = broadcast.as_mut() else {
                     return Err(no_broadcast());
                 };
-                // A broadcast reads the vector side only: the constant is on the node's binding, so
-                // there is no second stream to pull and no chunk to retain. Each chunk is
-                // transformed as it arrives and handed up, which is what keeps a broadcast over a
-                // whole vector from costing the vector.
-                let vector = match operation.operand {
-                    ScalarOperand::Left(_) => &mut **right,
-                    ScalarOperand::Right(_) => &mut **left,
+                // A constant is on the node's binding, so only the vector side is pulled. A varying
+                // scalar is read first, whole; then each vector chunk is transformed as it arrives
+                // and handed up, which is what keeps a broadcast over a whole vector from costing
+                // the vector.
+                let (vector, scalar) = if operation.vector_left {
+                    (&mut **left, &mut **right)
+                } else {
+                    (&mut **right, &mut **left)
                 };
+                if let BroadcastScalar::Dynamic { value, .. } = &mut operation.scalar
+                    && value.is_none()
+                {
+                    while let Some(chunk) = scalar.pull(inputs, inputs_finished)? {
+                        state
+                            .hold_scalar(&mut operation.scalar_bytes, value, chunk)
+                            .map_err(|error| state.context(error))?;
+                    }
+                }
+                // A varying scalar reads no data, so it hands its value over on its first pull and
+                // is always ready by now.
+                if operation.awaits_scalar() {
+                    return Err(DataFusionError::Execution(
+                        "a broadcast scalar did not hand over its value when it was read"
+                            .to_string(),
+                    ));
+                }
                 // An operation that empties every position yields no chunk, and the node asks its
                 // vector side again rather than reporting a decision it did not make.
                 loop {
@@ -2923,6 +3581,29 @@ impl RuntimeNode {
             // A scalar produces its value without reading anything, so it is settled from the
             // start: there is no chunk it owes its consumer.
             RuntimeOp::Scalar => true,
+            RuntimeOp::EvalTime {
+                produced, state, ..
+            } => *produced && state.queued.is_empty(),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                state.queued.is_empty()
+                    && map.is_some()
+                    && input.settled(inputs)
+                    && parameters.iter().all(|parameter| parameter.settled(inputs))
+            }
+            RuntimeOp::VectorOf {
+                input,
+                literal,
+                produced,
+                state,
+                ..
+            } => {
+                state.queued.is_empty() && (*produced || literal.is_none()) && input.settled(inputs)
+            }
             // These report as they are handed chunks, so a child with nothing left is all it takes
             // for them to have nothing left either.
             RuntimeOp::Instant { input, state, .. }
@@ -2977,8 +3658,8 @@ impl RuntimeNode {
                     && left.settled(inputs)
                     && right.settled(inputs)
             }
-            // A broadcast owes only what its vector side has not handed over yet: it answers each
-            // chunk as it reads it and keeps nothing, so it is settled exactly when that side is.
+            // A broadcast owes what its sides have not handed over yet. A constant side is settled
+            // from the start.
             RuntimeOp::Broadcast {
                 left,
                 right,
@@ -2986,12 +3667,9 @@ impl RuntimeNode {
                 state,
             } => {
                 state.queued.is_empty()
-                    && broadcast
-                        .as_ref()
-                        .is_some_and(|operation| match operation.operand {
-                            ScalarOperand::Left(_) => right.settled(inputs),
-                            ScalarOperand::Right(_) => left.settled(inputs),
-                        })
+                    && broadcast.is_some()
+                    && left.settled(inputs)
+                    && right.settled(inputs)
             }
         }
     }
@@ -3005,12 +3683,22 @@ impl RuntimeNode {
     /// later call, when what is below it has handed its answer over.
     fn flush_ready_merges(&mut self, inputs: &[InputSlot]) -> Result<bool> {
         match &mut self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(false),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(false),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                let mut flushed = input.flush_ready_merges(inputs)?;
+                for parameter in parameters {
+                    flushed |= parameter.flush_ready_merges(inputs)?;
+                }
+                Ok(flushed)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.flush_ready_merges(inputs),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.flush_ready_merges(inputs),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 let left_flushed = left.flush_ready_merges(inputs)?;
                 let right_flushed = right.flush_ready_merges(inputs)?;
@@ -3056,12 +3744,16 @@ impl RuntimeNode {
     /// Whether any window still holds collected input that has not been merged.
     fn any_merge_pending(&self) -> bool {
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => false,
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => false,
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => input.any_merge_pending() || parameters.iter().any(RuntimeNode::any_merge_pending),
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
-            | RuntimeOp::Vector { input, .. } => input.any_merge_pending(),
+            | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. } => input.any_merge_pending(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 left.any_merge_pending() || right.any_merge_pending()
             }
@@ -3079,12 +3771,19 @@ impl RuntimeNode {
     /// finished. Both are refused here, before any of them allocates a workspace.
     fn unclosed(&self) -> Result<()> {
         match &self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                input.unclosed()?;
+                parameters.iter().try_for_each(RuntimeNode::unclosed)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Window { input, .. }
             | RuntimeOp::Aggregate { input, .. }
+            | RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Merge { input, .. } => input.unclosed(),
             RuntimeOp::Binary {
                 left,
@@ -3126,12 +3825,23 @@ impl RuntimeNode {
     /// reported -- so that a failure leaves nothing to be read on the way out.
     fn finish_windows(&mut self) -> Result<()> {
         match &mut self.op {
-            RuntimeOp::Input(_) | RuntimeOp::Scalar => Ok(()),
+            RuntimeOp::Input(_) | RuntimeOp::Scalar | RuntimeOp::EvalTime { .. } => Ok(()),
+            RuntimeOp::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                // Every evaluator is finished even after one fails, as for a binary node.
+                let first = input.finish_windows();
+                parameters
+                    .iter_mut()
+                    .map(RuntimeNode::finish_windows)
+                    .fold(first, Result::and)
+            }
             RuntimeOp::Instant { input, .. }
             | RuntimeOp::Map { input, .. }
             | RuntimeOp::Timestamp { input, .. }
             | RuntimeOp::Aggregate { input, .. }
             | RuntimeOp::Vector { input, .. }
+            | RuntimeOp::VectorOf { input, .. }
             | RuntimeOp::Merge { input, .. } => input.finish_windows(),
             RuntimeOp::Binary { left, right, .. } | RuntimeOp::Broadcast { left, right, .. } => {
                 // Both sides are finished even when the first one fails: the failure is reported
@@ -3167,6 +3877,24 @@ impl RuntimeNode {
             // A source keeps its queue in the caller-owned slot, which is released beside the tree,
             // and a scalar holds nothing at all.
             RuntimeOp::Input(_) | RuntimeOp::Scalar => {}
+            RuntimeOp::EvalTime { state, .. } => state.release(),
+            RuntimeOp::ParameterizedMap {
+                input,
+                parameters,
+                map,
+                state,
+            } => {
+                *map = None;
+                state.release();
+                input.release();
+                for parameter in parameters {
+                    parameter.release();
+                }
+            }
+            RuntimeOp::VectorOf { input, state, .. } => {
+                state.release();
+                input.release();
+            }
             RuntimeOp::Instant {
                 input,
                 instant,
@@ -3258,33 +3986,21 @@ impl NativeExecutionState {
     pub fn try_new(tree: &NativeTree, pool: Arc<dyn MemoryPool>) -> Result<Self> {
         let mut inputs = Vec::new();
         let (root, _) = RuntimeNode::build(tree.root(), &pool, &mut inputs, "root".to_string())?;
-        let scalar_root = if inputs.is_empty() {
-            match (&tree.root().expr, &tree.root().output) {
-                (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
-                    Arc::clone(grid),
-                    *value,
-                    NodeState::new(
-                        "native.scalar at root".to_string(),
-                        Arc::clone(&root.metrics),
-                        &pool,
-                    ),
-                )),
-                _ => {
-                    return Err(DataFusionError::Execution(
-                        "native tree without inputs must be a scalar root".into(),
-                    ));
-                }
-            }
-        } else {
-            None
+        // A constant root has no node that produces its value, so the state produces it.
+        let scalar_root = match (&tree.root().expr, &tree.root().output) {
+            (NativeExpr::Scalar(BoundScalar { value }), NativeType::Scalar(grid)) => Some((
+                Arc::clone(grid),
+                *value,
+                NodeState::new(
+                    "native.scalar at root".to_string(),
+                    Arc::clone(&root.metrics),
+                    &pool,
+                ),
+            )),
+            _ => None,
         };
         match &tree.root().output {
-            NativeType::Scalar(_) if inputs.is_empty() => {}
-            NativeType::Scalar(_) => {
-                return Err(DataFusionError::Execution(
-                    "native scalar root unexpectedly has input nodes".into(),
-                ));
-            }
+            NativeType::Scalar(_) => {}
             NativeType::Samples(schema) if schema.eval_grid.is_some() => {}
             NativeType::Samples(_) => {
                 return Err(DataFusionError::Execution(
@@ -3349,18 +4065,7 @@ impl NativeExecutionState {
     /// down unchanged, because only a node that reads its whole input needs it.
     fn pull(&mut self, inputs_finished: bool) -> Result<Option<NativeChunk>> {
         if let Some((grid, value, mut state)) = self.scalar_root.take() {
-            let len = usize::try_from(grid.spec().len).map_err(|_| {
-                DataFusionError::Execution("scalar grid length does not fit memory size".into())
-            })?;
-            let bytes = std::mem::size_of::<EvaluatedChunk>()
-                .checked_add(std::mem::size_of::<Float64Array>())
-                .and_then(|bytes| {
-                    len.checked_mul(std::mem::size_of::<f64>())
-                        .and_then(|values| bytes.checked_add(values))
-                })
-                .ok_or_else(|| {
-                    DataFusionError::Execution("scalar allocation size overflow".into())
-                })?;
+            let bytes = grid_chunk_bytes(&grid).map_err(|error| state.context(error))?;
             state
                 .buffer
                 .grow(bytes)
@@ -3502,8 +4207,11 @@ impl NodeState {
     /// there is nothing to hand on, and the input may still decide more.
     fn map(&mut self, map: &MapRuntime, chunk: EvaluatedChunk) -> Result<Option<EvaluatedChunk>> {
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
-        // The chunk is held for as long as this node works on it.
+        // The chunk is held for as long as this node works on it, beside the series its
+        // operations write.
+        let workspace = map_workspace_bytes(&map.ops, &chunk.series)?;
         self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -3517,8 +4225,15 @@ impl NodeState {
         if closing {
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // The chunk and the workspace are this call's, not the node's, so a failed map gives them
+        // back here rather than holding the pool's budget until the stopped executor is dropped.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer.resize(self.emitted_bytes())?;
+                return Err(error);
+            }
+        };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
@@ -3533,6 +4248,60 @@ impl NodeState {
         Ok(output)
     }
 
+    /// Maps one evaluated chunk with its parameters read at each point, keeping its axis and its
+    /// closing.
+    ///
+    /// `None` means no point kept a value and the chunk does not close its series. What this node
+    /// holds afterwards is the label sets it handed out and what it holds for its parameters.
+    fn parameterized_map(
+        &mut self,
+        map: &ParameterizedMapRuntime,
+        chunk: EvaluatedChunk,
+    ) -> Result<Option<EvaluatedChunk>> {
+        let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
+        let workspace = built_series_workspace_bytes(&chunk.series)?;
+        self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
+        let metrics = Arc::clone(&self.buffer.metrics);
+        let outcome = {
+            let _timer = metrics.timer();
+            map.apply(&chunk)
+        };
+        metrics.record_input(1, positions);
+        if closing {
+            metrics.record_completed_series(1);
+        }
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.buffer
+                    .resize(self.emitted_bytes().saturating_add(map.parameter_bytes))?;
+                return Err(error);
+            }
+        };
+        let output = match outcome {
+            Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
+            // A closing chunk is handed over even when no point kept a value, because a consumer
+            // tells "nothing more here" from "no more input" by that chunk alone.
+            None if closing => {
+                let metric = drop_metric_name(&chunk.series.metric)?;
+                let empty = no_row_series(&map.schema, &chunk.series, metric)?;
+                Some(EvaluatedChunk::try_new(empty, true)?)
+            }
+            None => None,
+        };
+        if let Some(output) = &output {
+            metrics.record_grid_points(output.series.time.len());
+            metrics.record_output(1, valid_values(output));
+            self.track(output)?;
+        }
+        let emitted = self.emitted_bytes();
+        self.buffer
+            .resize(emitted.saturating_add(map.parameter_bytes))?;
+        Ok(output)
+    }
+
     /// Projects evaluation timestamps from one evaluated chunk, preserving its closing.
     fn timestamp(
         &mut self,
@@ -3541,25 +4310,21 @@ impl NodeState {
     ) -> Result<Option<EvaluatedChunk>> {
         let positions = chunk.series.time.len();
         let closing = chunk.is_last;
+        // The kernel reads the grid's timestamps, which it materializes when they are deferred.
         let grid_points = schema.eval_grid.as_ref().map_or(0, |grid| {
             usize::try_from(grid.spec().len).unwrap_or(usize::MAX)
         });
+        let workspace = built_series_workspace_bytes(&chunk.series)?;
         let scratch = grid_points
-            .saturating_mul(std::mem::size_of::<i64>())
-            .saturating_add(
-                positions
-                    .saturating_mul(
-                        std::mem::size_of::<usize>().saturating_add(
-                            schema
-                                .fields
-                                .len()
-                                .saturating_mul(std::mem::size_of::<f64>() + 1),
-                        ),
-                    )
-                    .saturating_mul(2),
-            );
-        self.buffer
-            .grow(evaluated_bytes(&chunk).saturating_add(scratch))?;
+            .checked_mul(std::mem::size_of::<i64>())
+            .and_then(|timestamps| timestamps.checked_add(workspace))
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "the workspace of timestamp does not fit one address space".to_string(),
+                )
+            })?;
+        self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(scratch)?;
         let labels = drop_metric_name(&chunk.series.metric)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let result = {
@@ -3570,7 +4335,15 @@ impl NodeState {
         if closing {
             metrics.record_completed_series(1);
         }
-        let output = match result? {
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.buffer.resize(self.emitted_bytes())?;
+                return Err(error);
+            }
+        };
+        let output = match result {
             Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
             None if closing => Some(no_row_chunk(schema, labels)?),
             None => None,
@@ -3601,8 +4374,17 @@ impl NodeState {
             ));
         };
         let (positions, closing) = (chunk.series.time.len(), chunk.is_last);
-        // The chunk is held for as long as this node works on it.
+        // The chunk is held for as long as this node works on it, beside the series the kernel
+        // writes: arithmetic against a constant maps the vector's segments, and every other
+        // operation builds a subset of its rows.
+        let workspace = match (&broadcast.scalar, broadcast.op) {
+            (BroadcastScalar::Literal(_), BroadcastOp::Arithmetic(_)) => {
+                mapped_workspace_bytes(&chunk.series)?
+            }
+            _ => built_series_workspace_bytes(&chunk.series)?,
+        };
         self.buffer.grow(evaluated_bytes(&chunk))?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             // The timer covers this node's own work only: it is dropped before the driver polls
@@ -3616,8 +4398,15 @@ impl NodeState {
             // on every chunk it handed up, so the series it read is closed here.
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // As in `Self::map`, a failed kernel gives back the chunk and the workspace here.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer
+                    .resize(self.emitted_bytes().saturating_add(broadcast.scalar_bytes))?;
+                return Err(error);
+            }
+        };
         let output = match output {
             Some(series) => Some(EvaluatedChunk::try_new(series, closing)?),
             None => None,
@@ -3633,10 +4422,63 @@ impl NodeState {
                 self.track(output)?;
             }
         }
-        // The chunk is gone and the label sets this node has handed out are what is left.
+        // The chunk is gone: the label sets this node has handed out and the scalar's value are
+        // what is left.
         let emitted = self.emitted_bytes();
-        self.buffer.resize(emitted)?;
+        self.buffer
+            .resize(emitted.saturating_add(broadcast.scalar_bytes))?;
         Ok(output)
+    }
+
+    /// Keeps the chunk a varying scalar operand hands over, the one closed series it is, in `slot`.
+    fn hold_scalar(
+        &mut self,
+        held: &mut usize,
+        slot: &mut Option<Series>,
+        chunk: NativeChunk,
+    ) -> Result<()> {
+        let NativeChunk::Evaluated(EvaluatedChunk { series, is_last }) = chunk else {
+            return Err(DataFusionError::Execution(
+                "a scalar operand is an evaluated series, not raw samples".to_string(),
+            ));
+        };
+        if slot.is_some() || !is_last {
+            return Err(DataFusionError::Execution(
+                "a scalar operand hands over exactly one closed chunk".to_string(),
+            ));
+        }
+        let bytes = series_bytes(&series);
+        self.buffer.grow(bytes)?;
+        *held = held.saturating_add(bytes);
+        *slot = Some(series);
+        Ok(())
+    }
+
+    /// Keeps a constant parameter's values on `grid` in `slot`, reserved before they are built.
+    fn hold_constant(
+        &mut self,
+        held: &mut usize,
+        slot: &mut Option<Series>,
+        grid: Arc<EvalGrid>,
+        value: f64,
+    ) -> Result<()> {
+        let bytes = grid_chunk_bytes(&grid)?;
+        self.buffer.grow(bytes)?;
+        *held = held.saturating_add(bytes);
+        *slot = Some(scalar_chunk(grid, value)?.series);
+        Ok(())
+    }
+
+    /// Builds the one closed chunk a node that reads no input produces, reserved before it is
+    /// built, and queues it for the pull that hands it over.
+    fn produce(&mut self, grid: &EvalGrid, series: impl FnOnce() -> Result<Series>) -> Result<()> {
+        let bytes = grid_chunk_bytes(grid)?;
+        self.buffer.grow(bytes)?;
+        let chunk = EvaluatedChunk::try_new(series()?, true)?;
+        self.buffer.metrics.record_completed_series(1);
+        self.queued
+            .push_back((NativeChunk::Evaluated(chunk), bytes));
+        Ok(())
     }
 
     /// Feeds one chunk to this node's window.
@@ -3662,8 +4504,22 @@ impl NodeState {
             return self.collect(merge, window, chunk);
         }
         let (positions, closing) = (chunk.positions(), chunk.is_last());
-        // The chunk is held for as long as the evaluator consumes it.
+        // The chunk is held for as long as the evaluator consumes it, beside the rows the push
+        // hands out, which are counted on the output grid: a sparse input can decide far more
+        // points than it carries, and a dense one far fewer.
+        let (fields, metric) = match &chunk {
+            NativeChunk::Raw(chunk) => (&chunk.fields, chunk.metric.as_ref()),
+            NativeChunk::Evaluated(chunk) => (&chunk.series.fields, Some(&chunk.series.metric)),
+        };
+        let workspace = match metric {
+            Some(metric) => {
+                window_workspace_bytes(window, last_sample_ms(&chunk), closing, fields, metric)?
+            }
+            // The evaluator refuses a raw chunk without labels before it writes a row.
+            None => 0,
+        };
         self.buffer.grow(chunk.bytes())?;
+        self.buffer.grow(workspace)?;
         let metrics = Arc::clone(&self.buffer.metrics);
         let outcome = {
             let _timer = metrics.timer();
@@ -3684,8 +4540,15 @@ impl NodeState {
             // nothing for it still closed it, so it is counted here rather than on its output.
             metrics.record_completed_series(1);
         }
-        // An error leaves the reservation to the driver, which releases every node when it stops.
-        let output = outcome?;
+        // As in `Self::map`, a failed push gives back the chunk and the workspace here.
+        let output = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                self.buffer
+                    .resize(window.retained_bytes().saturating_add(self.emitted_bytes()))?;
+                return Err(error);
+            }
+        };
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
@@ -3987,7 +4850,7 @@ impl NodeState {
         if let Some(output) = &output {
             metrics.record_grid_points(output.series.time.len());
             metrics.record_output(1, valid_values(output));
-            if instant.selection.timestamp {
+            if instant.selection.value == InstantValue::Timestamp {
                 self.track(output)?;
             }
         }
@@ -4120,12 +4983,21 @@ impl NodeState {
         // the flush is over.
         let merged = merge_same_labelset(&schema, merge.fragments)?;
         for series in merged {
+            let workspace = window_workspace_bytes(
+                window,
+                last_series_ms(&series),
+                true,
+                &series.fields,
+                &series.metric,
+            )?;
+            self.buffer.grow(workspace)?;
             let output = {
                 let metrics = Arc::clone(&self.buffer.metrics);
                 let _timer = metrics.timer();
                 window.push_series(&series, true)?
             };
             let Some(output) = output else {
+                self.buffer.shrink(workspace)?;
                 continue;
             };
             self.buffer
@@ -4793,66 +5665,63 @@ fn unsupported_binary(operands: &str) -> DataFusionError {
     ))
 }
 
-/// The broadcast a binary node with one constant operand is, read off its binding.
+/// The broadcast a binary node with one scalar operand is, read off its binding.
 ///
-/// The two sides say which mode this is: one evaluated vector and one constant is a broadcast. The
-/// constant comes from the scalar node's own binding — the value the node produces — and the
-/// operation from the matching the compiler bound; [`ScalarOperand`] preserves the constant's side.
+/// The two sides say which mode this is: one evaluated vector and one scalar is a broadcast over
+/// the vector, and two scalars of which one varies is a broadcast over the varying one. A constant
+/// comes from the scalar node's own binding and [`ScalarOperand`] preserves its side; a varying
+/// scalar is read from the chunk its node hands over. The operation is the matching the compiler
+/// bound.
 ///
-/// Of the rejection arms in the operand-type match below, only the two-constant one is a shape a
-/// tree that `validate` accepts can put here; the others are backstops that keep the match
-/// exhaustive. That is not the wide safety margin it looks like: [`NativeNode::validate`] refuses a
-/// binary operand that produces neither evaluated values nor a scalar before any of this runs, so a
-/// raw side or an aggregate-state side can never reach this function at all. The refusals after the
-/// match — a constant operand that is not a literal scalar node, and a constant carrying matching
-/// modifiers — are reachable through a validated tree.
+/// [`NativeNode::validate`] refuses a binary operand that produces neither evaluated values nor a
+/// scalar before any of this runs, so the last arm below is an exhaustiveness backstop.
 fn broadcast_runtime(
     left: &NativeNode,
     right: &NativeNode,
     matching: &BinaryMatching,
 ) -> Result<BroadcastRuntime> {
-    let (scalar_operand, vector, constant) = match (&left.output, &right.output) {
-        (NativeType::Samples(vector), NativeType::Scalar(_)) if vector.eval_grid.is_some() => (
-            ScalarOperand::Right as fn(f64) -> ScalarOperand,
-            vector,
-            right,
-        ),
-        (NativeType::Scalar(_), NativeType::Samples(vector)) if vector.eval_grid.is_some() => (
-            ScalarOperand::Left as fn(f64) -> ScalarOperand,
-            vector,
-            left,
-        ),
-        // The two-constant pair is reachable through the state builder, which is what this arm
-        // guards: `validate` accepts a binary node of two constants (it binds them to a scalar), and
-        // a compiler that could not fold a scalar–scalar operation would emit one. No constant has
-        // labels or fields to broadcast over, so there is no vector to apply the operation to. The
-        // executor test `an_unimplemented_node_is_reported_not_panicked` builds this pair directly.
-        (NativeType::Scalar(_), NativeType::Scalar(_)) => {
-            return Err(unsupported_binary(
-                "two constants, which broadcast over no vector",
-            ));
+    let literal = |node: &NativeNode| match &node.expr {
+        NativeExpr::Scalar(BoundScalar { value }) => Some(*value),
+        _ => None,
+    };
+    let (vector_left, sample_schema) = match (&left.output, &right.output) {
+        (NativeType::Samples(vector), NativeType::Scalar(_)) if vector.eval_grid.is_some() => {
+            (true, Arc::clone(vector))
         }
-        // Raw samples or aggregate state: `validate` already refused either as a binary operand, so
-        // this arm is the exhaustiveness backstop rather than a reachable case.
+        (NativeType::Scalar(_), NativeType::Samples(vector)) if vector.eval_grid.is_some() => {
+            (false, Arc::clone(vector))
+        }
+        (NativeType::Scalar(grid), NativeType::Scalar(_)) => {
+            // Two constants are folded by the compiler; one that was not has no series to carry
+            // the result. The executor test `an_unimplemented_node_is_reported_not_panicked`
+            // builds this pair directly.
+            if literal(left).is_some() && literal(right).is_some() {
+                return Err(unsupported_binary(
+                    "two constants, which broadcast over no vector",
+                ));
+            }
+            (
+                literal(left).is_none(),
+                Arc::new(scalar_schema(Arc::clone(grid))),
+            )
+        }
         (_, _) => {
             return Err(unsupported_binary(
-                "an operand that is neither evaluated samples nor a constant, which no validated \
+                "an operand that is neither evaluated samples nor a scalar, which no validated \
                  tree binds as a binary operand",
             ));
         }
     };
-    let NativeExpr::Scalar(BoundScalar { value }) = &constant.expr else {
-        // NotImplemented rather than Execution: this is a shape the runtime does not support, not a
-        // tree whose values are wrong. A caller that falls back to another planner on NotImplemented
-        // then still can, which an Execution would deny it.
-        return Err(DataFusionError::NotImplemented(
-            "the native runtime does not execute this Binary node, which broadcasts an operand that \
-             is not a literal scalar: the constant side has to be a Scalar node, and a computed \
-             constant such as `1 < bool 2` is not one until it is folded"
-                .to_string(),
-        ));
+    let scalar_side = if vector_left { right } else { left };
+    let scalar = match literal(scalar_side) {
+        Some(value) if vector_left => BroadcastScalar::Literal(ScalarOperand::Right(value)),
+        Some(value) => BroadcastScalar::Literal(ScalarOperand::Left(value)),
+        None => BroadcastScalar::Dynamic {
+            left: !vector_left,
+            value: None,
+        },
     };
-    // A constant has no labels, so the modifiers a vector–vector operation would use have no
+    // A scalar has no labels, so the modifiers a vector–vector operation would use have no
     // meaning here: a tree that carries them describes another operation than the one it computes.
     if matching.labels != MatchingLabels::Ignoring(Vec::new())
         || matching.cardinality != Cardinality::OneToOne
@@ -4861,9 +5730,11 @@ fn broadcast_runtime(
         return Err(matched_scalar());
     }
     Ok(BroadcastRuntime {
-        operand: scalar_operand(*value),
+        scalar,
+        vector_left,
         op: broadcast_op(matching)?,
-        sample_schema: Arc::clone(vector),
+        sample_schema,
+        scalar_bytes: 0,
     })
 }
 

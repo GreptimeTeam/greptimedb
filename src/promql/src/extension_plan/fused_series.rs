@@ -617,13 +617,10 @@ fn validate_binding(
         )));
     }
     let schemas = collect_source_schemas(tree)?;
-    if schemas.is_empty()
-        && (!matches!(tree.root().expr, NativeExpr::Scalar(_))
-            || !matches!(tree.root().output, NativeType::Scalar(_)))
-    {
-        return Err(DataFusionError::Plan(
-            "FusedSeries without inputs requires a constant scalar root".into(),
-        ));
+    // A tree built without its constructor carries no proof of its contracts, and one without an
+    // input has no scan to refuse it later.
+    if schemas.is_empty() {
+        tree.root().validate()?;
     }
     if schemas.len() != child_count {
         return Err(DataFusionError::Plan(
@@ -647,15 +644,30 @@ fn tree_inputs(tree: &NativeTree) -> Vec<&crate::native::plan::BoundInput> {
     fn collect<'a>(node: &'a NativeNode, inputs: &mut Vec<&'a crate::native::plan::BoundInput>) {
         match &node.expr {
             NativeExpr::Input(input) => inputs.push(input),
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => collect(input, inputs),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => collect(input, inputs),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                collect(input, inputs);
+                for parameter in parameters {
+                    collect(parameter, inputs);
+                }
+            }
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 collect(left, inputs);
                 collect(right, inputs);
             }
@@ -966,7 +978,7 @@ impl FusedSeriesExec {
         // Building a state proves the runtime executes this tree; drop the validation state now.
         let _ = NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default()))?;
         let output_series = tree.root().output.samples();
-        let scalar_root = raw_schemas.is_empty();
+        let scalar_root = matches!(tree.root().output, NativeType::Scalar(_));
         if let Some(op) = &partial_fold {
             aggregate_op(op)?;
         }
@@ -1376,7 +1388,8 @@ pub struct FusedSeriesStream {
     /// Every input partition, read concurrently, or `None` once they all ended.
     ///
     /// Each decoder holds its current batch, decoded chunks and upstream source. Dropping this on
-    /// error releases them even if the consumer keeps the terminated stream.
+    /// error releases them even if the consumer keeps the terminated stream; a partition read on a
+    /// spawned task is released once its runtime cancels the task, not by the time this returns.
     inputs: Option<SeriesGather>,
     /// The execution of this node's tree, or `None` once it has been closed.
     executor: Option<NativeExecutor>,
@@ -1464,7 +1477,7 @@ impl FusedSeriesStream {
         }
     }
 
-    /// Ends the stream in an error, releasing the execution and the input at once.
+    /// Ends the stream in an error, releasing the execution and the inputs.
     ///
     /// An ordinary drop of the stream releases all of this as well, so this is not about the last
     /// release: it is about a consumer that keeps the terminated stream, which would otherwise

@@ -361,7 +361,7 @@ struct Split {
 /// vector sibling, but this merge only gathers the cut's state.
 fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<Option<Split>> {
     match &node.expr {
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) => Ok(None),
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Ok(None),
         NativeExpr::Map { input, op } => {
             let Some(mut inner) = split(input, fields, time_index)? else {
                 return Ok(None);
@@ -439,7 +439,9 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
         | NativeExpr::Timestamp { input }
-        | NativeExpr::Vector { input, .. } => match split(input, fields, time_index)? {
+        | NativeExpr::Vector { input, .. }
+        | NativeExpr::VectorOf { input }
+        | NativeExpr::ParameterizedMap { input, .. } => match split(input, fields, time_index)? {
             Some(_) => Err(declined(
                 "an aggregate under an operation that reads evaluated values",
             )),
@@ -501,6 +503,17 @@ fn split(node: &NativeNode, fields: &[FieldSpec], time_index: &str) -> DfResult<
                 _ => Err(declined("an aggregate under a set operation")),
             }
         }
+        // The suffix above a split aggregate reads the merged state alone, so it has no source for
+        // the info series.
+        NativeExpr::Info { base, info, .. } => {
+            match (
+                split(base, fields, time_index)?,
+                split(info, fields, time_index)?,
+            ) {
+                (None, None) => Ok(None),
+                _ => Err(declined("an aggregate under info")),
+            }
+        }
     }
 }
 
@@ -519,17 +532,25 @@ fn prefix_fields(tree: &NativeTree) -> DfResult<Vec<FieldSpec>> {
                 .samples()
                 .filter(|schema| schema.eval_grid.is_none())
                 .map(|schema| schema.fields.to_vec()),
-            NativeExpr::Scalar(_) => None,
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => None,
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => raw_fields(input),
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-                raw_fields(left).or_else(|| raw_fields(right))
-            }
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => raw_fields(input),
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => raw_fields(input).or_else(|| parameters.iter().find_map(raw_fields)),
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => raw_fields(left).or_else(|| raw_fields(right)),
         }
     }
 

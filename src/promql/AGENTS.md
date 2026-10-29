@@ -37,12 +37,11 @@ each group. Partitioned aggregation requires `Partial` state per input partition
 followed by `Final` aggregation of that state. Do not claim that a complete
 aggregate on each scan partition is globally complete.
 
-The native `timestamp` operation evaluates on its input grid, and literal
-scalar constants (including foldable constant expressions) bind on the
-statement grid. This does not imply support for time-varying `time()` or
-`scalar(v)`. Native `count` produces Float64 values, unlike the legacy PromQL
-path's Int64 count. Native SQL/TQL output is not necessarily schema-identical
-to legacy output.
+The native `timestamp` operation evaluates on its input grid. A tree without
+a source (a literal, `time()`, `vector(s)`) is materialized on its bound grid
+without a scan. Native `count` produces Float64 values, unlike the legacy
+PromQL path's Int64 count. Native SQL/TQL output is not necessarily
+schema-identical to legacy output.
 
 The native tree and its compiler describe the implemented model, not the whole
 PromQL surface. Keep comments aligned with executable nodes and kernels rather
@@ -61,8 +60,8 @@ nodes also need a physical planner reachable from
 `DfQueryPlanner::create_physical_plan`, assembled in
 `src/query/src/query_engine/state.rs`.
 
-A `FusedSeries` over two tables stays on the frontend over one merge scan per
-table, each carrying a `RawSeriesSource` that answers explicit-label raw frames.
+A `FusedSeries` over more than one table stays on the frontend over one merge
+scan per selector, each carrying a `RawSeriesSource` that answers explicit-label raw frames.
 The frame schema is compared exactly at the merge scan, so its declaration and
 the region's output change together.
 

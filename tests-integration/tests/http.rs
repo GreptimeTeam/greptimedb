@@ -1927,7 +1927,7 @@ async fn assert_raw_scan_fused_formats(observer: &NativeFusedObserver, frontend:
                 lookback_ms: 300_000,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: promql::native::plan::InstantValue::Sample,
                 output_grid: Arc::clone(&grid),
             },
         },

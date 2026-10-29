@@ -89,7 +89,7 @@ use crate::map_label::LabelRewrite;
 use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, AggregateStage, BoundAggregate, BoundInput, BoundInstant, BoundMap, BoundScalar,
-    BoundWindow, Grouping, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
+    BoundWindow, Grouping, InstantValue, MapOp, NativeExpr, NativeNode, NativeTree, NativeType,
 };
 use crate::range_eval::{RangeFunction, RangeWindow};
 use crate::vector_match::{BinaryMatching, BinaryOp, Cardinality, FillValues, MatchingLabels};
@@ -249,7 +249,7 @@ fn binary_tree_over_sources(
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -269,7 +269,7 @@ fn binary_tree_over_sources(
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(&grid),
             },
         },
@@ -321,7 +321,7 @@ fn instant_of(source_index: usize, grid: &Arc<EvalGrid>) -> NativeNode {
                 lookback_ms: 0,
                 offset_ms: 0,
                 at_ms: None,
-                timestamp: false,
+                value: InstantValue::Sample,
                 output_grid: Arc::clone(grid),
             },
         },
@@ -352,19 +352,34 @@ fn declaring_orderings(tree: &NativeTree, orderings: &[SeriesOrdering]) -> Nativ
                 *seen += 1;
             }
             // A constant reads no source, so it declares no ordering.
-            NativeExpr::Scalar(_) => {}
+            NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => {}
             NativeExpr::Instant { input, .. }
             | NativeExpr::Window { input, .. }
             | NativeExpr::Merge { input }
             | NativeExpr::Map { input, .. }
             | NativeExpr::Timestamp { input }
             | NativeExpr::Aggregate { input, .. }
-            | NativeExpr::Vector { input, .. } => {
+            | NativeExpr::Vector { input, .. }
+            | NativeExpr::VectorOf { input } => {
                 **input = rewrite(input, orderings, seen);
             }
-            NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            NativeExpr::Binary { left, right, .. }
+            | NativeExpr::Set { left, right, .. }
+            | NativeExpr::Info {
+                base: left,
+                info: right,
+                ..
+            } => {
                 **left = rewrite(left, orderings, seen);
                 **right = rewrite(right, orderings, seen);
+            }
+            NativeExpr::ParameterizedMap {
+                input, parameters, ..
+            } => {
+                **input = rewrite(input, orderings, seen);
+                for parameter in parameters {
+                    *parameter = rewrite(parameter, orderings, seen);
+                }
             }
         }
         NativeNode {
@@ -2013,8 +2028,15 @@ async fn later_source_error_drops_all_gathered_inputs() {
     let mut stream = exec.execute(0, task_context(&pool)).unwrap();
     let error = stream.next().await.unwrap().unwrap_err();
     assert!(error.to_string().contains("later source failed"));
-    assert!(dropped.iter().all(|flag| flag.load(Ordering::SeqCst)));
-    assert_eq!(0, pool.reserved());
+    // Each partition is read on a spawned task that the failure only aborts, so its stream and the
+    // chunk it holds are dropped once its runtime cancels it, after the error is out.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !dropped.iter().all(|flag| flag.load(Ordering::SeqCst)) || pool.reserved() != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the failure left an input stream or its charge alive");
 }
 
 /// A hand-bound merge canonicalizes the observable output values from distinct raw keys that map
