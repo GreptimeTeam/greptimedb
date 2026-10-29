@@ -10159,6 +10159,101 @@ fn vector_op(inner: NativeNode, op: BoundVectorOp) -> NativeNode {
     }
 }
 
+#[test]
+fn count_values_runtime_rejects_grouping_by_another_value_field() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(raw_input_of(2), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::CountValues {
+            label: "sample".into(),
+            group: Grouping::By(Arc::from([Arc::<str>::from("v1")])),
+        },
+    ))
+    .unwrap();
+    let error = NativeExecutionState::try_new(&tree, pool())
+        .err()
+        .expect("grouping by another value field is unsupported");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate by value field requires a per-point label/schema adapter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn count_values_runtime_accepts_grouping_by_its_target_label() {
+    let grid = grid(0, 60_000, 1);
+    let tree = NativeTree::try_new(vector_op(
+        instant(input(), 60_000, 0, Arc::clone(&grid)),
+        BoundVectorOp::CountValues {
+            label: "v0".into(),
+            group: Grouping::By(Arc::from([Arc::<str>::from("v0")])),
+        },
+    ))
+    .unwrap();
+    let mut execution = executor(&tree, pool());
+    execution
+        .push_raw(
+            InputId::new(0),
+            raw_chunk(&raw_schema(), &[0], &[3.0], true),
+        )
+        .unwrap();
+    let chunks = run(&mut execution);
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].series.metric.get("v0"), Some("3"));
+    assert_eq!(decided(&chunks), vec![(0, Some(1.0))]);
+}
+
+#[test]
+fn topk_runtime_rejects_grouping_by_a_value_field() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(input(), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([Arc::<str>::from("v0")])),
+        },
+    ))
+    .unwrap();
+    let error = NativeExecutionState::try_new(&tree, pool())
+        .err()
+        .expect("grouping by a value field is unsupported");
+    assert!(
+        matches!(error, DataFusionError::NotImplemented(_)),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate by value field requires a per-point label/schema adapter"),
+        "{error}"
+    );
+}
+
+#[test]
+fn topk_runtime_accepts_grouping_by_a_label() {
+    let grid = grid(0, 60_000, 1);
+    let input = instant(input(), 60_000, 0, Arc::clone(&grid));
+    let tree = NativeTree::try_new(vector_op(
+        input,
+        BoundVectorOp::TopK {
+            k: 1.0,
+            top: true,
+            group: Grouping::By(Arc::from([Arc::<str>::from("host")])),
+        },
+    ))
+    .unwrap();
+    NativeExecutionState::try_new(&tree, pool()).expect("a label grouping stays supported");
+}
+
 /// The positions a series decided, with their values.
 type Decided = Vec<(usize, Option<f64>)>;
 

@@ -1707,14 +1707,41 @@ struct VectorRuntime {
 }
 
 impl VectorRuntime {
-    fn new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Self {
-        Self {
+    /// Validates schema-dependent requirements before the native route is selected.
+    fn try_new(op: BoundVectorOp, schema: Arc<SeriesSchema>) -> Result<Self> {
+        // Every grouping these operations address their series by is checked here: `topk`,
+        // `bottomk` and `limitk` key groups by series labels only, so a `by` naming a value field
+        // would fold series the existing plan keeps apart into one group.
+        let bound_grouping = match &op {
+            BoundVectorOp::TopK { group, .. }
+            | BoundVectorOp::LimitK { group, .. }
+            | BoundVectorOp::CountValues { group, .. } => Some(group),
+            _ => None,
+        };
+        if let Some(group) = bound_grouping {
+            let names: Vec<&str> = match group {
+                Grouping::By(names) | Grouping::Without(names) => {
+                    names.iter().map(AsRef::as_ref).collect()
+                }
+            };
+            let grouping = match group {
+                Grouping::By(_) => aggregate::Grouping::By(&names),
+                Grouping::Without(_) => aggregate::Grouping::Without(&names),
+            };
+            match &op {
+                BoundVectorOp::CountValues { label, .. } => {
+                    aggregate::validate_count_values(&schema, label, grouping)?
+                }
+                _ => aggregate::validate_vector_grouping(&schema, grouping)?,
+            }
+        }
+        Ok(Self {
             op,
             schema,
             input: RetainedInput::default(),
             merge_input: false,
             computed: false,
-        }
+        })
     }
 
     /// Runs the kernel over the whole input and returns the series it kept, or `None` when it
@@ -3055,7 +3082,7 @@ impl RuntimeNode {
                             .to_string(),
                     ));
                 }
-                let mut vector = VectorRuntime::new(op.clone(), schema);
+                let mut vector = VectorRuntime::try_new(op.clone(), schema)?;
                 let (child, child_shared) =
                     Self::build(input, pool, inputs, format!("{location}.input"))?;
                 let limitk = matches!(op, BoundVectorOp::LimitK { .. });

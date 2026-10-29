@@ -2220,10 +2220,33 @@ async fn native_fused_metric_fields_follow_logical_order() {
     }));
 }
 
-/// More than one selector over metric-engine logical tables is not one multi-input node, though
-/// one selector over the same tables is native.
+/// Every selector `plan`'s fused node reads answers with a raw source naming its own metric.
+fn fused_input_metrics(plan: &LogicalPlan) -> Vec<String> {
+    let fused = find_fused_series(plan).unwrap_or_else(|| panic!("no fused node in {plan}"));
+    fused
+        .inputs()
+        .iter()
+        .map(|input| {
+            let LogicalPlan::Extension(Extension { node }) = input else {
+                panic!("expected a raw source, got {input}");
+            };
+            node.as_any()
+                .downcast_ref::<RawSeriesSource>()
+                .unwrap_or_else(|| panic!("expected a raw source, got {input}"))
+                .metric_name()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Two metric logical tables over one physical table are two metrics, one input each, though one
+/// selector over either of them is one input and one binding.
+///
+/// Both logical tables are rewritten to scans of the same physical table, so their scans name the
+/// same table and only the id the rewrite restricts to tells them apart: a plan that read the first
+/// binding for both inputs would report the first metric's answer twice.
 #[tokio::test]
-async fn native_fused_multiple_metric_engine_selectors_fall_back() {
+async fn native_fused_metric_engine_selectors_keep_their_own_logical_table() {
     let tables = [
         (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
         (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
@@ -2231,14 +2254,72 @@ async fn native_fused_multiple_metric_engine_selectors_fall_back() {
     let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
     let single =
         build_native_fused_plan_with_provider("other_metric", true, provider().await).await;
-    assert!(find_fused_series(&single).is_some(), "{single}");
+    let fused = find_fused_series(&single).unwrap_or_else(|| panic!("{single}"));
+    assert_eq!(Some("other_metric"), fused.binding().metric_name.as_deref());
     for query in [
         "some_metric / other_metric",
-        "some_metric + some_metric",
         "some_metric + other_metric + some_metric",
     ] {
         let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
-        assert!(!has_pair_node(&native), "{query}: {native}");
+        assert!(has_pair_node(&native), "{query}: {native}");
+        let fused = find_fused_series(&native).unwrap_or_else(|| panic!("{query}: {native}"));
+        assert_eq!(None, fused.binding().metric_name, "{query}");
+        assert!(
+            fused_input_metrics(&native)
+                .iter()
+                .any(|metric| metric == "other_metric"),
+            "{query}: {native}"
+        );
+    }
+    let pair =
+        build_native_fused_plan_with_provider("some_metric / other_metric", true, provider().await)
+            .await;
+    assert_eq!(
+        vec!["some_metric".to_string(), "other_metric".to_string()],
+        fused_input_metrics(&pair),
+        "{pair}"
+    );
+    // Two selectors of one logical table are one metric read twice, so they keep the one binding
+    // and the direct scans that name it.
+    let repeated =
+        build_native_fused_plan_with_provider("some_metric + some_metric", true, provider().await)
+            .await;
+    let fused = find_fused_series(&repeated).unwrap_or_else(|| panic!("{repeated}"));
+    assert_eq!(2, fused.inputs().len(), "{repeated}");
+    assert_eq!(
+        Some("some_metric"),
+        fused.binding().metric_name.as_deref(),
+        "{repeated}"
+    );
+}
+
+/// Two aggregates over two metric logical tables of one physical table are one multi-input
+/// evaluation, not an aggregate split: the node folds every input partition in one execution.
+#[tokio::test]
+async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
+    let tables = [
+        (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+        (DEFAULT_SCHEMA_NAME.to_string(), "other_metric".to_string()),
+    ];
+    let provider = || build_test_table_provider_with_tsid(&tables, 1, 1);
+    for query in [
+        "sum(some_metric) / sum(other_metric)",
+        "sum(sum(some_metric)) / sum(other_metric)",
+        "sum by (tag_0) (some_metric) / sum by (tag_0) (other_metric)",
+    ] {
+        let native = build_native_fused_plan_with_provider(query, true, provider().await).await;
+        let fused = find_fused_series(&native)
+            .unwrap_or_else(|| panic!("{query}: no fused node: {native}"));
+        assert_eq!(2, fused.inputs().len(), "{query}: {native}");
+        assert!(
+            fused.partial_fold().is_none(),
+            "{query}: a multi-input aggregate is not a split: {native}"
+        );
+        assert_eq!(
+            vec!["some_metric".to_string(), "other_metric".to_string()],
+            fused_input_metrics(&native),
+            "{query}: {native}"
+        );
     }
 }
 
@@ -3195,6 +3276,27 @@ async fn native_fused_nested_aggregate_keeps_the_outer_names() {
     );
 }
 
+/// A classic histogram function above the cut is the split's: `histogram_quantile` reads each
+/// histogram off the bucket series the merge produced, which are the ones the statement's input
+/// would have produced in one execution, so the statement is answered by the merge over the partial
+/// producer instead of falling back to the existing plan.
+#[tokio::test]
+async fn native_fused_histogram_quantile_over_aggregate_splits() {
+    let query = "histogram_quantile(0.99, sum by (tag_0) (rate(some_metric[5m])))";
+    let plan = build_native_fused_plan(query, true).await;
+    let display = plan.display_indent().to_string();
+    assert!(
+        find_aggregate_finalize(&plan).is_some(),
+        "`{query}` must be answered by a split aggregate: {display}"
+    );
+    assert!(
+        find_fused_series(&plan).is_some(),
+        "`{query}` must keep the producer that exports the state: {display}"
+    );
+    assert!(display.contains("AggregateFinalize: "), "{display}");
+    assert!(display.contains("histogram_quantile"), "{display}");
+}
+
 /// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
 /// samples, a binary operation whose sibling is data would match one side's series before the merge,
 /// a sibling a call computes has no native node at all, and a group by a value field cannot be named
@@ -3275,12 +3377,15 @@ async fn native_fused_clamp_aggregate_keeps_the_existing_error() {
     }
 }
 
-/// A label rewrite stays on the existing plan, which is the one that projects its new label.
+/// A label rewrite keeps the existing plan, on every shape, because the native runtime refuses a
+/// label set its rewrite creates twice where the existing plan answers it.
 ///
-/// The native node's output schema is the table's own time index, fields and tags, so a tree that
-/// rewrote labels would report a label set the existing plan's projection emits and the node cannot.
-/// Each query below writes `newlabel`, which the fixture table does not have (its only tag is
-/// `tag_0`), so a fused plan would visibly lose it.
+/// The node's tags are copied from the existing plan, so a rewritten label is declarable - but the
+/// runtime is why this shape is not admitted: two series a rewrite gives one label set collide, and
+/// `a_label_rewrite_relabels_series_and_refuses_a_shared_point` (`promql/src/native/execute/tests.rs`)
+/// pins that refusal. The existing plan has no such check, so admitting the shape would turn an
+/// answer into an error. Every shape below therefore keeps the existing plan, the two-occurrence one
+/// included: the refusal sits in `collect_selectors`, ahead of any placement decision.
 #[tokio::test]
 async fn native_fused_label_rewrites_keep_legacy_output_labels() {
     for query in [
@@ -3290,12 +3395,17 @@ async fn native_fused_label_rewrites_keep_legacy_output_labels() {
         // ... and below another call, which is the same shape one level deeper.
         r#"abs(label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)"))"#,
         r#"abs(label_join(some_metric, "newlabel", "-", "tag_0", "tag_0"))"#,
+        // A second occurrence does not admit it either: the collision is the runtime's, not the
+        // placement's, so the pair keeps the existing plan as well.
+        r#"label_replace(some_metric, "newlabel", "$1", "tag_0", "(.*)") + on(newlabel) some_metric"#,
+        r#"label_join(some_metric, "newlabel", "-", "tag_0", "tag_0") + some_metric"#,
     ] {
         let native = build_native_fused_plan(query, true).await;
         let display = native.display_indent().to_string();
         assert!(
             find_fused_series(&native).is_none(),
-            "`{query}` rewrites labels the node's schema cannot declare: {display}"
+            "`{query}` writes a label the runtime would refuse twice, so it keeps the existing \
+             plan: {display}"
         );
         assert!(
             display.contains("newlabel"),

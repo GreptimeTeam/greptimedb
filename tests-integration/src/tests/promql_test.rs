@@ -1770,17 +1770,30 @@ async fn f06_scalar_metric_table_lag_order_by_ts_desc(instance: Arc<dyn MockInst
     }
 }
 
-/// The fused node of the last wrapped plan that held one, and every region-side raw source.
+/// The fused node of the last wrapped plan that held one, every region-side raw source, and the
+/// root of the last wrapped plan.
 #[derive(Default)]
 struct NativePlanObserver(
     Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
     Mutex<Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
+    Mutex<Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>>,
 );
 
 impl NativePlanObserver {
     fn clear(&self) {
         *self.0.lock().unwrap() = None;
         self.1.lock().unwrap().clear();
+        *self.2.lock().unwrap() = None;
+    }
+
+    /// The root of the first plan wrapped after the last `clear`, which is the frontend's own tree
+    /// for the statement: the region-side sub-plans are wrapped later, while it executes.
+    fn root_plan(&self) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        self.2
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a wrapped plan was captured")
     }
 
     fn take_raw_sources(&self) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
@@ -1807,6 +1820,12 @@ impl PhysicalPlanWrapper for NativePlanObserver {
         origin: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
         _ctx: session::context::QueryContextRef,
     ) -> Arc<dyn datafusion::physical_plan::ExecutionPlan> {
+        {
+            let mut root = self.2.lock().unwrap();
+            if root.is_none() {
+                *root = Some(origin.clone());
+            }
+        }
         let mut stack = vec![origin.clone()];
         while let Some(node) = stack.pop() {
             if node.name() == "FusedSeriesExec" {
@@ -3344,9 +3363,9 @@ async fn native_labelled_rows(
                 DataType::Timestamp(..) => {
                     time = Some(cast(column.as_ref(), &DataType::Int64).unwrap());
                 }
-                DataType::Float64 => {
+                DataType::Float64 | DataType::Int64 => {
                     assert!(value.is_none(), "one value column: {schema:?}");
-                    value = Some(column.clone());
+                    value = Some(cast(column.as_ref(), &DataType::Float64).unwrap());
                 }
                 _ => labels.push((
                     field.name().clone(),
@@ -4565,6 +4584,581 @@ async fn native_promql_metric_logical_tables_are_isolated() {
         let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
         assert_eq!(native_rows, vec![(1000, host.to_string(), value)]);
         assert_eq!(native_rows, legacy_rows);
+    }
+}
+
+/// Two occurrences of one metric logical table bind two scans of the same physical table, each
+/// with its own offset. The pair is answered where that table's region runs, with no raw source
+/// per input, and matches the existing plan row for row.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_metric_same_logical_table_offset_pair_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_offset_pair_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_offset_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_offset_a (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_offset_phy');
+        INSERT INTO native_offset_a (host, ts, val) VALUES ('a', 0, 10), ('a', 60000, 12), ('a', 120000, 15);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The left occurrence reads each step's sample and the offset one reads a minute earlier:
+    // 12 - 10 = 2, then 15 - 12 = 3.
+    let sql = "TQL EVAL (60, 120, '1m') native_offset_a - native_offset_a offset 1m";
+    let expected = vec![
+        (60_000, "a".to_string(), 2.0),
+        (120_000, "a".to_string(), 3.0),
+    ];
+
+    observer.clear();
+    let legacy_rows = native_result_rows(native_tql_output(&instance, sql, false).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "the existing plan must not hold a native node"
+    );
+    assert_eq!(legacy_rows, expected, "legacy");
+
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, sql, true).await).await;
+    let plan = observer.take();
+    assert_eq!(plan.name(), "FusedSeriesExec");
+    assert_eq!(plan.output_partitioning().partition_count(), 1);
+    assert_eq!(plan.children().len(), 2);
+    assert!(
+        observer.take_raw_sources().is_empty(),
+        "one logical table keeps both scans region-local instead of one raw source per input"
+    );
+    assert_eq!(native_rows, expected, "native");
+    assert_eq!(native_rows, legacy_rows);
+}
+
+/// What every name of the frontend-side merge a split aggregate runs in front of contains.
+const FINALIZE_EXEC_NAME: &str = "AggregateFinalize";
+
+/// Whether any node of `plan` is the merge a split aggregate runs in front of.
+fn holds_split_merge(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> bool {
+    let mut stack = vec![plan.clone()];
+    while let Some(node) = stack.pop() {
+        if node.name().contains(FINALIZE_EXEC_NAME) {
+            return true;
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    false
+}
+
+/// Two aggregates, one per metric logical table of one physical table, answered by one multi-input
+/// native node and by the existing plan alike.
+///
+/// The two logical tables are two metrics over one physical table, so both rewrites prepare a scan
+/// of that same table and only the id each one restricts to tells them apart: one binding read for
+/// both inputs would report one metric's sum where the query asks for a ratio. The pair is not a
+/// split either - the node has more than one input, so it declares one partition and folds every
+/// input's partitions in that one execution - and the plans the engines ran say so.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_metric_pair_e2e",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_pair_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_pair_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_pair_phy');
+        CREATE TABLE native_pair_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_pair_phy');
+        INSERT INTO native_pair_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_pair_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // `sum` drops the labels, so both sides are one label-less series and the division matches:
+    // (2 + 4) / (8 + 8) = 0.375. Grouped by host each source keeps its own host's ratio, so the
+    // two groups differ and a swapped input would not answer the same: a = 2 / 8, b = 4 / 8.
+    let grouped = |host: &str, value: f64| {
+        (
+            0,
+            std::collections::BTreeMap::from([("host".to_string(), host.to_string())]),
+            value,
+        )
+    };
+    for (query, expected) in [
+        (
+            "sum(native_pair_demo) / sum(native_pair_other)",
+            vec![(0, std::collections::BTreeMap::new(), 0.375)],
+        ),
+        (
+            "sum by (host) (native_pair_demo) / sum by (host) (native_pair_other)",
+            vec![grouped("a", 0.25), grouped("b", 0.5)],
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+
+        // The existing plan: the route is off, so no native node ran and the answer is the one the
+        // legacy planner derives from the fixture by hand.
+        observer.clear();
+        let (legacy_columns, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the existing plan must not hold a native node"
+        );
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the comparison cannot pass vacuously"
+        );
+        assert_eq!(legacy_rows, expected, "legacy: {query}");
+
+        // The native plan: one two-input node over both logical tables' scans, and no split.
+        observer.clear();
+        let (native_columns, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let plan = observer.take();
+        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
+        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
+        assert_eq!(plan.children().len(), 2, "{query}");
+        assert_eq!(
+            observer.take_raw_sources().len(),
+            2,
+            "{query}: each logical table answers through its own raw source"
+        );
+        assert!(
+            !holds_split_merge(&observer.root_plan()),
+            "{query}: a multi-input aggregate is one execution, not a split"
+        );
+
+        assert_eq!(native_rows, legacy_rows, "{query}: rows");
+        assert_eq!(native_rows, expected, "{query}");
+
+        // The columns both routes report: the time index, one value column, and one column per
+        // label. The labels themselves are compared row by row above, and the time index is `ts` on
+        // both. The value column's *name* is not equal, and that is this route's existing naming for
+        // a computed value column rather than anything this shape introduces: the node names its
+        // fields after the tree's own root schema, while the existing planner names a computed column
+        // after its expression (see the comment above `legacy_output_columns` in
+        // `src/query/src/promql/planner/native.rs`; the same difference is pinned for a cross-table
+        // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
+        // shape is asserted, and the value column's name is pinned as the raw field it comes from.
+        assert_eq!(
+            native_columns.len(),
+            legacy_columns.len(),
+            "{query}: columns"
+        );
+        assert!(
+            legacy_columns.iter().any(|column| column == "ts"),
+            "{query}"
+        );
+        assert!(
+            native_columns.iter().any(|column| column == "ts"),
+            "{query}"
+        );
+        assert!(
+            native_columns.iter().any(|column| column == "val"),
+            "{query}: {native_columns:?}"
+        );
+        let labels = native_rows
+            .first()
+            .map(|(_, labels, _)| labels.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for label in labels {
+            assert!(
+                native_columns.contains(&label) && legacy_columns.contains(&label),
+                "{query}: label {label} is a column on both routes"
+            );
+        }
+        common_telemetry::info!(
+            "{query}: native columns {native_columns:?}, legacy columns {legacy_columns:?}, rows \
+             {native_rows:?}, native plan:\n{}",
+            datafusion::physical_plan::displayable(observer.root_plan().as_ref()).indent(true)
+        );
+    }
+}
+
+/// A grouping by the metric name keeps series the schema would have no column for.
+///
+/// `sum by (__name__) (a or b)` folds two metrics into two groups that differ only in their metric
+/// name. The native aggregate keeps that name and folds by it, but the label set the node declares is
+/// taken from the existing planner's columns, and `__name__` is no column of any scan - so the two
+/// groups would be reported under one label set, as two rows a reader cannot tell apart. The number
+/// of rows and their full label sets are what this asserts: the values alone would still look
+/// plausible, and only the labels say the identity was lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_grouping_by_the_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_group_by_name",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_name_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_name_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_name_phy');
+        CREATE TABLE native_name_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_name_phy');
+        INSERT INTO native_name_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_name_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The two sides carry different hosts, so `or` keeps both series and the grouping has two groups
+    // whose only distinguishing label is the metric name.
+    let query = r#"sum by (__name__) (native_name_demo{host="a"} or native_name_other{host="b"})"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        !legacy_rows.is_empty(),
+        "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+    );
+
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{query}: the route must decline a grouping by the metric name, whose groups its declared \
+         schema cannot name"
+    );
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: the full label sets of every row, not only the values"
+    );
+}
+
+/// Unsupported `count_values` groupings keep the legacy plan before labels are lost or execution
+/// reaches a kernel refusal. The outer `sum` prevents a final-schema check from masking the latter.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_count_values_groupings_the_node_cannot_honor() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_count_values_groups",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_cv_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_cv_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_cv_phy');
+        CREATE TABLE native_cv_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_cv_phy');
+        INSERT INTO native_cv_demo (host, ts, val) VALUES ('a', 0, 1), ('b', 0, 1);
+        INSERT INTO native_cv_other (host, ts, val) VALUES ('a', 0, 1), ('b', 0, 1);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    // `by (__name__)` names a label absent from the declared schema; the outer sum hides the
+    // unsupported `by (val)` grouping from the final schema.
+    let by_name = r#"count_values by (__name__) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"})"#;
+    let by_field = r#"sum(count_values by (val) ("sample", native_cv_demo{host="a"} or native_cv_other{host="b"}))"#;
+    for query in [by_name, by_field] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+        );
+
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a grouping its declared schema or kernel cannot honor"
+        );
+        assert_eq!(
+            native_rows, legacy_rows,
+            "{query}: the full label sets of every row, not only the values"
+        );
+        if query == by_field {
+            assert_eq!(
+                native_rows,
+                vec![(0, std::collections::BTreeMap::new(), 2.0)],
+                "the outer sum counts both input series"
+            );
+        }
+    }
+}
+
+/// `topk`/`bottomk` key their groups by series labels, while the existing plan also accepts a value
+/// field there and forms one group per sample value. A `by(<value field>)` therefore keeps every
+/// group's winner on the existing plan and must not reach the native node, which would fold both
+/// series into one group and return fewer rows.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_ranking_grouped_by_a_value_field() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_ranking_value_field",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_rank_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_rank_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_rank_phy');
+        CREATE TABLE native_rank_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_rank_phy');
+        INSERT INTO native_rank_demo (host, ts, val) VALUES ('x', 0, 2);
+        INSERT INTO native_rank_other (host, ts, val) VALUES ('y', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let pair = r#"native_rank_demo{host="x"} or native_rank_other{host="y"}"#;
+    // `by (val)` forms two groups of one sample each, so both series survive: the existing plan
+    // answers two rows where the native node would keep the single winner of one group.
+    for query in [
+        format!("topk by (val) (1, {pair})"),
+        format!("bottomk by (val) (1, {pair})"),
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        observer.clear();
+        let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert_eq!(
+            legacy_rows.len(),
+            2,
+            "{query}: the existing plan keeps one row per value group"
+        );
+        assert!(
+            legacy_rows
+                .iter()
+                .map(|(_, _, value)| *value)
+                .eq([2.0, 8.0]),
+            "{query}: {legacy_rows:?}"
+        );
+
+        observer.clear();
+        let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline a grouping its groups cannot honor"
+        );
+        assert_eq!(native_rows, legacy_rows, "{query}: full rows");
+    }
+
+    // A label grouping is what the native node does honor, so it still runs natively and keeps every
+    // group's winner.
+    let sql = format!("TQL EVAL (0, 0, '1s') topk by (host) (1, {pair})");
+    observer.clear();
+    let native_rows = native_result_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert_eq!(observer.take().name(), "FusedSeriesExec");
+    let legacy_rows = native_result_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert_eq!(native_rows, legacy_rows);
+    assert_eq!(native_rows.len(), 2);
+}
+
+/// `limitk` keeps the series that arrive first, so a multi-input node must not answer it.
+///
+/// A node with more than one input hands its inputs' partitions over in the order they became ready,
+/// while `limitk` keeps the first `k` series of each group in input order: the schedule would decide
+/// which series a query keeps, where Prometheus defines the selection over a series set. The
+/// aggregate split declines it for the same reason, and that refusal is repeated for a multi-input
+/// node.
+///
+/// The existing planner cannot plan `limitk` at all - it has no kernel for the operator - so the
+/// statement fails on both routes today. What this pins is that the native route does not change
+/// that outcome by answering it, and in particular does not answer it differently between runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_selection_that_depends_on_arrival_order() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_limitk_order",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_order_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_order_left (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        CREATE TABLE native_order_right (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_order_phy');
+        INSERT INTO native_order_left (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_order_right (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = "native_order_left and on(host) limitk(1, native_order_right)";
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+
+    // The route declines, so the statement is planned by the one that was always its answer.
+    observer.clear();
+    let native = instance
+        .do_query(&sql, native_query_context(true, 4))
+        .await
+        .remove(0);
+    assert!(
+        observer.fused().is_none(),
+        "{query}: the route must decline a selection whose answer depends on arrival order"
+    );
+    let legacy = instance
+        .do_query(&sql, native_query_context(false, 4))
+        .await
+        .remove(0);
+    // Both routes report the same outcome: the decline leads to the plan this statement already had,
+    // not to an answer the schedule could change.
+    assert_eq!(
+        native.is_err(),
+        legacy.is_err(),
+        "{query}: the route must not change whether the statement is answerable"
+    );
+    if let (Err(native_error), Err(legacy_error)) = (native, legacy) {
+        assert_eq!(
+            native_error.to_string(),
+            legacy_error.to_string(),
+            "{query}: the decline must lead to the plan this statement already had"
+        );
+    }
+}
+
+/// A tree the native runtime cannot execute keeps the existing plan, rather than failing the
+/// statement.
+///
+/// The multi-input route skips the aggregate split, and the split is what refuses a tree the runtime
+/// cannot run. The native node is chosen while planning the logical plan, so a refusal the physical
+/// layer raises later is an error the statement reports, not a fall back - which would turn a query
+/// the existing plan answers into a failure. `quantile` is outside the eight complete kinds the
+/// runtime computes, and a grouping by a value field needs a per-point adapter it does not have, so
+/// both are checked here on the shape that would otherwise reach the node: two aggregates, one per
+/// logical table of one physical table, which is the multi-input case.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_a_tree_the_runtime_cannot_execute() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_unexecutable_tree",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        r#"CREATE TABLE native_unexec_phy (
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE
+        ) ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE native_unexec_demo (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_unexec_phy');
+        CREATE TABLE native_unexec_other (
+            host STRING,
+            ts TIMESTAMP TIME INDEX,
+            val DOUBLE,
+            PRIMARY KEY (host)
+        ) ENGINE=metric WITH ("on_physical_table" = 'native_unexec_phy');
+        INSERT INTO native_unexec_demo (host, ts, val) VALUES ('a', 0, 2), ('b', 0, 4);
+        INSERT INTO native_unexec_other (host, ts, val) VALUES ('a', 0, 8), ('b', 0, 8);"#,
+        QueryContext::arc(),
+    )
+    .await;
+
+    for query in [
+        // `quantile` computes a value the eight complete kinds do not, so the runtime refuses it.
+        "quantile(0.5, native_unexec_demo) / sum(native_unexec_other)",
+        // The outer `count` clears the labels the inner grouping writes, so no column check stops
+        // this one: the refusal is the grouping by a value field, which the runtime has no adapter
+        // for.
+        "count(count by (val) (native_unexec_demo)) / sum(native_unexec_other)",
+    ] {
+        let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+        let (_, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{query}: the existing plan must answer this, otherwise there is nothing to keep"
+        );
+
+        observer.clear();
+        let (_, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        assert_eq!(
+            native_rows, legacy_rows,
+            "{query}: a tree the runtime cannot execute must keep the existing plan"
+        );
+        assert!(
+            observer.fused().is_none(),
+            "{query}: the route must decline it instead of planning a node the runtime refuses"
+        );
     }
 }
 

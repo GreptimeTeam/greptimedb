@@ -127,6 +127,9 @@ const COUNTER_TABLE: &str = "native_agg_counter";
 /// The right operand of the hybrid binary cases. It has one region but a partition column, so a
 /// pair reading it is declined by the two-scan native route and planned by the hybrid one.
 const COUNTER_RHS_TABLE: &str = "native_agg_counter_rhs";
+/// The table the histogram queries read: one bucket series per `(job, le)`, with `le` in the primary
+/// key so the raw-series scan hands the bound over as a label.
+const HIST_TABLE: &str = "native_agg_hist_bucket";
 /// The table the range-window smoke test reads.
 const RANGE_TABLE: &str = "native_agg_range";
 const HYBRID_MATCH_LEFT: &str = "native_hybrid_match_left";
@@ -190,6 +193,33 @@ const COUNTER_WEST_REGION: &str = "us-west-2";
 /// The `region` tag of the counter series that stays in the memtable range: `job = b`,
 /// `instance = h5`, whose rate is 4.
 const COUNTER_EAST_REGION: &str = "us-east-1";
+
+/// The count both samples of every histogram bucket series start from: the same value as
+/// [`COUNTER_FIRST_VALUE`], and for the same reason - `rate`'s counter-zero clamp must not bind.
+/// Here it is asked to cover increases of at most 6, so `interval * first / increase` is
+/// `60 * 1500 / 6 = 15000s`, far above the 30s the boundary extrapolation adds.
+const HIST_FIRST_VALUE: f64 = COUNTER_FIRST_VALUE;
+
+/// The bucket series of the histogram fixture in insert order, as `(job, le, increase)`: three
+/// bounds per job, each holding a cumulative count, so a bound's count is never below the count of
+/// the bound beneath it - the monotonicity `histogram_quantile` and `histogram_fraction` require
+/// before they interpolate. The increases are 1, 2, 3 for `job = a` and 4, 5, 6 for `job = b`, all
+/// distinct, so a route that read a bucket twice or lost one answers a different number.
+///
+/// `rate` over the two samples at the counter fixture's instants divides by 150 exactly as
+/// [`COUNTER_SERIES`] does, so `sum by (le)` over both jobs leaves 5/150, 7/150 and 9/150 in the
+/// buckets `0.1`, `1` and `+Inf`. Those three counts put `histogram_quantile(0.99, ...)`'s rank
+/// inside the `+Inf` bucket, where the answer is the bound below it - 1 - and
+/// `histogram_quantile(0.5, ...)`'s nine tenths into the first bucket - 0.09 - while
+/// `histogram_fraction(0, 1, ...)` closes under the `+Inf` count at 7/9.
+const HIST_SERIES: [(&str, &str, f64); 6] = [
+    ("a", "0.1", 1.0),
+    ("a", "1", 2.0),
+    ("a", "+Inf", 3.0),
+    ("b", "0.1", 4.0),
+    ("b", "1", 5.0),
+    ("b", "+Inf", 6.0),
+];
 
 /// Observes the physical plan each query engine is about to execute, and keeps it.
 ///
@@ -1023,6 +1053,22 @@ fn counter_table_sql() -> String {
     )
 }
 
+/// The DDL of [`HIST_TABLE`]: [`create_table_sql`]'s shape with the instance replaced by the bucket
+/// bound.
+///
+/// `le` is part of the primary key so that it is a label of the series the raw-series scan reads,
+/// not a field of one: the histogram functions find a bucket by a `le` label whose value parses as a
+/// bound, and a bound that arrived as a field would leave them no bucket to read. TWCS is set as on
+/// every other fixture table, so one flush per bucket series leaves several files for the scan to
+/// split.
+fn hist_table_sql() -> String {
+    format!(
+        "CREATE TABLE {HIST_TABLE} (ts TIMESTAMP(3) TIME INDEX, job STRING, le STRING, v DOUBLE, \
+         PRIMARY KEY (job, le)) WITH ('compaction.type' = 'twcs', \
+         'compaction.twcs.trigger_file_num' = '100')"
+    )
+}
+
 /// Fills the fixture tables.
 ///
 /// The gauge table gets one flush per series but the last, so four files and one memtable range
@@ -1032,7 +1078,10 @@ fn counter_table_sql() -> String {
 /// one memtable range - but its samples are the two of [`COUNTER_SERIES`], [`COUNTER_STEP_SECS`]
 /// apart and 140s and 200s before [`EVAL_SECS`], and its rows carry the `region` tag of the file
 /// they were flushed into ([`COUNTER_WEST_REGION`]) or, for the series left in the memtable range,
-/// [`COUNTER_EAST_REGION`]. The range table gets one series whose samples are 390s apart: both are
+/// [`COUNTER_EAST_REGION`]. The histogram table holds the six bucket series of [`HIST_SERIES`] at
+/// the counter samples' instants, flushed after each series but the last, so its buckets reach the
+/// scan the same way - several files, one memtable range - and a bucket's partial sum is one
+/// partition's to fold. The range table gets one series whose samples are 390s apart: both are
 /// inside a 10m range at [`EVAL_SECS`] and the older one is outside the default 5m lookback, so a
 /// query that reads its own range counts two samples where one that used the lookback would count
 /// one.
@@ -1087,6 +1136,26 @@ async fn setup_fixture(instance: &Arc<Instance>) {
                 &format!("ADMIN FLUSH_TABLE('{COUNTER_RHS_TABLE}')"),
             )
             .await;
+        }
+    }
+
+    // The bucket series sit at the counter samples' instants, so `rate` over them extrapolates
+    // exactly as derived for [`COUNTER_SERIES`]; only the counts differ, and those are cumulative
+    // per bound.
+    execute_sql(instance, &hist_table_sql()).await;
+    for (index, (job, bound, increase)) in HIST_SERIES.iter().enumerate() {
+        let second_value = HIST_FIRST_VALUE + increase;
+        execute_sql(
+            instance,
+            &format!(
+                "INSERT INTO {HIST_TABLE} (ts, job, le, v) VALUES \
+                 ({counter_first}, '{job}', '{bound}', {HIST_FIRST_VALUE:?}), \
+                 ({counter_second}, '{job}', '{bound}', {second_value:?})"
+            ),
+        )
+        .await;
+        if index + 1 < HIST_SERIES.len() {
+            execute_sql(instance, &format!("ADMIN FLUSH_TABLE('{HIST_TABLE}')")).await;
         }
     }
 
@@ -1979,5 +2048,91 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     ];
     for case in &fallback_cases {
         check_fallback_case(&instance, &observer, case).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_answers() {
+    common_telemetry::init_default_ut_logging();
+
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_histogram_over_cut")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    setup_fixture(&instance).await;
+
+    // A histogram function above the cut is admitted because the merge has already folded every
+    // partition's `(..., le)` group into one complete series, so the buckets it reads are the ones
+    // the statement's input would have produced in one execution. That claim is checked here on the
+    // rows two real executions report, not on a plan: the bucket series of [`HIST_SERIES`] are
+    // spread over several files and a memtable range, and both routes compute real rates over them.
+    // The quantiles cover the two ends of the classic interpolation - 0.99's rank is above the last
+    // finite bucket's, where the answer is that bucket's upper bound rather than an interpolation,
+    // and 0.5 interpolates inside the first bucket - and the fraction reads the same buckets a third
+    // way.
+    let queries = [
+        format!("histogram_quantile(0.99, sum by (le) (rate({HIST_TABLE}[5m])))"),
+        format!("histogram_quantile(0.5, sum by (le) (rate({HIST_TABLE}[5m])))"),
+        format!("histogram_fraction(0.0, 1.0, sum by (le) (rate({HIST_TABLE}[5m])))"),
+    ];
+    for promql in &queries {
+        let query = tql_eval(promql);
+        let (legacy, legacy_capture) = run_query(&instance, promql, false, &observer).await;
+        assert!(
+            legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty(),
+            "`{query}`: the legacy run must not plan a native node, but it planned {} fused \
+             producers and {} frontend merges",
+            legacy_capture.fused.len(),
+            legacy_capture.finalize.len()
+        );
+        // Without this the comparison below would also pass over two empty answers, which says
+        // nothing about either route.
+        assert!(
+            !legacy.rows.is_empty(),
+            "`{query}`: the fixture must produce a value on the complete input, otherwise the two \
+             routes would agree on nothing"
+        );
+
+        let mark = observer.mark();
+        let (native, capture) = run_query(&instance, promql, true, &observer).await;
+        assert!(
+            !capture.finalize.is_empty(),
+            "`{query}`: the split must answer a histogram function above the cut, so the native run \
+             must merge the state the scan partitions export; instead its plans held {} fused \
+             producers and {} frontend merges - a fall back - and it answered {} rows against the \
+             legacy run's {}",
+            capture.fused.len(),
+            capture.finalize.len(),
+            native.rows.len(),
+            legacy.rows.len()
+        );
+        assert_same_columns(&native, &legacy, &query);
+        // The equivalence the admission rests on: the rows the same statement reports over the
+        // complete input, labels included.
+        assert_rows(
+            &native.rows,
+            &legacy.rows,
+            &format!("native `{query}` vs legacy"),
+        );
+
+        let plans = observer
+            .since(mark)
+            .iter()
+            .map(|plan| displayable(plan.as_ref()).indent(true).to_string())
+            .collect::<Vec<_>>();
+        common_telemetry::info!(
+            "`{query}`\n native rows: {:#?}\n legacy rows: {:#?}\n plans:\n{}",
+            native.rows,
+            legacy.rows,
+            plans.join("\n")
+        );
     }
 }

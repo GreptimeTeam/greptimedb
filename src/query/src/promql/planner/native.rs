@@ -42,15 +42,20 @@ use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as ArrowTimeUnit};
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::DataFusionError;
+use datafusion::execution::memory_pool::UnboundedMemoryPool;
 use datafusion::logical_expr::{Extension, LogicalPlan, LogicalPlanBuilder, TableScanBuilder};
 use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
-use promql::native::plan::{NativeExpr, NativeNode, NativeType, reads_across_series};
+use promql::native::execute::NativeExecutionState;
+use promql::native::plan::{
+    BoundAggregate, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeType,
+    reads_across_series,
+};
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
-use promql_parser::label::Matchers;
+use promql_parser::label::{METRIC_NAME, Matchers};
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
     BinModifier, EvalStmt, Expr as PromExpr, LabelModifier, MatrixSelector, ParenExpr,
@@ -178,8 +183,9 @@ impl PromPlanner {
 
     /// Plans `prom_expr` as one native node, or returns `None` to keep the existing plan.
     ///
-    /// `query_engine_state` is only read to build the *existing* plan of an aggregate query, whose
-    /// column names and grouped labels are what the rows of a split aggregate are named after. That
+    /// `query_engine_state` is only read to build the *existing* plan of the same statement, for the
+    /// column names the existing path gives it: they are what the rows of a split aggregate are named
+    /// after, and what names the tags of a tree whose labels the walk below does not derive. That
     /// plan is built for its schema, its names are copied, and it is dropped: it is never executed
     /// and never stored, so the batch that answers the query is the native route's own.
     ///
@@ -283,6 +289,10 @@ impl PromPlanner {
         let preparation = async {
             let mut prepared: Vec<PreparedInput> = Vec::new();
             let mut single_input_context = None;
+            // The first metric logical-table id a selector's rewrite carried, and whether a later one
+            // carried a different id. See the `cross_table` use below.
+            let mut logical_scan_id: Option<u32> = None;
+            let mut logical_ids_differ = false;
             for selector in &selectors {
                 self.ctx = original_context.clone();
                 // These matchers are alternatives the one scan below the node cannot represent, so the
@@ -337,8 +347,20 @@ impl PromPlanner {
                 let mut input = self.create_table_scan_plan(table_ref).await?;
                 let logical_scan = metric_scan_and_table_id(&input);
                 let has_verified_metric_rewrite = logical_scan.is_some();
+                // A metric logical table's id is part of the identity its own scan reads: two
+                // logical tables served through one physical table prepare two scans of that one
+                // table, and the ids are what says they are two metrics. A selector whose scan is not
+                // a logical rewrite contributes no id, and a missing id on either side is not a
+                // difference.
+                if let Some((_, _, table_id)) = &logical_scan {
+                    match logical_scan_id {
+                        None => logical_scan_id = Some(*table_id),
+                        Some(first) if first != *table_id => logical_ids_differ = true,
+                        Some(_) => {}
+                    }
+                }
                 let scan = match logical_scan {
-                    Some((mut scan, predicate)) => {
+                    Some((mut scan, predicate, _)) => {
                         // Preserve logical field order and the table restriction on the direct
                         // physical scan.
                         let source_schema = scan.source.schema();
@@ -381,11 +403,12 @@ impl PromPlanner {
                 // there is a planning error, not a fallback. So the engine is checked here, where the
                 // existing plan is still the answer. A file-engine table is the concrete case: its
                 // scanner is a `SinglePartitionScanner`, which leaves `raw_series_schema` at the
-                // default `None`. A metric-engine table is served only through the logical rewrite
-                // recognised above, which is what makes its series the table's own.
+                // default `None`. A metric-engine selector is admitted through its verified logical
+                // rewrite, with no separate multi-selector exclusion: each input is a metric logical
+                // table served through that rewrite, and the ids those rewrites carry are what tells
+                // two different ones apart below. Two occurrences of one logical table stay two
+                // scans of the one physical table, answered where that table's region runs them.
                 if !supports_native_raw_series(&table_meta.engine)
-                    || (selectors.len() > 1
-                        && !matches!(table_meta.engine.as_str(), MITO_ENGINE | MITO2_ENGINE))
                     || (table_meta.engine == METRIC_ENGINE_NAME && !has_verified_metric_rewrite)
                 {
                     return Ok(None);
@@ -451,17 +474,20 @@ impl PromPlanner {
                 }
                 prepared.push((input, series_schema, Some(Arc::from(metric)), time, tags));
             }
-            Ok(Some((prepared, single_input_context)))
+            Ok(Some((prepared, single_input_context, logical_ids_differ)))
         }
         .await;
         self.ctx = original_context;
-        let Some((mut prepared, single_input_context)) = preparation? else {
+        let Some((mut prepared, single_input_context, logical_ids_differ)) = preparation? else {
             return Ok(None);
         };
         // Selectors over one table share one region, so the node runs there over every scan. When
         // they read more than one table, each scan answers from its own region and the node runs
-        // above them; see `RawSeriesSource`.
-        let cross_table = !same_table_scans(prepared.iter().map(|(scan, ..)| scan));
+        // above them; see `RawSeriesSource`. A metric logical table's id is part of the identity it
+        // reads: two ids are two metrics even when one physical table holds both, so two selectors
+        // that differ only by that id still read different series and are bound as two inputs.
+        let cross_table =
+            !same_table_scans(prepared.iter().map(|(scan, ..)| scan)) || logical_ids_differ;
         // The first input names the output's time index and, on one table, binds every scan.
         let Some((_, series_schema, metric, time, tags)) = prepared.first() else {
             return Ok(None);
@@ -588,25 +614,70 @@ impl PromPlanner {
             .collect::<std::result::Result<Vec<_>, DataFusionError>>()
             .context(DataFusionPlanningSnafu)?;
         // Ordinary pointwise trees and trees of one-to-one matches, on one table or across
-        // several, are answered per partition. Aggregate splits are restricted to one raw scan
-        // child.
+        // several, are answered per partition. A tree that folds across series - an aggregate - is
+        // not, and one selector's fold is carried by the aggregate split below.
         let root = compiled.tree.root();
         let per_partition =
             !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
-        if !per_partition {
+        // The split is only ever a one-child plan: it exports each partition's leaf state and merges
+        // them above the region. A tree over two metric logical tables of ONE physical table is not
+        // split, because that node already runs one execution over every input partition: a
+        // `FusedSeries` with more than one input declares one partition, and its `execute` reads all
+        // of every input's partitions (`if self.inputs.len() > 1 { 0..count }` in `fused_series.rs`),
+        // so every group is folded in one place. Both of those inputs are `RawSeriesSource` children
+        // (the two ids made `cross_table` true), each answering from its own region with frames that
+        // carry their own labels, so the node is plannable above both. That plan needs no split to be
+        // correct, so it falls through to the node below.
+        //
+        // A multi-selector tree whose inputs stay direct scans of one table is not admitted here: its
+        // scans are not raw sources, so the categorizer refuses to place the node region-locally
+        // (`Categorizer::check_extension_plan` is `NonCommutative` for a cross-series node over more
+        // than one scan) and the physical planner cannot bind a merged plain scan under it either. So
+        // such a tree keeps its one-selector-or-decline behaviour, unchanged.
+        //
+        // A selector whose scan carries no metric logical id - a Mito table's, for one - adds no
+        // id, so one Mito aggregate beside one metric aggregate is not a multi-input tree:
+        // `sum(m) + sum(mito)` keeps the existing plan. A second metric logical id does make the
+        // tree multi-input, and the one execution above then reads the Mito input through its own
+        // raw source as well.
+        let multi_input = selectors.len() > 1 && logical_ids_differ;
+        // A multi-input tree skips the split below, so the refusals the split makes for reasons that
+        // are not about what the runtime computes have to be made here.
+        //
+        // The aggregate split keeps its prefix per-series, which is why it declines an operation
+        // whose answer depends on the order its input arrives in. A multi-input node reads its
+        // inputs' partitions in the order they became ready, so that refusal is repeated here.
+        if multi_input && depends_on_input_order(root) {
+            return Ok(None);
+        }
+        // The split names the columns its groups report from the existing planner. A grouping by the
+        // metric name keeps a label no column of the existing plan can name, so the schema the node
+        // declares would report one label set for groups the tree keeps apart.
+        if multi_input && groups_by_metric_name(root) {
+            return Ok(None);
+        }
+        // Catch construction-time refusals before choosing native execution: errors raised during
+        // physical planning cannot fall back. This includes unsupported aggregates and `topk`,
+        // `limitk` or CountValues groupings; it does not cover data-dependent errors raised while
+        // executing the tree.
+        if multi_input
+            && NativeExecutionState::try_new(
+                &compiled.tree,
+                Arc::new(UnboundedMemoryPool::default()),
+            )
+            .is_err()
+        {
+            return Ok(None);
+        }
+        if !per_partition && !multi_input {
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
                 return Ok(None);
             }
-            let saved = self.ctx.clone();
-            let planned = self
-                .prom_root_expr_to_plan(prom_expr, query_engine_state)
-                .await;
-            let legacy_fields = self.ctx.field_columns.clone();
-            let legacy_tags = self.ctx.tag_columns.clone();
-            self.ctx = saved;
-            drop(planned?);
+            let (legacy_fields, legacy_tags) = self
+                .legacy_output_columns(prom_expr, query_engine_state)
+                .await?;
             let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
             let Some(rawinput) = children.into_iter().next() else {
                 return Ok(None);
@@ -635,22 +706,40 @@ impl PromPlanner {
             )));
         }
         let tree = compiled.tree;
-        let (root_fields, output_tags) = match &tree.root().output {
+        // The tags are asked for before the fields, because the walk answers for a tree the
+        // compiler produced: a scalar root has no labels at all, and a sample root's are the ones
+        // the walk derives or - where it derives none - the ones the existing planner names.
+        let output_tags = match &tree.root().output {
+            // A scalar has no labels, and its value is named as a bare literal's is.
+            NativeType::Scalar(_) => Vec::new(),
+            NativeType::Samples(_) => match fused_output_tags(tree.root(), &source_tags) {
+                Some(output_tags) => output_tags,
+                None => {
+                    // The walk cannot name this tree's labels, so the columns the existing planner
+                    // names for the same statement are the answer rather than a decline.
+                    let (_, legacy_tags) = self
+                        .legacy_output_columns(prom_expr, query_engine_state)
+                        .await?;
+                    // Only the tag columns are copied: the node names its field columns after the
+                    // tree's own root schema, while the existing planner can name a computed column
+                    // after its expression, so its field names are not this node's. A tag that
+                    // collides with a field or the time index is still rejected by the uniqueness
+                    // check below.
+                    legacy_tags
+                }
+            },
+            NativeType::AggregateState(_) => return Ok(None),
+        };
+        let root_fields = match &tree.root().output {
             // The fields are the compiled root's own: a raw field's name, or the one `vector(s)`
             // gives its result.
-            NativeType::Samples(schema) => {
-                let fields = schema
-                    .fields
-                    .iter()
-                    .map(|f| f.name.to_string())
-                    .collect::<Vec<_>>();
-                let Some(output_tags) = fused_output_tags(tree.root(), &source_tags) else {
-                    return Ok(None);
-                };
-                (fields, output_tags)
-            }
+            NativeType::Samples(schema) => schema
+                .fields
+                .iter()
+                .map(|f| f.name.to_string())
+                .collect::<Vec<_>>(),
             // A scalar has no labels, and its value is named as a bare literal's is.
-            NativeType::Scalar(_) => (vec![DEFAULT_FIELD_COLUMN.to_string()], Vec::new()),
+            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
             NativeType::AggregateState(_) => return Ok(None),
         };
         // A root field can share a name with a tag or the time index, and under `or` the right
@@ -665,7 +754,12 @@ impl PromPlanner {
             return Ok(None);
         }
         let output_schema = fused_output_schema(&root_fields, &output_tags, &time)?;
-        // Across tables the region scans are bound by their `RawSeriesSource` children.
+        // Across tables the region scans are bound by their `RawSeriesSource` children, and this is
+        // also the binding a node over more than one input needs: such a node reads frames that
+        // already carry their own labels, so it binds neither tags nor one metric name of its own -
+        // each child names the metric it reads. A multi-input plan whose children stay direct
+        // scans reads one table through the one metric and tag set they share, and keeps this
+        // binding, which is the same identity those scans carry.
         let (tags, metric) = if cross_table {
             (Vec::new(), None)
         } else {
@@ -690,6 +784,33 @@ impl PromPlanner {
             }),
             single_input_context,
         )))
+    }
+
+    /// The field and tag columns the *existing* planner names for `prom_expr`.
+    ///
+    /// The names are read off the plan the existing path builds for the same statement, and that
+    /// plan is then dropped: it is never executed and never stored, so the batch that answers the
+    /// query is the native route's own. A statement the existing planner cannot plan fails here the
+    /// same way it fails there, because the existing plan is the answer for this statement: an error
+    /// planning it is the error the statement has, whichever route asked.
+    ///
+    /// Only the planner context is saved and restored: the table provider's resolved-table cache
+    /// keeps the entries this speculative planning resolved, exactly as the aggregate-split branch,
+    /// which planned the same way before this helper existed, always did.
+    async fn legacy_output_columns(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let saved = self.ctx.clone();
+        let planned = self
+            .prom_root_expr_to_plan(prom_expr, query_engine_state)
+            .await;
+        let legacy_fields = self.ctx.field_columns.clone();
+        let legacy_tags = self.ctx.tag_columns.clone();
+        self.ctx = saved;
+        drop(planned?);
+        Ok((legacy_fields, legacy_tags))
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -841,8 +962,10 @@ pub(crate) fn same_table_scans<'a>(plans: impl IntoIterator<Item = &'a LogicalPl
 /// by `on` or `ignoring`; `and` and `unless` keep the left side's series and `or` adds the right
 /// side's; `info` adds the data labels of the info table; an operation with a scalar or a function
 /// of each value keeps its operand's; a scalar and `vector(s)` have none. `None` for a node whose
-/// labels this walk does not derive - an aggregate's groups, or a whole-vector operation - so a tree
-/// holding one is declined rather than given its input's labels.
+/// labels this walk does not derive - an aggregate's groups, a whole-vector operation, or a label
+/// rewrite, which renames the labels below it - so a tree holding one reports no label set here.
+/// `None` is not the query's answer: the caller asks the existing planner for the columns the node is
+/// named after instead of declining the query.
 fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<Vec<String>> {
     match &node.expr {
         NativeExpr::Input(input) => source_tags.get(input.source_index).cloned(),
@@ -851,9 +974,19 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
         }
         NativeExpr::Instant { input, .. }
         | NativeExpr::Window { input, .. }
-        | NativeExpr::Map { input, .. }
-        | NativeExpr::ParameterizedMap { input, .. }
         | NativeExpr::Timestamp { input } => fused_output_tags(input, source_tags),
+        // A label rewrite changes the label set itself: `label_replace` adds its destination label
+        // and an empty replacement removes it, so the input's labels are not the output's. A map of
+        // math alone keeps them.
+        NativeExpr::Map { input, op } => {
+            if op.ops.iter().any(|op| matches!(op, MapOp::Label(_))) {
+                return None;
+            }
+            fused_output_tags(input, source_tags)
+        }
+        // Its parameters are scalars, which carry no labels, so what the node reports are its
+        // input's labels.
+        NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
         NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
             left,
@@ -934,6 +1067,92 @@ fn data_free(node: &NativeNode) -> bool {
         NativeExpr::Binary { left, right, .. } => data_free(left) && data_free(right),
         NativeExpr::VectorOf { input } => data_free(input),
         _ => false,
+    }
+}
+
+/// Whether `node` holds an operation whose answer depends on the order its input arrives in.
+///
+/// `limitk` keeps the first `k` series of each group *in input order* ([`promql::select::limitk`]).
+/// A node with more than one input reads its inputs' partitions through a gather that hands over
+/// whichever partition became ready first, so the schedule would decide which series a query keeps
+/// and the same data could answer differently between two runs. Prometheus defines the selection
+/// over a series set, not over an arrival order.
+///
+/// Only this operation's *selection* depends on that order. `topk` breaks ties by label and
+/// `limit_ratio` selects by a label hash, so a reordered gather changes neither. The instant
+/// `sort`s keep tied series in the order they arrived, and a floating-point fold such as `stdvar`
+/// can differ in its last bits, but neither changes which series a statement keeps. The aggregate
+/// split declines `LimitK` for the same reason, and only a multi-input node repeats that refusal.
+fn depends_on_input_order(node: &NativeNode) -> bool {
+    match &node.expr {
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. } => depends_on_input_order(input),
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => depends_on_input_order(input) || parameters.iter().any(depends_on_input_order),
+        NativeExpr::Vector { input, op } => {
+            matches!(op, BoundVectorOp::LimitK { .. }) || depends_on_input_order(input)
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            depends_on_input_order(left) || depends_on_input_order(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            depends_on_input_order(base) || depends_on_input_order(info)
+        }
+    }
+}
+
+/// Whether a grouping in `node` keeps a label the existing planner's column list cannot name.
+///
+/// An aggregate's `by(...)` keeps the labels it lists that its input carries, and `__name__` is one
+/// of them: the aggregate folds its groups by the metric name as by any other label. It is not a
+/// column of any scan, though - it is the name the raw frame carries - so the existing planner's
+/// `by(__name__)` finds no such column and reports no label at all. A schema taken from that list
+/// would drop the metric name the native aggregate kept, and two groups differing only in their
+/// metric would come out as two rows under one label set, which is a series identity lost rather
+/// than an answer given.
+///
+/// `without(...)` needs no such check: both routes drop `__name__` there. Nor does a tree with one
+/// selector: it reads one metric, so every group it folds carries the same name and naming that name
+/// or dropping it cannot merge two groups. What the check is for is the tree that reads more than one
+/// metric, which is the one a multi-input node is bound for.
+fn groups_by_metric_name(node: &NativeNode) -> bool {
+    let grouping_names_metric = |op: &BoundAggregate| matches!(&op.group, Grouping::By(names) if names.iter().any(|name| name.as_ref() == METRIC_NAME));
+    match &node.expr {
+        NativeExpr::Input(_)
+        | NativeExpr::Scalar(_)
+        | NativeExpr::EvalTime { .. }
+        | NativeExpr::VectorOf { .. } => false,
+        NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input } => groups_by_metric_name(input),
+        NativeExpr::Aggregate { input, op } => {
+            grouping_names_metric(op) || groups_by_metric_name(input)
+        }
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => groups_by_metric_name(input) || parameters.iter().any(groups_by_metric_name),
+        NativeExpr::Vector { input, op } => {
+            matches!(op, BoundVectorOp::CountValues { group: Grouping::By(names), .. }
+                if names.iter().any(|name| name.as_ref() == METRIC_NAME))
+                || groups_by_metric_name(input)
+        }
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            groups_by_metric_name(left) || groups_by_metric_name(right)
+        }
+        NativeExpr::Info { base, info, .. } => {
+            groups_by_metric_name(base) || groups_by_metric_name(info)
+        }
     }
 }
 
@@ -1091,6 +1310,11 @@ fn collect_selectors<'a>(
         PromExpr::NumberLiteral(_) => return true,
         PromExpr::Unary(unary) => return collect_selectors(stmt, &unary.expr, out),
         PromExpr::Call(call) => {
+            // A label rewrite is a point-wise map, so its selectors would be its argument's - but
+            // the runtime refuses two series that a rewrite gives one label set
+            // (`a_label_rewrite_relabels_series_and_refuses_a_shared_point`), where the existing
+            // plan answers them. Admitting the shape would turn an answer into an error, so the
+            // statement keeps the existing plan until that refusal has a fallback.
             if matches!(call.func.name, "label_replace" | "label_join") {
                 return false;
             }
@@ -1114,10 +1338,12 @@ fn supports_native_raw_series(engine: &str) -> bool {
     matches!(engine, MITO_ENGINE | MITO2_ENGINE | METRIC_ENGINE)
 }
 
-/// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`.
+/// Recognizes only the metric logical-table scan emitted by `create_table_scan_plan`, and reports
+/// the logical table's id together with the scan: the rewrite's `__table_id = <id>` restriction is
+/// the logical table the rewrite stands for, so it is the identity a selector over it reads.
 fn metric_scan_and_table_id(
     plan: &LogicalPlan,
-) -> Option<(datafusion::logical_expr::TableScan, Expr)> {
+) -> Option<(datafusion::logical_expr::TableScan, Expr, u32)> {
     let plan = match plan {
         LogicalPlan::Projection(projection) => projection.input.as_ref(),
         plan => plan,
@@ -1137,16 +1363,15 @@ fn metric_scan_and_table_id(
     {
         return None;
     }
-    if !matches!(
-        binary.right.as_ref(),
-        Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(_)), _)
-    ) {
+    let Expr::Literal(datafusion::scalar::ScalarValue::UInt32(Some(table_id)), _) =
+        binary.right.as_ref()
+    else {
         return None;
-    }
+    };
     let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
         return None;
     };
-    Some((scan.clone(), filter.predicate.clone()))
+    Some((scan.clone(), filter.predicate.clone(), *table_id))
 }
 
 /// Whether `expr` calls `rate`/`increase` anywhere in its admitted expression tree.
@@ -1417,9 +1642,29 @@ mod tests {
                 "{query}"
             );
         }
-        // An aggregate's labels are its groups, which this walk does not derive.
+        // An aggregate's labels are its groups, which this walk does not derive. The route still
+        // answers the query: it asks the existing planner for the columns instead of declining.
         let aggregate = compiled_test_tree("sum by (host) (x)");
         assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
+        // A label rewrite renames the label set below it, which this walk does not derive either.
+        for query in [
+            r#"label_replace(x, "dst", "$1", "src", "(.*)")"#,
+            r#"label_join(x, "dst", "-", "src", "src")"#,
+        ] {
+            let rewrite = compiled_test_tree(query);
+            assert_eq!(None, fused_output_tags(rewrite.root(), &sources), "{query}");
+        }
+    }
+
+    /// A map that only computes values passes its input's labels through unchanged.
+    #[test]
+    fn match_output_tags_pass_through_pointwise_math() {
+        let sources = [vec!["host".to_string(), "kind".to_string()]];
+        let tree = compiled_test_tree("abs(x) * 2");
+        assert_eq!(
+            Some(vec!["host".to_string(), "kind".to_string()]),
+            fused_output_tags(tree.root(), &sources)
+        );
     }
 
     #[test]
