@@ -144,6 +144,18 @@ jobs:
           python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
           python3 greptimedb/tests/perf/test_ci_runner_scripts.py
           python3 greptimedb/tests/perf/test_agent_observability_summary.py
+      - name: Configure AWS credentials for ECR Public
+        if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Login to Amazon ECR Public
+        if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
       - name: Check runtime supports shared version-comparison data
         if: inputs.compare_greptimedb
         run: |
@@ -285,6 +297,18 @@ jobs:
           docker info
           # The workspace (and Docker state) must not use a small /tmp filesystem.
           df -h "$GITHUB_WORKSPACE" /var/lib/docker
+      - name: Configure AWS credentials for ECR Public
+        if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+      - name: Login to Amazon ECR Public
+        if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
       - name: Resolve image tags and verify runtime revision
         shell: bash
         run: |
