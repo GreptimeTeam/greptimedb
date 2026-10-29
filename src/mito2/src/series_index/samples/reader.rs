@@ -103,8 +103,8 @@ impl SamplesReader {
             "samples source handle mismatch",
         )?;
         let path = format!(
-            "{region}/samples/{}/{}/manifest.json",
-            entry.file_id, artifact.generation
+            "{}manifest.json",
+            crate::series_index::samples::samples_prefix(region, artifact.generation)
         );
         let mut objects = HashMap::new();
         for object in &artifact.objects {

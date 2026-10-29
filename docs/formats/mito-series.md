@@ -392,3 +392,10 @@ stored. A block contains at most 8,388,608 series. The manifest is at most 64 Mi
 Offsets, lengths, and counts must fit their enclosing areas without arithmetic
 overflow. Counts must not imply allocations larger than the enclosing decoded
 payload permits.
+
+## Local cache compatibility
+
+The local series-index cache has a root `version` marker independent of this
+format version. Before workers start, a missing or incompatible marker causes
+the entire derived cache (including samples, ranges, and catalogs) to be reset.
+Matching-version restarts preserve the cache.
