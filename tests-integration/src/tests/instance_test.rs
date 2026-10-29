@@ -44,6 +44,43 @@ use crate::tests::test_util::{
 };
 
 #[apply(both_instances_cases)]
+async fn test_sparse_primary_key_schema_validation(instance: Arc<dyn MockInstance>) {
+    let instance = instance.frontend();
+    for columns in [
+        "host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "host BIGINT PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "ts TIMESTAMP TIME INDEX, val DOUBLE",
+        "__table_id INT UNSIGNED NOT NULL, __tsid BIGINT UNSIGNED NOT NULL, ts TIMESTAMP TIME INDEX, PRIMARY KEY (__table_id, __tsid)",
+    ] {
+        let error = try_execute_sql(
+            &instance,
+            &format!("CREATE TABLE sparse_tags ({columns}) WITH ('primary_key_encoding'='sparse')"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .output_msg()
+                .contains("sparse primary keys must start with (__table_id, __tsid)"),
+            "{error:?}"
+        );
+    }
+
+    // Reusing the name verifies that rejected creation did not persist the invalid schema.
+    execute_sql(
+        &instance,
+        "CREATE TABLE sparse_tags (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, val DOUBLE)",
+    )
+    .await;
+    execute_sql(&instance, "INSERT INTO sparse_tags VALUES ('a', 1000, 2.0)").await;
+    let output = execute_sql(&instance, "SELECT COUNT(*) FROM sparse_tags").await;
+    assert_eq!(
+        output.data.pretty_print().await,
+        "+----------+\n| count(*) |\n+----------+\n| 1        |\n+----------+"
+    );
+}
+
+#[apply(both_instances_cases)]
 async fn test_create_database_and_insert_query(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 

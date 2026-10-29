@@ -59,3 +59,42 @@ impl State for DrainDatanodeStart {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::procedure::drain_datanode::test_util::{
+        TestEnv, leader_region, new_persistent_context,
+    };
+    use crate::procedure::region_migration::test_util::TestingEnv;
+    use store_api::storage::RegionId;
+
+    #[tokio::test]
+    async fn test_drain_datanode_start_transitions_to_end() {
+        let env = TestEnv::new().await;
+        env.create_table(vec![leader_region(RegionId::new(1024, 1), 1)])
+            .await;
+
+        let mut ctx = env.context(new_persistent_context(Some(2)));
+        let procedure_ctx = TestingEnv::procedure_context();
+
+        let (next, status) = DrainDatanodeStart
+            .next(&mut ctx, &procedure_ctx)
+            .await
+            .unwrap();
+
+        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
+        // Registering the procedure is the only persisted step of the run.
+        assert!(matches!(status, Status::Executing { persist: true, .. }));
+        assert_eq!(
+            vec![RegionId::new(1024, 1)],
+            ctx.volatile_ctx.leader_regions()
+        );
+        assert!(
+            !ctx.node_scheduling_manager
+                .is_schedulable(NodeSchedulingRole::Datanode, 1)
+                .await
+                .unwrap()
+        );
+    }
+}

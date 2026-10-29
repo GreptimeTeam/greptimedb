@@ -23,7 +23,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::value::{Value, ValueRef};
 use memcomparable::{Deserializer, Serializer};
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::ColumnId;
@@ -39,30 +39,28 @@ use crate::row_converter::dense::SortField;
 pub use crate::row_converter::sparse::checked::SparsePrimaryKeyView;
 use crate::row_converter::{CompositeValues, PrimaryKeyCodec, PrimaryKeyFilter};
 
-/// A codec for sparse key of metrics.
+/// A codec for sparse keys with reserved table ID and TSID columns.
 ///
 /// ## Encoding format
 /// Each primary key is encoded as a sequence of `(column_id, value)` pairs:
-/// - The first two fields are always the reserved `table_id` (uint32) and `tsid` (uint64).
-/// - User-defined labels follow, sorted by **column name** in lexicographical order.
-/// - Null values are omitted (not encoded).
+/// - Keys start with reserved `table_id` (uint32) and `tsid` (uint64).
+/// - String tags follow the reserved prefix; null tags are omitted.
 ///
 /// The `column_id` is encoded as a 4-byte big-endian integer, and the value is encoded
 /// using memcomparable serialization.
 ///
-/// `decode_leftmost` always decodes the first value from the encoded bytes (i.e., the
-/// `table_id` field).
+/// `decode_leftmost` returns the reserved `table_id` value.
 ///
 /// ## Requirements
-/// It requires the input primary key columns are sorted by the column name in lexicographical order.
-/// It encodes the column id of the physical region.
+/// Encoders supply columns in the layout's order using stable physical-region IDs.
 #[derive(Clone, Debug)]
 pub struct SparsePrimaryKeyCodec {
     inner: Arc<SparsePrimaryKeyCodecInner>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SparsePrimaryKeyCodecInner {
+    fields: Option<Vec<(ColumnId, SortField)>>,
     // Internal fields
     table_id_field: SortField,
     // Internal fields
@@ -146,6 +144,66 @@ const TSID_VALUE_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SI
 /// Byte offset where tag columns start (after 9-byte table_id + 13-byte tsid entries).
 const TAGS_START_OFFSET: usize = COLUMN_ID_ENCODE_SIZE + 5 + COLUMN_ID_ENCODE_SIZE + 9;
 
+/// Validates complete sparse keys without materializing their values.
+///
+/// Scratch buffers retain capacity between keys; validation does not depend on region metadata.
+#[derive(Default)]
+pub struct SparsePrimaryKeyValidator {
+    column_ids: Vec<ColumnId>,
+    label_buf: Vec<u8>,
+}
+
+impl SparsePrimaryKeyValidator {
+    /// Checks the prefix, all label framing and UTF-8, and rejects duplicate or reserved labels.
+    pub fn validate(&mut self, bytes: &[u8]) -> Result<()> {
+        self.column_ids.clear();
+        validate_prefix(bytes)?;
+        let mut remaining = &bytes[TAGS_START_OFFSET..];
+        while !remaining.is_empty() {
+            let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "truncated label column id",
+                },
+            )?;
+            let column_id = u32::from_be_bytes(*id);
+            ensure!(
+                !ReservedColumnId::is_reserved(column_id),
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "reserved column id in sparse labels",
+                }
+            );
+            self.column_ids.push(column_id);
+            let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
+            let (length, ascii) = crate::row_converter::encoded_string_info::<true>(encoded)
+                .context(DeserializeFieldSnafu)?;
+            let encoded = &encoded[..length];
+            // Framing is already checked; ASCII needs no unchunking to establish valid UTF-8.
+            if !ascii {
+                self.label_buf.clear();
+                self.label_buf.reserve(length);
+                Deserializer::new(&encoded[1..])
+                    .read_bytes_into(&mut self.label_buf)
+                    .context(DeserializeFieldSnafu)?;
+                std::str::from_utf8(&self.label_buf).map_err(|_| {
+                    InvalidSparsePrimaryKeySnafu {
+                        reason: "label is not valid UTF-8",
+                    }
+                    .build()
+                })?;
+            }
+            remaining = &remaining[COLUMN_ID_ENCODE_SIZE + length..];
+        }
+        self.column_ids.sort_unstable();
+        ensure!(
+            !self.column_ids.windows(2).any(|pair| pair[0] == pair[1]),
+            InvalidSparsePrimaryKeySnafu {
+                reason: "duplicate column id in sparse key",
+            }
+        );
+        Ok(())
+    }
+}
+
 /// Inline capacity for the small-vec fast path of [`SparseOffsetsCache`].
 ///
 /// Most sparse primary keys carry only a handful of tags, so a linear scan
@@ -225,6 +283,7 @@ impl SparsePrimaryKeyCodec {
         let columns = columns_ids.collect();
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
+                fields: None,
                 table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
@@ -235,7 +294,16 @@ impl SparsePrimaryKeyCodec {
 
     /// Creates a new [`SparsePrimaryKeyCodec`] instance.
     pub fn new(region_metadata: &RegionMetadataRef) -> Self {
-        Self::from_columns(region_metadata.primary_key_columns().map(|c| c.column_id))
+        let fields = region_metadata
+            .primary_key_columns()
+            .map(|c| {
+                (
+                    c.column_id,
+                    SortField::new(c.column_schema.data_type.clone()),
+                )
+            })
+            .collect();
+        Self::with_fields(fields)
     }
 
     /// Returns a new [`SparsePrimaryKeyCodec`] instance.
@@ -244,6 +312,7 @@ impl SparsePrimaryKeyCodec {
     pub fn schemaless() -> Self {
         Self {
             inner: Arc::new(SparsePrimaryKeyCodecInner {
+                fields: None,
                 table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
                 tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
                 label_field: SortField::new(ConcreteDataType::string_datatype()),
@@ -252,27 +321,20 @@ impl SparsePrimaryKeyCodec {
         }
     }
 
-    /// Creates a new [`SparsePrimaryKeyCodec`] instance with additional label `fields`.
+    /// Creates a schema-aware sparse codec.
     pub fn with_fields(fields: Vec<(ColumnId, SortField)>) -> Self {
-        Self {
-            inner: Arc::new(SparsePrimaryKeyCodecInner {
-                columns: Some(fields.iter().map(|f| f.0).collect()),
-                table_id_field: SortField::new(ConcreteDataType::uint32_datatype()),
-                tsid_field: SortField::new(ConcreteDataType::uint64_datatype()),
-                label_field: SortField::new(ConcreteDataType::string_datatype()),
-            }),
-        }
+        let mut codec = Self::from_columns(fields.iter().map(|f| f.0));
+        Arc::make_mut(&mut codec.inner).fields = Some(fields);
+        codec
     }
 
     /// Returns the field of the given column id.
     fn get_field(&self, column_id: ColumnId) -> Option<&SortField> {
-        // if the `columns` is not specified, all unknown columns is primary key(label field).
         if let Some(columns) = &self.inner.columns
             && !columns.contains(&column_id)
         {
             return None;
         }
-
         match column_id {
             RESERVED_COLUMN_ID_TABLE_ID => Some(&self.inner.table_id_field),
             RESERVED_COLUMN_ID_TSID => Some(&self.inner.tsid_field),
@@ -405,32 +467,50 @@ impl SparsePrimaryKeyCodec {
 
     /// Decodes the given bytes into a [`SparseValues`].
     fn decode_sparse(&self, bytes: &[u8]) -> Result<SparseValues> {
-        let mut deserializer = Deserializer::new(bytes);
         let mut values = SparseValues::with_capacity(16);
-
-        let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
-        let value = self.inner.table_id_field.deserialize(&mut deserializer)?;
-        values.insert(column_id, value);
-
-        let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
-        let value = self.inner.tsid_field.deserialize(&mut deserializer)?;
-        values.insert(column_id, value);
-        while deserializer.has_remaining() {
-            let column_id = u32::deserialize(&mut deserializer).context(DeserializeFieldSnafu)?;
-            let value = self.inner.label_field.deserialize(&mut deserializer)?;
+        let (table_id, tsid) = self.decode_ids(bytes)?;
+        values.insert(RESERVED_COLUMN_ID_TABLE_ID, Value::UInt32(table_id));
+        values.insert(RESERVED_COLUMN_ID_TSID, Value::UInt64(tsid));
+        let mut remaining = &bytes[TAGS_START_OFFSET..];
+        while !remaining.is_empty() {
+            let id = remaining.first_chunk::<COLUMN_ID_ENCODE_SIZE>().context(
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "truncated label column id",
+                },
+            )?;
+            let column_id = u32::from_be_bytes(*id);
+            ensure!(
+                !ReservedColumnId::is_reserved(column_id),
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "reserved column id in sparse labels"
+                }
+            );
+            let encoded = &remaining[COLUMN_ID_ENCODE_SIZE..];
+            let length =
+                crate::row_converter::encoded_string_len(encoded).context(DeserializeFieldSnafu)?;
+            let value = self
+                .inner
+                .label_field
+                .deserialize(&mut Deserializer::new(&encoded[..length]))?;
+            ensure!(
+                values.get(&column_id).is_none(),
+                InvalidSparsePrimaryKeySnafu {
+                    reason: "duplicate column id in sparse key",
+                }
+            );
             values.insert(column_id, value);
+            remaining = &encoded[length..];
         }
-
         Ok(values)
     }
 
-    /// Decodes the given bytes into a [`Value`].
+    /// Decodes the reserved table ID from the key prefix.
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
-        let mut deserializer = Deserializer::new(bytes);
-        // Skip the column id.
-        deserializer.advance(COLUMN_ID_ENCODE_SIZE);
-        let value = self.inner.table_id_field.deserialize(&mut deserializer)?;
-        Ok(Some(value))
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        self.decode_ids(bytes)
+            .map(|(table_id, _)| Some(Value::UInt32(table_id)))
     }
 
     /// Returns the offset of the given column id in the given primary key.
@@ -529,11 +609,18 @@ impl SparsePrimaryKeyCodec {
 }
 
 impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
-    fn encode_key_value(&self, _key_value: &KeyValue, _buffer: &mut Vec<u8>) -> Result<()> {
-        UnsupportedOperationSnafu {
-            err_msg: "The encode_key_value method is not supported in SparsePrimaryKeyCodec.",
-        }
-        .fail()
+    fn encode_key_value(&self, key_value: &KeyValue, buffer: &mut Vec<u8>) -> Result<()> {
+        let fields = self
+            .inner
+            .fields
+            .as_ref()
+            .context(UnsupportedOperationSnafu {
+                err_msg: "raw row encoding requires primary key metadata",
+            })?;
+        self.encode_to_vec(
+            fields.iter().map(|f| f.0).zip(key_value.primary_keys()),
+            buffer,
+        )
     }
 
     fn encode_values(&self, values: &[(ColumnId, Value)], buffer: &mut Vec<u8>) -> Result<()> {
@@ -579,6 +666,21 @@ impl PrimaryKeyCodec for SparsePrimaryKeyCodec {
     fn decode_leftmost(&self, bytes: &[u8]) -> Result<Option<Value>> {
         self.decode_leftmost(bytes)
     }
+}
+
+fn validate_prefix(pk: &[u8]) -> Result<()> {
+    ensure!(
+        pk.len() >= TAGS_START_OFFSET
+            && pk[..COLUMN_ID_ENCODE_SIZE] == RESERVED_COLUMN_ID_TABLE_ID.to_be_bytes()
+            && pk[TSID_VALUE_OFFSET - COLUMN_ID_ENCODE_SIZE..TSID_VALUE_OFFSET]
+                == RESERVED_COLUMN_ID_TSID.to_be_bytes()
+            && pk[TABLE_ID_VALUE_OFFSET] == 1
+            && pk[TSID_VALUE_OFFSET] == 1,
+        InvalidSparsePrimaryKeySnafu {
+            reason: "invalid table_id/tsid prefix"
+        }
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -846,6 +948,12 @@ mod tests {
         assert!(!buffer.is_empty());
         let result = codec.decode_leftmost(&buffer).unwrap().unwrap();
         assert_eq!(result, Value::UInt32(42));
+        assert_eq!(codec.decode_leftmost(&[]).unwrap(), None);
+        assert!(
+            codec
+                .decode_leftmost(&buffer[..TAGS_START_OFFSET - 1])
+                .is_err()
+        );
     }
 
     #[test]
@@ -861,6 +969,132 @@ mod tests {
         invalid[0..4].copy_from_slice(&1_u32.to_be_bytes());
         assert!(codec.decode_ids(&invalid).is_err());
         assert!(codec.decode_ids(&buffer[..buffer.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn test_sparse_validator_matches_decoder() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut validator = SparsePrimaryKeyValidator::default();
+        let mut prefix = Vec::new();
+        codec.encode_internal(0, 0, &mut prefix).unwrap();
+        let mut cases = vec![prefix.clone()];
+        let mut max_prefix = Vec::new();
+        codec
+            .encode_internal(u32::MAX, u64::MAX, &mut max_prefix)
+            .unwrap();
+        cases.push(max_prefix);
+
+        for label in ["", "a", "12345678", "123456789", "1234567🦀末尾", "日本語"]
+            .into_iter()
+            .map(String::from)
+            .chain([
+                "a".repeat(128),
+                format!("{}🦀", "a".repeat(127)),
+                format!("🦀{}", "a".repeat(127)),
+            ])
+        {
+            let mut key = prefix.clone();
+            codec
+                .encode_raw_tag_value([(37, label.as_bytes())].into_iter(), &mut key)
+                .unwrap();
+            assert!(validator.validate(&key).is_ok());
+            cases.push(key);
+        }
+
+        // Null labels, unknown IDs and arbitrary label order are accepted by the decoder.
+        let mut labels = prefix.clone();
+        labels.extend_from_slice(&12_u32.to_be_bytes());
+        labels.push(0);
+        codec
+            .encode_raw_tag_value(
+                [(999, b"unknown".as_slice()), (0, b"first".as_slice())].into_iter(),
+                &mut labels,
+            )
+            .unwrap();
+        assert!(validator.validate(&labels).is_ok());
+        cases.push(labels.clone());
+
+        // Padding outside the significant bytes has never been required to be zero.
+        let mut padded = cases[3].clone();
+        let padding_offset = padded.len() - 2;
+        padded[padding_offset] = 0xff;
+        assert!(codec.decode(&padded).is_ok());
+        assert!(validator.validate(&padded).is_ok());
+        cases.push(padded);
+
+        for id in [
+            12,
+            RESERVED_COLUMN_ID_TABLE_ID,
+            RESERVED_COLUMN_ID_TSID,
+            u32::MAX,
+        ] {
+            let mut invalid = labels.clone();
+            invalid.extend_from_slice(&id.to_be_bytes());
+            invalid.push(0);
+            assert!(codec.decode(&invalid).is_err());
+            assert!(validator.validate(&invalid).is_err());
+            cases.push(invalid);
+        }
+        for label in [
+            b"\xff".as_slice(),
+            b"\xc0\xaf",
+            b"\xed\xa0\x80",
+            b"1234567\xf4\x90\x80\x80",
+        ] {
+            let mut invalid = prefix.clone();
+            codec
+                .encode_raw_tag_value([(37, label)].into_iter(), &mut invalid)
+                .unwrap();
+            assert!(codec.decode(&invalid).is_err());
+            assert!(validator.validate(&invalid).is_err());
+            cases.push(invalid);
+        }
+
+        // Reuse the same scratch state across successes and failures, including every
+        // truncation and byte substitution in this corpus of framing and UTF-8 boundaries.
+        let mut compare = |bytes: &[u8]| {
+            assert_eq!(
+                validator.validate(bytes).is_ok(),
+                codec.decode(bytes).is_ok(),
+                "{bytes:02x?}"
+            );
+        };
+        for key in cases {
+            compare(&key);
+            for end in 0..key.len() {
+                compare(&key[..end]);
+            }
+            for offset in 0..key.len() {
+                let mut mutated = key.clone();
+                for byte in 0..=u8::MAX {
+                    mutated[offset] = byte;
+                    compare(&mutated);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sparse_validator_reuses_state_for_unordered_columns() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut validator = SparsePrimaryKeyValidator::default();
+        for num_tags in [512, 32, 1] {
+            let mut key = Vec::new();
+            codec.encode_internal(0, 0, &mut key).unwrap();
+            codec
+                .encode_raw_tag_value(
+                    (0..num_tags).map(|index| (index * 17 % num_tags, "1234567🦀".as_bytes())),
+                    &mut key,
+                )
+                .unwrap();
+            assert!(validator.validate(&key).is_ok());
+
+            let mut duplicate = key.clone();
+            duplicate.extend_from_slice(&0_u32.to_be_bytes());
+            duplicate.push(0);
+            assert!(validator.validate(&duplicate).is_err());
+            assert!(validator.validate(&key).is_ok());
+        }
     }
 
     #[test]
