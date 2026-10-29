@@ -5740,7 +5740,7 @@ fn a_merge_over_an_unknown_partitioning_child_is_refused() {
 /// Nothing in this tree reads the whole vector, so one execution per partition is the parallelism
 /// that keeps its answers cheap, and a child's ownership makes no difference to that.
 #[tokio::test]
-async fn a_per_series_tree_keeps_the_childs_partitions() {
+async fn a_per_series_tree_keeps_the_child_partitions() {
     let routed = SeriesRepartitionExec::try_new(
         ScriptedEvaluated::plan(vec![
             vec![evaluated_chunk(
