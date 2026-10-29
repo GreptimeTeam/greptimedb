@@ -126,4 +126,43 @@ SELECT COUNT(DISTINCT region_id) AS distinct_regions,
   SUM(file_size + 1) = SUM(file_size) + COUNT(*) AS complex_input_matches
 FROM information_schema.ssts_manifest;
 
+-- Non-file-size columns and general aggregate filters use the same state merge.
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+EXPLAIN SELECT COUNT(file_id), SUM(num_rows), SUM(level), SUM(table_id),
+  SUM(CAST(num_row_groups AS DOUBLE)), SUM(CAST(max_row_group_uncompressed_size AS DECIMAL(20, 0))),
+  COUNT(index_file_size), SUM(index_file_size),
+  COUNT(*) FILTER (WHERE visible AND level = 0)
+FROM information_schema.ssts_manifest WHERE region_id > 0;
+
+WITH pushed AS (
+  SELECT COUNT(file_id) AS files, COUNT(index_file_size) AS indexes,
+    SUM(num_rows) AS rows, SUM(level) AS levels, SUM(table_id) AS tables,
+    SUM(index_file_size) AS index_bytes,
+    SUM(CAST(num_row_groups AS DOUBLE)) AS float_groups,
+    SUM(CAST(max_row_group_uncompressed_size AS DECIMAL(20, 0))) AS decimal_bytes,
+    COUNT(*) FILTER (WHERE visible AND level = 0) AS visible_files,
+    SUM(num_rows) FILTER (WHERE min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS) AS recent_rows
+  FROM information_schema.ssts_manifest WHERE region_id > 0
+), fallback AS (
+  SELECT COUNT(file_id) AS files, COUNT(index_file_size) AS indexes,
+    SUM(num_rows) AS rows, SUM(level) AS levels, SUM(table_id) AS tables,
+    SUM(index_file_size) AS index_bytes,
+    SUM(CAST(num_row_groups AS DOUBLE)) AS float_groups,
+    SUM(CAST(max_row_group_uncompressed_size AS DECIMAL(20, 0))) AS decimal_bytes,
+    COUNT(*) FILTER (WHERE visible AND level = 0) AS visible_files,
+    SUM(num_rows) FILTER (WHERE min_ts >= '1970-01-01T00:00:00.002Z'::TIMESTAMP_NS) AS recent_rows
+  FROM (SELECT * FROM information_schema.ssts_manifest WHERE region_id > 0 LIMIT 1000)
+)
+SELECT pushed.files = fallback.files AS same_count,
+  pushed.indexes = fallback.indexes AS same_nullable_count,
+  pushed.rows = fallback.rows AS same_rows,
+  pushed.float_groups = fallback.float_groups AS same_float_groups,
+  pushed.decimal_bytes = fallback.decimal_bytes AS same_decimal_bytes,
+  pushed.levels = fallback.levels AS same_levels,
+  pushed.tables = fallback.tables AS same_tables,
+  pushed.index_bytes IS NOT DISTINCT FROM fallback.index_bytes AS same_index_bytes,
+  pushed.visible_files = fallback.visible_files AS same_visible_count,
+  pushed.recent_rows IS NOT DISTINCT FROM fallback.recent_rows AS same_recent_rows
+FROM pushed CROSS JOIN fallback;
+
 DROP TABLE ssts_limit_case;

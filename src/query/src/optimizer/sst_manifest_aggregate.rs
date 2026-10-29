@@ -31,13 +31,13 @@ use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{DFSchemaRef, DataFusionError, Result, ScalarValue};
+use datafusion_common::{DFSchema, DFSchemaRef, DataFusionError, Result, ScalarValue};
 use datafusion_expr::{
-    Expr, Extension, LogicalPlan, LogicalPlanBuilder, Operator, UserDefinedLogicalNode,
+    Expr, ExprSchemable, Extension, LogicalPlan, LogicalPlanBuilder, UserDefinedLogicalNode,
     UserDefinedLogicalNodeCore,
 };
 use datafusion_optimizer::AnalyzerRule;
-use store_api::sst_entry::{self, ManifestSstEntry};
+use store_api::sst_entry::ManifestSstEntry;
 use store_api::storage::ScanRequest;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -58,7 +58,10 @@ impl AnalyzerRule for SstManifestAggregateRule {
                 };
                 if !aggregate.group_expr.is_empty()
                     || aggregate.aggr_expr.is_empty()
-                    || !aggregate.aggr_expr.iter().all(is_supported_aggregate)
+                    || !aggregate
+                        .aggr_expr
+                        .iter()
+                        .all(|expr| is_supported_aggregate(expr, aggregate.input.schema()))
                     || !is_supported_input(&aggregate.input)
                 {
                     return Ok(Transformed::no(plan));
@@ -161,7 +164,7 @@ impl UserDefinedLogicalNodeCore for SstManifestAggregate {
     }
 }
 
-fn is_supported_aggregate(expr: &Expr) -> bool {
+fn is_supported_aggregate(expr: &Expr, schema: &DFSchema) -> bool {
     let Some(function) = get_aggr_func(expr) else {
         return false;
     };
@@ -172,71 +175,39 @@ fn is_supported_aggregate(expr: &Expr) -> bool {
     if params
         .filter
         .as_deref()
-        .is_some_and(|filter| !is_supported_aggregate_filter(filter))
+        .is_some_and(|filter| !is_supported_predicate(filter))
     {
         return false;
     }
     if function.func == count_udaf() {
         matches!(
             params.args.as_slice(),
-            [Expr::Literal(
-                ScalarValue::Int64(Some(1))
-                    | ScalarValue::UInt64(Some(1))
-                    | ScalarValue::Int32(Some(1))
-                    | ScalarValue::UInt8(Some(1)),
-                _
-            )]
+            [Expr::Column(_)]
+                | [Expr::Literal(
+                    ScalarValue::Int64(Some(1))
+                        | ScalarValue::UInt64(Some(1))
+                        | ScalarValue::Int32(Some(1))
+                        | ScalarValue::UInt8(Some(1)),
+                    _
+                )]
         )
     } else if function.func == sum_udaf() {
-        matches!(params.args.as_slice(), [Expr::Column(column)] if column.name == sst_entry::FILE_SIZE)
+        matches!(params.args.as_slice(), [arg] if is_numeric_column(arg, schema))
     } else {
         false
     }
 }
 
-fn is_supported_aggregate_filter(expr: &Expr) -> bool {
-    let Expr::BinaryExpr(binary) = expr else {
-        return false;
-    };
-    if !matches!(
-        binary.op,
-        Operator::Eq
-            | Operator::NotEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Gt
-            | Operator::GtEq
-    ) {
-        return false;
-    }
-    (is_file_size_column(&binary.left) && is_integer_literal(&binary.right))
-        || (is_integer_literal(&binary.left) && is_file_size_column(&binary.right))
-}
-
-fn is_file_size_column(expr: &Expr) -> bool {
+// SUM coerces narrow numeric columns before this rule runs. Keep those casts in
+// the remote plan while rejecting computed aggregate arguments.
+fn is_numeric_column(expr: &Expr, schema: &DFSchema) -> bool {
     match expr {
-        Expr::Column(column) => column.name == sst_entry::FILE_SIZE,
-        // Type coercion can widen UInt64 before comparing a signed literal.
-        // Keep the cast in the remote predicate; only eligibility unwraps it.
-        Expr::Cast(cast) if cast.field.data_type().is_numeric() => is_file_size_column(&cast.expr),
-        _ => false,
-    }
-}
-
-fn is_integer_literal(expr: &Expr) -> bool {
-    match expr {
-        Expr::Literal(
-            ScalarValue::Int8(Some(_))
-            | ScalarValue::Int16(Some(_))
-            | ScalarValue::Int32(Some(_))
-            | ScalarValue::Int64(Some(_))
-            | ScalarValue::UInt8(Some(_))
-            | ScalarValue::UInt16(Some(_))
-            | ScalarValue::UInt32(Some(_))
-            | ScalarValue::UInt64(Some(_)),
-            _,
-        ) => true,
-        Expr::Cast(cast) if cast.field.data_type().is_numeric() => is_integer_literal(&cast.expr),
+        Expr::Column(_) => expr
+            .get_type(schema)
+            .is_ok_and(|data_type| data_type.is_numeric()),
+        Expr::Cast(cast) if cast.field.data_type().is_numeric() => {
+            is_numeric_column(&cast.expr, schema)
+        }
         _ => false,
     }
 }

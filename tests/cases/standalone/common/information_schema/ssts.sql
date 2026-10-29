@@ -137,4 +137,16 @@ WHERE table_id > 0 AND region_id > 0
 SELECT COUNT(*) AS files, COUNT(1) AS files_one, SUM(file_size) AS bytes
 FROM information_schema.ssts_manifest WHERE region_id = 0;
 
+-- Generic column aggregates retain the same semantics in both deployment modes.
+SELECT COUNT(file_id) = COUNT(*) AS same_file_count,
+  COUNT(index_file_size) <= COUNT(*) AS nullable_count,
+  SUM(num_rows) > 0 AS has_rows,
+  SUM(CAST(num_row_groups AS DOUBLE)) > 0 AS has_float_groups,
+  SUM(CAST(max_row_group_uncompressed_size AS DECIMAL(20, 0))) >= 0 AS has_decimal_bytes,
+  COUNT(*) FILTER (WHERE visible AND level = 0) <= COUNT(*) AS visible_count
+FROM information_schema.ssts_manifest WHERE region_id > 0;
+
+SELECT COUNT(index_file_size), SUM(num_rows), SUM(level), SUM(index_file_size)
+FROM information_schema.ssts_manifest WHERE region_id = 0;
+
 DROP TABLE sst_case;

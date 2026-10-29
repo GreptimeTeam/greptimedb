@@ -83,7 +83,7 @@ fn batch(sizes: Vec<u64>) -> RecordBatch {
             file_size,
             max_row_group_uncompressed_size: 0,
             index_file_path: None,
-            index_file_size: None,
+            index_file_size: (index % 2 == 0).then_some(file_size),
             num_rows: 1,
             num_row_groups: 1,
             num_series: None,
@@ -230,6 +230,9 @@ async fn test_manifest_aggregate_states_match_baseline() {
     ] {
         for sql in [
             "SELECT COUNT(*), COUNT(1), SUM(file_size) FROM ssts_manifest",
+            "SELECT SUM(CAST(file_size AS DOUBLE)), SUM(CAST(index_file_size AS DECIMAL(20, 0))) FROM ssts_manifest",
+            "SELECT COUNT(file_id), COUNT(index_file_size), COUNT(node_id), COUNT(visible), COUNT(min_ts), COUNT(primary_key_min), SUM(node_id), SUM(index_file_size), SUM(num_rows), SUM(level), SUM(table_id) FROM ssts_manifest",
+            "SELECT COUNT(file_id) FILTER (WHERE visible AND level = 0), SUM(num_rows) FILTER (WHERE min_ts >= CAST(1 AS TIMESTAMP)), SUM(index_file_size) FILTER (WHERE index_file_size IS NOT NULL), COUNT(*) FILTER (WHERE file_size % 2 = 0) FROM ssts_manifest",
             "SELECT COUNT(*) AS files, SUM(m.file_size) AS bytes FROM ssts_manifest m WHERE m.file_size >= 2",
             "SELECT COUNT(*), SUM(file_size), COUNT(*) FILTER (WHERE file_size < 5), SUM(file_size) FILTER (WHERE file_size < 5) FROM ssts_manifest",
             "SELECT COUNT(*), SUM(file_size) FROM ssts_manifest WHERE file_size > 100",
@@ -293,10 +296,12 @@ async fn test_manifest_aggregate_fallbacks() {
         "SELECT COUNT(DISTINCT file_size) FROM ssts_manifest",
         "SELECT file_size, COUNT(*) FROM ssts_manifest GROUP BY file_size",
         "SELECT SUM(file_size + 1) FROM ssts_manifest",
-        "SELECT COUNT(file_size) FROM ssts_manifest",
+        "SELECT SUM(CAST(min_ts AS BIGINT)) FROM ssts_manifest",
+        "SELECT COUNT(file_size + 1) FROM ssts_manifest",
+        "SELECT SUM(CAST(file_size + 1 AS DOUBLE)) FROM ssts_manifest",
         "SELECT COUNT(*) FROM ssts_manifest WHERE length(file_path) > 0",
         "SELECT COUNT(*) FROM (SELECT * FROM ssts_manifest LIMIT 1) m",
-        "SELECT SUM(file_size) FILTER (WHERE file_size % 2 = 0) FROM ssts_manifest",
+        "SELECT SUM(file_size) FILTER (WHERE length(file_path) > 0) FROM ssts_manifest",
     ] {
         let plan = analyzed(sql, consts::INFORMATION_SCHEMA_SSTS_MANIFEST_TABLE_ID).await;
         let rewritten = SstManifestAggregateRule
