@@ -60,7 +60,7 @@ use datafusion::common::DFSchemaRef;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{MemoryReservation, UnboundedMemoryPool};
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -83,7 +83,7 @@ use crate::evaluated::EvaluatedChunk;
 use crate::extension_plan::SeriesRouting;
 use crate::extension_plan::aggregate_exchange::{PartialFold, aggregate_op, state_schema};
 use crate::extension_plan::series_repartition::SeriesRepartitionExec;
-use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor, operand_chunk_bytes};
+use crate::native::execute::{InputId, NativeExecutionState, NativeExecutor};
 use crate::native::plan::{
     AggregateKind, BoundAggregate, Grouping, NativeExpr, NativeNode, NativeTree, NativeType,
     reads_across_series,
@@ -580,7 +580,26 @@ impl FusedSeries {
         });
         let locality = input_locality(self.tree.root());
         let normalize = matches!(locality, InputLocality::SinglePartition);
+        let matching_policy = match &locality {
+            InputLocality::MatchingLocal(policy) => Some(policy.clone()),
+            _ => None,
+        };
+        let matching_partitions = matching_policy.as_ref().map(|_| {
+            if let Some(source) = same_source(self.tree.root()) {
+                inputs
+                    .get(source)
+                    .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                    .unwrap_or(1)
+            } else {
+                inputs
+                    .iter()
+                    .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                    .max()
+                    .unwrap_or(1)
+            }
+        });
         let window_sources = if evaluated
+            && !normalize
             && inputs
                 .iter()
                 .any(|(input, _, _)| input.properties().partitioning.partition_count() > 1)
@@ -604,13 +623,36 @@ impl FusedSeries {
                     ));
                 }
                 if declaration.content() != FrameContent::Evaluated {
-                    // A global tree needs one partition whatever the input carries. A raw frame is
-                    // routed by its keys, and with one output every key lands in the same place, so
-                    // the same node gathers it just as it does for an evaluated frame.
-                    if normalize && input.properties().partitioning.partition_count() != 1 {
+                    let count = input.properties().partitioning.partition_count();
+                    if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                             as Arc<dyn ExecutionPlan>;
                         return Ok((input, label_source, SeriesOrdering::Contiguous));
+                    }
+                    if let (Some(policy), Some(required)) =
+                        (matching_policy.as_ref(), matching_partitions)
+                    {
+                        if required == 1 && count != 1 {
+                            let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
+                                as Arc<dyn ExecutionPlan>;
+                            return Ok((input, label_source, SeriesOrdering::Contiguous));
+                        }
+                        let has_router =
+                            input
+                                .downcast_ref::<SeriesRepartitionExec>()
+                                .is_some_and(|router| {
+                                    router.outputs() == required
+                                        && router.routing_policy()
+                                            == &SeriesRouting::Matching(policy.clone())
+                                });
+                        if required > 1 && !has_router {
+                            let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
+                                input,
+                                required,
+                                SeriesRouting::Matching(policy.clone()),
+                            )?) as Arc<dyn ExecutionPlan>;
+                            return Ok((input, label_source, SeriesOrdering::Contiguous));
+                        }
                     }
                     return Ok((input, label_source, ordering));
                 }
@@ -620,18 +662,18 @@ impl FusedSeries {
                         "FusedSeries input {index} has no partitions"
                     )));
                 }
-                let required = if normalize { 1 } else { count };
+                let required = if normalize {
+                    1
+                } else {
+                    matching_partitions.unwrap_or(count)
+                };
                 let needs_owner = window_sources.contains(&index);
                 let contiguous = actual_ordering == SeriesOrdering::Contiguous;
-                let matching_policy = match &locality {
-                    InputLocality::MatchingLocal(policy) => Some(policy.clone()),
-                    _ => None,
-                };
                 let has_router =
                     input
                         .downcast_ref::<SeriesRepartitionExec>()
                         .is_some_and(|router| {
-                            router.outputs() == count
+                            router.outputs() == required
                                 && matching_policy.as_ref().is_some_and(|policy| {
                                     router.routing_policy()
                                         == &SeriesRouting::Matching(policy.clone())
@@ -645,9 +687,9 @@ impl FusedSeries {
                     // Already the one partition a global tree needs; wrapping it would add a node
                     // that changes nothing.
                     Ok((input, label_source, ordering))
-                } else if let Some(policy) = matching_policy
-                    && count > 1
-                    && !has_router
+                } else if let Some(policy) = matching_policy.as_ref()
+                    && required > 1
+                    && (count != required || !has_router)
                 {
                     // Either there is no router yet or the one there routes by another key. The
                     // second case re-routes what the first produced: a router's output is plain
@@ -655,8 +697,8 @@ impl FusedSeries {
                     // no-op, and refusing the query would be worse than paying for the move.
                     let input = Arc::new(SeriesRepartitionExec::try_new_with_routing(
                         input,
-                        count,
-                        SeriesRouting::Matching(policy),
+                        required,
+                        SeriesRouting::Matching(policy.clone()),
                     )?) as Arc<dyn ExecutionPlan>;
                     Ok((input, label_source, SeriesOrdering::Contiguous))
                 } else if needs_owner
@@ -1076,8 +1118,7 @@ fn input_locality(root: &NativeNode) -> InputLocality {
     // A match between two different sources needs its match keys co-located, wherever the match
     // sits under the pointwise nodes above it.
     if let Some((left, right, labels)) = matching_site(root)
-        && let (Some(left_source), Some(right_source)) = (same_source(left), same_source(right))
-        && left_source != right_source
+        && let (Some(_left_source), Some(_right_source)) = (same_source(left), same_source(right))
     {
         return InputLocality::MatchingLocal(labels.clone());
     }
@@ -1932,23 +1973,11 @@ impl ExecutionPlan for FusedSeriesExec {
         };
         if frame_mode {
             let schema = evaluated_output(&self.tree)?;
-            let pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool> =
-                Arc::clone(&context.runtime_env().memory_pool);
-            let reservation =
-                MemoryConsumer::new(format!("FusedSeriesFrame[{partition}]")).register(&pool);
-            let handed = Arc::new(Mutex::new(Vec::new()));
-            let source: SendableEvaluatedSeriesStream = Box::pin(FusedEvaluatedStream::new(
-                stream,
-                Arc::clone(&schema),
-                Arc::clone(&pool),
-                reservation,
-                Arc::clone(&handed),
-                preserves_identity(self.tree.root()),
-            ));
-            Ok(Box::pin(FusedPackedStream {
-                inner: pack_evaluated_series(source, schema)?,
-                handed,
-            }))
+            // The adapter hands each chunk straight to the packer, so it holds nothing of its own
+            // to charge for; what the packer keeps is bounded by the chunk it is encoding.
+            let source: SendableEvaluatedSeriesStream =
+                Box::pin(FusedEvaluatedStream { source: stream });
+            Ok(pack_evaluated_series(source, schema)?)
         } else {
             Ok(Box::pin(stream))
         }
@@ -2314,274 +2343,34 @@ impl Stream for FusedSeriesStream {
     }
 }
 
-/// Whether closing a chain also closes the label set it carries.
-///
-/// A frame declares each series is contiguous, so one label set must appear as one chain. That holds
-/// when the series that closes is the only one that will ever carry those labels.
-///
-/// Within one source it does hold: every series of that source shares its metric name, so a node
-/// that drops `__name__`, `__type__` or `__unit__` — which is what a range function, a math map and
-/// the timestamp shape do — maps distinct series to distinct labels. Rewriting an ordinary label is
-/// what can make two of them equal, and that is the one thing refused here. Across sources nothing
-/// is assumed: two metrics can share every ordinary label, so a name-dropping node collapses them.
-///
-/// The answer is conservative: a shape not recognised here keeps the end fold, which only costs
-/// memory.
-fn preserves_identity(node: &NativeNode) -> bool {
-    same_source(node).is_some() && !rewrites_ordinary_labels(node)
-}
-
-/// Whether any node in the tree rewrites a label other than the metadata ones.
-///
-/// Dropping the metric name is safe within one source (see [`preserves_identity`]); replacing or
-/// removing an ordinary label is not, because it can map two series onto one label set.
-fn rewrites_ordinary_labels(node: &NativeNode) -> bool {
-    let children: Vec<&NativeNode> = match &node.expr {
-        NativeExpr::Map { input, op } => {
-            if op
-                .ops
-                .iter()
-                .any(|op| matches!(op, crate::native::plan::MapOp::Label(_)))
-            {
-                return true;
-            }
-            vec![input]
-        }
-        NativeExpr::Instant { input, .. }
-        | NativeExpr::Window { input, .. }
-        | NativeExpr::Timestamp { input }
-        | NativeExpr::VectorOf { input }
-        | NativeExpr::Merge { input }
-        | NativeExpr::Aggregate { input, .. }
-        | NativeExpr::Vector { input, .. } => vec![input],
-        NativeExpr::ParameterizedMap {
-            input, parameters, ..
-        } => std::iter::once(&**input).chain(parameters.iter()).collect(),
-        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
-            vec![left, right]
-        }
-        NativeExpr::Info { base, info, .. } => vec![base, info],
-        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Vec::new(),
-    };
-    children.into_iter().any(rewrites_ordinary_labels)
-}
-
-struct FusedPackedStream {
-    inner: SendableRecordBatchStream,
-    handed: Arc<Mutex<Vec<MemoryReservation>>>,
-}
-
-impl RecordBatchStream for FusedPackedStream {
-    fn schema(&self) -> SchemaRef {
-        self.inner.schema()
-    }
-}
-
-impl Stream for FusedPackedStream {
-    type Item = DataFusionResult<RecordBatch>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let result = self.inner.as_mut().poll_next(cx);
-        let mut handed = self.handed.lock().unwrap_or_else(|e| e.into_inner());
-        match &result {
-            // Everything but the identity being packed is out of the way.
-            Poll::Ready(Some(Ok(_))) | Poll::Pending => {
-                let settled = handed.len().saturating_sub(1);
-                handed.drain(..settled);
-            }
-            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => handed.clear(),
-        }
-        result
-    }
-}
-
-impl Drop for FusedPackedStream {
-    fn drop(&mut self) {
-        self.handed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
-    }
-}
-
 struct FusedEvaluatedStream {
     source: FusedSeriesStream,
-    schema: Arc<SeriesSchema>,
-    /// Where a fresh per-identity charge is registered.
-    pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
-    reservation: MemoryReservation,
-    /// Charges handed to the packer, oldest first.
-    ///
-    /// A charge goes here when the identity it covers is emitted, because the packer keeps the
-    /// series it was handed. The packed stream frees them as it consumes, so what is billed here
-    /// matches what is still resident.
-    handed: Arc<Mutex<Vec<MemoryReservation>>>,
-    retained: Vec<datatypes::series::samples::Series>,
-    output: VecDeque<datatypes::series::samples::Series>,
-    /// Whether a closed chain is also a closed label set, so it can be published at once.
-    identity_per_chain: bool,
-    ended: bool,
-    failed: bool,
-}
-
-impl FusedEvaluatedStream {
-    fn new(
-        source: FusedSeriesStream,
-        schema: Arc<SeriesSchema>,
-        pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
-        reservation: MemoryReservation,
-        handed: Arc<Mutex<Vec<MemoryReservation>>>,
-        identity_per_chain: bool,
-    ) -> Self {
-        Self {
-            source,
-            schema,
-            pool,
-            reservation,
-            handed,
-            retained: Vec::new(),
-            output: VecDeque::new(),
-            identity_per_chain,
-            ended: false,
-            failed: false,
-        }
-    }
-
-    /// Merges the fragments of the chain that just closed and queues its output.
-    ///
-    /// A chain's fragments are absorbed only for as long as it stays open, so what is retained here
-    /// is the pieces of one closing chain rather than a partition's whole output. Two chains that
-    /// end up carrying equal labels are folded together by the merge above this node, not here.
-    fn close_identity(&mut self) -> Result<(), DataFusionError> {
-        if self.retained.is_empty() {
-            return Ok(());
-        }
-        let rows = self.retained.iter().fold(0usize, |rows, series| {
-            rows.saturating_add(series.time.len())
-        });
-        let fragments = self.retained.len();
-        let fields = self.schema.fields.len();
-        let workspace = crate::native::execute::merge_workspace_bytes(rows, fragments, fields);
-        self.reservation.try_grow(workspace)?;
-        let retained = std::mem::take(&mut self.retained);
-        let merged = super::series_repartition::merge_exact_series(&self.schema, retained)?;
-        self.output.extend(merged);
-        Ok(())
-    }
-
-    /// Moves the charge this identity filled to the packed stream and starts a fresh one.
-    fn hand_over(&mut self) {
-        let fresh = MemoryConsumer::new("FusedSeriesFrame").register(&self.pool);
-        let filled = std::mem::replace(&mut self.reservation, fresh);
-        self.handed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(filled);
-    }
-
-    fn fail(&mut self) {
-        self.retained.clear();
-        self.output.clear();
-        self.reservation.free();
-        self.source.fail();
-        self.failed = true;
-    }
 }
 
 impl Stream for FusedEvaluatedStream {
     type Item = Result<(datatypes::series::samples::Series, bool), common_error::ext::BoxedError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if self.failed {
-            return Poll::Ready(None);
-        }
-        if let Some(series) = self.output.pop_front() {
-            if self.output.is_empty() {
-                self.hand_over();
+        match Pin::new(&mut self.source).poll_output(cx) {
+            Poll::Ready(Some(Ok(FusedOutput::Evaluated(chunk)))) => {
+                Poll::Ready(Some(Ok((chunk.series, chunk.is_last))))
             }
-            return Poll::Ready(Some(Ok((series, true))));
-        }
-        if self.ended {
-            return Poll::Ready(None);
-        }
-        for _ in 0..POLL_BUDGET {
-            match Pin::new(&mut self.source).poll_output(cx) {
-                Poll::Ready(Some(Ok(FusedOutput::Evaluated(chunk)))) => {
-                    let mut tables = 0usize;
-                    for segment in chunk
-                        .series
-                        .fields
-                        .iter()
-                        .flat_map(|field| field.segments())
-                    {
-                        let batch = match segment.dense() {
-                            Some(DenseSamplesRef::Histogram(histograms)) => {
-                                Some(histograms.batch())
-                            }
-                            Some(DenseSamplesRef::Mixed(mixed)) => Some(mixed.histograms().batch()),
-                            _ => None,
-                        };
-                        if let Some(batch) = batch {
-                            match super::series_repartition::histogram_table_slice_bytes(batch) {
-                                Ok(bytes) => tables = tables.saturating_add(bytes),
-                                Err(error) => return self.error(error),
-                            }
-                        }
-                    }
-                    let charge = operand_chunk_bytes(&chunk.series).saturating_add(tables);
-                    if let Err(error) = self.reservation.try_grow(charge) {
-                        return self.error(error);
-                    }
-                    let closed = chunk.is_last && self.identity_per_chain;
-                    self.retained.push(chunk.series);
-                    if closed {
-                        if let Err(error) = self.close_identity() {
-                            return self.error(error);
-                        }
-                        if let Some(series) = self.output.pop_front() {
-                            if self.output.is_empty() {
-                                self.hand_over();
-                            }
-                            return Poll::Ready(Some(Ok((series, true))));
-                        }
-                    }
-                }
-                Poll::Ready(Some(Ok(FusedOutput::Rows(_)))) => {
-                    return self.error(DataFusionError::Internal(
+            Poll::Ready(Some(Ok(FusedOutput::Rows(_)))) => {
+                Pin::new(&mut self.source).fail();
+                Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
+                    common_query::error::Error::from(DataFusionError::Internal(
                         "row batch reached the evaluated stream adapter".into(),
-                    ));
-                }
-                Poll::Ready(Some(Err(error))) => return self.error(error),
-                Poll::Ready(None) => {
-                    self.ended = true;
-                    if let Err(error) = self.close_identity() {
-                        return self.error(error);
-                    }
-                    if let Some(series) = self.output.pop_front() {
-                        if self.output.is_empty() {
-                            self.hand_over();
-                        }
-                        return Poll::Ready(Some(Ok((series, true))));
-                    }
-                    // Nothing was left to hand over; the packed stream frees what it holds.
-                    return Poll::Ready(None);
-                }
-                Poll::Pending => return Poll::Pending,
+                    )),
+                ))))
             }
+            Poll::Ready(Some(Err(error))) => {
+                Pin::new(&mut self.source).fail();
+                Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
+                    common_query::error::Error::from(error),
+                ))))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
         }
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
-impl FusedEvaluatedStream {
-    fn error<T>(
-        &mut self,
-        error: DataFusionError,
-    ) -> Poll<Option<Result<T, common_error::ext::BoxedError>>> {
-        self.fail();
-        Poll::Ready(Some(Err(common_error::ext::BoxedError::new(
-            common_query::error::Error::from(error),
-        ))))
     }
 }
