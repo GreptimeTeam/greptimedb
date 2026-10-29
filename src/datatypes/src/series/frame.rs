@@ -73,7 +73,7 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{
@@ -81,7 +81,7 @@ use arrow::array::{
     StructArray, UInt32Array, UInt64Array,
 };
 use arrow::buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
-use arrow::compute::concat;
+use arrow::compute::{concat, take};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::{RecordBatch, RecordBatchOptions};
 use serde::{Deserialize, Serialize};
@@ -1457,13 +1457,43 @@ fn histogram_charge(values: &HistogramSamples) -> Result<usize> {
     )
 }
 
+fn compact_histogram(values: &HistogramSamples) -> Result<(ArrayRef, UInt32Array)> {
+    let indices = values.indices();
+    // One encoded entry per *distinct* referenced row: a segment that references the same row many
+    // times would otherwise copy that row once per reference, so a small table plus a long run of
+    // equal indices would still grow the payload with every position.
+    let mut carried: HashMap<u32, u32> = HashMap::new();
+    let mut selected = Vec::new();
+    let mut remapped = Vec::with_capacity(indices.len());
+    for index in 0..indices.len() {
+        if indices.is_valid(index) {
+            let original = indices.value(index);
+            let local_index = match carried.get(&original) {
+                Some(local_index) => *local_index,
+                None => {
+                    let local_index = u32::try_from(selected.len())
+                        .map_err(|_| err("too many referenced histograms in one frame segment"))?;
+                    selected.push(original);
+                    carried.insert(original, local_index);
+                    local_index
+                }
+            };
+            remapped.push(Some(local_index));
+        } else {
+            remapped.push(None);
+        }
+    }
+    let selected = UInt32Array::from(selected);
+    let table = arrow(take(values.batch().as_arrow(), &selected, None))?;
+    Ok((table, UInt32Array::from(remapped)))
+}
+
 /// Encodes buffered rows as one batch with direct N-row Arrow array construction.
 ///
-/// Row-local histogram indices stay exactly as encoded: physical tables are concatenated under
-/// cumulative row list offsets, so no index is remapped. Each histogram-bearing row carries its
-/// complete table, including unreferenced entries; many segments referencing one large table can
-/// therefore repeat that table in the encoded batch. A single constituent child array is reused
-/// by clone (sharing its buffers); multiple constituents are concatenated, which copies.
+/// Each histogram segment carries each *distinct* table row it references exactly once, and its
+/// local indices are remapped into that compact table, so the payload grows with the rows a segment
+/// actually names rather than with its positions. A single constituent child array is reused by
+/// clone (sharing its buffers); multiple constituents are concatenated, which copies.
 fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Result<RecordBatch> {
     let count = rows.len();
     let DataType::Struct(time_fields) = schema.field(2).data_type() else {
@@ -1590,20 +1620,22 @@ fn encode_rows(schema: &SchemaRef, shape: FrameShape, rows: &[FrameRow]) -> Resu
                 DenseSamplesRef::Histogram(values) => {
                     float_lengths.push(0);
                     float_valid.push(false);
-                    index_lengths.push(values.len());
-                    index_parts.push(Arc::new(values.indices().clone()));
-                    table_lengths.push(values.batch().len());
-                    table_parts.push(Arc::new(values.batch().as_arrow().clone()));
+                    let (table, indices) = compact_histogram(values)?;
+                    index_lengths.push(indices.len());
+                    index_parts.push(Arc::new(indices));
+                    table_lengths.push(table.len());
+                    table_parts.push(table);
                     histogram_valid.push(true);
                 }
                 DenseSamplesRef::Mixed(values) => {
                     float_lengths.push(values.floats().len());
                     float_parts.push(Arc::new(values.floats().clone()));
                     float_valid.push(true);
-                    index_lengths.push(values.histograms().len());
-                    index_parts.push(Arc::new(values.histograms().indices().clone()));
-                    table_lengths.push(values.histograms().batch().len());
-                    table_parts.push(Arc::new(values.histograms().batch().as_arrow().clone()));
+                    let (table, indices) = compact_histogram(values.histograms())?;
+                    index_lengths.push(indices.len());
+                    index_parts.push(Arc::new(indices));
+                    table_lengths.push(table.len());
+                    table_parts.push(table);
                     histogram_valid.push(true);
                 }
             }

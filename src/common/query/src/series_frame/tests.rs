@@ -2185,10 +2185,10 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
     struct Expected {
         time: i64,
         float_bits: Option<u64>,
-        hist_index: Option<u32>,
+        hist_sum: Option<f64>,
     }
-    // Table rows: 0 => sum 10.5, 1 => sum -9.5, 2 => sum 7.25. Row-local indices stay
-    // unchanged, so equal indices in different rows keep the same sum.
+    // Table rows: 0 => sum 10.5, 1 => sum -9.5, 2 => sum 7.25. Each frame row compacts
+    // referenced histogram rows densely, so the same local index can carry different sums.
     let nan_bits = f64::from_bits(0x7ff8_0000_0000_0042).to_bits();
     let rows: [(Vec<Expected>, bool); 4] = [
         (
@@ -2196,12 +2196,12 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
                 Expected {
                     time: 10,
                     float_bits: Some(1.0_f64.to_bits()),
-                    hist_index: Some(1),
+                    hist_sum: Some(-9.5),
                 },
                 Expected {
                     time: 20,
                     float_bits: None,
-                    hist_index: None,
+                    hist_sum: None,
                 },
             ],
             false,
@@ -2210,7 +2210,7 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
             vec![Expected {
                 time: 30,
                 float_bits: Some(nan_bits),
-                hist_index: Some(0),
+                hist_sum: Some(10.5),
             }],
             false,
         ),
@@ -2218,7 +2218,7 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
             vec![Expected {
                 time: 40,
                 float_bits: Some((-0.0_f64).to_bits()),
-                hist_index: Some(0),
+                hist_sum: Some(10.5),
             }],
             false,
         ),
@@ -2226,12 +2226,11 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
             vec![Expected {
                 time: 50,
                 float_bits: Some(crate::prometheus::PROMETHEUS_STALE_NAN_BITS),
-                hist_index: Some(2),
+                hist_sum: Some(7.25),
             }],
             true,
         ),
     ];
-    let sums = [10.5_f64, -9.5, 7.25];
     for (expected, last) in rows {
         let chunk = decoded.next().await.unwrap().unwrap();
         assert_eq!(chunk.primary_key.as_slice(), b"series-key");
@@ -2250,12 +2249,12 @@ async fn multirow_ipc_roundtrip_preserves_cross_chunk_variable_segments() {
                 SampleRef::Missing => assert_eq!(expected.float_bits, None),
                 SampleRef::Histogram(_) => panic!("expected a float field"),
             }
-            match expected.hist_index {
-                Some(index_value) => {
+            match expected.hist_sum {
+                Some(sum) => {
                     assert!(hist.indices().is_valid(index));
-                    assert_eq!(hist.indices().value(index), index_value);
+                    assert_eq!(hist.indices().value(index), 0);
                     let view = hist.view_at(index).expect("histogram sample present");
-                    assert_eq!(view.sum.to_bits(), sums[index_value as usize].to_bits());
+                    assert_eq!(view.sum.to_bits(), sum.to_bits());
                     assert_eq!(view.schema, -7);
                     assert_eq!(view.reset_hint, CounterResetHint::Unrecognized(37));
                     assert_eq!(view.custom_values, [1.5, 4.5]);

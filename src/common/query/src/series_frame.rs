@@ -571,6 +571,13 @@ impl SequenceValidator {
 
 /// Cross-chunk validation state for evaluated chains.
 ///
+/// This is a **chain-local** validator. It checks exactly three things: that a chunk does not change
+/// identity while its chain is open, that a chain closes exactly once, and that the positions of an
+/// open chain keep increasing across adjacent chunks. It keeps at most the one open chain, so it
+/// never certifies that a complete identity does not recur later in the stream; that global
+/// non-recurrence is a producer contract enforced where identities are completed (the repartition
+/// owner), not here.
+///
 /// `is_last` closes one chunk chain and nothing more. It is not the end of a label set: a range
 /// function or a label rewrite can make two input series show the same complete labels, and each of
 /// them closes itself, so a closed chain may be followed by another chain whose labels happen to be

@@ -26,6 +26,7 @@ use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use snafu::ResultExt;
 
+use crate::cache::columnar::{self as metadata_cache, MetadataCache};
 use crate::error::{NewRecordBatchSnafu, OpenDalSnafu, RecordBatchSnafu, Result, SerdeJsonSnafu};
 use crate::series_index::artifact::ArtifactFormat;
 use crate::series_index::columnar::codec::{self, Dictionary};
@@ -42,9 +43,45 @@ use crate::sst::parquet::helper::fetch_byte_ranges;
 pub(crate) struct ColumnarReader {
     store: ObjectStore,
     manifest: Arc<Manifest>,
+    schema: SchemaRef,
+    cache: Option<MetadataCache>,
     handle: SeriesIndexFileHandle,
 }
 impl ColumnarReader {
+    pub(crate) async fn open_cached(
+        store: ObjectStore,
+        handle: SeriesIndexFileHandle,
+        cache: Option<MetadataCache>,
+    ) -> Result<Self> {
+        let identity = format!("{:?}/{:?}", handle.file_id(), handle.entry());
+        let descriptor = metadata_cache::load(
+            cache.as_ref(),
+            identity,
+            |(manifest, schema): &(Arc<Manifest>, SchemaRef)| {
+                manifest.retained_size()
+                    + 8 * std::mem::size_of::<usize>()
+                    + std::mem::size_of::<datatypes::arrow::datatypes::Schema>()
+                    + schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.size() + std::mem::size_of::<usize>())
+                        .sum::<usize>()
+            },
+            async {
+                let reader = Self::open(store.clone(), handle.clone()).await?;
+                Ok((reader.manifest, reader.schema))
+            },
+        )
+        .await?;
+        Ok(Self {
+            store,
+            handle,
+            manifest: descriptor.0.clone(),
+            schema: descriptor.1.clone(),
+            cache,
+        })
+    }
+
     pub(crate) async fn open(store: ObjectStore, handle: SeriesIndexFileHandle) -> Result<Self> {
         let entry = handle.entry();
         let artifact = entry
@@ -143,6 +180,8 @@ impl ColumnarReader {
         )?;
         Ok(Self {
             store,
+            schema: manifest.schema(),
+            cache: None,
             manifest: Arc::new(manifest),
             handle,
         })
@@ -151,7 +190,7 @@ impl ColumnarReader {
 
 impl FormatReader for ColumnarReader {
     fn schema(&self) -> SchemaRef {
-        self.manifest.schema()
+        self.schema.clone()
     }
 
     fn read(&self, request: SeriesReadRequest) -> Result<BoxStream<'static, Result<RecordBatch>>> {
@@ -174,6 +213,7 @@ impl FormatReader for ColumnarReader {
                 .project(&projection)
                 .map_err(|e| invalid(format!("series projection: {e}")))?,
         );
+        let cache = self.cache.clone();
         let manifest = self.manifest.clone();
         let store = self.store.clone();
         let handle = self.handle.clone();
@@ -190,6 +230,7 @@ impl FormatReader for ColumnarReader {
                 if !matches_range(part.first, part.last, &request) { continue; }
                 let path = manifest.part_path(part.part_id);
                 let size = part.file_size;
+                let trailer = metadata_cache::load(cache.as_ref(), format!("{path}/{size}/framing"), |_| std::mem::size_of::<Trailer>(), async {
                 let framing = fetch_byte_ranges(&path, store.clone(), &[0..metadata::HEADER_SIZE, size-metadata::TRAILER_SIZE..size]).await.context(OpenDalSnafu)?;
                 require(
                     framing.len() == 2
@@ -199,32 +240,32 @@ impl FormatReader for ColumnarReader {
                 )?;
                 metadata::validate_header(&framing[0])?;
                 let trailer = Trailer::decode(&framing[1], size)?;
+                    Ok(trailer)
+                }).await?;
                 require(trailer.root.first == part.first && trailer.root.last == part.last, "series part/root bounds mismatch")?;
-                let root = load_metadata_page(&store, &path, &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
-                let (mut active, children) = match root {
-                    Page::Leaf(blocks) => (Some(blocks), Vec::new()),
-                    Page::Internal(children) => (None, children),
+                let root = load_metadata_page(cache.as_ref(), &store, (&path, size), &trailer.root, trailer.depth, trailer.payload_end, &names).await?;
+                let (mut active, children) = match root.as_ref() {
+                    Page::Leaf(_) => (Some(root.clone()), Vec::new()),
+                    Page::Internal(children) => (None, children.clone()),
                 };
                 let mut child_iter = children.into_iter();
                 let mut observed_rows = 0u64;
                 let mut previous_payload_end = metadata::HEADER_SIZE;
                 loop {
-                    let blocks = if let Some(blocks) = active.take() { blocks } else {
+                    let page = if let Some(page) = active.take() { page } else {
                         let Some(child) = child_iter.next() else { break; };
                         if !matches_range(child.first, child.last, &request) { continue; }
-                        match load_metadata_page(&store, &path, &child, 1, trailer.payload_end, &names).await? {
-                            Page::Leaf(blocks) => blocks,
-                            Page::Internal(_) => Err(unsupported("internal child in depth-two series index"))?,
-                        }
+                        load_metadata_page(cache.as_ref(), &store, (&path, size), &child, 1, trailer.payload_end, &names).await?
                     };
+                    let blocks = match page.as_ref() { Page::Leaf(blocks) => blocks, Page::Internal(_) => Err(unsupported("internal child in depth-two series index"))? };
                     for block in blocks {
                         observed_rows = observed_rows.checked_add(u64::from(block.rows)).ok_or_else(|| invalid("series part row count overflow"))?;
                         for column in &block.columns {
                             column.payload.validate(previous_payload_end, trailer.payload_end, false)?;
                             previous_payload_end = column.payload.end()?;
                         }
-                        if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(&block, &request.filters) { continue; }
-                        if let Some(mut output) = read_block(&store, &path, &block, &request, projected.clone()).await? {
+                        if !matches_range(block.first_id(), block.last_id(), &request) || !matches_statistics(block, &request.filters) { continue; }
+                        if let Some(mut output) = read_block(&store, &path, block, &request, projected.clone()).await? {
                             while let Some(batch) = output.next_batch()? { yield batch; }
                         }
                     }
@@ -291,33 +332,42 @@ async fn read_range(store: &ObjectStore, path: &str, start: u64, end: u64) -> Re
     Ok(bytes)
 }
 
-/// TODO: integrate with Mito's cache using store/region, generation, part, reference,
-/// checksum and codec IDs. The immutable path and reference remain available here.
+/// Reuses validated immutable metadata; traversal remains local to each stream.
 async fn load_metadata_page(
+    cache: Option<&MetadataCache>,
     store: &ObjectStore,
-    path: &str,
+    object: (&str, u64),
     reference: &PageReference,
     depth: u32,
     payload_end: u64,
     names: &[String],
-) -> Result<Page> {
-    if reference.payload.encoding != 1 {
-        return Err(unsupported(format!(
-            "series metadata encoding {}",
-            reference.payload.encoding
-        )));
-    }
-    let bytes = read_range(
-        store,
-        path,
-        reference.payload.offset,
-        reference.payload.end()?,
+) -> Result<Arc<Page>> {
+    let (path, size) = object;
+    metadata_cache::load(
+        cache,
+        format!("{path}/{size}/{reference:?}/{depth}/{payload_end}"),
+        Page::retained_size,
+        async {
+            if reference.payload.encoding != 1 {
+                return Err(unsupported(format!(
+                    "series metadata encoding {}",
+                    reference.payload.encoding
+                )));
+            }
+            let bytes = read_range(
+                store,
+                path,
+                reference.payload.offset,
+                reference.payload.end()?,
+            )
+            .await?;
+            // TODO: benchmark inline versus offloaded codecs for latency, throughput,
+            // and async-worker responsiveness before adding scheduling overhead.
+            let decoded = reference.payload.unpack(&bytes)?;
+            Page::decode(&decoded, reference, depth, payload_end, names)
+        },
     )
-    .await?;
-    // TODO: benchmark inline versus offloaded codecs for latency, throughput,
-    // and async-worker responsiveness before adding scheduling overhead.
-    let decoded = reference.payload.unpack(&bytes)?;
-    Page::decode(&decoded, reference, depth, payload_end, names)
+    .await
 }
 
 #[derive(Debug)]

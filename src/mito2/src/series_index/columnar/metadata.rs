@@ -293,6 +293,34 @@ pub(crate) enum Page {
     Internal(Vec<PageReference>),
 }
 impl Page {
+    pub(crate) fn retained_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + match self {
+                Self::Internal(children) => {
+                    children.capacity() * std::mem::size_of::<PageReference>()
+                }
+                Self::Leaf(blocks) => {
+                    blocks.capacity() * std::mem::size_of::<Block>()
+                        + blocks
+                            .iter()
+                            .map(|block| {
+                                block.columns.capacity() * std::mem::size_of::<Column>()
+                                    + block
+                                        .columns
+                                        .iter()
+                                        .map(|column| {
+                                            column.name.capacity()
+                                                + column.bounds.as_ref().map_or(0, |(min, max)| {
+                                                    min.capacity() + max.capacity()
+                                                })
+                                        })
+                                        .sum::<usize>()
+                            })
+                            .sum::<usize>()
+                }
+            }
+    }
+
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {

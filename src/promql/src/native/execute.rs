@@ -155,7 +155,7 @@ pub(super) fn evaluated_bytes(chunk: &EvaluatedChunk) -> usize {
 /// allocation however many chunks index into it, so it is not a per-chunk cost at all. Dropping it
 /// here is therefore only half the story -- it must not become a figure the operand never charges.
 /// [`unbilled_tables`] is the other half, and the operand bills each table once through it.
-fn operand_chunk_bytes(series: &Series) -> usize {
+pub(crate) fn operand_chunk_bytes(series: &Series) -> usize {
     series_bytes(series)
         .saturating_sub(fields_bytes(&series.fields))
         .saturating_add(sample_slice_bytes(&series.fields))
@@ -243,7 +243,7 @@ fn unbilled_tables(series: &Series, billed: &HashSet<usize>) -> (Vec<usize>, usi
 ///
 /// Existing values and histogram tables remain shared with the fragments, whose estimates already
 /// account for their payloads.
-fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize {
+pub(crate) fn merge_workspace_bytes(rows: usize, fragments: usize, fields: usize) -> usize {
     let sorted_rows = rows.saturating_mul(
         std::mem::size_of::<(usize, usize, usize)>() + std::mem::size_of::<usize>(),
     );

@@ -15,6 +15,7 @@
 //! Cache for the engine.
 
 pub(crate) mod cache_size;
+pub(crate) mod columnar;
 
 pub(crate) mod file_cache;
 pub(crate) mod index;
@@ -56,6 +57,7 @@ use store_api::storage::{ColumnId, ConcreteDataType, FileId, RegionId, TimeSerie
 pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapperRef};
 
 use crate::cache::cache_size::parquet_meta_size;
+use crate::cache::columnar::{DecodedKey, DecodedValue, shared_weight};
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
@@ -1020,8 +1022,9 @@ impl CacheStrategy {
 pub struct CacheManager {
     /// Cache for compact, authoritative SST metadata.
     sst_meta_cache: Option<SstMetaCache>,
-    /// Cache for decoded SST metadata, used only as an acceleration tier.
+    /// Shared decoded SST and native-reader metadata acceleration tier.
     sst_decoded_meta_cache: Option<SstDecodedMetaCache>,
+    columnar_load_locks: Arc<[tokio::sync::Mutex<()>; 32]>,
     /// Cache for vectors.
     vector_cache: Option<VectorCache>,
     /// Cache for SST byte ranges.
@@ -1172,7 +1175,7 @@ impl CacheManager {
             CACHE_BYTES
                 .with_label_values(&[SST_META_DECODED_TYPE])
                 .add(decoded_meta_cache_weight(&key, &metadata).into());
-            cache.insert(key, metadata);
+            cache.insert(DecodedKey::Sst(key), DecodedValue::Sst(metadata));
         }
     }
 
@@ -1200,7 +1203,14 @@ impl CacheManager {
     }
 
     fn get_decoded_sst_meta(&self, key: &SstMetaKey) -> Option<Arc<CachedSstMeta>> {
-        self.sst_decoded_meta_cache.as_ref()?.get(key)
+        match self
+            .sst_decoded_meta_cache
+            .as_ref()?
+            .get(&DecodedKey::Sst(key.clone()))?
+        {
+            DecodedValue::Sst(value) => Some(value),
+            _ => None,
+        }
     }
 
     /// Gets and decodes only the compact tier without promoting into the decoded cache.
@@ -1261,7 +1271,7 @@ impl CacheManager {
             cache.remove(&key);
         }
         if let Some(cache) = &self.sst_decoded_meta_cache {
-            cache.remove(&key);
+            cache.remove(&DecodedKey::Sst(key));
         }
     }
 
@@ -1588,14 +1598,12 @@ impl CacheManagerBuilder {
         let sst_decoded_meta_cache = (decoded_meta_capacity != 0).then(|| {
             Cache::builder()
                 .max_capacity(decoded_meta_capacity)
-                .weigher(decoded_meta_cache_weight)
+                .weigher(shared_weight)
                 .eviction_listener(|k, v, cause| {
-                    let size = decoded_meta_cache_weight(&k, &v);
-                    CACHE_BYTES
-                        .with_label_values(&[SST_META_DECODED_TYPE])
-                        .sub(size.into());
+                    let size = shared_weight(&k, &v);
+                    CACHE_BYTES.with_label_values(&[v.label()]).sub(size.into());
                     CACHE_EVICTION
-                        .with_label_values(&[SST_META_DECODED_TYPE, removal_cause_str(cause)])
+                        .with_label_values(&[v.label(), removal_cause_str(cause)])
                         .inc();
                 })
                 .build()
@@ -1667,6 +1675,7 @@ impl CacheManagerBuilder {
         CacheManager {
             sst_meta_cache,
             sst_decoded_meta_cache,
+            columnar_load_locks: Arc::new(std::array::from_fn(|_| tokio::sync::Mutex::new(()))),
             vector_cache,
             page_cache,
             write_cache: self.write_cache,
@@ -1727,7 +1736,7 @@ fn update_hit_miss<T>(value: Option<T>, cache_type: &str) -> Option<T> {
 
 /// Cache key (region id, file id) for SST meta.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct SstMetaKey(RegionId, FileId);
+pub(crate) struct SstMetaKey(RegionId, FileId);
 
 impl SstMetaKey {
     /// Returns memory used by the key (estimated).
@@ -2085,7 +2094,7 @@ impl SelectorResultValue {
 /// Maps (region id, file id) to fused SST metadata.
 type SstMetaCache = Cache<SstMetaKey, Arc<CompactSstMeta>>;
 /// Maps (region id, file id) to decoded SST metadata retained as an acceleration tier.
-type SstDecodedMetaCache = Cache<SstMetaKey, Arc<CachedSstMeta>>;
+type SstDecodedMetaCache = Cache<DecodedKey, DecodedValue>;
 /// Maps [Value] to a vector that holds this value repeatedly.
 ///
 /// e.g. `"hello" => ["hello", "hello", "hello"]`

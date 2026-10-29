@@ -16,7 +16,7 @@
 
 mod codec;
 mod metadata;
-mod reader;
+pub(crate) mod reader;
 #[cfg(test)]
 mod tests;
 mod writer;
@@ -159,6 +159,18 @@ struct Manifest {
     files: Vec<Part>,
 }
 impl Manifest {
+    fn retained_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.timestamp.name.capacity()
+            + self.files.capacity() * std::mem::size_of::<Part>()
+            + self.fields.capacity() * std::mem::size_of::<ValueColumn>()
+            + self
+                .fields
+                .iter()
+                .map(|field| field.name.capacity() + field.data_type.capacity())
+                .sum::<usize>()
+    }
+
     fn prefix(&self) -> String {
         samples_prefix(self.region_id, self.generation)
     }

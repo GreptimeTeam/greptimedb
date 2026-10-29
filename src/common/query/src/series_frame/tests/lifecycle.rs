@@ -346,9 +346,9 @@ async fn streaming_round_trip_preserves_sliced_multifield_payload_and_owners() {
     assert_eq!(mixed_seen, [Some(1.25_f64.to_bits()), None, None]);
 }
 
-/// One row of one sample, with every array a nonzero-offset slice of a larger owner: the decoded
-/// chunk keeps the source buffers by pointer, and the values stay readable and bit-exact after
-/// every source owner is dropped.
+/// One row of one sample, with payload arrays as nonzero-offset slices of larger owners: the
+/// decoded chunk keeps the float and time buffers by pointer, and values stay readable and bit-exact
+/// after every source owner is dropped.
 #[tokio::test]
 async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners() {
     let schema = Arc::new(SeriesSchema {
@@ -388,9 +388,9 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
     let index_owner = UInt32Array::from(vec![Some(3), Some(0)]);
     let indices = index_owner.slice(1, 1);
     let hist = Samples::try_from_histogram(indices.clone(), sliced_table.clone()).unwrap();
-    let mixed_float_owner = Float64Array::from(vec![Some(0.0), Some(-0.0)]);
+    let mixed_float_owner = Float64Array::from(vec![Some(0.0), None]);
     let mixed_floats = mixed_float_owner.slice(1, 1);
-    let mixed_index_owner = UInt32Array::from(vec![Some(0), None]);
+    let mixed_index_owner = UInt32Array::from(vec![None, Some(0)]);
     let mixed_indices = mixed_index_owner.slice(1, 1);
     let mixed = Samples::try_from_mixed(
         mixed_floats.clone(),
@@ -409,9 +409,7 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
 
     let input_times_ptr = chunk.time.as_buffer().as_ptr();
     let input_float_ptr = float.values().as_ptr();
-    let input_hist_indices_ptr = indices.values().as_ptr();
     let input_mixed_float_ptr = mixed_floats.values().as_ptr();
-    let input_mixed_indices_ptr = mixed_indices.values().as_ptr();
 
     let input: SendableRawSeriesStream = Box::pin(RawFixture {
         schema: schema.clone(),
@@ -438,18 +436,9 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
     else {
         panic!("expected histogram")
     };
-    assert_eq!(
-        decoded_hist.indices().values().as_ptr(),
-        input_hist_indices_ptr
-    );
-    assert!(
-        decoded_hist
-            .batch()
-            .as_arrow()
-            .to_data()
-            .ptr_eq(&sliced_table.as_arrow().to_data()),
-        "a single row keeps the sliced histogram table by pointer"
-    );
+    assert!(decoded_hist.indices().is_valid(0));
+    assert_eq!(decoded_hist.indices().value(0), 0);
+    assert_histogram(decoded_hist.batch().view(0).unwrap(), -9.5, Some(456));
     let DenseSamplesRef::Mixed(decoded_mixed) = output[0].fields.get(2).unwrap().dense().unwrap()
     else {
         panic!("expected mixed")
@@ -458,17 +447,13 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
         decoded_mixed.floats().values().as_ptr(),
         input_mixed_float_ptr
     );
-    assert_eq!(
-        decoded_mixed.histograms().indices().values().as_ptr(),
-        input_mixed_indices_ptr
-    );
-    assert!(
-        decoded_mixed
-            .histograms()
-            .batch()
-            .as_arrow()
-            .to_data()
-            .ptr_eq(&sliced_table.as_arrow().to_data())
+    assert!(decoded_mixed.floats().is_null(0));
+    assert!(decoded_mixed.histograms().indices().is_valid(0));
+    assert_eq!(decoded_mixed.histograms().indices().value(0), 0);
+    assert_histogram(
+        decoded_mixed.histograms().batch().view(0).unwrap(),
+        -9.5,
+        Some(456),
     );
     assert_eq!(output[0].time.as_buffer().as_ptr(), input_times_ptr);
 
@@ -506,8 +491,8 @@ async fn single_row_sliced_payload_keeps_zero_copy_buffers_and_releases_owners()
         panic!("expected histogram")
     };
     assert_histogram(value, -9.5, Some(456));
-    match chunk.fields.get(2).unwrap().sample(0) {
-        SampleRef::Float(value) => assert_eq!(value.to_bits(), (-0.0_f64).to_bits()),
-        SampleRef::Missing | SampleRef::Histogram(_) => panic!("expected mixed float"),
-    }
+    let SampleRef::Histogram(value) = chunk.fields.get(2).unwrap().sample(0) else {
+        panic!("expected mixed histogram")
+    };
+    assert_histogram(value, -9.5, Some(456));
 }
