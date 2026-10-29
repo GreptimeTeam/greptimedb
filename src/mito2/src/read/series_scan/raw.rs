@@ -244,10 +244,6 @@ pub(crate) fn make_stream(
     let stream = async_stream::stream! {
         let mut input = inner;
         let mut pending: Option<RawSeriesChunk> = None;
-        // The primary key of the last chunk a flat package closed. Closing that chunk clears
-        // `pending`, but the next package's first chunk must still be ordered after it, so the
-        // comparisons keep their own baseline.
-        let mut closed: Option<Buffer> = None;
         let mut last_package_key: Option<Buffer> = None;
         // Records waiting for one predicate pass, and the number of rows they hold.
         let mut buffered: Vec<RecordBatch> = Vec::new();
@@ -273,7 +269,7 @@ pub(crate) fn make_stream(
                     None => match incoming.pop_front() {
                         Some(record) => record,
                         None => {
-                            let next = if buffered.is_empty() {
+                            let next = if group_last_package_key.is_none() {
                                 input.next().await
                             } else {
                                 match input.next().now_or_never() {
@@ -287,10 +283,13 @@ pub(crate) fn make_stream(
                                 // ends it closes the last of them. Empty records carry no rows and no
                                 // series, which puts the flag on the last record that has rows; a
                                 // package without any ends no series and closes nothing.
-                                let ends_package = flat
-                                    .batches
-                                    .iter()
-                                    .rposition(|batch| batch.num_rows() > 0);
+                                let ends_package = if ordering == SeriesOrdering::KeyThenTime {
+                                    flat.batches
+                                        .iter()
+                                        .rposition(|batch| batch.num_rows() > 0)
+                                } else {
+                                    None
+                                };
                                 for (index, batch) in flat.batches.into_iter().enumerate() {
                                     if batch.num_rows() == 0 {
                                         continue;
@@ -346,9 +345,6 @@ pub(crate) fn make_stream(
                     group_last_package_key = Some(key);
                 }
                 buffered.push(record.batch);
-                if ordering == SeriesOrdering::Contiguous && record.ends_package {
-                    break;
-                }
             }
             if buffered.is_empty() { break; }
             // Take the rows out of the buffer before processing them, so an early return cannot
@@ -451,28 +447,8 @@ pub(crate) fn make_stream(
                     {
                         yield Err(invalid("raw timestamps are not strictly increasing")); return;
                     }
-                    // A package end already closed this key, so a chunk for it now would split one
-                    // series into two runs that both claim to be complete. Only a series that keeps
-                    // going past the package that completed it can do that, whatever shape carries
-                    // the rest of it, and that breaks the flat contract; reject it instead of letting
-                    // the split through. It is checked before `pending` so a series resuming after
-                    // another one in between is caught as well.
-                    //
-                    // Legacy flat producers declare `KeyThenTime`, so a reopened key is rejected by
-                    // the ordered-key comparison below. `Contiguous` flat input uses package-local
-                    // completion, while ordinary RecordBatch boundaries carry no completion fact.
-                    if let Some(key) = closed.as_ref() {
-                        if key.as_slice() == current.primary_key.as_slice() {
-                            yield Err(invalid("raw series continued after the package that completed it")); return;
-                        }
-                        // Closing a package clears `pending`, so the closed key is the baseline that
-                        // keeps the keys of the following packages strictly increasing.
-                        if ordering == SeriesOrdering::KeyThenTime
-                            && current.primary_key.as_slice() < key.as_slice()
-                        {
-                            yield Err(invalid("legacy series primary keys are not strictly increasing")); return;
-                        }
-                    }
+                    // Legacy flat producers declare `KeyThenTime`; the ordered-key comparison
+                    // rejects a key that reopens after a package has completed it.
                     if let Some(mut old) = pending.take() {
                         if old.primary_key.as_slice() != current.primary_key.as_slice() {
                             old.is_last = true;
@@ -483,19 +459,12 @@ pub(crate) fn make_stream(
                     start = end;
                 }
             }
-            if let Some(package_last_key) = group_last_package_key {
-                if ordering == SeriesOrdering::KeyThenTime {
-                    if pending.as_ref().is_some_and(|last| last.primary_key.as_slice() <= package_last_key.as_slice())
-                        && let Some(mut last) = pending.take()
-                    {
-                        last.is_last = true;
-                        yield Ok(last);
-                    }
-                } else if let Some(mut last) = pending.take() {
-                    last.is_last = true;
-                    yield Ok(last);
-                }
-                closed = Some(package_last_key);
+            if let Some(package_last_key) = group_last_package_key
+                && pending.as_ref().is_some_and(|last| last.primary_key.as_slice() <= package_last_key.as_slice())
+                && let Some(mut last) = pending.take()
+            {
+                last.is_last = true;
+                yield Ok(last);
             }
         }
         if let Some(error) = upstream_error { yield Err(BoxedError::new(error)); return; }

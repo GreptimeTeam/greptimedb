@@ -1133,6 +1133,29 @@ impl Stream for PendingAfter {
     }
 }
 
+struct PendingBetween {
+    items: std::vec::IntoIter<Result<ScanBatch>>,
+    pending: bool,
+}
+
+impl Stream for PendingBetween {
+    type Item = Result<ScanBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if std::mem::replace(&mut self.pending, false) {
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        match self.items.next() {
+            Some(item) => {
+                self.pending = true;
+                Poll::Ready(Some(item))
+            }
+            None => Poll::Pending,
+        }
+    }
+}
+
 /// Returns the next chunk, failing instead of hanging when the producer withholds it.
 async fn next_within(output: &mut SendableRawSeriesStream) -> RawSeriesChunk {
     tokio::time::timeout(CLOSE_TIMEOUT, output.next())
@@ -1162,7 +1185,7 @@ fn package(batches: Vec<RecordBatch>) -> ScanBatch {
 /// never asked for the next package and never ends, so only the package end can close `b`.
 #[tokio::test]
 async fn a_complete_package_closes_its_last_series_without_the_next_package() {
-    let mut output = convert(
+    let mut output = convert_ordered(
         Box::pin(PendingAfter {
             items: vec![Ok(package(vec![
                 dictionary_batch(&[b"a"], &[1], &[Some(1)]),
@@ -1222,7 +1245,7 @@ async fn multiple_ready_packages_close_before_pending_with_predicate() {
 #[tokio::test]
 async fn filtered_package_tails_do_not_close_an_incomplete_ordinary_tail() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut output = convert_with_predicate(
+    let mut output = convert_with_predicate_ordering(
         Box::pin(PendingAfter {
             items: vec![
                 Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
@@ -1237,13 +1260,55 @@ async fn filtered_package_tails_do_not_close_an_incomplete_ordinary_tail() {
         }),
         schema(),
         positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
     );
     let first = next_within(&mut output).await;
     assert_eq!(first.primary_key.as_slice(), b"a");
     assert_eq!(values(&first), vec![Some(1.0)]);
     assert!(first.is_last);
     assert_waits_for_input(&mut output).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // An ordinary RecordBatch tail must not close a series and must not cost an extra predicate pass.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn record_batches_separated_by_pending_share_one_predicate_pass() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut batches: Vec<Result<ScanBatch>> = (0..100)
+        .map(|i| {
+            let key = format!("{i:03}").into_bytes();
+            Ok(ScanBatch::RecordBatch(dictionary_batch(
+                &[&key, &key],
+                &[1, 2],
+                &[Some(1), Some(2)],
+            )))
+        })
+        .collect();
+    batches.push(Ok(package(vec![dictionary_batch(
+        &[b"b"],
+        &[1],
+        &[Some(3)],
+    )])));
+    let mut output = convert_with_predicate_ordering(
+        Box::pin(PendingBetween {
+            items: batches.into_iter(),
+            pending: false,
+        }),
+        schema(),
+        positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
+    );
+
+    for i in 0..100 {
+        let chunk = next_within(&mut output).await;
+        assert_eq!(chunk.primary_key.as_slice(), format!("{i:03}").as_bytes());
+        assert_eq!(chunk.time.len(), 2);
+        assert!(chunk.is_last);
+    }
+    let package_tail = next_within(&mut output).await;
+    assert_eq!(package_tail.primary_key.as_slice(), b"b");
+    assert!(package_tail.is_last);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1338,7 +1403,7 @@ async fn completed_filtered_flat_key_cannot_reopen_in_ordinary_batch() {
 #[tokio::test]
 async fn a_package_end_closes_the_series_whose_tail_run_the_predicate_dropped() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let mut output = convert_with_predicate(
+    let mut output = convert_with_predicate_ordering(
         Box::pin(PendingAfter {
             items: vec![Ok(package(vec![
                 dictionary_batch(&[b"a", b"a"], &[1, 2], &[Some(1), Some(2)]),
@@ -1348,6 +1413,7 @@ async fn a_package_end_closes_the_series_whose_tail_run_the_predicate_dropped() 
         }),
         schema(),
         positive_value_predicate(calls.clone()),
+        SeriesOrdering::KeyThenTime,
     );
 
     // The second record holds the rest of `a` and ends the package; the predicate empties it, so the
@@ -1384,6 +1450,33 @@ async fn a_package_end_closes_the_series_whose_tail_run_the_predicate_dropped() 
     );
 }
 
+/// A series that continues past the package that completed it must be rejected under KeyThenTime.
+#[tokio::test]
+async fn a_key_closed_by_a_package_must_not_continue_in_a_later_one() {
+    let mut output = convert_ordered(
+        input(vec![
+            Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
+            Ok(package(vec![dictionary_batch(&[b"a"], &[2], &[Some(2)])])),
+        ]),
+        schema(),
+    );
+
+    let first = output.next().await.unwrap().unwrap();
+    assert_eq!(first.primary_key.as_slice(), b"a");
+    assert_eq!(values(&first), vec![Some(1.0)]);
+    assert!(first.is_last);
+    let error = output.next().await.unwrap().unwrap_err();
+    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(
+        reason,
+        "legacy series primary keys are not strictly increasing"
+    );
+    assert!(output.next().await.is_none());
+}
+
 /// A series that continues past the package that completed it must be rejected: yielding it again
 /// would split one series into two runs that both claim to be final.
 #[tokio::test]
@@ -1413,35 +1506,6 @@ async fn a_series_continued_after_its_package_is_terminal() {
     assert_eq!(
         reason,
         "legacy series primary keys are not strictly increasing"
-    );
-    assert!(output.next().await.is_none());
-}
-
-/// A new run of the key a package closed means the input keeps that series going past the package
-/// that completed it, which the flat contract forbids. It is rejected whatever the declared
-/// ordering, instead of being yielded as a second complete run of the same series.
-#[tokio::test]
-async fn a_key_closed_by_a_package_must_not_continue_in_a_later_one() {
-    let mut output = convert(
-        input(vec![
-            Ok(package(vec![dictionary_batch(&[b"a"], &[1], &[Some(1)])])),
-            Ok(package(vec![dictionary_batch(&[b"a"], &[2], &[Some(2)])])),
-        ]),
-        schema(),
-    );
-
-    let first = output.next().await.unwrap().unwrap();
-    assert_eq!(first.primary_key.as_slice(), b"a");
-    assert_eq!(values(&first), vec![Some(1.0)]);
-    assert!(first.is_last);
-    let error = output.next().await.unwrap().unwrap_err();
-    let Some(Error::InvalidRecordBatch { reason, .. }) = error.as_any().downcast_ref::<Error>()
-    else {
-        panic!("unexpected error: {error}");
-    };
-    assert_eq!(
-        reason,
-        "raw series continued after the package that completed it"
     );
     assert!(output.next().await.is_none());
 }
