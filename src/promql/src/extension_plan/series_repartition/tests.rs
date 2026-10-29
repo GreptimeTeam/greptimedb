@@ -3991,11 +3991,12 @@ async fn a_recorded_failure_reaches_every_output_once() {
         || matches!(execution.ending(), Ending::Failed(_)),
     )
     .await;
-    let queued = pool.reserved();
-    assert!(
-        queued > 0,
-        "queued output chains retain memory before drain"
-    );
+    // The producer records the failure before its queued chains are all visible, so wait for the
+    // retention this assertion is about instead of reading the pool once.
+    wait_until("queued output chains retain memory before drain", || {
+        pool.reserved() > 0
+    })
+    .await;
     let outputs = tokio::time::timeout(
         Duration::from_secs(10),
         futures::future::join_all(streams.iter_mut().map(until_end)),
