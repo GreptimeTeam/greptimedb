@@ -308,13 +308,13 @@ async fn flush_batch_physical_tracked(
     let combined_batch = batch_convert::concat_modified_batches(&modified_batches)?;
     // 5. Split by physical partition rule and send to regions
     let physical_table_id = physical_table_info.table_id();
-    let owners = table_batches
+    let row_count = table_batches
         .iter()
         .flat_map(|table| &table.batches)
-        .flat_map(|batch| std::iter::repeat_n(batch.owner, batch.batch.num_rows()))
-        .collect::<Vec<_>>();
+        .map(|batch| batch.batch.num_rows())
+        .sum::<usize>();
     ensure!(
-        owners.len() == combined_batch.num_rows(),
+        row_count == combined_batch.num_rows(),
         error::InternalSnafu {
             err_msg: "Physical transformation changed row ownership"
         }
@@ -323,11 +323,22 @@ async fn flush_batch_physical_tracked(
         region_write::split_combined_batch_by_region(&combined_batch, partition_rule.as_ref())?;
     let mut writes = Vec::new();
     for (region, mask) in masks {
-        let selected = owners
-            .iter()
-            .enumerate()
-            .filter_map(|(index, owner)| mask.array().value(index).then_some(*owner))
-            .collect::<Vec<_>>();
+        let mut selected = Vec::with_capacity(mask.selected_rows());
+        let bits = mask.array().values();
+        let mut offset = 0;
+        // Filtering preserves batch order, and each original batch has one owner.
+        for batch in table_batches.iter().flat_map(|table| &table.batches) {
+            let num_rows = batch.batch.num_rows();
+            let selected_rows = if num_rows == 1 {
+                // Avoid bitmap range setup for single-row submissions.
+                usize::from(bits.value(offset))
+            } else {
+                bits.inner()
+                    .count_set_bits_offset(bits.offset() + offset, num_rows)
+            };
+            selected.extend(std::iter::repeat_n(batch.owner, selected_rows));
+            offset += num_rows;
+        }
         if let Some(batch) =
             region_write::plan_region_batch(&combined_batch, physical_table_id, region, &mask)?
         {
@@ -693,6 +704,186 @@ mod tests {
             let result = receiver.await.unwrap();
             assert_eq!(result.affected_rows, 1);
             assert_eq!(result.error.is_some(), owner == 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_flush_batch_physical_preserves_owners_with_sliced_masks() {
+        use std::sync::Mutex;
+
+        use api::v1::region::{bulk_insert_request, region_request};
+        use arrow::array::{BooleanArray, Float64Array, StringArray, TimestampMillisecondArray};
+        use common_grpc::flight::FlightDecoder;
+        use common_query::WriteProgress;
+        use operator::write_dispatcher::TrackedWrite;
+
+        #[derive(Clone)]
+        struct MaskPartitions {
+            offset: usize,
+            pattern: usize,
+        }
+
+        impl PartitionRule for MaskPartitions {
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+
+            fn partition_columns(&self) -> &[String] {
+                &[]
+            }
+
+            fn find_region(&self, _: &[datatypes::prelude::Value]) -> PartitionResult<u32> {
+                unreachable!()
+            }
+
+            fn split_record_batch(
+                &self,
+                batch: &RecordBatch,
+            ) -> PartitionResult<HashMap<u32, RegionMask>> {
+                Ok([false, true]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(region, selected)| {
+                        let values = std::iter::repeat_n(true, self.offset)
+                            .chain((0..batch.num_rows()).map(|row| {
+                                let matches = match self.pattern {
+                                    0 => false,
+                                    1 => true,
+                                    _ => row % 3 != 0,
+                                };
+                                matches == selected
+                            }))
+                            .chain([true; 8])
+                            .collect::<Vec<_>>();
+                        let mask = BooleanArray::from(values).slice(self.offset, batch.num_rows());
+                        (region as u32, RegionMask::from(mask))
+                    })
+                    .collect())
+            }
+        }
+
+        #[async_trait]
+        impl PhysicalFlushPartitionProvider for MaskPartitions {
+            async fn find_table_partition_rule(
+                &self,
+                _: &table::metadata::TableInfo,
+            ) -> PartitionResult<(PartitionRuleRef, HashMap<u32, Option<u64>>)> {
+                Ok((Arc::new(self.clone()), HashMap::new()))
+            }
+        }
+
+        #[derive(Default)]
+        struct RecordingDispatcher(Mutex<Vec<TrackedWrite>>);
+
+        #[async_trait]
+        impl PhysicalFlushWriteDispatcher for RecordingDispatcher {
+            async fn dispatch(&self, _: Vec<RegionRequest>) -> error::Result<usize> {
+                unreachable!()
+            }
+
+            async fn dispatch_tracked(
+                &self,
+                requests: Vec<TrackedWrite>,
+                inputs: usize,
+            ) -> Vec<WriteProgress> {
+                let mut progress = vec![WriteProgress::default(); inputs];
+                for owner in requests.iter().flat_map(|request| &request.owners) {
+                    progress[*owner].affected_rows += 1;
+                }
+                *self.0.lock().unwrap() = requests;
+                progress
+            }
+        }
+
+        let ctx = session::context::QueryContext::arc();
+        let catalog = MockFlushCatalogProvider {
+            table: Some(mock_physical_table_metadata(1024)),
+        };
+        for lengths in [[0; 7], [1; 7], [0, 3, 65, 1, 127, 0, 64]] {
+            let mut expected = Vec::new();
+            let tables = lengths
+                .chunks(4)
+                .enumerate()
+                .map(|(table, lengths)| {
+                    let batches = lengths
+                        .iter()
+                        .enumerate()
+                        .map(|(index, &rows)| {
+                            let owner = [2, 0, 1, 0, 2, 1, 0][table * 4 + index];
+                            let start = expected.len();
+                            expected.extend(std::iter::repeat_n(owner, rows));
+                            let mut batch = mock_aligned_tag_batch("tag1", "host-1", 0, 1.0);
+                            batch.batch = RecordBatch::try_new(
+                                batch.batch.schema(),
+                                vec![
+                                    Arc::new(TimestampMillisecondArray::from_iter_values(
+                                        (start..start + rows).map(|row| row as i64),
+                                    )),
+                                    Arc::new(Float64Array::from(vec![1.0; rows])),
+                                    Arc::new(StringArray::from(vec!["host-1"; rows])),
+                                ],
+                            )
+                            .unwrap();
+                            batch.owner = owner;
+                            batch
+                        })
+                        .collect();
+                    TableBatch {
+                        table_name: format!("logical_{table}"),
+                        table_id: 100 + table as u32,
+                        batches,
+                        row_count: lengths.iter().sum(),
+                    }
+                })
+                .collect::<Vec<_>>();
+            for offset in [0, 1, 7, 65] {
+                for pattern in 0..3 {
+                    let dispatcher = RecordingDispatcher::default();
+                    let affected = flush_batch_physical(
+                        &tables,
+                        "phy",
+                        &ctx,
+                        &MaskPartitions { offset, pattern },
+                        &dispatcher,
+                        &catalog,
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(affected, expected.len());
+                    let mut actual = Vec::new();
+                    for write in dispatcher.0.into_inner().unwrap() {
+                        let Some(region_request::Body::BulkInsert(request)) = write.request.body
+                        else {
+                            panic!("expected bulk request")
+                        };
+                        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = request.body else {
+                            panic!("expected Arrow IPC")
+                        };
+                        let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                            .unwrap()
+                            .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                            .unwrap();
+                        assert_eq!(batch.num_rows(), write.owners.len());
+                        let timestamps = batch
+                            .column_by_name("greptime_timestamp")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .unwrap();
+                        assert!(timestamps.values().windows(2).all(|pair| pair[0] < pair[1]));
+                        actual.extend(timestamps.values().iter().copied().zip(write.owners));
+                    }
+                    actual.sort_unstable();
+                    assert_eq!(
+                        actual,
+                        expected
+                            .iter()
+                            .enumerate()
+                            .map(|(row, owner)| (row as i64, *owner))
+                            .collect::<Vec<_>>(),
+                    );
+                }
+            }
         }
     }
 
