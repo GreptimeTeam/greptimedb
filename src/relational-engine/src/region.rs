@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use object_store::ObjectStore;
@@ -20,13 +21,16 @@ use store_api::path_utils::region_name;
 use store_api::region_request::{RegionCreateRequest, RegionOpenRequest};
 use store_api::storage::RegionId;
 
-use crate::error::Result;
+use crate::error::{RegionExistsSnafu, Result};
 use crate::manifest::RelationalRegionManifest;
 
 #[derive(Debug)]
 pub struct RelationalRegion {
     pub(crate) region_dir: String,
     pub(crate) metadata: RegionMetadataRef,
+    /// Frozen connection / remote table options. Kept alongside the metadata so an
+    /// idempotent `Create` can be validated against the existing definition.
+    options: HashMap<String, String>,
 }
 
 pub type RelationalRegionRef = Arc<RelationalRegion>;
@@ -45,6 +49,7 @@ impl RelationalRegion {
         request: RegionCreateRequest,
         object_store: &ObjectStore,
     ) -> Result<RelationalRegionRef> {
+        let options = request.options.clone();
         let manifest = RelationalRegionManifest {
             region_id,
             column_metadatas: request.column_metadatas.clone(),
@@ -63,6 +68,7 @@ impl RelationalRegion {
         Ok(Arc::new(Self {
             region_dir,
             metadata,
+            options,
         }))
     }
 
@@ -94,10 +100,12 @@ impl RelationalRegion {
     ) -> Result<RelationalRegionRef> {
         manifest.relational_options()?;
         let metadata = manifest.metadata()?;
+        let options = manifest.options;
 
         Ok(Arc::new(Self {
             region_dir: region_dir.to_string(),
             metadata,
+            options,
         }))
     }
 
@@ -108,6 +116,50 @@ impl RelationalRegion {
 
     pub fn metadata(&self) -> RegionMetadataRef {
         self.metadata.clone()
+    }
+
+    /// Validates an idempotent `Create` against the already-open region, mirroring
+    /// mito2's `check_recovered_region`. A create whose definition (region id, schema,
+    /// primary key, or options) matches the existing region succeeds; a mismatched
+    /// create must fail instead of silently returning success.
+    pub(crate) fn check_create_request(
+        &self,
+        region_id: RegionId,
+        request: &RegionCreateRequest,
+    ) -> Result<()> {
+        if self.metadata.region_id != region_id {
+            return RegionExistsSnafu {
+                region_id,
+                reason: format!(
+                    "existing metadata has different region id {}",
+                    self.metadata.region_id
+                ),
+            }
+            .fail();
+        }
+        if self.metadata.column_metadatas != request.column_metadatas {
+            return RegionExistsSnafu {
+                region_id,
+                reason: "existing metadata has different schema".to_string(),
+            }
+            .fail();
+        }
+        if self.metadata.primary_key != request.primary_key {
+            return RegionExistsSnafu {
+                region_id,
+                reason: "existing metadata has different primary key".to_string(),
+            }
+            .fail();
+        }
+        if self.options != request.options {
+            return RegionExistsSnafu {
+                region_id,
+                reason: "existing metadata has different options".to_string(),
+            }
+            .fail();
+        }
+
+        Ok(())
     }
 }
 

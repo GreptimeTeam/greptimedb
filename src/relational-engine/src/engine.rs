@@ -37,8 +37,7 @@ use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 use tokio::sync::Mutex;
 
 use crate::error::{
-    RegionExistsSnafu, RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu,
-    UnsupportedSnafu,
+    RegionNotFoundSnafu, Result as EngineResult, UnexpectedEngineSnafu, UnsupportedSnafu,
 };
 use crate::manifest::RelationalRegionManifest;
 use crate::region::{RelationalRegion, RelationalRegionRef};
@@ -248,7 +247,10 @@ impl EngineInner {
             }
         );
 
-        if self.exists(region_id).await {
+        // If the region is already open, validate the definition before treating the
+        // create as idempotent: a mismatched create must fail, not silently succeed.
+        if let Some(region) = self.get_region(region_id).await {
+            region.check_create_request(region_id, &request)?;
             return Ok(0);
         }
 
@@ -256,7 +258,8 @@ impl EngineInner {
 
         let _lock = self.region_mutex.lock().await;
         // Check again after acquiring the lock
-        if self.exists(region_id).await {
+        if let Some(region) = self.get_region(region_id).await {
+            region.check_create_request(region_id, &request)?;
             return Ok(0);
         }
 
@@ -272,16 +275,11 @@ impl EngineInner {
         if RelationalRegionManifest::exists(&region_dir, &self.object_store).await? {
             let manifest =
                 RelationalRegionManifest::load(region_id, &region_dir, &self.object_store).await?;
+            let region = RelationalRegion::from_manifest(&region_dir, manifest)?;
             // The persisted definition must match the incoming request, otherwise a
             // retried CREATE with a different schema would silently reuse the old
             // manifest. Reject the mismatch instead.
-            ensure!(
-                manifest.column_metadatas == request.column_metadatas
-                    && manifest.primary_key == request.primary_key
-                    && manifest.options == request.options,
-                RegionExistsSnafu { region_id }
-            );
-            let region = RelationalRegion::from_manifest(&region_dir, manifest)?;
+            region.check_create_request(region_id, &request)?;
             self.regions.write().unwrap().insert(region_id, region);
             info!(
                 "Region recovered from existing manifest, region_id: {}",
@@ -582,5 +580,51 @@ mod tests {
             .await
             .unwrap_err();
         assert_matches!(err, Error::RegionExists { .. });
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_mismatched_definition_in_memory() {
+        let (_dir, object_store) = new_test_object_store("test_create_mismatch_in_memory");
+        let inner = EngineInner::new(object_store);
+        let region_id = RegionId::new(1, 0);
+
+        let request = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![1],
+            options: new_test_options(),
+            table_dir: "mismatch_in_memory_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+
+        inner
+            .handle_create(region_id, request.clone())
+            .await
+            .unwrap();
+
+        // An identical create is idempotent while the region stays in memory.
+        assert_eq!(inner.handle_create(region_id, request).await.unwrap(), 0);
+
+        // A mismatched create must fail, not silently return success.
+        let mismatched = RegionCreateRequest {
+            engine: "relational".to_string(),
+            column_metadatas: new_test_column_metadata(),
+            primary_key: vec![2],
+            options: new_test_options(),
+            table_dir: "mismatch_in_memory_dir/".to_string(),
+            path_type: PathType::Bare,
+            partition_expr_json: Some("".to_string()),
+            requirements: Default::default(),
+        };
+        let err = inner
+            .handle_create(region_id, mismatched)
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err,
+            Error::RegionExists { reason, .. } if reason.contains("primary key")
+        );
     }
 }

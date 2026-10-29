@@ -59,7 +59,6 @@ pub(crate) fn new_test_options() -> HashMap<String, String> {
     HashMap::from([(
         RELATIONAL_META_KEY.to_string(),
         serde_json::to_string(&RelationalOptions {
-            version: 1,
             connection: "mysql://user:***@127.0.0.1:3306/db".to_string(),
             remote_table: "remote_table".to_string(),
         })

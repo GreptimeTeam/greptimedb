@@ -66,15 +66,9 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 /// remote database when serving queries on the region.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RelationalOptions {
-    #[serde(default = "relational_options")]
-    pub version: u8,
     /// Full DSN, e.g. `mysql://user:password@host:3306/db`.
     pub connection: String,
     pub remote_table: String,
-}
-
-fn relational_options() -> u8 {
-    1
 }
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";

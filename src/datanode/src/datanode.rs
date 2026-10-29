@@ -711,9 +711,8 @@ impl DatanodeBuilder {
             self.local_file_access.clone(),
         );
 
-        let relational_engine = RelationalEngine::new(
-            object_store_manager.default_object_store().clone(),
-        );
+        let relational_engine =
+            RelationalEngine::new(object_store_manager.default_object_store().clone());
 
         Ok(vec![
             Arc::new(mito_engine) as _,

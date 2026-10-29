@@ -55,11 +55,13 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Region already exists with a different definition, region_id: {}",
-        region_id
+        "Region already exists with a different definition, region_id: {}, reason: {}",
+        region_id,
+        reason
     ))]
     RegionExists {
         region_id: RegionId,
+        reason: String,
         #[snafu(implicit)]
         location: Location,
     },
@@ -147,7 +149,7 @@ impl ErrorExt for Error {
 
             RegionNotFound { .. } => StatusCode::RegionNotFound,
 
-            RegionExists { .. } => StatusCode::RegionAlreadyExists,
+            RegionExists { .. } => StatusCode::Unexpected,
 
             CheckObject { .. }
             | StoreRegionManifest { .. }
