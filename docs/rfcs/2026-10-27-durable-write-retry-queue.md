@@ -40,6 +40,8 @@ known limitation and is closed by the region-side DDL fence of the durable
 phase, which needs a dedicated table epoch, a replay epoch in the request header
 and a truncate epoch in the region manifest. v1 adds none of that.
 
+The queue does not merge before the exact memory accounting is verified by tests.
+
 # Motivation
 
 `WriteDispatcher` splits a write per region and, when retries are enabled,
@@ -206,6 +208,12 @@ replayer per lease and completion, plus the ledger lock per record; neither can
 stall a worker. Under a storm both are hot, which is the price of exact
 accounting; it is paid on a path that has already failed and returns immediately
 after the handoff.
+
+The single ledger lock is a potential contention point under extreme concurrent
+failure storms. Its critical section only performs integer arithmetic and
+allocates nothing, so the hold time is nanoseconds. If profiling later shows it
+has become a bottleneck it can be sharded, but v1 keeps the single lock because
+that is what makes the accounting exact.
 
 Replay runs on the shared runtimes as an ordinary task. Its decode and its
 client's encode are CPU and allocation work; `replay_concurrency` and the
@@ -431,14 +439,16 @@ tables do not.
 Names and defaults are a proposal.
 
 ```toml
+# Initial values, not tuned: adjust per deployment. The bounds are what the
+# design requires; the numbers are starting points.
 [write_queue]
-enable = false          # the client response does not change
-max_bytes = "512MB"     # pending record bytes; the admission bound
-max_records = 100000
-max_record_size = "8MB"
-ttl = "30m"
-max_attempts = 10       # not persisted; ttl is the bound
-replay_concurrency = 8
+enable = false          # off: a retrying client can duplicate a replayed write
+max_bytes = "512MB"     # exact ceiling for pending records; not a disk quota
+max_records = 100000    # bounds per-record bookkeeping, which max_bytes does not count
+max_record_size = "8MB" # above this a record is rejected before allocation
+ttl = "30m"             # bounds pending age and how long a zombie replay can happen
+max_attempts = 10       # not persisted; ttl, not attempts, bounds a record's life
+replay_concurrency = 8  # bounds in-flight decode and transport buffers and workers
 ```
 
 `max_bytes` is the pending-record budget, not a disk quota and not a soft target.
