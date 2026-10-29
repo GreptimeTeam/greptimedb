@@ -266,7 +266,7 @@ impl SystemTable for InformationSchemaTableSemantics {
                     .make_tables(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
-                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
+                    .map_err(datafusion::error::DataFusionError::from)
             }),
         ));
         Ok(Box::pin(

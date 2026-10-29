@@ -17,26 +17,38 @@
 use std::any::Any;
 use std::fmt;
 
-use crate::ext::{ErrorExt, StackError};
+use crate::ext::{ErrorExt, RetryHint, StackError};
 use crate::status_code::StatusCode;
 
 /// A mock error mainly for test.
 #[derive(Debug)]
 pub struct MockError {
     pub code: StatusCode,
+    retry_hint: RetryHint,
     source: Option<Box<MockError>>,
 }
 
 impl MockError {
     /// Create a new [MockError] without backtrace.
     pub fn new(code: StatusCode) -> MockError {
-        MockError { code, source: None }
+        MockError {
+            code,
+            retry_hint: RetryHint::NonRetryable,
+            source: None,
+        }
+    }
+
+    /// Sets the retry hint independently of the status code.
+    pub fn with_retry_hint(mut self, retry_hint: RetryHint) -> Self {
+        self.retry_hint = retry_hint;
+        self
     }
 
     /// Create a new [MockError] with source.
     pub fn with_source(source: MockError) -> MockError {
         MockError {
             code: source.code,
+            retry_hint: source.retry_hint,
             source: Some(Box::new(source)),
         }
     }
@@ -61,6 +73,10 @@ impl ErrorExt for MockError {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn retry_hint(&self) -> RetryHint {
+        self.retry_hint
     }
 }
 

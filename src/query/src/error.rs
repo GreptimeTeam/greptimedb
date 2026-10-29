@@ -19,6 +19,7 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use common_query::error::datafusion_status_code;
+use common_recordbatch::error::datafusion_retry_hint;
 use datafusion::error::DataFusionError;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::Value;
@@ -460,6 +461,9 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
+            DataFusion { error, .. } | PlanSql { error, .. } => {
+                datafusion_retry_hint::<Self>(error)
+            }
             BuildBackend { source, .. } | ListObjects { source, .. } => source.retry_hint(),
             GetRegionMetadata { .. } => RetryHint::Retryable,
             ParseFileFormat { source, .. } | InferSchema { source, .. } => source.retry_hint(),
@@ -483,27 +487,89 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
-        DataFusionError::External(Box::new(e))
+        DataFusionError::External(Box::new(BoxedError::new(e)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use common_error::ext::PlainError;
+    use common_error::mock::MockError;
 
     use super::*;
 
     #[test]
-    fn test_datafusion_external_boxed_error_status_code() {
-        let error = Error::DataFusion {
-            error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
-                "neutral error".to_string(),
-                StatusCode::RequestOutdated,
-            )))),
-            location: Location::default(),
-        };
+    fn test_datafusion_preserves_error_metadata() {
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            for boxed in [false, true] {
+                let source = || {
+                    let error = Error::RegionQuery {
+                        source: BoxedError::new(
+                            MockError::new(StatusCode::RequestOutdated).with_retry_hint(hint),
+                        ),
+                        location: Location::default(),
+                    };
+                    if boxed {
+                        DataFusionError::External(Box::new(BoxedError::new(error)))
+                    } else {
+                        DataFusionError::External(Box::new(error))
+                    }
+                };
+                for error in [
+                    Error::DataFusion {
+                        error: source(),
+                        location: Location::default(),
+                    },
+                    Error::PlanSql {
+                        error: source(),
+                        location: Location::default(),
+                    },
+                ] {
+                    assert_eq!(error.status_code(), StatusCode::RequestOutdated);
+                    assert_eq!(error.retry_hint(), hint);
+                }
+            }
+        }
+    }
 
-        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
+    #[test]
+    fn test_retry_hint_survives_cross_crate_datafusion_round_trip() {
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            let source =
+                || BoxedError::new(MockError::new(StatusCode::RegionBusy).with_retry_hint(hint));
+            let errors: [DataFusionError; 2] = [
+                catalog::error::Error::Internal {
+                    source: source(),
+                    location: Location::default(),
+                }
+                .into(),
+                common_query::error::Error::TableMutation {
+                    source: source(),
+                    location: Location::default(),
+                }
+                .into(),
+            ];
+            for error in errors {
+                let error = Error::PlanSql {
+                    error,
+                    location: Location::default(),
+                };
+                assert_eq!(error.retry_hint(), hint);
+                let error = common_recordbatch::error::Error::PollStream {
+                    error: error.into(),
+                    location: Location::default(),
+                };
+                assert_eq!(error.status_code(), StatusCode::RegionBusy);
+                assert_eq!(error.retry_hint(), hint);
+            }
+        }
     }
 
     #[test]

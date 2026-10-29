@@ -16,9 +16,10 @@ use std::any::Any;
 use std::sync::Arc;
 
 use arrow::error::ArrowError;
-use common_error::ext::{BoxedError, ErrorExt};
+use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
+use common_recordbatch::error::datafusion_retry_hint;
 use datafusion_common::DataFusionError;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::DataType as ArrowDatatype;
@@ -265,11 +266,24 @@ impl ErrorExt for Error {
     fn as_any(&self) -> &dyn Any {
         self
     }
+
+    fn retry_hint(&self) -> RetryHint {
+        match self {
+            Error::StorageWrite { source, .. } => source.retry_hint(),
+            Error::Execute { source, .. }
+            | Error::DecodePlan { source, .. }
+            | Error::TableMutation { source, .. }
+            | Error::ProcedureService { source, .. } => source.retry_hint(),
+            Error::ConvertDfRecordBatchStream { source, .. } => source.retry_hint(),
+            Error::GeneralDataFusion { error, .. } => datafusion_retry_hint::<Self>(error),
+            _ => RetryHint::NonRetryable,
+        }
+    }
 }
 
 impl From<Error> for DataFusionError {
     fn from(e: Error) -> DataFusionError {
-        DataFusionError::External(Box::new(e))
+        DataFusionError::External(Box::new(BoxedError::new(e)))
     }
 }
 
@@ -309,8 +323,71 @@ mod tests {
     use std::sync::Arc;
 
     use common_error::ext::PlainError;
+    use common_error::mock::MockError;
 
     use super::*;
+
+    #[tokio::test]
+    async fn test_write_completion_preserves_retry_hint() {
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            let source =
+                || BoxedError::new(MockError::new(StatusCode::RegionBusy).with_retry_hint(hint));
+            let progress = crate::WriteProgress::failed(source());
+            let error = progress.clone().into_result().unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RegionBusy);
+            assert_eq!(error.retry_hint(), hint);
+            assert_eq!(progress.error.unwrap().retry_hint(), hint);
+
+            let error = crate::WriteCompletion::new(std::future::ready(Err(source())))
+                .wait()
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RegionBusy);
+            assert_eq!(error.retry_hint(), hint);
+        }
+    }
+
+    #[test]
+    fn test_runtime_wrappers_preserve_retry_hint() {
+        for hint in [
+            RetryHint::NonRetryable,
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+        ] {
+            let source =
+                || BoxedError::new(MockError::new(StatusCode::RegionBusy).with_retry_hint(hint));
+            for error in [
+                Error::Execute {
+                    source: source(),
+                    location: Location::default(),
+                },
+                Error::TableMutation {
+                    source: source(),
+                    location: Location::default(),
+                },
+                Error::ProcedureService {
+                    source: source(),
+                    location: Location::default(),
+                },
+                Error::DecodePlan {
+                    source: source(),
+                    location: Location::default(),
+                },
+            ] {
+                assert_eq!(error.retry_hint(), hint);
+                let error = Error::GeneralDataFusion {
+                    error: DataFusionError::Context("function".to_string(), Box::new(error.into())),
+                    location: Location::default(),
+                };
+                assert_eq!(error.status_code(), StatusCode::RegionBusy);
+                assert_eq!(error.retry_hint(), hint);
+            }
+        }
+    }
 
     #[test]
     fn test_datafusion_status_code_preserves_external_errors_through_wrappers() {

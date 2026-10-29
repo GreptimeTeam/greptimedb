@@ -689,7 +689,7 @@ impl MergeScanExec {
                     .await
                     .map_err(|e| {
                         MERGE_SCAN_ERRORS_TOTAL.inc();
-                        DataFusionError::External(Box::new(e))
+                        DataFusionError::from(e)
                     })?;
                 let select_target_cost = select_target_start.elapsed();
                 let mut subscriber_rollback =

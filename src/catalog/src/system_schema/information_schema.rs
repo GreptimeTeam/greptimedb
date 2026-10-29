@@ -545,11 +545,15 @@ impl InformationExtension for NoopInformationExtension {
 #[cfg(test)]
 mod tests {
     use cache::{build_fundamental_cache_registry, with_default_composite_cache_registry};
+    use common_error::ext::{BoxedError, RetryHint};
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
     use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
     use common_meta::ddl::test_util::create_table::test_create_table_task;
     use common_meta::key::schema_name::SchemaNameKey;
     use common_meta::key::table_route::TableRouteValue;
     use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::kv_backend::test_util::MockKvBackendBuilder;
     use common_meta::kv_backend::txn::TxnService;
     use common_meta::wal_provider::RegionWalOptions;
     use datatypes::schema::Schema;
@@ -807,6 +811,58 @@ mod tests {
                 .tables()
                 .contains_key("visible_a")
         );
+    }
+
+    #[tokio::test]
+    async fn test_information_schema_scan_preserves_retry_hint() {
+        for hint in [
+            RetryHint::Retryable,
+            RetryHint::RetryAfterRouteRefresh,
+            RetryHint::NonRetryable,
+        ] {
+            let backend = Arc::new(
+                MockKvBackendBuilder::default()
+                    .range_fn(Arc::new(move |_| {
+                        Err(common_meta::error::Error::External {
+                            source: BoxedError::new(
+                                MockError::new(StatusCode::RegionBusy).with_retry_hint(hint),
+                            ),
+                            location: Default::default(),
+                        })
+                    }))
+                    .build()
+                    .unwrap(),
+            );
+            let caches = LayeredCacheRegistryBuilder::default()
+                .add_cache_registry(build_fundamental_cache_registry(backend.clone()));
+            let manager = KvBackendCatalogManagerBuilder::new(
+                Arc::new(NoopInformationExtension),
+                backend,
+                Arc::new(
+                    with_default_composite_cache_registry(caches)
+                        .unwrap()
+                        .build(),
+                ),
+            )
+            .build();
+
+            for name in [TABLES, VIEWS, FLOWS, FLOW_STATISTICS, TABLE_SEMANTICS] {
+                let table = manager
+                    .table(DEFAULT_CATALOG_NAME, INFORMATION_SCHEMA_NAME, name, None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let error = table
+                    .scan_to_stream(ScanRequest::default())
+                    .await
+                    .unwrap()
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.retry_hint(), hint, "{name}");
+                assert_eq!(error.status_code(), StatusCode::RegionBusy, "{name}");
+            }
+        }
     }
 
     #[test]

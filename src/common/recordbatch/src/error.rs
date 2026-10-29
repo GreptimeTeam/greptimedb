@@ -18,7 +18,7 @@ use std::any::Any;
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
-use datafusion_common::ScalarValue;
+use datafusion_common::{DataFusionError, ScalarValue};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::SchemaRef;
 use snafu::{Location, Snafu};
@@ -252,6 +252,7 @@ impl ErrorExt for Error {
 
     fn retry_hint(&self) -> RetryHint {
         match self {
+            Error::PollStream { error, .. } => datafusion_retry_hint::<Self>(error),
             Error::ExceedMemoryLimit { .. } => RetryHint::Retryable,
             Error::External { source, .. } => source.retry_hint(),
             Error::SchemaConversion { source, .. } | Error::CastVector { source, .. } => {
@@ -262,39 +263,68 @@ impl ErrorExt for Error {
     }
 }
 
+/// Returns the retry hint from an external `T` or [`BoxedError`] through DataFusion's
+/// shared, context and diagnostic wrappers. Other errors are non-retryable.
+pub fn datafusion_retry_hint<T: ErrorExt + 'static>(mut error: &DataFusionError) -> RetryHint {
+    loop {
+        error = match error {
+            DataFusionError::Shared(inner) => inner,
+            DataFusionError::Context(_, inner) | DataFusionError::Diagnostic(_, inner) => inner,
+            _ => break,
+        };
+    }
+
+    if let DataFusionError::External(error) = error {
+        if let Some(error) = error.downcast_ref::<T>() {
+            return error.retry_hint();
+        }
+        if let Some(error) = error.downcast_ref::<BoxedError>() {
+            return error.retry_hint();
+        }
+    }
+    RetryHint::NonRetryable
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use common_error::ext::PlainError;
+    use common_error::mock::MockError;
     use datafusion::error::DataFusionError;
 
     use super::*;
 
     #[test]
-    fn poll_stream_status_code_preserves_boxed_error_through_wrappers() {
-        let boxed_error = |status| {
-            DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
-                "neutral error".to_string(),
-                status,
-            ))))
+    fn poll_stream_preserves_error_metadata_through_wrappers() {
+        let boxed_error = |status, hint| {
+            DataFusionError::External(Box::new(BoxedError::new(
+                MockError::new(status).with_retry_hint(hint),
+            )))
         };
 
-        for status in [
-            StatusCode::RequestOutdated,
-            StatusCode::Unknown,
-            StatusCode::Unsupported,
+        for (status, hint) in [
+            (
+                StatusCode::RequestOutdated,
+                RetryHint::RetryAfterRouteRefresh,
+            ),
+            (StatusCode::Unknown, RetryHint::Retryable),
+            (StatusCode::Unknown, RetryHint::RetryAfterRouteRefresh),
+            (StatusCode::Unknown, RetryHint::NonRetryable),
+            (StatusCode::Unsupported, RetryHint::NonRetryable),
         ] {
             let errors = [
-                boxed_error(status),
-                DataFusionError::Shared(Arc::new(boxed_error(status))),
-                DataFusionError::Context("context".to_string(), Box::new(boxed_error(status))),
+                boxed_error(status, hint),
+                DataFusionError::Shared(Arc::new(boxed_error(status, hint))),
+                DataFusionError::Context(
+                    "context".to_string(),
+                    Box::new(boxed_error(status, hint)),
+                ),
                 DataFusionError::Diagnostic(
                     Box::new(datafusion::common::Diagnostic::new_error(
                         "diagnostic",
                         None,
                     )),
-                    Box::new(boxed_error(status)),
+                    Box::new(boxed_error(status, hint)),
                 ),
                 DataFusionError::Shared(Arc::new(DataFusionError::Context(
                     "context".to_string(),
@@ -303,7 +333,7 @@ mod tests {
                             "diagnostic",
                             None,
                         )),
-                        Box::new(boxed_error(status)),
+                        Box::new(boxed_error(status, hint)),
                     )),
                 ))),
             ];
@@ -314,6 +344,7 @@ mod tests {
                     location: Location::default(),
                 };
                 assert_eq!(error.status_code(), status);
+                assert_eq!(error.retry_hint(), hint);
             }
         }
 
@@ -327,6 +358,7 @@ mod tests {
             location: Location::default(),
         };
         assert_eq!(error.status_code(), StatusCode::Internal);
+        assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
     }
 
     #[test]
@@ -361,6 +393,7 @@ mod tests {
                 location: Location::default(),
             };
             assert_eq!(error.status_code(), StatusCode::EngineExecuteQuery);
+            assert_eq!(error.retry_hint(), RetryHint::NonRetryable);
         }
     }
 }
