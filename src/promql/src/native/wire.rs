@@ -57,6 +57,8 @@ use datatypes::series::{
 };
 use std::{convert::TryInto, sync::Arc};
 
+// This experimental branch has no deployed readers or compatibility obligation; the unreleased
+// format can widen to nested math maps without changing its version.
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 const MAX_BYTES: usize = 1_048_576;
 /// Maximum recursive nesting depth of a node tree, counted from the root as depth 0.
@@ -150,23 +152,23 @@ pub(crate) fn encode_prefix(tree: &NativeTree) -> Result<Vec<u8>, String> {
     }
     Ok(w.0)
 }
-/// Accepts exactly the supported shapes: a selection over raw input, optionally under one map.
+/// Accepts exactly the supported shapes: a selection over raw input, under any number of math maps.
 ///
-/// The map is optional because a bare selection is a prefix too — it is what a query like `x`
-/// transports. When present there is one, and it holds only math operations: a label rewrite or a
-/// histogram function would change the identity or the value type in ways this format does not
-/// describe.
+/// The maps are optional because a bare selection is a prefix too — it is what a query like `x`
+/// transports. When present they hold only math operations: a label rewrite or a histogram
+/// function would change the identity or the value type in ways this format does not describe.
+///
+/// A map is transparent to the shape. It keeps its input's samples type and grid, so `abs(ceil(x))`
+/// — which the compiler builds as one map over another — is the same shape as `abs(x)`, and only
+/// the operation kinds are restricted. [`MAX_DEPTH`] still bounds how deep the payload can go.
 fn check_shape(n: &NativeNode) -> Result<(), String> {
-    let selection = match &n.expr {
-        NativeExpr::Map { input, op } => {
-            if op.ops.is_empty() || op.ops.iter().any(|x| !matches!(x, MapOp::Math(_))) {
-                return Err("unsupported Map operation (only Math)".into());
-            }
-            input
+    let mut selection = n;
+    while let NativeExpr::Map { input, op } = &selection.expr {
+        if op.ops.is_empty() || op.ops.iter().any(|x| !matches!(x, MapOp::Math(_))) {
+            return Err("unsupported Map operation (only Math)".into());
         }
-        NativeExpr::Instant { .. } | NativeExpr::Window { .. } => n,
-        other => return Err(format!("unsupported operation: {}", node_name(other))),
-    };
+        selection = input;
+    }
     let (NativeExpr::Instant { input: child, .. } | NativeExpr::Window { input: child, .. }) =
         &selection.expr
     else {
@@ -629,6 +631,7 @@ fn dec_math(r: &mut R<'_>) -> Result<MathOp, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::histogram_eval::NativeHistogramFunction;
     fn input() -> NativeNode {
         let t = NativeType::Samples(Arc::new(SeriesSchema {
             fields: vec![FieldSpec { name: "v".into() }].into(),
@@ -799,6 +802,191 @@ mod tests {
         assert!(
             matches!(op.ops[0],MapOp::Math(MathOp::Round{nearest}) if nearest.to_bits()==0.5f64.to_bits())
         );
+    }
+    /// `abs(ceil(x))` compiles to one map over another. A map keeps its input's type and grid, so
+    /// that is the same shape as one map and has to survive the round trip.
+    #[test]
+    fn nested_maps_roundtrip() {
+        let inner = mapped();
+        let input = Box::new(inner.root().clone());
+        let output = input.output.clone();
+        let tree = NativeTree::try_new(NativeNode {
+            expr: NativeExpr::Map {
+                input,
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+            output,
+        })
+        .unwrap();
+        let bytes = encode_prefix(&tree).unwrap();
+        let decoded = decode_prefix(&bytes).unwrap();
+        assert_eq!(encode_prefix(&decoded).unwrap(), bytes);
+        let NativeExpr::Map { input, op } = &decoded.root().expr else {
+            panic!("the outer map is not a map")
+        };
+        assert!(matches!(op.ops[0], MapOp::Math(MathOp::Abs)));
+        let NativeExpr::Map { op, .. } = &input.expr else {
+            panic!("the inner map was flattened away: {:?}", input.expr)
+        };
+        assert_eq!(op.ops.len(), 3);
+        let NativeType::Samples(decoded_schema) = &decoded.root().output else {
+            panic!("decoded output is not samples")
+        };
+        let NativeType::Samples(original_schema) = &tree.root().output else {
+            panic!("original output is not samples")
+        };
+        assert_eq!(
+            decoded_schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>(),
+            original_schema
+                .fields
+                .iter()
+                .map(|field| field.name.as_ref())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            decoded_schema.eval_grid.as_ref().map(|grid| grid.spec()),
+            original_schema.eval_grid.as_ref().map(|grid| grid.spec())
+        );
+    }
+    /// The shape validator must inspect inner maps, not only the root map.
+    #[test]
+    fn nested_maps_still_refuse_non_math_operations() {
+        let inner_input = Box::new(instant().root().clone());
+        let inner = NativeNode {
+            output: inner_input.output.clone(),
+            expr: NativeExpr::Map {
+                input: inner_input,
+                op: BoundMap {
+                    ops: vec![MapOp::Histogram(NativeHistogramFunction::Count)].into(),
+                },
+            },
+        };
+        let input = Box::new(inner);
+        let tree = NativeTree::try_new(NativeNode {
+            output: input.output.clone(),
+            expr: NativeExpr::Map {
+                input,
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            encode_prefix(&tree).unwrap_err(),
+            "unsupported Map operation (only Math)"
+        );
+    }
+    #[test]
+    fn three_nested_maps_roundtrip() {
+        let mut tree = mapped();
+        for op in [MathOp::Ceil, MathOp::Abs] {
+            let input = Box::new(tree.root().clone());
+            tree = NativeTree::try_new(NativeNode {
+                output: input.output.clone(),
+                expr: NativeExpr::Map {
+                    input,
+                    op: BoundMap {
+                        ops: vec![MapOp::Math(op)].into(),
+                    },
+                },
+            })
+            .unwrap();
+        }
+        let bytes = encode_prefix(&tree).unwrap();
+        let decoded = decode_prefix(&bytes).unwrap();
+        assert_eq!(encode_prefix(&decoded).unwrap(), bytes);
+        let NativeExpr::Map { input: middle, .. } = &decoded.root().expr else {
+            panic!("outer map missing")
+        };
+        let NativeExpr::Map { input: inner, .. } = &middle.expr else {
+            panic!("middle map missing")
+        };
+        assert!(
+            matches!(inner.expr, NativeExpr::Map { .. }),
+            "inner map missing"
+        );
+    }
+    #[test]
+    fn nested_inner_non_math_map_is_rejected() {
+        let inner_input = Box::new(mapped().root().clone());
+        let inner = NativeNode {
+            output: inner_input.output.clone(),
+            expr: NativeExpr::Map {
+                input: inner_input,
+                op: BoundMap {
+                    ops: vec![MapOp::Histogram(NativeHistogramFunction::Count)].into(),
+                },
+            },
+        };
+        let outer_input = Box::new(inner);
+        let tree = NativeTree::try_new(NativeNode {
+            output: outer_input.output.clone(),
+            expr: NativeExpr::Map {
+                input: outer_input,
+                op: BoundMap {
+                    ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                },
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            encode_prefix(&tree).unwrap_err(),
+            "unsupported Map operation (only Math)"
+        );
+    }
+    fn make_map_chain(map_count: usize) -> NativeTree {
+        let mut node = instant().root().clone();
+        for _ in 0..map_count {
+            let input = Box::new(node);
+            node = NativeNode {
+                output: input.output.clone(),
+                expr: NativeExpr::Map {
+                    input,
+                    op: BoundMap {
+                        ops: vec![MapOp::Math(MathOp::Abs)].into(),
+                    },
+                },
+            };
+        }
+        NativeTree::try_new(node).unwrap()
+    }
+    #[test]
+    fn map_chain_depth_boundary_is_enforced_on_encode_and_decode() {
+        // 127 maps plus the selection and input fit the protocol's depth boundary.
+        let allowed = encode_prefix(&make_map_chain(MAX_DEPTH - 1)).unwrap();
+        let decoded = decode_prefix(&allowed).unwrap();
+        assert_eq!(encode_prefix(&decoded).unwrap(), allowed);
+
+        let too_deep = make_map_chain(MAX_DEPTH);
+        let error = encode_prefix(&too_deep).unwrap_err();
+        assert!(error.starts_with("nesting maximum exceeded:"), "{error}");
+        assert!(error.contains(&MAX_DEPTH.to_string()), "{error}");
+
+        // Decode the same over-depth shape from bytes and verify it fails at the depth guard.
+        let mut bytes = W(Vec::new());
+        bytes.u32(PROTOCOL_VERSION);
+        for _ in 0..MAX_DEPTH {
+            bytes.u8(4);
+        }
+        bytes.u8(2);
+        bytes.u8(1);
+        bytes.u64(0);
+        bytes.u8(2);
+        bytes.u32(1);
+        bytes.text("v").unwrap();
+        for _ in 0..MAX_DEPTH {
+            bytes.u32(1);
+            bytes.u8(1);
+        }
+        let error = decode_prefix(&bytes.0).unwrap_err();
+        assert!(error.starts_with("nesting maximum exceeded:"), "{error}");
     }
     #[test]
     fn floats_preserve_bits() {
@@ -1001,9 +1189,8 @@ mod tests {
 
     /// A payload of `depth` nested `Instant` nodes over one raw input.
     ///
-    /// No supported shape accepts the result, but the decoder walks the nodes before it checks the
-    /// shape, so this is how the recursion limit is reached. The encoder's own depth guard is
-    /// unreachable through [`encode_prefix`], which rejects a deeper shape before encoding it.
+    /// The decoder walks nodes before shape validation, so unsupported deep trees exercise its
+    /// recursion guard. Supported map chains exercise the encoder's guard separately.
     fn nested_instants(depth: usize) -> Vec<u8> {
         let mut w = W(Vec::new());
         w.u32(PROTOCOL_VERSION);
@@ -1124,8 +1311,7 @@ mod tests {
         assert!(!err.contains("field count"), "{err}");
     }
 
-    /// Depth 128 is still walked; depth 129 is refused, and by the depth limit rather than the
-    /// shape check that also rejects every payload this deep.
+    /// The decoder walks depth 128, then refuses depth 129 at its recursion limit.
     #[test]
     fn nesting_boundary_is_128() {
         let allowed = decode_prefix(&nested_instants(MAX_DEPTH)).unwrap_err();
