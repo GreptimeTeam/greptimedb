@@ -100,7 +100,9 @@ pub fn raw_series_frame_schema_with_ordering(
 ///
 /// The mode and description pair is checked by [`series_frame_schema`], so a key mode without a
 /// description and an explicit mode with one are both rejected here instead of reaching the wire.
-fn frame_schema_with(
+/// A node that re-declares its child's frame and publishes under that declaration uses this: the
+/// declaration has to survive the round trip, and this is the one place that decides what it is.
+pub fn frame_schema_with(
     schema: &SeriesSchema,
     mode: FrameLabelMode,
     decode: Option<&LabelDecodeSpec>,

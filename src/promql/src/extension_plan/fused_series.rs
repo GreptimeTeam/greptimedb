@@ -627,7 +627,8 @@ impl FusedSeries {
                     if normalize && count != 1 {
                         let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                             as Arc<dyn ExecutionPlan>;
-                        return Ok((input, label_source, SeriesOrdering::Contiguous));
+                        let ordering = series_frame_ordering(input.schema().as_ref())?;
+                        return Ok((input, RawLabelSource::Explicit, ordering));
                     }
                     if let (Some(policy), Some(required)) =
                         (matching_policy.as_ref(), matching_partitions)
@@ -635,7 +636,8 @@ impl FusedSeries {
                         if required == 1 && count != 1 {
                             let input = Arc::new(SeriesRepartitionExec::try_new(input, 1)?)
                                 as Arc<dyn ExecutionPlan>;
-                            return Ok((input, label_source, SeriesOrdering::Contiguous));
+                            let ordering = series_frame_ordering(input.schema().as_ref())?;
+                            return Ok((input, RawLabelSource::Explicit, ordering));
                         }
                         let has_router =
                             input
@@ -651,7 +653,8 @@ impl FusedSeries {
                                 required,
                                 SeriesRouting::Matching(policy.clone()),
                             )?) as Arc<dyn ExecutionPlan>;
-                            return Ok((input, label_source, SeriesOrdering::Contiguous));
+                            let ordering = series_frame_ordering(input.schema().as_ref())?;
+                            return Ok((input, RawLabelSource::Explicit, ordering));
                         }
                     }
                     return Ok((input, label_source, ordering));
