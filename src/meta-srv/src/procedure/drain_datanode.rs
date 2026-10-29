@@ -15,7 +15,11 @@
 pub(crate) mod drain_datanode_end;
 pub(crate) mod drain_datanode_start;
 pub(crate) mod manager;
+mod migration;
 pub(crate) mod utils;
+
+#[cfg(test)]
+mod test_util;
 
 use std::any::Any;
 use std::fmt::Debug;
@@ -24,7 +28,7 @@ use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_procedure::error::{FromJsonSnafu, ToJsonSnafu};
 use common_procedure::{
-    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure,
+    Context as ProcedureContext, Error as ProcedureError, LockKey, Procedure, ProcedureId,
     Result as ProcedureResult, Status,
 };
 use common_telemetry::{error, info};
@@ -33,11 +37,24 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
+use crate::metasrv::SelectorContext;
 use crate::node_scheduling::NodeSchedulingManagerRef;
 use crate::procedure::drain_datanode::drain_datanode_start::DrainDatanodeStart;
 use crate::procedure::drain_datanode::manager::{
     DrainDatanodeProcedureGuard, DrainDatanodeProcedureTracker,
 };
+use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+
+/// The strategy of a drain run when a region cannot be migrated.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DrainDatanodeStrategy {
+    /// Aborts the procedure once every migration of the batch is settled and at least one
+    /// of them failed.
+    FailFast,
+    /// Drains every remaining region and records the failed ones.
+    #[default]
+    TryAll,
+}
 
 /// The regions placed on a datanode, split by role.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -60,6 +77,15 @@ pub struct PersistentContext {
     pub target_node_id: Option<DatanodeId>,
 }
 
+/// A dispatched migration sub-procedure that is not settled yet.
+#[derive(Debug, Clone, Copy)]
+pub struct SubprocedureMeta {
+    /// The region migrated by the sub-procedure.
+    pub region_id: RegionId,
+    /// The procedure id of the sub-procedure.
+    pub procedure_id: ProcedureId,
+}
+
 /// The in-memory data of [`DrainDatanodeProcedure`].
 ///
 /// It is not persisted: a restarted procedure rebuilds the plan by rescanning the datanode.
@@ -67,6 +93,12 @@ pub struct PersistentContext {
 pub struct VolatileContext {
     /// The drain plan, `None` until the first state builds it.
     pub plan: Option<DrainDatanodePlan>,
+    /// The migration sub-procedures of the current batch that are not settled yet.
+    pub inflight_subprocedures: Vec<SubprocedureMeta>,
+    /// The number of regions confirmed to have left the source while collecting batch results.
+    pub migrated: usize,
+    /// The regions given up by [`DrainDatanodeStrategy::TryAll`] in this run.
+    pub failed_regions: Vec<RegionId>,
 }
 
 /// The task of [`DrainDatanodeProcedure`].
@@ -89,6 +121,10 @@ pub struct Context {
     pub table_metadata_manager: TableMetadataManagerRef,
     /// The node scheduling manager, used to fence the drained datanode.
     pub node_scheduling_manager: NodeSchedulingManagerRef,
+    /// Builds region migration procedures.
+    pub region_migration_manager: RegionMigrationManagerRef,
+    /// Resolves destinations for region migrations.
+    pub selector_ctx: SelectorContext,
 }
 
 impl Context {
@@ -99,6 +135,8 @@ impl Context {
     pub(crate) fn new(
         table_metadata_manager: TableMetadataManagerRef,
         node_scheduling_manager: NodeSchedulingManagerRef,
+        region_migration_manager: RegionMigrationManagerRef,
+        selector_ctx: SelectorContext,
         persistent_ctx: PersistentContext,
     ) -> Self {
         Self {
@@ -106,6 +144,8 @@ impl Context {
             volatile_ctx: VolatileContext::default(),
             table_metadata_manager,
             node_scheduling_manager,
+            region_migration_manager,
+            selector_ctx,
         }
     }
 }
@@ -125,6 +165,15 @@ impl Context {
         self.volatile_ctx.plan = Some(plan);
 
         Ok(())
+    }
+}
+
+impl Context {
+    /// Removes `region_id` from the current plan. A later scan may add it back.
+    pub(crate) fn forget_leader_region(&mut self, region_id: RegionId) {
+        if let Some(plan) = self.volatile_ctx.plan.as_mut() {
+            plan.leader_regions.retain(|region| *region != region_id);
+        }
     }
 }
 
@@ -289,225 +338,12 @@ impl Procedure for DrainDatanodeProcedure {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
-    use common_meta::key::TableMetadataManagerRef;
-    use common_meta::key::table_route::TableRouteValue;
-    use common_meta::key::test_utils::new_test_table_info;
-    use common_meta::peer::Peer;
-    use common_meta::rpc::router::{Region, RegionRoute};
-
     use super::*;
-    use crate::error;
     use crate::key::NodeSchedulingRole;
-    use crate::procedure::drain_datanode::drain_datanode_end::DrainDatanodeEnd;
-    use crate::procedure::drain_datanode::manager::{
-        DrainDatanodeManager, DrainDatanodeProcedureTracker,
+    use crate::procedure::drain_datanode::test_util::{
+        TestEnv, follower_region, leader_region, new_persistent_context, run_until_done,
     };
     use crate::procedure::region_migration::test_util::TestingEnv;
-    use crate::test_util::{create_meta_peer_client, new_node_scheduling_discovery, put_datanodes};
-
-    fn new_persistent_context(target_node_id: Option<DatanodeId>) -> PersistentContext {
-        PersistentContext {
-            node_id: 1,
-            target_node_id,
-        }
-    }
-
-    fn leader_region(region_id: RegionId, leader_id: DatanodeId) -> RegionRoute {
-        RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(Peer::empty(leader_id)),
-            follower_peers: vec![],
-            ..Default::default()
-        }
-    }
-
-    fn follower_region(
-        region_id: RegionId,
-        leader_id: DatanodeId,
-        follower_id: DatanodeId,
-    ) -> RegionRoute {
-        RegionRoute {
-            region: Region::new_test(region_id),
-            leader_peer: Some(Peer::empty(leader_id)),
-            follower_peers: vec![Peer::empty(follower_id)],
-            ..Default::default()
-        }
-    }
-
-    struct TestEnv {
-        env: TestingEnv,
-        table_metadata_manager: TableMetadataManagerRef,
-        node_scheduling_manager: NodeSchedulingManagerRef,
-    }
-
-    impl TestEnv {
-        async fn new() -> Self {
-            let env = TestingEnv::new();
-            // Shares one backend between the scheduling manager and the peer discovery, so
-            // the selector observes the scheduling marks written by the procedure.
-            let meta_peer_client = create_meta_peer_client();
-            put_datanodes(
-                &meta_peer_client,
-                vec![
-                    Peer {
-                        id: 1,
-                        addr: "dn1:3001".to_string(),
-                    },
-                    Peer {
-                        id: 2,
-                        addr: "dn2:3001".to_string(),
-                    },
-                ],
-            )
-            .await;
-            let (node_scheduling_manager, _discovery) =
-                new_node_scheduling_discovery(&meta_peer_client);
-            let table_metadata_manager = env.table_metadata_manager().clone();
-
-            Self {
-                env,
-                table_metadata_manager,
-                node_scheduling_manager,
-            }
-        }
-
-        fn context(&self, persistent_ctx: PersistentContext) -> Context {
-            Context::new(
-                self.table_metadata_manager.clone(),
-                self.node_scheduling_manager.clone(),
-                persistent_ctx,
-            )
-        }
-
-        fn table_metadata_manager(&self) -> &TableMetadataManagerRef {
-            &self.table_metadata_manager
-        }
-
-        async fn create_table(&self, region_routes: Vec<RegionRoute>) {
-            create_table(&self.table_metadata_manager, region_routes).await;
-        }
-    }
-
-    async fn create_table(
-        table_metadata_manager: &TableMetadataManagerRef,
-        region_routes: Vec<RegionRoute>,
-    ) {
-        table_metadata_manager
-            .create_table_metadata(
-                new_test_table_info(1024),
-                TableRouteValue::physical(region_routes),
-                HashMap::default(),
-            )
-            .await
-            .unwrap();
-    }
-
-    async fn run_until_done(
-        state: &mut Box<dyn State>,
-        ctx: &mut Context,
-        procedure_ctx: &ProcedureContext,
-    ) -> Result<Status> {
-        for _ in 0..10 {
-            let (next, status) = state.next(ctx, procedure_ctx).await?;
-            *state = next;
-            if !matches!(status, Status::Executing { .. }) {
-                return Ok(status);
-            }
-        }
-
-        panic!("the drain procedure did not finish in 10 steps");
-    }
-
-    #[tokio::test]
-    async fn test_build_datanode_plan() {
-        let env = TestEnv::new().await;
-        let first = RegionId::new(1024, 1);
-        let second = RegionId::new(1024, 2);
-        env.create_table(vec![leader_region(first, 1), follower_region(second, 2, 1)])
-            .await;
-
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
-
-        assert_eq!(vec![first], plan.leader_regions);
-        assert_eq!(vec![second], plan.follower_regions);
-    }
-
-    #[tokio::test]
-    async fn test_build_datanode_plan_of_empty_datanode() {
-        let env = TestEnv::new().await;
-
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
-
-        assert!(plan.leader_regions.is_empty());
-        assert!(plan.follower_regions.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_build_datanode_plan_reads_the_table_route() {
-        let env = TestEnv::new().await;
-        let region_id = RegionId::new(1024, 1);
-        // The datanode is a follower of the region, so it is not a leader even though the
-        // datanode table index of the datanode contains the table.
-        env.create_table(vec![follower_region(region_id, 2, 1)])
-            .await;
-
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
-
-        assert!(plan.leader_regions.is_empty());
-        assert_eq!(vec![region_id], plan.follower_regions);
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_start_transitions_to_end() {
-        let env = TestEnv::new().await;
-        env.create_table(vec![leader_region(RegionId::new(1024, 1), 1)])
-            .await;
-
-        let mut ctx = env.context(new_persistent_context(Some(2)));
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (next, status) = DrainDatanodeStart
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-
-        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
-        // Registering the procedure is the only persisted step of the run.
-        assert!(matches!(status, Status::Executing { persist: true, .. }));
-        assert_eq!(
-            vec![RegionId::new(1024, 1)],
-            ctx.volatile_ctx.leader_regions()
-        );
-        assert!(
-            !ctx.node_scheduling_manager
-                .is_schedulable(NodeSchedulingRole::Datanode, 1)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_end_transitions_to_done() {
-        let env = TestEnv::new().await;
-        let mut ctx = env.context(new_persistent_context(Some(2)));
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (next, status) = DrainDatanodeEnd
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-
-        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
-        assert!(matches!(status, Status::Done { output: None }));
-    }
 
     #[tokio::test]
     async fn test_drain_datanode_fences_and_collects_the_plan() {
@@ -561,92 +397,5 @@ mod tests {
         assert_eq!(Some(2), ctx.target_node_id);
         // The plan is volatile, so it is not dumped.
         assert!(!json.contains("leader_regions"));
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_end_finishes() {
-        let env = TestEnv::new().await;
-        let mut ctx = env.context(new_persistent_context(Some(2)));
-        let procedure_ctx = TestingEnv::procedure_context();
-
-        let (next, status) = DrainDatanodeEnd
-            .next(&mut ctx, &procedure_ctx)
-            .await
-            .unwrap();
-
-        assert!(next.as_any().downcast_ref::<DrainDatanodeEnd>().is_some());
-        assert!(matches!(status, Status::Done { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_submit_procedure_rejects_same_target() {
-        let env = TestEnv::new().await;
-        let manager = DrainDatanodeManager::new(
-            env.env.procedure_manager().clone(),
-            env.table_metadata_manager.clone(),
-            env.node_scheduling_manager.clone(),
-        );
-
-        let error = manager
-            .submit_procedure(
-                common_procedure::ProcedureContext::default(),
-                DrainDatanodeProcedureTask {
-                    node_id: 1,
-                    target_node_id: Some(1),
-                },
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, error::Error::InvalidArguments { .. }));
-    }
-
-    #[tokio::test]
-    async fn test_submit_procedure_rejects_a_running_drain() {
-        let env = TestEnv::new().await;
-        let manager = DrainDatanodeManager::new(
-            env.env.procedure_manager().clone(),
-            env.table_metadata_manager.clone(),
-            env.node_scheduling_manager.clone(),
-        );
-        let task = DrainDatanodeProcedureTask {
-            node_id: 1,
-            target_node_id: Some(2),
-        };
-
-        // A drain of datanode 1 is running, for example one recovered after a restart.
-        let _guard = manager.tracker().insert_running_procedure(&task).unwrap();
-
-        let error = manager
-            .submit_procedure(common_procedure::ProcedureContext::default(), task)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(error, error::Error::DrainDatanodeRunning { .. }));
-        assert!(!error.is_retryable());
-    }
-
-    #[tokio::test]
-    async fn test_drain_datanode_tracker_takes_the_place_back_on_reload() {
-        let env = TestEnv::new().await;
-        let procedure =
-            DrainDatanodeProcedure::new(env.context(new_persistent_context(Some(2))), vec![]);
-        let json = procedure.dump().unwrap();
-        let tracker = DrainDatanodeProcedureTracker::default();
-
-        // Reloading takes the place back, so a second drain of the datanode is rejected.
-        let reloaded = DrainDatanodeProcedure::from_json(&json, &tracker, |persistent_ctx| {
-            env.context(persistent_ctx)
-        })
-        .unwrap();
-        let task = DrainDatanodeProcedureTask {
-            node_id: 1,
-            target_node_id: Some(2),
-        };
-        assert!(tracker.insert_running_procedure(&task).is_none());
-
-        // Dropping the reloaded procedure releases the place.
-        drop(reloaded);
-        assert!(tracker.insert_running_procedure(&task).is_some());
     }
 }
