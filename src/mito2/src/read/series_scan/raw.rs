@@ -324,16 +324,15 @@ pub(crate) fn make_stream(
                     held = Some(record);
                     break;
                 }
-                if ordering == SeriesOrdering::KeyThenTime {
-                    let first_key = primary_key_at_row(&record.batch, 0).map(Buffer::from);
-                    if let (Some(previous), Some(first)) = (last_package_key.as_ref(), first_key)
-                        && first.as_slice() <= previous.as_slice()
-                    {
-                        upstream_error = Some(InvalidRecordBatchSnafu {
-                            reason: "legacy series primary keys are not strictly increasing".to_string(),
-                        }.build());
-                        break;
-                    }
+                if ordering == SeriesOrdering::KeyThenTime
+                    && let Some(previous) = last_package_key.as_ref()
+                    && let Some(first) = primary_key_at_row(&record.batch, 0)
+                    && first <= previous.as_slice()
+                {
+                    upstream_error = Some(InvalidRecordBatchSnafu {
+                        reason: "legacy series primary keys are not strictly increasing".to_string(),
+                    }.build());
+                    break;
                 }
                 buffered_rows += record.batch.num_rows();
                 if record.ends_package
