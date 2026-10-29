@@ -22,16 +22,14 @@
 //!
 //! The frame names each series by its complete labels rather than by its storage key. The node's
 //! schema is fixed while the frontend plans it, where the region's key layout is unknown, and the
-//! receiver compares that schema exactly; an explicit frame depends only on the field names. The
-//! stream is one partition that reads every scan partition at once and interleaves them only where
-//! a series ends: a scan keeps each series in one partition, so every series stays contiguous.
+//! receiver compares that schema exactly; an explicit frame depends only on the field names. Each
+//! scan partition is re-labelled independently, keeping its place in the partition layout and
+//! each series contiguous within its scan partition.
 
 use std::fmt::{self, Formatter};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 
-use common_error::ext::BoxedError;
+use crate::source::materialize_raw_labels;
 use common_query::series_frame::{
     pack_raw_series, raw_series_frame_schema_with_ordering, unpack_raw_series,
 };
@@ -40,7 +38,6 @@ use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
-use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::logical_expr::{Expr, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::{EquivalenceProperties, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
@@ -49,13 +46,8 @@ use datafusion::physical_plan::{
     Partitioning, PlanProperties, SendableRecordBatchStream,
 };
 use datatypes::series::SeriesOrdering;
-use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use futures::Stream;
-use store_api::region_engine::{RawLabelSource, RawSeriesStream};
-
-use crate::extension_plan::series_gather::{SeriesGather, spawn_partitions};
-use crate::source::materialize_raw_labels;
+use store_api::region_engine::RawLabelSource;
 
 /// The ordering every frame of this node declares.
 ///
@@ -201,7 +193,7 @@ impl UserDefinedLogicalNodeCore for RawSeriesSource {
     }
 }
 
-/// The physical node: the region's raw-series leaf, relabelled and read as one partition.
+/// The physical node: the region's raw-series leaf, re-labelling each scan partition in place.
 #[derive(Debug)]
 pub struct RawSeriesSourceExec {
     input: Arc<dyn ExecutionPlan>,
@@ -217,6 +209,12 @@ impl RawSeriesSourceExec {
         fields: Vec<String>,
     ) -> DataFusionResult<Self> {
         let series_schema = series_schema(&fields);
+        let partition_count = input.properties().partitioning.partition_count();
+        if partition_count == 0 {
+            return Err(DataFusionError::Plan(
+                "RawSeriesSourceExec child has zero partitions".to_string(),
+            ));
+        }
         // Rejects a child that is not a raw frame of these fields before the plan can run.
         unpack_raw_series(
             Box::pin(
@@ -229,7 +227,7 @@ impl RawSeriesSourceExec {
         )?;
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(frame_schema(&fields)?),
-            Partitioning::UnknownPartitioning(1),
+            Partitioning::UnknownPartitioning(partition_count),
             EmissionType::Incremental,
             Boundedness::Bounded,
         ));
@@ -311,61 +309,16 @@ impl ExecutionPlan for RawSeriesSourceExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DataFusionResult<SendableRecordBatchStream> {
-        if partition != 0 {
+        let partition_count = self.properties.partitioning.partition_count();
+        if partition >= partition_count {
             return Err(DataFusionError::Execution(format!(
-                "RawSeriesSourceExec has one partition, got {partition}"
+                "RawSeriesSourceExec partition {partition} is out of bounds for {partition_count} partitions"
             )));
         }
-        let mut inputs = Vec::new();
-        for child_partition in 0..self.input.properties().partitioning.partition_count() {
-            let frames = self.input.execute(child_partition, Arc::clone(&context))?;
-            let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
-            inputs.push((
-                0,
-                materialize_raw_labels(raw)
-                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
-            ));
-        }
-        let reservation = MemoryConsumer::new("RawSeriesSourceGather")
-            .register(&context.runtime_env().memory_pool);
-        pack_raw_series(Box::pin(GatheredRawSeries {
-            schema: Arc::clone(&self.series_schema),
-            label_source: RawLabelSource::Explicit,
-            inputs: SeriesGather::new(
-                spawn_partitions(inputs, &context.runtime_env().memory_pool),
-                reservation,
-            ),
-        }))
-    }
-}
-
-/// The partitions of one scan, read at once and interleaved where a series ends.
-struct GatheredRawSeries {
-    schema: Arc<SeriesSchema>,
-    label_source: RawLabelSource,
-    inputs: SeriesGather,
-}
-
-impl Stream for GatheredRawSeries {
-    type Item = Result<RawSeriesChunk, BoxedError>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.get_mut().inputs)
-            .poll_next(cx)
-            .map(|item| item.map(|result| result.map(|(_, chunk)| chunk)))
-    }
-}
-
-impl RawSeriesStream for GatheredRawSeries {
-    fn schema(&self) -> &Arc<SeriesSchema> {
-        &self.schema
-    }
-
-    fn label_source(&self) -> &RawLabelSource {
-        &self.label_source
-    }
-
-    fn ordering(&self) -> SeriesOrdering {
-        ORDERING
+        let frames = self.input.execute(partition, context)?;
+        let raw = unpack_raw_series(frames, Some(Arc::clone(&self.series_schema)))?;
+        let relabelled = materialize_raw_labels(raw)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        pack_raw_series(relabelled)
     }
 }
