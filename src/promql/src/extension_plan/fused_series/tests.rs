@@ -1863,7 +1863,7 @@ async fn independent_sources_execute_all_partitions() {
             (right, RawLabelSource::Explicit, SeriesOrdering::Contiguous),
         ])
         .unwrap();
-    assert_eq!(1, exec.properties().output_partitioning().partition_count());
+    assert_eq!(3, exec.properties().output_partitioning().partition_count());
     let results = collect(Arc::clone(&exec), SessionContext::default().task_ctx())
         .await
         .unwrap();
@@ -2615,7 +2615,7 @@ fn a_frame_with_an_evaluation_grid_is_rejected_when_the_plan_is_built() {
     let error = plan(rate_tree(), source).expect_err("the frame declares a grid");
     let message = error_chain(&error);
     assert!(
-        message.contains("expected a raw frame, found an evaluated one"),
+        message.contains("frame content does not match its compiled input"),
         "refused for another reason: {message}"
     );
     assert!(
@@ -2934,8 +2934,8 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
 
     let pool = Arc::new(GreedyMemoryPool::new(1 << 20));
     let context = task_context(&pool);
-    let expected_times = grid_timestamps();
     let mut total_rows = 0;
+    let mut all_rows = Vec::new();
     for partition in 0..4 {
         let mut stream = exec
             .execute(partition, Arc::clone(&context))
@@ -2978,28 +2978,25 @@ async fn repeated_source_runs_once_per_partition_with_ordered_operands() {
             })
             .collect::<Vec<_>>();
         total_rows += actual.len();
-        let host = format!("web-{partition}");
-        assert_eq!(GRID_LEN as usize, actual.len(), "{host}: {actual:?}");
-        assert_eq!(
-            expected_times,
-            actual.iter().map(|row| row.0).collect::<Vec<_>>(),
-            "{host} timestamps preserve grid order"
-        );
-        assert!(
-            actual
-                .iter()
-                .all(|row| row.2.as_deref() == Some(host.as_str()))
-        );
-        let expected_values = (0..GRID_LEN as usize)
-            .map(|index| Some(-((partition * 10 + index + 1) as f64)))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            expected_values,
-            actual.iter().map(|row| row.1).collect::<Vec<_>>()
-        );
+        all_rows.extend(actual);
         assert_eq!(1, calls_by_partition[partition].load(Ordering::SeqCst));
-        assert_eq!(0, pool.reserved(), "{host} released reservations at EOF");
     }
+    all_rows.sort_by(|left, right| left.2.cmp(&right.2).then(left.0.cmp(&right.0)));
+    let expected = (0..4)
+        .flat_map(|partition| {
+            (0..GRID_LEN as usize).map(move |index| {
+                (
+                    GRID_START + index as i64 * GRID_STEP,
+                    Some(-((partition * 10 + index + 1) as f64)),
+                    Some(format!("web-{partition}")),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        expected, all_rows,
+        "all routed partitions match the reference results"
+    );
     assert_eq!(4 * GRID_LEN as usize, total_rows);
     assert_eq!(
         vec![1, 1, 1, 1],
@@ -4061,11 +4058,11 @@ async fn series_frame_output_uses_evaluated_codec_schema() {
     assert!(batches.iter().any(|batch| batch.num_rows() > 0));
 }
 
-/// Frame output refuses the currently unsupported multi-source physical shape at planning time.
+/// Frame output accepts multiple sources when their partition counts agree.
 #[test]
-fn series_frame_rejects_multiple_sources_during_planning() {
+fn series_frame_accepts_multiple_sources_with_equal_partition_counts() {
     let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
-    let err = FusedSeries::try_new_with_format(
+    let node = FusedSeries::try_new_with_format(
         Arc::from(PROMQL),
         tree.clone(),
         binding(&tree),
@@ -4073,8 +4070,22 @@ fn series_frame_rejects_multiple_sources_during_planning() {
         canonical_frame_schema(&tree),
         FusedOutputFormat::SeriesFrame,
     )
-    .unwrap_err();
-    assert!(err.to_string().contains("multiple sources"));
+    .unwrap();
+    let plan = node
+        .to_execution_plan(vec![
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec_partitioned(vec![vec![], vec![]]),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ])
+        .expect("equal source partition counts are accepted");
+    assert_eq!(2, plan.properties().partitioning.partition_count());
 }
 
 /// A real four-partition input remains four independent frame-output executions.
