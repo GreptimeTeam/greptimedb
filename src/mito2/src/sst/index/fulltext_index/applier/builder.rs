@@ -168,15 +168,15 @@ impl<'a> FulltextIndexApplierBuilder<'a> {
                 Self::extract_requests(right, metadata, requests);
             }
             Expr::Like(like) => {
-                if let Some((column_id, like)) = Self::expr_to_like(metadata, like) {
-                    requests.entry(column_id).or_default().likes.push(like);
+                if let Some((target, like)) = Self::expr_to_like(metadata, like) {
+                    requests.entry(target).or_default().likes.push(like);
                 }
             }
             Expr::ScalarFunction(func) => {
-                if let Some((column_id, query)) = Self::expr_to_query(metadata, func) {
-                    requests.entry(column_id).or_default().queries.push(query);
-                } else if let Some((column_id, term)) = Self::expr_to_term(metadata, func) {
-                    requests.entry(column_id).or_default().terms.push(term);
+                if let Some((target, query)) = Self::expr_to_query(metadata, func) {
+                    requests.entry(target).or_default().queries.push(query);
+                } else if let Some((target, term)) = Self::expr_to_term(metadata, func) {
+                    requests.entry(target).or_default().terms.push(term);
                 }
             }
             _ => {}
@@ -414,9 +414,8 @@ mod tests {
             func: matches_func(),
         };
 
-        let (column_id, query) =
-            FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap();
-        assert_eq!(column_id, IndexTarget::ColumnId(1));
+        let (target, query) = FulltextIndexApplierBuilder::expr_to_query(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(query, FulltextQuery("foo".to_string()));
     }
 
@@ -477,9 +476,8 @@ mod tests {
             func: matches_term_func(),
         };
 
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, IndexTarget::ColumnId(1));
+        let (target, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(
             term,
             FulltextTerm {
@@ -503,9 +501,8 @@ mod tests {
             func: matches_term_func(),
         };
 
-        let (column_id, term) =
-            FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
-        assert_eq!(column_id, IndexTarget::ColumnId(1));
+        let (target, term) = FulltextIndexApplierBuilder::expr_to_term(&metadata, &func).unwrap();
+        assert_eq!(target, IndexTarget::ColumnId(1));
         assert_eq!(
             term,
             FulltextTerm {
