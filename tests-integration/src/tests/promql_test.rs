@@ -2139,9 +2139,12 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
         4,
         "fused scan must have four partitions"
     );
-    let Some(values_by_partition) = output_values_per_partition(plan) else {
-        return;
-    };
+    let values_by_partition = output_values_per_partition(plan).unwrap_or_else(|| {
+        panic!(
+            "the fused producer must report `native.root.output_values` for every partition, \
+             otherwise nothing here shows that the partitions executed"
+        )
+    });
     assert!(
         values_by_partition.iter().all(|value| *value > 0),
         "every native execution partition must produce values: {values_by_partition:?}"
@@ -6997,9 +7000,32 @@ const CORPUS: &[CorpusCase] = &[
         metrics: &["container_memory_rss"],
     },
     CorpusCase {
+        label: "Q05",
+        promql: r#"sum(8 * rate(container_network_receive_bytes_total{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",namespace=~".+"}[5m])) by (namespace)"#,
+        metrics: &["container_network_receive_bytes_total"],
+    },
+    CorpusCase {
         label: "Q06",
         promql: r#"sum(8 * irate(container_network_receive_bytes_total{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",namespace="app-0",pod=~"pod-0"}[5m])) by (pod)"#,
         metrics: &["container_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "Q08",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1",namespace="app-0"}) * on(cluster, namespace, pod) group_left(workload, workload_type) namespace_workload_pod:kube_pod_owner:relabel{cluster="eks-us-east-1-qa1",namespace="app-0",workload=~".*",workload_type=~".*"}) by (pod)"#,
+        metrics: &[
+            "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m",
+            "namespace_workload_pod:kube_pod_owner:relabel",
+        ],
+    },
+    CorpusCase {
+        label: "Q09",
+        promql: r#"sum by (pod) ((8 * rate(container_network_receive_bytes_total{cluster="eks-us-east-1-qa1",namespace=~"app-0"}[5m])) * on(cluster, namespace, pod) group_left() topk by (cluster, namespace, pod) (1, max by (cluster, namespace, pod) (kube_pod_info{host_network="false"})))"#,
+        metrics: &["container_network_receive_bytes_total", "kube_pod_info"],
+    },
+    CorpusCase {
+        label: "Q10",
+        promql: r#"histogram_quantile(0.99, sum(rate(kubelet_pleg_relist_duration_seconds_bucket{cluster="eks-us-east-1-qa1",job="kubelet",instance=~".*"}[5m])) by (instance, le))"#,
+        metrics: &["kubelet_pleg_relist_duration_seconds_bucket"],
     },
     CorpusCase {
         label: "Q11",
@@ -7130,6 +7156,10 @@ async fn native_promql_corpus_route_matrix() {
         "cpu",
         "device",
         "fstype",
+        "workload",
+        "workload_type",
+        "le",
+        "host_network",
     ];
     let metrics = CORPUS
         .iter()
@@ -7152,12 +7182,35 @@ async fn native_promql_corpus_route_matrix() {
                 .join(","),
         );
         fixture.push_str(")) ENGINE=metric WITH (\"on_physical_table\"='corpus_phy');");
-        for (host, pod, az, ts, value) in [
-            ("h0", "pod-0", "a0", 242000, 1.0),
-            ("h0", "pod-0", "a0", 300000, 301.0),
-            ("h1", "pod-1", "a1", 242000, 2.0),
-            ("h1", "pod-1", "a1", 300000, 602.0),
-        ] {
+        // Histogram bucket samples need multiple `le` values at each timestamp; a single
+        // bucket would make Q10's histogram quantile degenerate.
+        let samples = if *metric == "kubelet_pleg_relist_duration_seconds_bucket" {
+            [
+                ("h0", "pod-0", "a0", 242000, 1.0),
+                ("h0", "pod-0", "a0", 300000, 301.0),
+                ("h1", "pod-1", "a1", 242000, 2.0),
+                ("h1", "pod-1", "a1", 300000, 602.0),
+            ]
+            .into_iter()
+            .flat_map(|(host, pod, az, ts, value)| {
+                ["0.5", "1", "5", "+Inf"]
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(index, le)| (host, pod, az, ts, value * (index + 1) as f64, le))
+            })
+            .collect::<Vec<_>>()
+        } else {
+            [
+                ("h0", "pod-0", "a0", 242000, 1.0),
+                ("h0", "pod-0", "a0", 300000, 301.0),
+                ("h1", "pod-1", "a1", 242000, 2.0),
+                ("h1", "pod-1", "a1", 300000, 602.0),
+            ]
+            .into_iter()
+            .map(|(host, pod, az, ts, value)| (host, pod, az, ts, value, "+Inf"))
+            .collect()
+        };
+        for (host, pod, az, ts, value, le) in samples {
             let columns = all_tags
                 .iter()
                 .map(|t| format!("\"{t}\""))
@@ -7183,6 +7236,10 @@ async fn native_promql_corpus_route_matrix() {
                     "cpu" => if host == "h0" { "0" } else { "1" }.to_string(),
                     "device" => "nvme0n1".to_string(),
                     "fstype" => "ext4".to_string(),
+                    "workload" => format!("wl-{pod}"),
+                    "workload_type" => "deployment".to_string(),
+                    "le" => le.to_string(),
+                    "host_network" => "false".to_string(),
                     _ => String::new(),
                 })
                 .map(|v| format!("'{v}'"))
@@ -7231,7 +7288,33 @@ async fn native_promql_corpus_route_matrix() {
                     .to_string();
                 d.contains("FusedSeriesExec") && d.contains("partial state:")
             });
-        let segmented = fused && root_display.contains("MergeScanExec");
+        // `segmented` means the frontend's native node consumes what a region's native node
+        // produced. A `MergeScan` alone does not show that: its region side can be a plain scan
+        // feeding raw frames, which is a different placement and says nothing about a prefix
+        // running in the region. The merge scan's own `Debug` carries the plan its region runs, so
+        // the check reads that for the segment.
+        let region_native_children = fused_nodes_in_root(&root).first().is_some_and(|frontend| {
+            let children = frontend.children();
+            !children.is_empty()
+                && children.iter().all(|child| {
+                    let scan = if child.is::<CooperativeExec>() {
+                        let wrapped = child.children();
+                        if wrapped.len() != 1 {
+                            return false;
+                        }
+                        wrapped[0]
+                    } else {
+                        child
+                    };
+                    scan.downcast_ref::<MergeScanExec>()
+                        .is_some_and(|scan| format!("{scan:?}").contains("FusedSeries"))
+                })
+        });
+        let segmented = fused && region_native_children;
+        // The frontend native node reads raw frames from its scans: the tree runs above the
+        // region rather than a prefix running inside it.
+        let frontend_raw =
+            fused && !region_native_children && root_display.contains("MergeScanExec");
         let region_local = regions.iter().any(|plan| {
             let mut stack = vec![plan.clone()];
             while let Some(node) = stack.pop() {
@@ -7246,11 +7329,20 @@ async fn native_promql_corpus_route_matrix() {
             "segmented"
         } else if split {
             "aggregate-split"
+        } else if frontend_raw {
+            "frontend-raw"
         } else if region_local {
             "region-local"
         } else {
             "legacy"
         };
+        // Every corpus query is meant to answer natively; a fallback here is the regression this
+        // table exists to catch, so it fails rather than being recorded as a route.
+        assert_ne!(
+            route, "legacy",
+            "{} fell back to the existing plan; root:\n{root_display}\nregions: {region_displays:?}",
+            case.label
+        );
         // For aggregate-split, counts are per-partition partial-state rows, not final query values.
         let mut partition_vectors = Vec::new();
         for plan in &regions {
