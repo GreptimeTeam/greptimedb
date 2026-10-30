@@ -689,10 +689,12 @@ impl RangeManipulateStream {
         // special-casing each function. Comparing native ticks rather than the millisecond
         // payload keeps distinct sub-millisecond samples apart.
         //
-        // The first row of a tied group wins, which is the row a deduplicating read keeps:
-        // storage orders equal primary key and timestamp by sequence descending and
-        // `FlatDedupReader` keeps the first row of each group, so the same rows seen through a
-        // deduplicating path yield the same value.
+        // The first row of a tied group wins. A deduplicating scan also keeps the first row
+        // after ordering equal primary keys and timestamps by descending sequence, so the values
+        // agree when the scan presents those rows newest-first. This operator cannot establish
+        // that order itself: unordered scans and scans whose sequence values were overwritten
+        // can select a different tied value. The collapse fixes sample multiplicity, not global
+        // newest-write conflict resolution.
         let (native_timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
             .ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
