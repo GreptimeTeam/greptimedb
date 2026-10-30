@@ -232,9 +232,9 @@ impl BloomFilterIndexApplier {
             .map(|(i, range)| (*i, vec![range.clone()]))
             .collect::<Vec<_>>();
 
-        for (column_id, predicates) in predicates {
+        for (target, predicates) in predicates {
             let blob = match self
-                .blob_reader(file_id, column_id, file_size_hint, metrics.as_deref_mut())
+                .blob_reader(file_id, target, file_size_hint, metrics.as_deref_mut())
                 .await?
             {
                 Some(blob) => blob,
@@ -250,7 +250,7 @@ impl BloomFilterIndexApplier {
                 let reader = CachedBloomFilterIndexBlobReader::new(
                     file_id.file_id(),
                     file_id.version,
-                    column_id.clone(),
+                    target.clone(),
                     Tag::Skipping,
                     blob_size,
                     BloomFilterReaderImpl::new(blob),
@@ -291,16 +291,16 @@ impl BloomFilterIndexApplier {
 
     /// Creates a blob reader from the cached or remote index file.
     ///
-    /// Returus `None` if the column does not have an index.
+    /// Returns `None` if the target does not have an index.
     async fn blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
         metrics: Option<&mut BloomFilterIndexApplyMetrics>,
     ) -> Result<Option<BlobReader>> {
         let reader = match self
-            .cached_blob_reader(file_id, column_id, file_size_hint)
+            .cached_blob_reader(file_id, target, file_size_hint)
             .await
         {
             Ok(Some(puffin_reader)) => puffin_reader,
@@ -309,17 +309,17 @@ impl BloomFilterIndexApplier {
                     m.blob_cache_miss += 1;
                 }
                 if let Err(err) = other {
-                    // Blob not found means no index for this column
+                    // Blob not found means no index for this target.
                     if is_blob_not_found(&err) {
                         return Ok(None);
                     }
                     warn!(err; "An unexpected error occurred while reading the cached index file. Fallback to remote index file.")
                 }
                 let res = self
-                    .remote_blob_reader(file_id, column_id, file_size_hint)
+                    .remote_blob_reader(file_id, target, file_size_hint)
                     .await;
                 if let Err(err) = res {
-                    // Blob not found means no index for this column
+                    // Blob not found means no index for this target.
                     if is_blob_not_found(&err) {
                         return Ok(None);
                     }
@@ -337,7 +337,7 @@ impl BloomFilterIndexApplier {
     async fn cached_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
     ) -> Result<Option<BlobReader>> {
         let Some(file_cache) = &self.file_cache else {
@@ -357,7 +357,7 @@ impl BloomFilterIndexApplier {
             file_cache.local_store(),
             WriteCachePathProvider::new(file_cache.clone()),
         );
-        let blob_name = Self::target_blob_name(column_id);
+        let blob_name = Self::target_blob_name(target);
 
         let reader = puffin_manager
             .reader(&file_id)
@@ -374,8 +374,8 @@ impl BloomFilterIndexApplier {
     }
 
     // TODO(ruihang): use the same util with the code in creator
-    fn target_blob_name(column_id: &IndexTarget) -> String {
-        let target_key = column_id.encode();
+    fn target_blob_name(target: &IndexTarget) -> String {
+        let target_key = target.encode();
         format!("{INDEX_BLOB_TYPE}-{target_key}")
     }
 
@@ -383,7 +383,7 @@ impl BloomFilterIndexApplier {
     async fn remote_blob_reader(
         &self,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         file_size_hint: Option<u64>,
     ) -> Result<BlobReader> {
         let path_factory = RegionFilePathFactory::new(self.table_dir.clone(), self.path_type);
@@ -402,7 +402,7 @@ impl BloomFilterIndexApplier {
             .build(self.object_store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        let blob_name = Self::target_blob_name(column_id);
+        let blob_name = Self::target_blob_name(target);
 
         puffin_manager
             .reader(&file_id)
@@ -440,19 +440,19 @@ impl BloomFilterIndexApplier {
         sst_metadata: &RegionMetadataRef,
     ) -> Option<Arc<BTreeMap<IndexTarget, Vec<InListPredicate>>>> {
         let mut has_type_mismatch = false;
-        let mut compatible_col_ids = Vec::new();
+        let mut compatible_targets = Vec::new();
 
-        for (col_id, expected) in &self.expected_predicate_target_types {
-            if crate::sst::index::column::skipping_target_data_type(sst_metadata, col_id).as_ref()
+        for (target, expected) in &self.expected_predicate_target_types {
+            if crate::sst::index::column::skipping_target_data_type(sst_metadata, target).as_ref()
                 != Some(expected)
             {
                 has_type_mismatch = true;
                 continue;
             }
-            compatible_col_ids.push(col_id.clone());
+            compatible_targets.push(target.clone());
         }
 
-        if compatible_col_ids.is_empty() {
+        if compatible_targets.is_empty() {
             return None;
         }
 
@@ -461,9 +461,9 @@ impl BloomFilterIndexApplier {
         }
 
         let mut compatible_predicates = BTreeMap::new();
-        for col_id in compatible_col_ids {
-            if let Some(predicates) = self.default_predicates.get(&col_id) {
-                compatible_predicates.insert(col_id, predicates.clone());
+        for target in compatible_targets {
+            if let Some(predicates) = self.default_predicates.get(&target) {
+                compatible_predicates.insert(target, predicates.clone());
             }
         }
 
@@ -531,6 +531,7 @@ mod tests {
                             path: vec!["value".into()],
                             data_type: ConcreteDataType::int64_datatype(),
                             inverted_index: false,
+                            fulltext_index: None,
                             skipping_index: Some(
                                 SkippingIndexOptions::new(2, 0.01, Default::default()).unwrap(),
                             ),

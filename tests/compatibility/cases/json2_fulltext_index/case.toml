@@ -1,0 +1,8 @@
+name = "json2_fulltext_index"
+reason = "Old JSON2 metadata without fulltext hints remains readable after enabling path indexes."
+introduced_by = "JSON2 path fulltext index"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.3.0"]
+to_range = ["*"]
+features = ["json2", "metadata", "index"]
+owner = "storage"

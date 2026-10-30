@@ -1571,6 +1571,16 @@ fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> 
                 path: hint.path,
                 data_type,
                 inverted_index: hint.inverted_index,
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(api::v1::column_def::json_fulltext_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidRawRegionRequestSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
                 skipping_index: hint
                     .skipping_index
                     .map(api::v1::column_def::json_skipping_options_from_proto)
@@ -2532,6 +2542,7 @@ mod tests {
                             data_type: ColumnDataType::String as i32,
                             inverted_index,
                             skipping_index: None,
+                            fulltext_index: None,
                             ..Default::default()
                         }],
                         max_auto_expanded_paths: Some(0),
@@ -2617,6 +2628,7 @@ mod tests {
                         data_type: ColumnDataType::String as i32,
                         datatype_extension: None,
                         inverted_index: true,
+                        fulltext_index: None,
                         skipping_index: Some(v1::JsonSkippingIndexOptions {
                             granularity: 8,
                             index_type: 0,
