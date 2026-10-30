@@ -17,7 +17,7 @@ mod tests;
 
 use datafusion::arrow::buffer::ScalarBuffer;
 use datafusion_common::DataFusionError;
-use datatypes::error::{InvalidSeriesSnafu, Result};
+use datatypes::error::InvalidSeriesSnafu;
 use datatypes::series::histogram::HistogramView;
 use datatypes::series::raw::{RawSeriesChunk, RawTimestamps};
 use datatypes::series::samples::{SampleRef, Samples, SeriesFields, SeriesSchema};
@@ -32,12 +32,15 @@ pub(crate) fn merge_raw_identity_charging(
     schema: &SeriesSchema,
     chunks: &[RawSeriesChunk],
     reserve: &mut dyn FnMut(usize) -> std::result::Result<(), DataFusionError>,
-) -> Result<RawSeriesChunk> {
+    shrink: &mut dyn FnMut(usize),
+) -> std::result::Result<RawSeriesChunk, DataFusionError> {
     let invalid = |reason: &str| {
-        InvalidSeriesSnafu {
-            reason: reason.to_string(),
-        }
-        .build()
+        DataFusionError::External(Box::new(
+            InvalidSeriesSnafu {
+                reason: reason.to_string(),
+            }
+            .build(),
+        ))
     };
     let Some(first) = chunks.first() else {
         return Err(invalid("cannot merge an empty raw identity"));
@@ -84,8 +87,7 @@ pub(crate) fn merge_raw_identity_charging(
     for chunk in chunks.iter() {
         row_count = row_count.saturating_add(chunk.time.len());
     }
-    reserve(row_count.saturating_mul(std::mem::size_of::<(i64, usize, usize)>()))
-        .map_err(|error| invalid(error.to_string().as_str()))?;
+    reserve(row_count.saturating_mul(std::mem::size_of::<(i64, usize, usize)>()))?;
     let mut rows = Vec::with_capacity(row_count);
     for (chunk_index, chunk) in chunks.iter().enumerate() {
         for row_index in 0..chunk.time.len() {
@@ -97,8 +99,7 @@ pub(crate) fn merge_raw_identity_charging(
     reserve(
         rows.len()
             .saturating_mul(std::mem::size_of::<(i64, usize, usize)>()),
-    )
-    .map_err(|error| invalid(error.to_string().as_str()))?;
+    )?;
     let mut selected = Vec::with_capacity(rows.len());
     let mut index = 0;
     while index < rows.len() {
@@ -128,8 +129,7 @@ pub(crate) fn merge_raw_identity_charging(
         index = end;
     }
 
-    reserve(selected.len().saturating_mul(std::mem::size_of::<i64>()))
-        .map_err(|error| invalid(error.to_string().as_str()))?;
+    reserve(selected.len().saturating_mul(std::mem::size_of::<i64>()))?;
     let mut times = Vec::with_capacity(selected.len());
     for row in &selected {
         times.push(row.0);
@@ -151,21 +151,38 @@ pub(crate) fn merge_raw_identity_charging(
                 .fields
                 .get(field_index)
                 .ok_or_else(|| invalid("field index out of bounds"))?;
-            reserve(std::mem::size_of::<Samples>())
-                .map_err(|error| invalid(error.to_string().as_str()))?;
-            parts.push(source.slice(row_index, end - start)?);
+            reserve(std::mem::size_of::<Samples>())?;
+            parts.push(
+                source
+                    .slice(row_index, end - start)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            );
             start = end;
         }
-        output_fields.push(Samples::try_from_chunks(parts)?);
+        output_fields.push(
+            Samples::try_from_chunks(parts)
+                .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        );
     }
-    RawSeriesChunk::try_new(
+    let result = RawSeriesChunk::try_new(
         schema,
         key,
         Some(labels),
-        RawTimestamps::try_new(ScalarBuffer::from(times))?,
-        SeriesFields::try_from_vec(output_fields)?,
+        RawTimestamps::try_new(ScalarBuffer::from(times))
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
+        SeriesFields::try_from_vec(output_fields)
+            .map_err(|error| DataFusionError::External(Box::new(error)))?,
         true,
     )
+    .map_err(|error| DataFusionError::External(Box::new(error)))?;
+    // The two reservations above total 2 * row_count * size_of::<(i64, usize, usize)>(),
+    // and this shrinks that same figure; failure means the reservation was reduced elsewhere.
+    shrink(
+        row_count
+            .saturating_mul(std::mem::size_of::<(i64, usize, usize)>())
+            .saturating_mul(2),
+    );
+    Ok(result)
 }
 
 fn samples_equal(left: SampleRef<'_>, right: SampleRef<'_>) -> bool {

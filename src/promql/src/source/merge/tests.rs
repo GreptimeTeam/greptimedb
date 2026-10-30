@@ -27,8 +27,8 @@ use super::merge_raw_identity_charging;
 fn merge_raw_identity(
     schema: &SeriesSchema,
     chunks: &[RawSeriesChunk],
-) -> datatypes::error::Result<RawSeriesChunk> {
-    merge_raw_identity_charging(schema, chunks, &mut |_| Ok(()))
+) -> datafusion::common::Result<RawSeriesChunk> {
+    merge_raw_identity_charging(schema, chunks, &mut |_| Ok(()), &mut |_| {})
 }
 
 fn schema(count: usize) -> SeriesSchema {
@@ -342,4 +342,47 @@ fn rejects_empty_and_shape_mismatch() {
         is_last: false,
     };
     assert!(merge_raw_identity(&schema(1), &[malformed]).is_err());
+}
+
+#[test]
+fn reservation_error_is_preserved() {
+    let error = merge_raw_identity_charging(
+        &schema(1),
+        &[chunk(b"k", "v", vec![1], vec![vec![Some(1.)]])],
+        &mut |_| {
+            Err(datafusion::common::DataFusionError::Execution(
+                "reservation refused".into(),
+            ))
+        },
+        &mut |_| {},
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        datafusion::common::DataFusionError::Execution(_)
+    ));
+}
+
+#[test]
+fn merge_releases_transient_row_workspace() {
+    let mut reserved = 0usize;
+    let mut shrunk = 0usize;
+    let result = merge_raw_identity_charging(
+        &schema(1),
+        &[
+            chunk(b"k", "v", vec![1, 3], vec![vec![Some(1.), Some(3.)]]),
+            chunk(b"k", "v", vec![1, 2], vec![vec![Some(1.), Some(2.)]]),
+        ],
+        &mut |bytes| {
+            reserved = reserved.saturating_add(bytes);
+            Ok(())
+        },
+        &mut |bytes| shrunk = shrunk.saturating_add(bytes),
+    )
+    .unwrap();
+    assert_eq!(result.time.len(), 3);
+    assert_eq!(shrunk, 2 * 4 * std::mem::size_of::<(i64, usize, usize)>());
+    let retained = reserved - shrunk;
+    assert!(retained < reserved);
+    assert!(retained >= result.time.len() * std::mem::size_of::<i64>());
 }

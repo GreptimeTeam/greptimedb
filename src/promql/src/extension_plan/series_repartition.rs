@@ -1670,8 +1670,8 @@ struct PendingGroup {
 ///
 /// A key-then-time raw frame promises its keys arrive in order, and this owner publishes in key
 /// order only when it publishes them together: an identity that is complete while a smaller one is
-/// still waiting would go out first and break that promise. Such a frame therefore waits for every
-/// input to end, which is when the scan over the owned keys can hand them all out in order.
+/// still waiting would go out first and break that promise. Watermarks let it publish once every
+/// input has advanced past the identity, without waiting for every input to end.
 fn group_ready(
     group: &PendingGroup,
     eof: &[bool],
@@ -1901,8 +1901,22 @@ impl RepartitionStream {
         // that a well-ordered identity never approaches.
         let workspace = MemoryConsumer::new("SeriesRepartitionRawOwner").register(&self.pool);
         let mut reserve = |bytes: usize| workspace.try_grow(bytes);
-        let chunk = merge_raw_identity_charging(&self.schema, &group.raw_chunks, &mut reserve)
-            .map_err(|error| DataFusionError::External(Box::new(error)))?;
+        let mut shrink = |bytes: usize| {
+            let result = workspace.try_shrink(bytes);
+            debug_assert!(
+                result.is_ok(),
+                "raw merge workspace shrink failed: {result:?}"
+            );
+            // The merged data is already correct; tolerate accounting inconsistency rather than
+            // turning a valid query result into an error.
+            let _ = result;
+        };
+        let chunk = merge_raw_identity_charging(
+            &self.schema,
+            &group.raw_chunks,
+            &mut reserve,
+            &mut shrink,
+        )?;
         self.output.push_back(ReadySeries {
             series: ReadyOutput::Raw(chunk),
             charges: ReadyCharges {
@@ -1965,21 +1979,34 @@ impl Stream for RepartitionStream {
                 return Poll::Ready(Some(Err(boxed(DataFusionError::from(&error)))));
             }
             if this.rescan {
-                let next = match &this.resume_after {
-                    Some(after) => this
-                        .groups
-                        .range((
-                            std::ops::Bound::Excluded(after.clone()),
-                            std::ops::Bound::Unbounded,
-                        ))
-                        .find_map(|(key, group)| {
+                let next = if this.ordering == SeriesOrdering::KeyThenTime {
+                    this.groups.first_key_value().and_then(|(key, group)| {
+                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
+                            .then(|| key.clone())
+                    })
+                } else {
+                    match &this.resume_after {
+                        Some(after) => this
+                            .groups
+                            .range((
+                                std::ops::Bound::Excluded(after.clone()),
+                                std::ops::Bound::Unbounded,
+                            ))
+                            .find_map(|(key, group)| {
+                                group_ready(
+                                    group,
+                                    &this.eof,
+                                    &this.last_key_from,
+                                    this.ordering,
+                                    key,
+                                )
+                                .then(|| key.clone())
+                            }),
+                        None => this.groups.iter().find_map(|(key, group)| {
                             group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
                                 .then(|| key.clone())
                         }),
-                    None => this.groups.iter().find_map(|(key, group)| {
-                        group_ready(group, &this.eof, &this.last_key_from, this.ordering, key)
-                            .then(|| key.clone())
-                    }),
+                    }
                 };
                 match next {
                     Some(key) => {
