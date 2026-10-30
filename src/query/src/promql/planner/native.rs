@@ -1070,6 +1070,48 @@ fn collect_segment(node: &NativeNode, sources: &mut Vec<usize>, cut: &mut Vec<Na
     }
 }
 
+/// Collects every scan input in a selected segment without looking for nested cuts.
+fn collect_segment_inputs(node: &NativeNode, sources: &mut Vec<usize>) {
+    match &node.expr {
+        NativeExpr::Input(input) => {
+            if !sources.contains(&input.source_index) {
+                sources.push(input.source_index);
+            }
+        }
+        expr => {
+            for child in node_children(expr) {
+                collect_segment_inputs(child, sources);
+            }
+        }
+    }
+}
+
+/// Rewrites every input leaf in a selected segment to its index in the segment's own space.
+fn rewrite_inner_segment(node: &NativeNode, sources: &[usize]) -> NativeNode {
+    let expr = match &node.expr {
+        NativeExpr::Input(input) => NativeExpr::Input(BoundInput {
+            source_index: sources
+                .iter()
+                .position(|&source| source == input.source_index)
+                .expect("the segment collected every scan it reads"),
+            output: input.output.clone(),
+            ordering: input.ordering,
+        }),
+        expr => with_node_children(
+            expr,
+            node_children(expr)
+                .into_iter()
+                .map(|child| rewrite_inner_segment(child, sources))
+                .collect::<Vec<_>>()
+                .into_iter(),
+        ),
+    };
+    NativeNode {
+        expr,
+        output: node.output.clone(),
+    }
+}
+
 /// Rewrites a segment's tree so every leaf names its index in the segment's own space.
 fn rewrite_segment(
     node: &NativeNode,
@@ -1130,7 +1172,7 @@ fn cut_segments(node: &NativeNode) -> Segment {
     }
 }
 
-/// Builds one segment's plan from a subtree, cutting its own per-series prefixes.
+/// Builds one segment's plan from a subtree, binding its scan inputs without cutting again.
 ///
 /// Returns the plan and the output columns the segment reports, which its parent names its own
 /// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
@@ -1143,21 +1185,16 @@ fn build_inner_segment(
     tags: &[String],
     metric: &Option<Arc<str>>,
 ) -> Option<(LogicalPlan, Vec<String>)> {
-    let segment = cut_segments(node);
-    let mut inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
-    let mut child_tags = Vec::with_capacity(inputs.capacity());
-    for &index in &segment.sources {
+    let mut sources = Vec::new();
+    collect_segment_inputs(node, &mut sources);
+    let mut inputs = Vec::with_capacity(sources.len());
+    let mut child_tags = Vec::with_capacity(sources.len());
+    for &index in &sources {
         inputs.push(children.get(index)?.clone());
         child_tags.push(source_tags.get(index)?.clone());
     }
-    for cut in &segment.cut {
-        let (plan, cut_tags) =
-            build_inner_segment(cut, children, source_tags, grid, time_index, tags, metric)?;
-        inputs.push(plan);
-        child_tags.push(cut_tags);
-    }
-    let output_tags = fused_output_tags(&segment.node, &child_tags)?;
-    let tree = NativeTree::try_new(segment.node).ok()?;
+    let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
+    let output_tags = fused_output_tags(tree.root(), &child_tags)?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
         return None;
     }
