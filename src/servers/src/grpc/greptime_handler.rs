@@ -42,6 +42,7 @@ use session::hints::{INSERT_SKIP_WAL_HINT, READ_PREFERENCE_HINT, is_reserved_ext
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
+use tokio_util::task::AbortOnDropHandle;
 use tonic::Status;
 
 use crate::error::{InvalidQuerySnafu, JoinTaskSnafu, Result, UnknownHintSnafu};
@@ -134,22 +135,12 @@ impl GreptimeRequestHandler {
             };
 
             match runtime {
-                Some(runtime) => {
-                    // Executes requests in another runtime to
-                    // 1. prevent the execution from being cancelled unexpected by Tonic runtime;
-                    //   - Refer to our blog for the rational behind it:
-                    //     https://www.greptime.com/blogs/2023-01-12-hidden-control-flow.html
-                    //   - Obtaining a `JoinHandle` to get the panic message (if there's any).
-                    //     From its docs, `JoinHandle` is cancel safe. The task keeps running even it's handle been dropped.
-                    // 2. avoid the handler blocks the gRPC runtime incidentally.
-                    runtime
-                        .spawn(result_future)
-                        .await
-                        .context(JoinTaskSnafu)
-                        .inspect_err(|e| {
-                            timer.record(e.status_code());
-                        })?
-                }
+                Some(runtime) => AbortOnDropHandle::new(runtime.spawn(result_future))
+                    .await
+                    .context(JoinTaskSnafu)
+                    .inspect_err(|e| {
+                        timer.record(e.status_code());
+                    })?,
                 None => result_future.await,
             }
         }
@@ -317,20 +308,103 @@ impl Drop for RequestTimer {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error as StdError;
+    use std::future::pending;
+    use std::result::Result as StdResult;
+    use std::time::Duration;
+
+    use api::v1::QueryRequest as ApiQueryRequest;
+    use api::v1::query_request::Query;
+    use async_trait::async_trait;
     use chrono::FixedOffset;
     use common_error::ext::BoxedError;
     use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
     use common_time::Timezone;
+    use futures::stream::{self, BoxStream};
     use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use session::context::QueryContext;
     use session::hints::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, READ_PREFERENCE_EXTENSION_KEY,
         REMOTE_QUERY_ID_EXTENSION_KEY,
     };
     use snafu::ResultExt;
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
     use tonic::Code;
 
     use super::*;
     use crate::error::{ExecuteGrpcRequestSnafu, InvalidParameterSnafu};
+    use crate::query_handler::grpc::GrpcQueryHandler;
+
+    struct BlockingQueryHandler {
+        started: Arc<Notify>,
+        finished: Arc<Notify>,
+    }
+
+    struct QueryFinished(Arc<Notify>);
+
+    impl Drop for QueryFinished {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl GrpcQueryHandler for BlockingQueryHandler {
+        async fn do_query(&self, _: QueryRequest, _: QueryContextRef) -> Result<Output> {
+            let _finished = QueryFinished(self.finished.clone());
+            self.started.notify_one();
+            pending().await
+        }
+
+        fn handle_put_record_batch_stream(
+            &self,
+            _: PutRecordBatchRequestStream,
+            _: QueryContextRef,
+        ) -> BoxStream<'static, Result<DoPutResponse>> {
+            Box::pin(stream::empty())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_drop_request_cancels_execution() -> StdResult<(), Box<dyn StdError + Send + Sync>>
+    {
+        // Payloads are opaque here; this tests cancellation before do_query returns an Output.
+        let requests = [
+            QueryRequest::Query(ApiQueryRequest {
+                query: Some(Query::Sql("SELECT * FROM numbers".into())),
+            }),
+            QueryRequest::Inserts(Default::default()),
+            QueryRequest::Query(ApiQueryRequest {
+                query: Some(Query::LogicalPlan(Vec::new())),
+            }),
+            QueryRequest::Query(ApiQueryRequest {
+                query: Some(Query::PromRangeQuery(Default::default())),
+            }),
+        ];
+        for request in requests {
+            for runtime in [None, Some(common_runtime::query_runtime())] {
+                let started = Arc::new(Notify::new());
+                let finished = Arc::new(Notify::new());
+                let handler = GreptimeRequestHandler::new(
+                    Arc::new(BlockingQueryHandler {
+                        started: started.clone(),
+                        finished: finished.clone(),
+                    }),
+                    None,
+                    runtime,
+                    FlightCompression::default(),
+                );
+                let task = AbortOnDropHandle::new(tokio::spawn(
+                    handler.handle_request_with_query_ctx(request.clone(), QueryContext::arc()),
+                ));
+                timeout(Duration::from_secs(5), started.notified()).await?;
+                drop(task);
+                timeout(Duration::from_secs(5), finished.notified()).await?;
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_create_query_context_typed_skip_wal() {
