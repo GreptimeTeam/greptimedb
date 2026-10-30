@@ -831,7 +831,7 @@ mod test {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMillisecondArray::from(vec![1_000; 3])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_001, 1_002])),
                 histograms,
             ],
         )
@@ -843,11 +843,11 @@ mod test {
         let normalized =
             SeriesNormalize::new(1_000, TIME_INDEX_COLUMN, false, Vec::new(), logical_input);
         let range = RangeManipulate::new(
-            2_000,
-            2_000,
+            2_002,
+            2_002,
             1,
             1_000,
-            1,
+            3,
             TIME_INDEX_COLUMN.to_string(),
             vec!["value".to_string()],
             LogicalPlan::Extension(datafusion::logical_expr::Extension {
@@ -909,7 +909,7 @@ mod test {
         .unwrap();
         assert_eq!(
             timestamps.get(0).unwrap().to_data(),
-            TimestampMillisecondArray::from(vec![2_000; 3]).to_data()
+            TimestampMillisecondArray::from(vec![2_000, 2_001, 2_002]).to_data()
         );
     }
 }
