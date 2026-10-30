@@ -79,6 +79,7 @@ use crate::test_util;
 #[derive(Clone, Default)]
 struct RecordingRegionService {
     request_sizes: Arc<Mutex<Vec<usize>>>,
+    response_rows: Arc<Mutex<Option<usize>>>,
     rpc_rejections: Arc<Mutex<VecDeque<Status>>>,
     requests: Arc<Mutex<Vec<RegionRequest>>>,
     rejections: Arc<Mutex<HashMap<u64, VecDeque<Status>>>>,
@@ -147,6 +148,9 @@ impl Region for RecordingRegionService {
                 .unwrap()
                 .status_code = StatusCode::PartialFailure as u32;
         }
+        if let Some(rows) = *self.response_rows.lock().unwrap() {
+            response.affected_rows = rows as _;
+        }
         Ok(Response::new(response))
     }
 }
@@ -157,6 +161,13 @@ impl RecordingRegionService {
         request: RegionRequest,
     ) -> std::result::Result<Response<PbRegionResponse>, Status> {
         let region_id = write_region_id(&request).unwrap().as_u64();
+        let affected_rows = match &request.body {
+            Some(Body::Inserts(inserts)) => inserts.requests[0]
+                .rows
+                .as_ref()
+                .map_or(1, |rows| rows.rows.len()),
+            _ => 1,
+        };
         self.requests.lock().unwrap().push(request);
         let release = self.release.lock().unwrap().clone();
         if let Some(release) = release {
@@ -178,7 +189,7 @@ impl RecordingRegionService {
                     ..Default::default()
                 }),
             }),
-            affected_rows: 1,
+            affected_rows: affected_rows as _,
             ..Default::default()
         }))
     }
@@ -751,18 +762,46 @@ async fn test_write_retry_cancellation_stops_backoff() {
 
 #[tokio::test]
 async fn test_write_retry_cancellation_drains_inflight_requests() {
+    for tracked in [false, true] {
+        check_write_retry_cancellation_drains_inflight_requests(tracked).await;
+    }
+}
+
+async fn check_write_retry_cancellation_drains_inflight_requests(tracked: bool) {
     let server = RegionTestServer::start().await;
     server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
     let release = Arc::new(Semaphore::new(0));
     *server.service.release.lock().unwrap() = Some(release.clone());
     let dispatcher = server.create_dispatcher(2).await;
-    let writes = dispatcher
-        .prepare(vec![build_insert_request(&[1, 2])])
-        .await
-        .unwrap();
     let cancellation = CancellationToken::new();
     let guard = cancellation.clone().drop_guard();
-    let execute = dispatcher.execute(writes, None, Some(&cancellation));
+    let execute = async {
+        if tracked {
+            let requests = split_request(build_insert_request(&[1, 2]))
+                .into_iter()
+                .map(|request| TrackedWrite {
+                    request,
+                    owners: vec![0],
+                })
+                .collect();
+            let (writes, progress) = dispatcher.prepare_tracked(requests, 1).await;
+            let mut progress = dispatcher
+                .execute_tracked(writes, progress, None, Some(&cancellation))
+                .await;
+            assert_eq!(progress[0].affected_rows, 1);
+            progress.pop().unwrap().into_result()
+        } else {
+            let writes = dispatcher
+                .prepare(vec![build_insert_request(&[1, 2])])
+                .await
+                .unwrap();
+            dispatcher
+                .execute(writes, None, Some(&cancellation))
+                .await
+                .map(|response| response.affected_rows)
+                .map_err(BoxedError::new)
+        }
+    };
     tokio::pin!(execute);
     tokio::time::timeout(
         Duration::from_secs(1),
@@ -797,11 +836,18 @@ async fn test_write_retry_cancellation_drains_inflight_requests() {
             (RegionId::new(1, 2).as_u64(), 1),
         ])
     );
+    assert_eq!(*server.service.request_sizes.lock().unwrap(), [2]);
     assert!(server.invalidator.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn test_tracked_cancellation_during_route_refresh_stops_retries() {
+    for inputs in [1, 2] {
+        check_tracked_cancellation_during_route_refresh_stops_retries(inputs).await;
+    }
+}
+
+async fn check_tracked_cancellation_during_route_refresh_stops_retries(inputs: usize) {
     let server = RegionTestServer::start().await;
     server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
     let backend = test_util::prepare_mocked_backend().await;
@@ -825,10 +871,10 @@ async fn test_tracked_cancellation_during_route_refresh_stops_retries() {
                 },
                 TrackedWrite {
                     request: build_partitioned_request(WriteKind::Insert, 2, None, &[20]),
-                    owners: vec![1],
+                    owners: vec![inputs - 1],
                 },
             ],
-            2,
+            inputs,
         )
         .await;
     let progress = dispatcher
@@ -837,11 +883,17 @@ async fn test_tracked_cancellation_during_route_refresh_stops_retries() {
     assert!(cancellation.is_cancelled());
     assert_eq!(invalidator.calls.lock().unwrap().len(), 2);
     assert_eq!(progress[0].affected_rows, 1);
-    assert!(progress[0].error.is_none());
-    assert_eq!(progress[1].affected_rows, 0);
+    assert_eq!(progress[0].error.is_none(), inputs == 2);
+    if inputs == 2 {
+        assert_eq!(progress[1].affected_rows, 0);
+    }
     assert_eq!(
-        progress[1].error.as_ref().unwrap().retry_hint(),
+        progress[inputs - 1].error.as_ref().unwrap().retry_hint(),
         RetryHint::RetryAfterRouteRefresh
+    );
+    assert_eq!(
+        *server.service.request_sizes.lock().unwrap(),
+        if inputs == 1 { vec![2] } else { vec![1, 1] }
     );
     assert_eq!(
         server.attempt_counts(),
@@ -1151,6 +1203,7 @@ fn request_parts(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
     for (kind, tracked) in [
         (WriteKind::Insert, false),
+        (WriteKind::Insert, true),
         (WriteKind::Delete, false),
         (WriteKind::BulkInsert, false),
         (WriteKind::BulkInsert, true),
@@ -1219,6 +1272,11 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             invalidator.clone(),
         );
         if tracked {
+            let inputs = if matches!(kind, WriteKind::Insert) {
+                1
+            } else {
+                2
+            };
             new_server.fail_region(5, [RetryHint::NonRetryable]);
             let progress = dispatcher
                 .dispatch_tracked(
@@ -1234,19 +1292,22 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
                                 old_versions[&2],
                                 &[20, 40],
                             ),
-                            owners: vec![0, 1],
+                            owners: vec![0, inputs - 1],
                         },
                     ],
-                    2,
+                    inputs,
                     None,
                 )
                 .await;
-            assert_eq!(
-                progress.iter().map(|p| p.affected_rows).collect::<Vec<_>>(),
-                [2, 0]
-            );
-            assert!(progress[0].error.is_none());
-            assert!(progress[1].error.is_some());
+            assert_eq!(progress[0].affected_rows, 2);
+            assert_eq!(progress[0].error.is_none(), inputs == 2);
+            if inputs == 2 {
+                assert_eq!(progress[1].affected_rows, 0);
+                assert!(progress[1].error.is_some());
+            } else {
+                assert_eq!(*old_server.service.request_sizes.lock().unwrap(), [2]);
+                assert_eq!(*new_server.service.request_sizes.lock().unwrap(), [2]);
+            }
         } else {
             let response = dispatcher
                 .dispatch(vec![
@@ -2183,6 +2244,213 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
             .is_err()
     );
     assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 1);
+}
+
+#[tokio::test]
+async fn test_tracked_row_writes_preserve_peer_batching() {
+    for max_retries in [0, 2] {
+        for hint in [
+            None,
+            Some(RetryHint::Retryable),
+            Some(RetryHint::NonRetryable),
+        ] {
+            let server = RegionTestServer::start().await;
+            if let Some(hint) = hint {
+                server.fail_region(1, [hint]);
+            }
+            let dispatcher = server.create_dispatcher(max_retries).await;
+            let histogram = Histogram::with_opts(prometheus::HistogramOpts::new(
+                "tracked_batch_attempts",
+                "Tracked batch send attempts",
+            ))
+            .unwrap();
+            // Repeated region IDs must still be distinguished by their entry indices.
+            let writes = [(1, 2), (1, 2), (2, 3)]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (region, rows))| TrackedWrite {
+                    request: build_partitioned_request(
+                        WriteKind::Insert,
+                        region,
+                        None,
+                        &vec![20 + index as i32; rows],
+                    ),
+                    owners: vec![0; rows],
+                })
+                .collect();
+            let progress = dispatcher
+                .dispatch_tracked(writes, 1, Some(&histogram))
+                .await;
+            let retried = max_retries > 0 && hint == Some(RetryHint::Retryable);
+            let failed = hint.is_some() && !retried;
+            assert_eq!(progress[0].affected_rows, 7 - 2 * usize::from(failed));
+            assert_eq!(progress[0].error.is_some(), failed);
+            assert_eq!(
+                server.attempt_counts(),
+                HashMap::from([
+                    (RegionId::new(1, 1).as_u64(), 2 + usize::from(retried)),
+                    (RegionId::new(1, 2).as_u64(), 1),
+                ])
+            );
+            let mut expected_sizes = if max_retries == 0 {
+                vec![1, 1, 1]
+            } else {
+                vec![3]
+            };
+            if retried {
+                expected_sizes.push(1);
+                let values = server
+                    .service
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|request| request_parts(request).2[0])
+                    .collect::<Vec<_>>();
+                assert_eq!(values, [20, 21, 22, 20]);
+            }
+            assert_eq!(histogram.get_sample_count(), expected_sizes.len() as u64);
+            assert_eq!(
+                *server.service.request_sizes.lock().unwrap(),
+                expected_sizes
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_tracked_batches_preserve_peers_and_headers() {
+    let first = RegionTestServer::start().await;
+    let second = RegionTestServer::start().await;
+    let dispatcher = first.create_dispatcher(2).await;
+    let requests = [1, 1, 1, 2, 2]
+        .into_iter()
+        .enumerate()
+        .map(|(index, region)| {
+            let mut request = build_partitioned_request(WriteKind::Insert, region, None, &[20]);
+            if index == 2 {
+                request.header = Some(RegionRequestHeader {
+                    dbname: "greptime.other".to_string(),
+                    ..Default::default()
+                });
+            }
+            TrackedWrite {
+                request,
+                owners: vec![0],
+            }
+        })
+        .collect();
+    let (mut writes, progress) = dispatcher.prepare_tracked(requests, 1).await;
+    for write in &mut writes {
+        if write_region_id(&write.request).unwrap().region_number() == 2 {
+            write.peer = Arc::new(second.peer.clone());
+        }
+    }
+    let progress = dispatcher
+        .execute_tracked(writes, progress, None, None)
+        .await;
+    assert_eq!(progress[0].affected_rows, 5);
+    assert!(progress[0].error.is_none());
+    let mut sizes = first.service.request_sizes.lock().unwrap().clone();
+    sizes.sort_unstable();
+    assert_eq!(sizes, [1, 2]);
+    assert_eq!(*second.service.request_sizes.lock().unwrap(), [2]);
+    assert_eq!(
+        first
+            .service
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| { request.header.as_ref().unwrap().dbname == "greptime.other" })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_tracked_batches_reject_mismatched_acknowledgements() {
+    for (partial, rows) in [(false, 0), (false, 1), (false, 3), (true, 0), (true, 2)] {
+        let server = RegionTestServer::start().await;
+        *server.service.response_rows.lock().unwrap() = Some(rows);
+        if partial {
+            server.fail_region(2, [RetryHint::Retryable]);
+        }
+        let dispatcher = server.create_dispatcher(2).await;
+        let requests = [1, 2]
+            .into_iter()
+            .map(|region| TrackedWrite {
+                request: build_partitioned_request(WriteKind::Insert, region, None, &[20]),
+                owners: vec![0],
+            })
+            .collect();
+        let progress = dispatcher.dispatch_tracked(requests, 1, None).await;
+        assert_eq!(progress[0].affected_rows, 0);
+        assert!(
+            progress[0]
+                .error
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("cannot attribute")
+        );
+        assert_eq!(*server.service.request_sizes.lock().unwrap(), [2]);
+    }
+}
+
+#[tokio::test]
+async fn test_tracked_batches_retry_whole_rpc_failures() {
+    for failures in [1, 3] {
+        let server = RegionTestServer::start().await;
+        server
+            .service
+            .rpc_rejections
+            .lock()
+            .unwrap()
+            .extend((0..failures).map(|_| Status::unavailable("acknowledgement lost")));
+        let dispatcher = server.create_dispatcher(2).await;
+        let requests = [1, 2]
+            .into_iter()
+            .map(|region| TrackedWrite {
+                request: build_partitioned_request(WriteKind::Insert, region, None, &[20]),
+                owners: vec![0],
+            })
+            .collect();
+        let progress = dispatcher.dispatch_tracked(requests, 1, None).await;
+        assert_eq!(progress[0].affected_rows, if failures == 1 { 2 } else { 0 });
+        assert_eq!(progress[0].error.is_some(), failures == 3);
+        assert_eq!(
+            *server.service.request_sizes.lock().unwrap(),
+            vec![2; (failures + 1).min(3)]
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_tracked_batches_leave_other_write_kinds_separate() {
+    for kind in [WriteKind::BulkInsert, WriteKind::Delete] {
+        let server = RegionTestServer::start().await;
+        let dispatcher = server.create_dispatcher(2).await;
+        let histogram = Histogram::with_opts(prometheus::HistogramOpts::new(
+            "tracked_other_attempts",
+            "Tracked non-insert attempts",
+        ))
+        .unwrap();
+        let requests = [1, 2]
+            .into_iter()
+            .map(|region| TrackedWrite {
+                request: build_partitioned_request(kind, region, None, &[20]),
+                owners: vec![0],
+            })
+            .collect();
+        let progress = dispatcher
+            .dispatch_tracked(requests, 1, Some(&histogram))
+            .await;
+        assert_eq!(progress[0].affected_rows, 2);
+        assert!(progress[0].error.is_none());
+        assert_eq!(histogram.get_sample_count(), 2);
+        assert_eq!(server.service.requests.lock().unwrap().len(), 2);
+    }
 }
 
 #[tokio::test]

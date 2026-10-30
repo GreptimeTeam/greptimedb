@@ -652,17 +652,20 @@ impl RegionServer {
         let first_region_id = first.region_id;
         let request_type = first.request.request_type();
 
-        // Upstream batching keeps requests from the same engine together.
-        // Ordinary execution reports engine lookup failures per entry.
+        // Ordinary execution handles mixed engines and unavailable regions per entry.
         let Ok(CurrentEngine::Engine(engine)) =
             self.inner.get_engine(first_region_id, &RegionChange::None)
         else {
             return Ok(Either::Right(requests));
         };
         if engine.name() != METRIC_ENGINE_NAME
-            || !requests
-                .iter()
-                .all(|request| matches!(request.request, RegionRequest::Put(_)))
+            || !requests.iter().all(|request| {
+                matches!(request.request, RegionRequest::Put(_))
+                    && matches!(
+                        self.inner.region_map.get(&request.region_id).as_deref(),
+                        Some(RegionEngineWithStatus::Ready(engine)) if engine.name() == METRIC_ENGINE_NAME
+                    )
+            })
         {
             return Ok(Either::Right(requests));
         }
@@ -3630,9 +3633,11 @@ mod tests {
         let mut env = TestEnv::with_prefix("region-server-metric-results").await;
         let mito = env.create_engine(MitoConfig::default()).await;
         let metric = Arc::new(
-            MetricEngine::try_new(mito, metric_engine::config::EngineConfig::default()).unwrap(),
+            MetricEngine::try_new(mito.clone(), metric_engine::config::EngineConfig::default())
+                .unwrap(),
         );
         let mut server = mock_region_server();
+        server.register_engine(Arc::new(mito));
         server.register_engine(metric.clone());
         let mut inserts = Vec::new();
         for table in [10, 20] {
@@ -3731,6 +3736,50 @@ mod tests {
                 .iter()
                 .all(|(_, error)| error.retry_hint() == RetryHint::RetryAfterRouteRefresh)
         );
+
+        let regular_region = RegionId::new(30, 0);
+        let mut create = CreateRequestBuilder::new().build();
+        create.table_dir = "metric-results/30/".to_string();
+        let regular = InsertRequest {
+            region_id: regular_region.as_u64(),
+            rows: Some(Rows {
+                schema: rows_schema(&create),
+                rows: build_rows(0, 3),
+            }),
+            ..Default::default()
+        };
+        server
+            .handle_request(regular_region, RegionRequest::Create(create))
+            .await
+            .unwrap();
+        // A metric entry must not route its Mito2 sibling through the metric engine.
+        for (metric_insert, metric_failed) in inserts.iter().zip([false, true]) {
+            for metric_first in [true, false] {
+                let requests = if metric_first {
+                    vec![metric_insert.clone(), regular.clone()]
+                } else {
+                    vec![regular.clone(), metric_insert.clone()]
+                };
+                let response = server
+                    .handle_requests_in_parallel(region_request::Body::Inserts(InsertRequests {
+                        requests,
+                    }))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.affected_rows,
+                    3 + usize::from(!metric_failed),
+                    "{:?}",
+                    response.failures
+                );
+                assert_eq!(response.failures.len(), usize::from(metric_failed));
+                if let Some((index, error)) = response.failures.first() {
+                    assert_eq!(*index, usize::from(!metric_first));
+                    assert_eq!(error.status_code(), StatusCode::RegionNotReady);
+                    assert_eq!(error.retry_hint(), RetryHint::RetryAfterRouteRefresh);
+                }
+            }
+        }
     }
 
     #[tokio::test]

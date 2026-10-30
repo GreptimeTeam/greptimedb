@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use api::v1::region::RegionRequest;
+use api::v1::region::{RegionRequest, region_request::Body};
 use backon::{BackoffBuilder, ExponentialBuilder};
 use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::error::{Error, UnexpectedSnafu};
+use common_meta::peer::PeerRef;
 use common_query::WriteProgress;
 use futures::future;
 use prometheus::Histogram;
@@ -33,6 +34,12 @@ use crate::write_dispatcher::{
 pub struct TrackedWrite {
     pub request: RegionRequest,
     pub owners: Vec<usize>,
+}
+
+/// A wire request retaining one row-owner vector per region entry.
+struct TrackedBatch {
+    request: RegionRequest,
+    owners: Vec<Vec<usize>>,
 }
 
 impl WriteDispatcher {
@@ -126,24 +133,23 @@ impl WriteDispatcher {
         let mut failures = Vec::new();
         loop {
             failures.clear();
-            let attempts = future::join_all(pending.into_iter().map(|write| async {
-                let owners = write.owners.clone().unwrap_or_default();
-                let attempt = if let Some(retry) = &self.retry {
-                    retry.send(write, histogram).await
-                } else {
-                    let _timer = histogram.map(Histogram::start_timer);
-                    let datanode = self.node_manager.datanode(&write.peer).await;
-                    match datanode.handle(write.request).await {
-                        Ok(response) => WriteAttempt::Success(response),
-                        Err(error) => WriteAttempt::Failed {
-                            error,
-                            request: None,
-                        },
-                    }
-                };
-                (owners, attempt)
-            }))
-            .await;
+            // Partial responses can be attributed directly when all rows belong to one input.
+            let attempts = if progress.len() == 1
+                && self.retry.is_some()
+                && pending.len() > 1
+                && pending
+                    .iter()
+                    .any(|write| matches!(write.request.body, Some(Body::Inserts(_))))
+            {
+                self.send_tracked_batches(pending, histogram).await
+            } else {
+                future::join_all(
+                    pending
+                        .into_iter()
+                        .map(|write| self.send_tracked_write(write, histogram)),
+                )
+                .await
+            };
             pending = Vec::new();
             let mut refresh = Vec::new();
             let mut terminal = false;
@@ -219,6 +225,90 @@ impl WriteDispatcher {
             record_failure(&mut progress, &owners, error);
         }
         progress
+    }
+
+    async fn send_tracked_write(
+        &self,
+        write: RoutedWrite,
+        histogram: Option<&Histogram>,
+    ) -> (Vec<usize>, WriteAttempt) {
+        let owners = write.owners.clone().unwrap_or_default();
+        let attempt = if let Some(retry) = &self.retry {
+            retry.send(write, histogram).await
+        } else {
+            let _timer = histogram.map(Histogram::start_timer);
+            let datanode = self.node_manager.datanode(&write.peer).await;
+            match datanode.handle(write.request).await {
+                Ok(response) => WriteAttempt::Success(response),
+                Err(error) => WriteAttempt::Failed {
+                    error,
+                    request: None,
+                },
+            }
+        };
+        (owners, attempt)
+    }
+
+    async fn send_tracked_batches(
+        &self,
+        writes: Vec<RoutedWrite>,
+        histogram: Option<&Histogram>,
+    ) -> Vec<(Vec<usize>, WriteAttempt)> {
+        let mut batches: HashMap<PeerRef, Vec<TrackedBatch>> = HashMap::new();
+        let mut singles = Vec::new();
+        let mut attempts = Vec::new();
+        for write in writes {
+            if !matches!(write.request.body, Some(Body::Inserts(_))) {
+                singles.push(write);
+                continue;
+            }
+            let owners = write.owners.unwrap_or_default();
+            let mut request = match Arc::try_unwrap(write.request) {
+                Ok(request) => request,
+                Err(_) => {
+                    attempts.push((
+                        owners,
+                        WriteAttempt::Failed {
+                            error: UnexpectedSnafu {
+                                err_msg: "Region request is still shared before batching",
+                            }
+                            .build(),
+                            request: None,
+                        },
+                    ));
+                    continue;
+                }
+            };
+            let batches = batches.entry(write.peer).or_default();
+            if let Some(batch) = batches
+                .iter_mut()
+                .find(|batch| batch.request.header == request.header)
+                && let (Some(Body::Inserts(existing)), Some(Body::Inserts(next))) =
+                    (&mut batch.request.body, &mut request.body)
+            {
+                existing.requests.append(&mut next.requests);
+                batch.owners.push(owners);
+            } else {
+                batches.push(TrackedBatch {
+                    request,
+                    owners: vec![owners],
+                });
+            }
+        }
+        let batches = future::join_all(batches.into_iter().flat_map(|(peer, batches)| {
+            batches.into_iter().map(move |batch| {
+                self.send_batch(Arc::clone(&peer), batch.request, batch.owners, histogram, None)
+            })
+        }));
+        let singles = future::join_all(
+            singles
+                .into_iter()
+                .map(|write| self.send_tracked_write(write, histogram)),
+        );
+        let (batches, singles) = future::join(batches, singles).await;
+        attempts.extend(batches.into_iter().flatten());
+        attempts.extend(singles);
+        attempts
     }
 }
 
