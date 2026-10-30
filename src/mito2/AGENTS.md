@@ -104,6 +104,10 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
   resident history, and an accepted plan consumes the fairness turn for each selected
   key. Execution success or failure must not rewrite waiting ages. TWCS discovery
   must not mutate scheduler state.
+- Compaction admission is engine-wide (`compaction/scheduler/coordinator.rs`),
+  but pick/DDL state remains worker-owned. Repick only after every batch unit's
+  `Released`; FIFO submission is not admission and pipeline children share the
+  parent unit's slot. Keep service accounting across batches until region unload.
 - In flat batches, equal `__primary_key` dictionary keys imply the same series, but
   not the reverse: `wrap_pk_binary_to_dict` gives every row its own key. Compare key
   bytes when grouping rows by series.
