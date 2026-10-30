@@ -45,6 +45,7 @@ use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
 pub use fused_series::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
+    InputLocality, input_locality,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
