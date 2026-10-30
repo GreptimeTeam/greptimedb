@@ -51,7 +51,7 @@ use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
     AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality,
-    RawSeriesSource, input_locality,
+    RawSeriesSource, input_locality, tree_source_fields,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
@@ -1205,23 +1205,50 @@ fn build_inner_segment(
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
-    // A segment carries one source's identity, and the scan it binds follows from it: binding the
-    // segment's own scan is what lets the physical planner place it in a region, and binding its
-    // own metric is what keeps two segments over two sources from reading the same series. Naming
-    // that source keeps cutting independent of how many selectors the statement has.
-    //
-    // One segment per source is this route's present scope, not a property of segments: a matching
-    // subtree over two sources is a cut candidate (`MatchingLocal` needs no gather), and such a
-    // statement falls back for want of a binding that carries two sources. `sum(topk(1, m / n))`
-    // is that shape.
-    let &[index] = sources.as_slice() else {
+    if sources.is_empty() {
         return None;
-    };
-    let input = bare_scans.get(index)?.clone();
-    let (metric, time_index, tags) = per_source.get(index)?;
-    let inputs = vec![input];
+    }
+    let scans = sources
+        .iter()
+        .map(|&index| bare_scans.get(index).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    let source_tags = sources
+        .iter()
+        .map(|&index| per_source.get(index).map(|(_, _, tags)| tags.clone()))
+        .collect::<Option<Vec<_>>>()?;
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = fused_output_tags(tree.root(), std::slice::from_ref(tags))?;
+    let output_tags = fused_output_tags(tree.root(), &source_tags)?;
+    let (inputs, metric, time_index, tags) = if let [index] = sources.as_slice() {
+        let (metric, time_index, tags) = per_source.get(*index)?;
+        (scans, metric.clone(), time_index.clone(), tags.clone())
+    } else {
+        // A binding cannot describe different source identities. Give each child the existing
+        // explicit-label source boundary used for separate metric tables.
+        let source_fields = tree_source_fields(&tree).ok()?;
+        let mut children = Vec::with_capacity(sources.len());
+        for (local_index, &source_index) in sources.iter().enumerate() {
+            let (Some((Some(metric), _, source_tags)), Some(fields), Some(scan)) = (
+                per_source.get(source_index),
+                source_fields.get(local_index),
+                scans.get(local_index),
+            ) else {
+                return None;
+            };
+            children.push(LogicalPlan::Extension(Extension {
+                node: Arc::new(
+                    RawSeriesSource::try_new(
+                        Arc::clone(metric),
+                        source_tags.clone(),
+                        fields.clone(),
+                        scan.clone(),
+                    )
+                    .ok()?,
+                ),
+            }));
+        }
+        let time_index = per_source.get(*sources.first()?)?.1.clone();
+        (children, None, time_index, output_tags.clone())
+    };
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
         return None;
     }
