@@ -184,6 +184,10 @@ tql eval (60, 60, '1s') max_over_time(data[2m]);
 -- SQLNESS SORT_RESULT 2 1
 tql eval (60, 60, '1s') last_over_time(data[2m]);
 
+-- Oldest values are 2, 2, 2, NaN, NaN; this is not a minimum.
+-- SQLNESS SORT_RESULT 2 1
+tql eval (60, 60, '1s') first_over_time(data[2m]);
+
 drop table data;
 
 -- Sliding min/max regression: overlapping 30s windows expire extrema at the
