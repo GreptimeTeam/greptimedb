@@ -6825,7 +6825,7 @@ async fn native_promql_real_query_q07_throttled_periods() {
     );
 }
 
-/// Reports native planning and labelled answers for the real Q04 nested aggregate pair.
+/// Reports native planning and labelled answers for corpus Q04 verbatim.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_real_query_q04_namespace_cpu_requests() {
     common_telemetry::init_default_ut_logging();
@@ -6836,26 +6836,26 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
         &instance,
         r#"CREATE TABLE real_q04_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
             ENGINE=metric WITH ("physical_metric_table" = "true");
-        CREATE TABLE node_namespace_pod_container_cpu_usage (
+        CREATE TABLE "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" (
             "cluster" STRING, namespace STRING, pod STRING, container STRING,
             ts TIMESTAMP TIME INDEX, val DOUBLE,
             PRIMARY KEY(cluster, namespace, pod, container)
         ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
-        CREATE TABLE namespace_cpu_pod_requests (
+        CREATE TABLE "namespace_cpu:kube_pod_container_resource_requests:sum" (
             "cluster" STRING, namespace STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
             PRIMARY KEY(cluster, namespace)
         ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
-        INSERT INTO node_namespace_pod_container_cpu_usage ("cluster", namespace, pod, container, ts, val) VALUES
+        INSERT INTO "node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m" ("cluster", namespace, pod, container, ts, val) VALUES
             ('eks-us-east-1-qa1','app-0','pod-0','main',2000,1),
             ('eks-us-east-1-qa1','app-0','pod-0','main',301000,3),
             ('eks-us-east-1-qa1','app-1','pod-1','main',2000,2),
             ('eks-us-east-1-qa1','app-1','pod-1','main',301000,4);
-        INSERT INTO namespace_cpu_pod_requests ("cluster", namespace, ts, val) VALUES
+        INSERT INTO "namespace_cpu:kube_pod_container_resource_requests:sum" ("cluster", namespace, ts, val) VALUES
             ('eks-us-east-1-qa1','app-0',2000,2), ('eks-us-east-1-qa1','app-0',301000,4),
             ('eks-us-east-1-qa1','app-1',2000,4), ('eks-us-east-1-qa1','app-1',301000,8)"#,
     )
     .await;
-    let query = "sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container_cpu_usage)) by (namespace) / sum by (namespace) (namespace_cpu_pod_requests)";
+    let query = r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1"})) by (namespace) / sum(namespace_cpu:kube_pod_container_resource_requests:sum{cluster="eks-us-east-1-qa1"}) by (namespace)"#;
     let sql = format!("TQL EVAL (301, 301, '1m') {query}");
     observer.clear();
     let (legacy_columns, legacy_rows) =
@@ -6889,15 +6889,13 @@ async fn native_promql_real_query_q04_namespace_cpu_requests() {
     assert_eq!(frontend_fused.len(), 1);
     let children = frontend_fused[0].children();
     assert_eq!(children.len(), 2);
+    assert!(child_debug.iter().any(|debug| {
+        debug.contains("node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m")
+    }));
     assert!(
         child_debug
             .iter()
-            .any(|debug| debug.contains("node_namespace_pod_container_cpu_usage"))
-    );
-    assert!(
-        child_debug
-            .iter()
-            .any(|debug| debug.contains("namespace_cpu_pod_requests"))
+            .any(|debug| debug.contains("namespace_cpu:kube_pod_container_resource_requests:sum"))
     );
     assert!(
         child_debug
@@ -6957,5 +6955,359 @@ async fn native_promql_map_with_varying_parameters_matches_prometheus() {
             (20_000, "b", 12.0),
             (30_000, "b", 24.0),
         ])
+    );
+}
+
+struct CorpusCase {
+    label: &'static str,
+    promql: &'static str,
+    metrics: &'static [&'static str],
+}
+
+const CORPUS: &[CorpusCase] = &[
+    CorpusCase {
+        label: "Q01",
+        promql: r#"cluster:node_cpu:ratio_rate5m{cluster="eks-us-east-1-qa1"}"#,
+        metrics: &["cluster:node_cpu:ratio_rate5m"],
+    },
+    CorpusCase {
+        label: "Q02",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m{cluster="eks-us-east-1-qa1"})) by (namespace)"#,
+        metrics: &["node_namespace_pod_container:container_cpu_usage_seconds_total:sum_rate5m"],
+    },
+    CorpusCase {
+        label: "Q03",
+        promql: r#"sum(max by (cluster, namespace, pod, container) (container_memory_rss{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",container!=""})) by (namespace)"#,
+        metrics: &["container_memory_rss"],
+    },
+    CorpusCase {
+        label: "Q06",
+        promql: r#"sum(8 * irate(container_network_receive_bytes_total{job="kubelet",metrics_path="/metrics/cadvisor",cluster="eks-us-east-1-qa1",namespace="app-0",pod=~"pod-0"}[5m])) by (pod)"#,
+        metrics: &["container_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "Q11",
+        promql: r#"sum(rate(rest_client_requests_total{cluster="eks-us-east-1-qa1",job="kubelet",instance=~".*",code=~"2.."}[5m]))"#,
+        metrics: &["rest_client_requests_total"],
+    },
+    CorpusCase {
+        label: "Q12",
+        promql: r#"sum without(instance, node) (topk(1, kubelet_volume_stats_available_bytes{cluster="eks-us-east-1-qa1",job="kubelet",namespace="app-0",persistentvolumeclaim="persistentvolumeclaim0"}))"#,
+        metrics: &["kubelet_volume_stats_available_bytes"],
+    },
+    CorpusCase {
+        label: "L01",
+        promql: r#"100 - (avg by (region, az, hostname) (rate(node_cpu_seconds_total{mode="idle", region="us-west-2"}[1m])) * 100)"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L02",
+        promql: r#"avg without(cpu) (rate(node_cpu_seconds_total{mode!="idle", region="us-west-2"}[5m]))"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L03",
+        promql: r#"sum by (region, az) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L04",
+        promql: r#"sum by (region, az, hostname) (rate(node_network_transmit_bytes_total{device!="lo", region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_transmit_bytes_total"],
+    },
+    CorpusCase {
+        label: "L05",
+        promql: r#"node_memory_MemAvailable_bytes{region="us-west-2"} / node_memory_MemTotal_bytes{region="us-west-2"}"#,
+        metrics: &[
+            "node_memory_MemAvailable_bytes",
+            "node_memory_MemTotal_bytes",
+        ],
+    },
+    CorpusCase {
+        label: "L06",
+        promql: r#"100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|vfat", region="us-west-2"} / node_filesystem_size_bytes{fstype!~"tmpfs|vfat", region="us-west-2"})"#,
+        metrics: &["node_filesystem_avail_bytes", "node_filesystem_size_bytes"],
+    },
+    CorpusCase {
+        label: "L07",
+        promql: r#"rate(node_disk_io_time_seconds_total{device="nvme0n1", region="us-west-2"}[5m])"#,
+        metrics: &["node_disk_io_time_seconds_total"],
+    },
+    CorpusCase {
+        label: "L08",
+        promql: r#"rate(node_disk_read_time_seconds_total{device="nvme0n1", region="us-west-2"}[1m]) / rate(node_disk_reads_completed_total{device="nvme0n1", region="us-west-2"}[1m])"#,
+        metrics: &[
+            "node_disk_read_time_seconds_total",
+            "node_disk_reads_completed_total",
+        ],
+    },
+    CorpusCase {
+        label: "L09",
+        promql: r#"topk(10, sum by (hostname) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[5m])))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L10",
+        promql: r#"count by (region, az) (node_cpu_seconds_total{mode="idle", region="us-west-2"})"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "L11",
+        promql: r#"sum by (region, az, hostname, device) (rate(node_network_receive_bytes_total{region="us-west-2"}[5m]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "L12",
+        promql: r#"avg by (region, az) (node_load1{region="us-west-2"})"#,
+        metrics: &["node_load1"],
+    },
+    CorpusCase {
+        label: "R01",
+        promql: r#"sum by (region, az) (rate(node_network_receive_bytes_total{region="us-west-2"}[1h]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "R02",
+        promql: r#"100 - (avg by (region, az, hostname) (rate(node_cpu_seconds_total{mode="idle", region="us-west-2"}[1h])) * 100)"#,
+        metrics: &["node_cpu_seconds_total"],
+    },
+    CorpusCase {
+        label: "R03",
+        promql: r#"100 * (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|vfat", region="us-west-2"} / node_filesystem_size_bytes{fstype!~"tmpfs|vfat", region="us-west-2"})"#,
+        metrics: &["node_filesystem_avail_bytes", "node_filesystem_size_bytes"],
+    },
+    CorpusCase {
+        label: "R04",
+        promql: r#"topk(10, sum by (hostname) (rate(node_network_receive_bytes_total{device!="lo", region="us-west-2"}[1h])))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+    CorpusCase {
+        label: "R05",
+        promql: r#"sum by (region, az, hostname, device) (rate(node_network_receive_bytes_total{region="us-west-2"}[1h]))"#,
+        metrics: &["node_network_receive_bytes_total"],
+    },
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_corpus_route_matrix() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_corpus_route_matrix",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    let all_tags = &[
+        "cluster",
+        "namespace",
+        "pod",
+        "container",
+        "job",
+        "metrics_path",
+        "instance",
+        "code",
+        "persistentvolumeclaim",
+        "node",
+        "mode",
+        "region",
+        "az",
+        "hostname",
+        "cpu",
+        "device",
+        "fstype",
+    ];
+    let metrics = CORPUS
+        .iter()
+        .flat_map(|case| case.metrics.iter().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut fixture = String::from(
+        r#"CREATE TABLE corpus_phy (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE=metric WITH ("physical_metric_table"="true");"#,
+    );
+    for metric in &metrics {
+        fixture.push_str(&format!(" CREATE TABLE \"{metric}\" ("));
+        for tag in all_tags {
+            fixture.push_str(&format!("\"{tag}\" STRING, "));
+        }
+        fixture.push_str("ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(");
+        fixture.push_str(
+            &all_tags
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        fixture.push_str(")) ENGINE=metric WITH (\"on_physical_table\"='corpus_phy');");
+        for (host, pod, az, ts, value) in [
+            ("h0", "pod-0", "a0", 242000, 1.0),
+            ("h0", "pod-0", "a0", 300000, 301.0),
+            ("h1", "pod-1", "a1", 242000, 2.0),
+            ("h1", "pod-1", "a1", 300000, 602.0),
+        ] {
+            let columns = all_tags
+                .iter()
+                .map(|t| format!("\"{t}\""))
+                .chain(["ts".to_string(), "val".to_string()])
+                .collect::<Vec<_>>();
+            let values = all_tags
+                .iter()
+                .map(|tag| match *tag {
+                    "cluster" => "eks-us-east-1-qa1".to_string(),
+                    "namespace" => "app-0".to_string(),
+                    "pod" => pod.to_string(),
+                    "container" => "main".to_string(),
+                    "job" => "kubelet".to_string(),
+                    "metrics_path" => "/metrics/cadvisor".to_string(),
+                    "code" => "200".to_string(),
+                    "instance" => host.to_string(),
+                    "persistentvolumeclaim" => "persistentvolumeclaim0".to_string(),
+                    "node" => host.to_string(),
+                    "region" => "us-west-2".to_string(),
+                    "az" => az.to_string(),
+                    "hostname" => host.to_string(),
+                    "mode" => if host == "h0" { "idle" } else { "user" }.to_string(),
+                    "cpu" => if host == "h0" { "0" } else { "1" }.to_string(),
+                    "device" => "nvme0n1".to_string(),
+                    "fstype" => "ext4".to_string(),
+                    _ => String::new(),
+                })
+                .map(|v| format!("'{v}'"))
+                .chain([ts.to_string(), value.to_string()])
+                .collect::<Vec<_>>();
+            fixture.push_str(&format!(
+                " INSERT INTO \"{metric}\" ({}) VALUES ({});",
+                columns.join(","),
+                values.join(",")
+            ));
+        }
+    }
+    execute_all(&instance, &fixture, QueryContext::arc()).await;
+    let mut table_rows = Vec::new();
+    for case in CORPUS {
+        let sql = format!("TQL EVAL (301, 361, '1m') {}", case.promql);
+        observer.clear();
+        let (legacy_columns, legacy_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+        assert!(
+            !legacy_rows.is_empty(),
+            "{} legacy fixture produced no rows",
+            case.label
+        );
+        observer.clear();
+        let (native_columns, native_rows) =
+            native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+        let root = observer.root_plan();
+        let root_display = datafusion::physical_plan::displayable(root.as_ref())
+            .indent(true)
+            .to_string();
+        let regions = observer.region_plans();
+        let region_displays = regions
+            .iter()
+            .map(|plan| {
+                datafusion::physical_plan::displayable(plan.as_ref())
+                    .indent(true)
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+        let fused = !fused_nodes_in_root(&root).is_empty();
+        let split = root_display.contains("AggregateFinalizeExec")
+            && regions.iter().any(|p| {
+                let d = datafusion::physical_plan::displayable(p.as_ref())
+                    .indent(true)
+                    .to_string();
+                d.contains("FusedSeriesExec") && d.contains("partial state:")
+            });
+        let segmented = fused && root_display.contains("MergeScanExec");
+        let region_local = regions.iter().any(|plan| {
+            let mut stack = vec![plan.clone()];
+            while let Some(node) = stack.pop() {
+                if node.name() == "FusedSeriesExec" {
+                    return true;
+                }
+                stack.extend(node.children().into_iter().cloned());
+            }
+            false
+        });
+        let route = if segmented {
+            "segmented"
+        } else if split {
+            "aggregate-split"
+        } else if region_local {
+            "region-local"
+        } else {
+            "legacy"
+        };
+        let rows_equal = native_rows == legacy_rows;
+        if case.label == "L07" || case.label == "Q01" {
+            let mut repeated_values = Vec::new();
+            for enabled in [false, false, true] {
+                repeated_values.push(
+                    native_labelled_rows(native_tql_output(&instance, &sql, enabled).await)
+                        .await
+                        .1,
+                );
+            }
+            common_telemetry::info!(
+                "{} triple runs [native off, native off, native on]: {repeated_values:?}",
+                case.label
+            );
+        }
+        let max_rel_diff = native_rows
+            .iter()
+            .zip(&legacy_rows)
+            .map(|(native, legacy)| (native.2 - legacy.2).abs() / legacy.2.abs().max(1.0))
+            .fold(0.0_f64, f64::max);
+        if route != "legacy" {
+            assert_eq!(
+                native_rows.len(),
+                legacy_rows.len(),
+                "{} row count mismatch",
+                case.label
+            );
+            for (native_row, legacy_row) in native_rows.iter().zip(&legacy_rows) {
+                assert_eq!(
+                    (native_row.0, &native_row.1),
+                    (legacy_row.0, &legacy_row.1),
+                    "{} labels/timestamps",
+                    case.label
+                );
+                assert!(
+                    (native_row.2 - legacy_row.2).abs() <= 1e-10 * legacy_row.2.abs().max(1.0),
+                    "{} value mismatch: {native_row:?} vs {legacy_row:?}",
+                    case.label
+                );
+            }
+        }
+        let value_column = native_columns
+            .iter()
+            .find(|column| {
+                column.as_str() != "ts"
+                    && native_rows
+                        .first()
+                        .is_none_or(|row| !row.1.contains_key(column.as_str()))
+            })
+            .cloned()
+            .unwrap_or_else(|| {
+                if case.label == "Q01" {
+                    "val".to_string()
+                } else {
+                    String::new()
+                }
+            });
+        let row = format!(
+            "{} | {} | {} | {} | {:.6e} | {}",
+            case.label,
+            route,
+            if route == "legacy" { "unknown" } else { "—" },
+            rows_equal,
+            max_rel_diff,
+            value_column
+        );
+        common_telemetry::info!(
+            "{row} | legacy rows={legacy_rows:?} legacy columns={legacy_columns:?} native rows={native_rows:?} native columns={native_columns:?} max_rel_diff={max_rel_diff:.6e} root:\n{root_display} region_plans={region_displays:?}"
+        );
+        table_rows.push(row);
+    }
+    common_telemetry::info!(
+        "label | route | gate-if-legacy | rows==legacy | native value column\n{}",
+        table_rows.join("\n")
     );
 }
