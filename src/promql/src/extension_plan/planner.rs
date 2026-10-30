@@ -126,7 +126,9 @@ fn plan_fused_series(
         ));
     }
     if physical_inputs.is_empty() {
-        return fused.to_execution_plan(Vec::new()).map(Some);
+        return fused
+            .to_execution_plan_with_parallelism(Vec::new(), target_partitions)
+            .map(Some);
     }
     if let Some(inputs) = physical_inputs
         .iter()
@@ -136,7 +138,9 @@ fn plan_fused_series(
         })
         .collect::<Option<Vec<_>>>()
     {
-        return fused.to_execution_plan(inputs).map(Some);
+        return fused
+            .to_execution_plan_with_parallelism(inputs, target_partitions)
+            .map(Some);
     }
     if physical_inputs
         .iter()
@@ -177,7 +181,9 @@ fn plan_fused_series(
             series_scan.raw_series_ordering(),
         ));
     }
-    fused.to_execution_plan(series_inputs).map(Some)
+    fused
+        .to_execution_plan_with_parallelism(series_inputs, target_partitions)
+        .map(Some)
 }
 
 /// Builds the region half of a [`RawSeriesSource`]: the region's raw-series leaf for its binding.

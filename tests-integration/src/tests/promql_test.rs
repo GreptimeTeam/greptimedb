@@ -6349,6 +6349,15 @@ async fn native_promql_multi_source_segments_match_legacy_values() {
         .iter()
         .find(|node| node.children().len() == 2)
         .expect("the m/n matching subtree must be one segment over both tables");
+    // The engine is configured for four workers, and each table arrives from one region as a
+    // single partition. The segment must run at the configured width anyway, so each table's one
+    // partition is spread over four; without this the match runs serial while the scans below it
+    // are parallel.
+    assert_eq!(
+        4,
+        segment.output_partitioning().partition_count(),
+        "a matching segment runs at the configured width, not at its inputs' count"
+    );
     let child_debug = segment
         .children()
         .iter()
@@ -6797,13 +6806,17 @@ fn fused_nodes_in_root(
 }
 
 fn debug_merge_scan_child(child: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> String {
-    let child = if child.is::<CooperativeExec>() {
+    // A matching segment re-declares each source at the configured width, so a one-partition
+    // region scan arrives under a router. Look through both the cooperative wrapper and that
+    // router to reach the scan the source is actually read from.
+    let mut child = child;
+    while child.is::<CooperativeExec>()
+        || child.is::<promql::extension_plan::SeriesRepartitionExec>()
+    {
         let wrapped = child.children();
-        assert_eq!(wrapped.len(), 1, "cooperative wrapper must have one child");
-        wrapped[0]
-    } else {
-        child
-    };
+        assert_eq!(wrapped.len(), 1, "a wrapper here must have one child");
+        child = wrapped[0];
+    }
     let scan = child
         .downcast_ref::<MergeScanExec>()
         .expect("frontend child must be a MergeScanExec");
