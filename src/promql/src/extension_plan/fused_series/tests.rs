@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use common_query::series_frame::unpack_evaluated_series;
+use common_query::series_frame::{pack_evaluated_series, unpack_evaluated_series};
 use datafusion::arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use datafusion::arrow::buffer::{Buffer, ScalarBuffer};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -290,6 +290,68 @@ fn binary_tree_over_sources(
         output: NativeType::Samples(output),
     })
     .unwrap()
+}
+
+/// A mixed-input binary: raw source 0 is rate-evaluated, while evaluated source 1 is already on `grid`.
+fn mixed_raw_evaluated_tree() -> NativeTree {
+    let grid = grid();
+    let raw = raw_schema();
+    let evaluated_schema = Arc::new(SeriesSchema {
+        fields: raw.fields.clone(),
+        eval_grid: Some(Arc::clone(&grid)),
+    });
+    let evaluated = NativeType::Samples(Arc::clone(&evaluated_schema));
+    let raw_type = NativeType::Samples(Arc::clone(&raw));
+    let left_input = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: raw_type.clone(),
+            source_index: 0,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: raw_type,
+    };
+    let left = NativeNode {
+        expr: NativeExpr::Window {
+            input: Box::new(left_input),
+            op: BoundWindow {
+                function: RangeFunction::Rate,
+                window: RangeWindow {
+                    range_ms: RANGE_MS,
+                    offset_ms: 0,
+                    anchor_ms: None,
+                    modifier: None,
+                },
+                input_grid: None,
+                output_grid: Arc::clone(&grid),
+            },
+        },
+        output: evaluated.clone(),
+    };
+    let right = NativeNode {
+        expr: NativeExpr::Input(BoundInput {
+            output: evaluated.clone(),
+            source_index: 1,
+            ordering: SeriesOrdering::Contiguous,
+        }),
+        output: evaluated.clone(),
+    };
+    let output = crate::vector_match::binary_output_schema(&evaluated_schema, &evaluated_schema)
+        .expect("same-grid samples can be matched");
+    NativeTree::try_new(NativeNode {
+        expr: NativeExpr::Binary {
+            left: Box::new(left),
+            right: Box::new(right),
+            matching: BinaryMatching {
+                op: BinaryOp::Add,
+                return_bool: false,
+                labels: MatchingLabels::On(vec![Arc::from(HOST)]),
+                cardinality: Cardinality::OneToOne,
+                fill: FillValues::default(),
+            },
+        },
+        output: NativeType::Samples(output),
+    })
+    .expect("raw-rate and evaluated samples share the output grid")
 }
 
 /// The constant scalar `value`, evaluated on `grid`.
@@ -4014,6 +4076,165 @@ async fn a_failed_input_exports_no_partial_state() {
         error.to_string().contains("partition"),
         "refused for another reason: {error}"
     );
+}
+
+/// A fused tree can decode its raw source and already-evaluated source independently.
+#[tokio::test]
+async fn mixed_raw_and_evaluated_inputs_execute_with_source_local_decoders() {
+    let tree = mixed_raw_evaluated_tree();
+    let mut evaluated_batches = Vec::new();
+    for (host, values) in [
+        ("web-1", vec![10.0, 20.0, 30.0, 40.0, 50.0]),
+        ("web-2", vec![60.0, 70.0, 80.0, 90.0, 100.0]),
+    ] {
+        let schema = Arc::new(SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        });
+        let chunk = EvaluatedChunk::try_new(
+            Series {
+                metric: metric(&[(HOST, host)], Some(METRIC)),
+                time: TimeAxis::from_grid_spans(
+                    Arc::clone(schema.eval_grid.as_ref().unwrap()),
+                    vec![GridSpan::new(0, GRID_LEN as usize)],
+                )
+                .unwrap(),
+                fields: SeriesFields::try_from_vec(vec![Samples::from_float(Float64Array::from(
+                    values,
+                ))])
+                .unwrap(),
+            },
+            true,
+        )
+        .unwrap();
+        evaluated_batches.extend(
+            pack_evaluated_series(
+                Box::pin(futures::stream::iter(vec![Ok((
+                    chunk.series,
+                    chunk.is_last,
+                ))])),
+                schema,
+            )
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+        );
+    }
+    let raw_batches = frames(&[
+        series_chunk("web-1", &series_samples(1.0), true),
+        series_chunk("web-2", &series_samples(1.0), true),
+    ]);
+    let evaluated_frame_schema = series_frame_schema(
+        &SeriesSchema {
+            fields: raw_schema().fields.clone(),
+            eval_grid: Some(grid()),
+        },
+        FrameLabelMode::Explicit,
+        None,
+    )
+    .unwrap();
+    let exec = FusedSeries::try_new(
+        Arc::from("mixed raw/evaluated"),
+        tree.clone(),
+        binding_of(
+            &tree,
+            raw_schema(),
+            vec![HOST.to_string(), NAME.to_string()],
+        ),
+        vec![
+            input_plan(frame_schema()),
+            input_plan(evaluated_frame_schema.clone()),
+        ],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap()
+    .to_execution_plan(vec![
+        (
+            memory_exec(raw_batches),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        ),
+        (
+            memory_exec_with(evaluated_frame_schema, evaluated_batches),
+            RawLabelSource::Explicit,
+            SeriesOrdering::Contiguous,
+        ),
+    ])
+    .unwrap();
+    let mut actual = rows(
+        &collect(exec, SessionContext::default().task_ctx())
+            .await
+            .unwrap(),
+    );
+    let mut expected = vec![
+        (GRID_START, Some(11.0), Some("web-1".into()), None),
+        (
+            GRID_START + GRID_STEP,
+            Some(21.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 2 * GRID_STEP,
+            Some(31.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 3 * GRID_STEP,
+            Some(41.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (
+            GRID_START + 4 * GRID_STEP,
+            Some(51.0),
+            Some("web-1".into()),
+            None,
+        ),
+        (GRID_START, Some(61.0), Some("web-2".into()), None),
+        (
+            GRID_START + GRID_STEP,
+            Some(71.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 2 * GRID_STEP,
+            Some(81.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 3 * GRID_STEP,
+            Some(91.0),
+            Some("web-2".into()),
+            None,
+        ),
+        (
+            GRID_START + 4 * GRID_STEP,
+            Some(101.0),
+            Some("web-2".into()),
+            None,
+        ),
+    ];
+    actual.sort_by(|left, right| {
+        (left.0, left.2.as_deref(), left.3.as_deref()).cmp(&(
+            right.0,
+            right.2.as_deref(),
+            right.3.as_deref(),
+        ))
+    });
+    expected.sort_by(|left, right| {
+        (left.0, left.2.as_deref(), left.3.as_deref()).cmp(&(
+            right.0,
+            right.2.as_deref(),
+            right.3.as_deref(),
+        ))
+    });
+    assert_eq!(10, actual.len());
+    assert_eq!(expected, actual);
 }
 
 /// Frame output is planned from the evaluated root and is emitted without flattening to rows.
