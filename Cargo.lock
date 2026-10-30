@@ -13848,6 +13848,7 @@ dependencies = [
  "prost 0.14.1",
  "snafu 0.8.6",
  "sql",
+ "tokio",
  "uuid",
 ]
 

@@ -25,7 +25,7 @@
 //!    would otherwise be admitted for free), and a client can understate the
 //!    header while sending a much larger body.
 //!
-//! Permits acquired while streaming are held by [`BodyMemoryAccounting`],
+//! Upfront and streaming permits are held by [`BodyMemoryAccounting`],
 //! which is also inserted into the request extensions so they stay alive until
 //! the whole request is finished (extractors collect the body into owned
 //! buffers that outlive the body stream itself).
@@ -67,7 +67,7 @@ pub async fn memory_limit_middleware(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let _guard = match limiter.acquire(content_length).await {
+    let guard = match limiter.acquire(content_length).await {
         Ok(guard) => guard,
         Err(e) => {
             return (
@@ -87,6 +87,7 @@ pub async fn memory_limit_middleware(
     // Account whatever is actually streamed beyond the upfront reservation
     // (chunked transfer has none).
     let accounting = BodyMemoryAccounting::default();
+    accounting.hold(guard);
     // The middleware keeps its own handle so the acquired permits stay held
     // for the whole request: the body wrapper and the extensions are dropped
     // once the extractors finish collecting the body, before the handler is
@@ -168,13 +169,13 @@ pub async fn decoded_body_accounting_middleware(
     quota_exceeded_response(&retained_accounting, response)
 }
 
-/// Holds the memory guards acquired while a request body is streamed. Shared
+/// Holds the memory guards acquired upfront and while a request body is streamed. Shared
 /// between the [`AccountedBody`] wrapper, the request extensions and the
 /// middleware itself, so the permits are only released when the request
 /// (including any collected body buffers and the handler still using them)
 /// is finished.
 #[derive(Clone, Default)]
-struct BodyMemoryAccounting {
+pub(crate) struct BodyMemoryAccounting {
     guards: Arc<Mutex<Vec<MemoryGuard<RequestMemoryMetrics>>>>,
     /// Set when an incremental charge hit the quota, so the rejection can be
     /// rewritten into a 429 after the middleware regains control.
@@ -182,6 +183,16 @@ struct BodyMemoryAccounting {
 }
 
 impl BodyMemoryAccounting {
+    /// Includes permit rounding and all frames collected so far.
+    pub(crate) fn reserved_bytes(&self) -> u64 {
+        self.guards
+            .lock()
+            .unwrap()
+            .iter()
+            .map(MemoryGuard::granted_bytes)
+            .sum()
+    }
+
     fn hold(&self, guard: MemoryGuard<RequestMemoryMetrics>) {
         self.guards.lock().unwrap().push(guard);
     }

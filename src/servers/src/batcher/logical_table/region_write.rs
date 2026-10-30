@@ -25,7 +25,7 @@ use catalog::CatalogManagerRef;
 use common_grpc::error::Error as GrpcError;
 use common_grpc::flight;
 use common_telemetry::tracing_context::TracingContext;
-use operator::write_dispatcher::WriteDispatcherRef;
+use operator::write_dispatcher::{WriteAttribution, WriteDispatcherRef};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
 use snafu::ResultExt;
@@ -68,7 +68,7 @@ pub trait PhysicalFlushPartitionProvider: Send + Sync {
 #[async_trait]
 pub trait PhysicalFlushWriteDispatcher: Send + Sync {
     /// Dispatches one physical flush together, sharing routing refreshes across its writes.
-    async fn dispatch(&self, requests: Vec<RegionRequest>) -> Result<usize>;
+    async fn dispatch(&self, requests: Vec<(RegionRequest, WriteAttribution)>) -> Result<usize>;
 }
 
 #[derive(Clone)]
@@ -126,12 +126,14 @@ pub(crate) struct WriteDispatcherPhysicalFlushAdapter {
 
 #[async_trait]
 impl PhysicalFlushWriteDispatcher for WriteDispatcherPhysicalFlushAdapter {
-    async fn dispatch(&self, requests: Vec<RegionRequest>) -> Result<usize> {
+    async fn dispatch(&self, requests: Vec<(RegionRequest, WriteAttribution)>) -> Result<usize> {
         self.write_dispatcher
-            .dispatch_with_metrics(
+            .dispatch_attributed(
                 requests,
-                metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                    .with_label_values(&["flush_write_region"]),
+                Some(
+                    metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                        .with_label_values(&["flush_write_region"]),
+                ),
             )
             .await
             .context(error::CommonMetaSnafu)
@@ -141,6 +143,7 @@ impl PhysicalFlushWriteDispatcher for WriteDispatcherPhysicalFlushAdapter {
 
 /// Arrow rows selected for one physical region.
 pub(crate) struct PlannedRegionBatch {
+    pub(crate) attribution: WriteAttribution,
     pub(crate) region_id: RegionId,
     pub(crate) batch: RecordBatch,
 }
@@ -169,6 +172,7 @@ pub(crate) fn plan_region_batch(
     physical_table_id: TableId,
     region_number: u32,
     mask: &partition::partition::RegionMask,
+    attribution: &WriteAttribution,
 ) -> Result<Option<PlannedRegionBatch>> {
     if mask.select_none() {
         return Ok(None);
@@ -189,6 +193,7 @@ pub(crate) fn plan_region_batch(
     }
 
     Ok(Some(PlannedRegionBatch {
+        attribution: attribution.filter(mask).context(error::CommonMetaSnafu)?,
         region_id: RegionId::new(physical_table_id, region_number),
         batch: region_batch,
     }))
@@ -199,6 +204,7 @@ pub(crate) fn plan_region_batches(
     combined_batch: RecordBatch,
     physical_table_id: TableId,
     partition_rule: &dyn partition::partition::PartitionRule,
+    attribution: WriteAttribution,
 ) -> Result<Vec<PlannedRegionBatch>> {
     let region_masks = split_combined_batch_by_region(&combined_batch, partition_rule)?;
 
@@ -206,9 +212,13 @@ pub(crate) fn plan_region_batches(
     // Mito's sparse bulk conversion projects the stored fields and encoded primary key.
     let mut planned_batches = Vec::new();
     for (region_number, mask) in region_masks {
-        if let Some(planned_batch) =
-            plan_region_batch(&combined_batch, physical_table_id, region_number, &mask)?
-        {
+        if let Some(planned_batch) = plan_region_batch(
+            &combined_batch,
+            physical_table_id,
+            region_number,
+            &mask,
+            &attribution,
+        )? {
             planned_batches.push(planned_batch);
         }
     }
@@ -221,7 +231,7 @@ pub(crate) fn encode_region_write_requests(
     planned_batches: Vec<PlannedRegionBatch>,
     skip_wal: bool,
     partition_versions: &HashMap<u32, Option<u64>>,
-) -> Result<Vec<RegionRequest>> {
+) -> Result<Vec<(RegionRequest, WriteAttribution)>> {
     let mut region_writes = Vec::with_capacity(planned_batches.len());
     for planned in planned_batches {
         let region_id = planned.region_id;
@@ -256,7 +266,7 @@ pub(crate) fn encode_region_write_requests(
             })),
         };
 
-        region_writes.push(request);
+        region_writes.push((request, planned.attribution));
     }
 
     Ok(region_writes)
@@ -334,6 +344,7 @@ mod tests {
             &TwoRegionPartitionRule {
                 partition_columns: vec!["host".to_string()],
             },
+            operator::write_dispatcher::WriteAttribution::new(2, None),
         )
         .unwrap();
         planned_batches.sort_by_key(|planned| planned.region_id.region_number());
@@ -352,7 +363,7 @@ mod tests {
             &HashMap::from([(1, Some(7)), (2, Some(8))]),
         )
         .unwrap();
-        for (index, write) in writes.into_iter().enumerate() {
+        for (index, (write, _)) in writes.into_iter().enumerate() {
             let Some(region_request::Body::BulkInsert(request)) = write.body else {
                 panic!("expected bulk")
             };
@@ -426,6 +437,7 @@ mod tests {
 
     fn check_encode_region_write_requests(skip_wal: bool) {
         let planned_batch = PlannedRegionBatch {
+            attribution: operator::write_dispatcher::WriteAttribution::new(1, None),
             region_id: RegionId::new(1024, 1),
             batch: RecordBatch::try_new(
                 Arc::new(ArrowSchema::new(vec![
@@ -453,7 +465,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(1, writes.len());
-        let Some(region_request::Body::BulkInsert(request)) = &writes[0].body else {
+        let Some(region_request::Body::BulkInsert(request)) = &writes[0].0.body else {
             panic!("expected bulk insert request");
         };
         assert_eq!(RegionId::new(1024, 1).as_u64(), request.region_id);
