@@ -6692,6 +6692,229 @@ async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
     // private region-side physical segment held by each MergeScanExec.
 }
 
+/// Sets up a shared physical metric table and the query-specific logical metric tables and rows.
+/// Explicit INSERT columns are essential because the physical column order differs from the
+/// logical tables; SQL keywords such as `cluster` must be quoted; and timestamps at zero are
+/// excluded by the scan lower bound and PromQL staleness handling.
+async fn setup_real_query_metric_fixture(instance: &Arc<Instance>, fixture_sql: &str) {
+    execute_all(instance, fixture_sql, QueryContext::arc()).await;
+}
+
+fn fused_nodes_in_root(
+    root: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+    let mut found = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec" {
+            found.push(node.clone());
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    found
+}
+
+fn debug_merge_scan_child(child: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> String {
+    let child = if child.is::<CooperativeExec>() {
+        let wrapped = child.children();
+        assert_eq!(wrapped.len(), 1, "cooperative wrapper must have one child");
+        wrapped[0]
+    } else {
+        child
+    };
+    let scan = child
+        .downcast_ref::<MergeScanExec>()
+        .expect("frontend child must be a MergeScanExec");
+    format!("{scan:?}")
+}
+
+/// Reports native planning and labelled answers for the real Q07 aggregate pair.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_real_query_q07_throttled_periods() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q07")).await;
+    let instance = standalone.fe_instance().clone();
+    setup_real_query_metric_fixture(
+        &instance,
+        r#"CREATE TABLE real_q_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE container_cpu_cfs_throttled_periods_total (
+            "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
+            pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, job, metrics_path, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');
+        CREATE TABLE container_cpu_cfs_periods_total (
+            "cluster" STRING, job STRING, metrics_path STRING, namespace STRING,
+            pod STRING, container STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, job, metrics_path, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q_phy');
+        INSERT INTO container_cpu_cfs_throttled_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,60),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,30);
+        INSERT INTO container_cpu_cfs_periods_total ("cluster", job, metrics_path, namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','main',301000,120),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',2000,0),
+            ('eks-us-east-1-qa1','kubelet','/metrics/cadvisor','app-0','pod-0','sidecar',301000,60)"#,
+    )
+    .await;
+    let query = r#"sum(increase(container_cpu_cfs_throttled_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container) / sum(increase(container_cpu_cfs_periods_total{job="kubelet",metrics_path="/metrics/cadvisor",namespace="app-0",pod="pod-0",container!="",cluster="eks-us-east-1-qa1"}[5m])) by (container)"#;
+    let sql = format!("TQL EVAL (301, 301, '1m') {query}");
+    observer.clear();
+    let (legacy_columns, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(!legacy_rows.is_empty(), "Q07 legacy rows must be nonempty");
+    observer.clear();
+    let (native_columns, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let native = observer.fused().is_some();
+    assert!(
+        native,
+        "{query}: the native route must answer this statement; it declined: {root_display}"
+    );
+    let frontend_fused = fused_nodes_in_root(&root);
+    let child_debug = frontend_fused[0]
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    common_telemetry::info!(
+        "Q07 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
+        root.name(),
+        frontend_fused.len()
+    );
+    assert_eq!(native_rows, legacy_rows, "Q07 labelled rows");
+    assert_eq!(root.name(), "FusedSeriesExec");
+    assert_eq!(frontend_fused.len(), 1);
+    let children = frontend_fused[0].children();
+    assert_eq!(children.len(), 2);
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("container_cpu_cfs_throttled_periods_total"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("container_cpu_cfs_periods_total"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("FusedSeries"))
+    );
+    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    assert!(
+        legacy_columns
+            .iter()
+            .any(|column| column.contains("prom_increase"))
+    );
+    assert_eq!(
+        native_columns
+            .iter()
+            .filter(|column| *column == "val")
+            .count(),
+        1
+    );
+}
+
+/// Reports native planning and labelled answers for the real Q04 nested aggregate pair.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_real_query_q04_namespace_cpu_requests() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) =
+        native_test_instance(GreptimeDbStandaloneBuilder::new("native_promql_real_q04")).await;
+    let instance = standalone.fe_instance().clone();
+    setup_real_query_metric_fixture(
+        &instance,
+        r#"CREATE TABLE real_q04_phy (ts TIMESTAMP TIME INDEX, val DOUBLE)
+            ENGINE=metric WITH ("physical_metric_table" = "true");
+        CREATE TABLE node_namespace_pod_container_cpu_usage (
+            "cluster" STRING, namespace STRING, pod STRING, container STRING,
+            ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, namespace, pod, container)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
+        CREATE TABLE namespace_cpu_pod_requests (
+            "cluster" STRING, namespace STRING, ts TIMESTAMP TIME INDEX, val DOUBLE,
+            PRIMARY KEY(cluster, namespace)
+        ) ENGINE=metric WITH ("on_physical_table" = 'real_q04_phy');
+        INSERT INTO node_namespace_pod_container_cpu_usage ("cluster", namespace, pod, container, ts, val) VALUES
+            ('eks-us-east-1-qa1','app-0','pod-0','main',2000,1),
+            ('eks-us-east-1-qa1','app-0','pod-0','main',301000,3),
+            ('eks-us-east-1-qa1','app-1','pod-1','main',2000,2),
+            ('eks-us-east-1-qa1','app-1','pod-1','main',301000,4);
+        INSERT INTO namespace_cpu_pod_requests ("cluster", namespace, ts, val) VALUES
+            ('eks-us-east-1-qa1','app-0',2000,2), ('eks-us-east-1-qa1','app-0',301000,4),
+            ('eks-us-east-1-qa1','app-1',2000,4), ('eks-us-east-1-qa1','app-1',301000,8)"#,
+    )
+    .await;
+    let query = "sum(max by (cluster, namespace, pod, container) (node_namespace_pod_container_cpu_usage)) by (namespace) / sum by (namespace) (namespace_cpu_pod_requests)";
+    let sql = format!("TQL EVAL (301, 301, '1m') {query}");
+    observer.clear();
+    let (legacy_columns, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(!legacy_rows.is_empty(), "Q04 legacy rows must be nonempty");
+    observer.clear();
+    let (native_columns, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let native = observer.fused().is_some();
+    assert!(
+        native,
+        "{query}: the native route must answer this statement; it declined: {root_display}"
+    );
+    let frontend_fused = fused_nodes_in_root(&root);
+    let child_debug = frontend_fused[0]
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    common_telemetry::info!(
+        "Q04 root name={} fused_frontend={} child merge scans={child_debug:?} value columns legacy={legacy_columns:?} native={native_columns:?}, legacy_rows={legacy_rows:?} native_rows={native_rows:?}, root:\n{root_display}",
+        root.name(),
+        frontend_fused.len()
+    );
+    assert_eq!(native_rows, legacy_rows, "Q04 labelled rows");
+    assert_eq!(root.name(), "FusedSeriesExec");
+    assert_eq!(frontend_fused.len(), 1);
+    let children = frontend_fused[0].children();
+    assert_eq!(children.len(), 2);
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("node_namespace_pod_container_cpu_usage"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .any(|debug| debug.contains("namespace_cpu_pod_requests"))
+    );
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("FusedSeries"))
+    );
+    // Known computed-column naming gap from the ungrouped two-source case; values agree.
+    assert!(legacy_columns.iter().any(|column| column.contains("max(")));
+    assert_eq!(
+        native_columns
+            .iter()
+            .filter(|column| *column == "val")
+            .count(),
+        1
+    );
+}
+
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
 /// parameter that reads no data runs per partition over the scan. The answers are Prometheus'
 /// literal ones: the existing planner does not plan a parameter that is not a number literal, so it
