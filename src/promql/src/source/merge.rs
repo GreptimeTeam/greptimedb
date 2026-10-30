@@ -87,83 +87,124 @@ pub(crate) fn merge_raw_identity_charging(
     for chunk in chunks.iter() {
         row_count = row_count.saturating_add(chunk.time.len());
     }
-    reserve(row_count.saturating_mul(std::mem::size_of::<(i64, usize, usize)>()))?;
-    let mut rows = Vec::with_capacity(row_count);
-    for (chunk_index, chunk) in chunks.iter().enumerate() {
-        for row_index in 0..chunk.time.len() {
-            rows.push((chunk.time.as_buffer()[row_index], chunk_index, row_index));
-        }
-    }
-    rows.sort_unstable();
-
-    reserve(
-        rows.len()
-            .saturating_mul(std::mem::size_of::<(i64, usize, usize)>()),
-    )?;
-    let mut selected = Vec::with_capacity(rows.len());
-    let mut index = 0;
-    while index < rows.len() {
-        let mut end = index + 1;
-        while end < rows.len() && rows[end].0 == rows[index].0 {
-            end += 1;
-        }
-        for duplicate in &rows[index + 1..end] {
-            for field_index in 0..schema.fields.len() {
-                if !samples_equal(
-                    chunks[rows[index].1]
-                        .fields
-                        .get(field_index)
-                        .ok_or_else(|| invalid("field index out of bounds"))?
-                        .sample(rows[index].2),
-                    chunks[duplicate.1]
-                        .fields
-                        .get(field_index)
-                        .ok_or_else(|| invalid("field index out of bounds"))?
-                        .sample(duplicate.2),
-                ) {
-                    return Err(invalid("duplicate raw timestamp has conflicting samples"));
-                }
-            }
-        }
-        selected.push(rows[index]);
-        index = end;
-    }
-
-    reserve(selected.len().saturating_mul(std::mem::size_of::<i64>()))?;
-    let mut times = Vec::with_capacity(selected.len());
-    for row in &selected {
-        times.push(row.0);
-    }
+    let chunks_are_ordered_and_disjoint = chunks.windows(2).all(|pair| {
+        pair[0]
+            .time
+            .as_buffer()
+            .last()
+            .zip(pair[1].time.as_buffer().first())
+            .is_some_and(|(last, first)| last < first)
+    });
+    let mut transient_workspace_bytes = 0usize;
     let mut output_fields = Vec::with_capacity(schema.fields.len());
-    for field_index in 0..schema.fields.len() {
-        let mut parts = Vec::new();
-        let mut start = 0;
-        while start < selected.len() {
-            let (chunk_index, row_index) = (selected[start].1, selected[start].2);
-            let mut end = start + 1;
-            while end < selected.len()
-                && selected[end].1 == chunk_index
-                && selected[end].2 == selected[end - 1].2 + 1
-            {
-                end += 1;
+    let times = if chunks_are_ordered_and_disjoint {
+        reserve(row_count.saturating_mul(std::mem::size_of::<i64>()))?;
+        let mut times = Vec::with_capacity(row_count);
+        for chunk in chunks {
+            times.extend_from_slice(chunk.time.as_buffer());
+        }
+        for field_index in 0..schema.fields.len() {
+            let mut parts = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                let source = chunk
+                    .fields
+                    .get(field_index)
+                    .ok_or_else(|| invalid("field index out of bounds"))?;
+                reserve(std::mem::size_of::<Samples>())?;
+                parts.push(
+                    source
+                        .slice(0, chunk.time.len())
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?,
+                );
             }
-            let source = chunks[chunk_index]
-                .fields
-                .get(field_index)
-                .ok_or_else(|| invalid("field index out of bounds"))?;
-            reserve(std::mem::size_of::<Samples>())?;
-            parts.push(
-                source
-                    .slice(row_index, end - start)
+            output_fields.push(
+                Samples::try_from_chunks(parts)
                     .map_err(|error| DataFusionError::External(Box::new(error)))?,
             );
-            start = end;
         }
-        output_fields.push(
-            Samples::try_from_chunks(parts)
-                .map_err(|error| DataFusionError::External(Box::new(error)))?,
-        );
-    }
+        times
+    } else {
+        transient_workspace_bytes = row_count
+            .saturating_mul(std::mem::size_of::<(i64, usize, usize)>())
+            .saturating_mul(2);
+        reserve(row_count.saturating_mul(std::mem::size_of::<(i64, usize, usize)>()))?;
+        let mut rows = Vec::with_capacity(row_count);
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
+            for row_index in 0..chunk.time.len() {
+                rows.push((chunk.time.as_buffer()[row_index], chunk_index, row_index));
+            }
+        }
+        rows.sort_unstable();
+
+        reserve(
+            rows.len()
+                .saturating_mul(std::mem::size_of::<(i64, usize, usize)>()),
+        )?;
+        let mut selected = Vec::with_capacity(rows.len());
+        let mut index = 0;
+        while index < rows.len() {
+            let mut end = index + 1;
+            while end < rows.len() && rows[end].0 == rows[index].0 {
+                end += 1;
+            }
+            for duplicate in &rows[index + 1..end] {
+                for field_index in 0..schema.fields.len() {
+                    if !samples_equal(
+                        chunks[rows[index].1]
+                            .fields
+                            .get(field_index)
+                            .ok_or_else(|| invalid("field index out of bounds"))?
+                            .sample(rows[index].2),
+                        chunks[duplicate.1]
+                            .fields
+                            .get(field_index)
+                            .ok_or_else(|| invalid("field index out of bounds"))?
+                            .sample(duplicate.2),
+                    ) {
+                        return Err(invalid("duplicate raw timestamp has conflicting samples"));
+                    }
+                }
+            }
+            selected.push(rows[index]);
+            index = end;
+        }
+
+        reserve(selected.len().saturating_mul(std::mem::size_of::<i64>()))?;
+        let mut times = Vec::with_capacity(selected.len());
+        for row in &selected {
+            times.push(row.0);
+        }
+        for field_index in 0..schema.fields.len() {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            while start < selected.len() {
+                let (chunk_index, row_index) = (selected[start].1, selected[start].2);
+                let mut end = start + 1;
+                while end < selected.len()
+                    && selected[end].1 == chunk_index
+                    && selected[end].2 == selected[end - 1].2 + 1
+                {
+                    end += 1;
+                }
+                let source = chunks[chunk_index]
+                    .fields
+                    .get(field_index)
+                    .ok_or_else(|| invalid("field index out of bounds"))?;
+                reserve(std::mem::size_of::<Samples>())?;
+                parts.push(
+                    source
+                        .slice(row_index, end - start)
+                        .map_err(|error| DataFusionError::External(Box::new(error)))?,
+                );
+                start = end;
+            }
+            output_fields.push(
+                Samples::try_from_chunks(parts)
+                    .map_err(|error| DataFusionError::External(Box::new(error)))?,
+            );
+        }
+        times
+    };
     let result = RawSeriesChunk::try_new(
         schema,
         key,
@@ -175,13 +216,8 @@ pub(crate) fn merge_raw_identity_charging(
         true,
     )
     .map_err(|error| DataFusionError::External(Box::new(error)))?;
-    // The two reservations above total 2 * row_count * size_of::<(i64, usize, usize)>(),
-    // and this shrinks that same figure; failure means the reservation was reduced elsewhere.
-    shrink(
-        row_count
-            .saturating_mul(std::mem::size_of::<(i64, usize, usize)>())
-            .saturating_mul(2),
-    );
+    // Only the general merge path allocates transient row-index workspaces.
+    shrink(transient_workspace_bytes);
     Ok(result)
 }
 

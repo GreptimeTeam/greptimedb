@@ -144,6 +144,90 @@ fn interleaved_pieces_merge_in_time_order() {
 }
 
 #[test]
+fn ordered_disjoint_pieces_concatenate_without_row_workspace() {
+    let schema = schema(1);
+    let chunks = [
+        chunk(b"k", "v", vec![1, 2], vec![vec![Some(10.), Some(20.)]]),
+        chunk(b"k", "v", vec![3, 4], vec![vec![Some(30.), Some(40.)]]),
+    ];
+    let result = merge_raw_identity(&schema, &chunks).unwrap();
+    assert_eq!(result.time.as_buffer().as_ref(), &[1, 2, 3, 4]);
+    assert_eq!(result.time.len(), 4);
+    assert_eq!(
+        result
+            .fields
+            .get(0)
+            .unwrap()
+            .iter()
+            .map(|sample| match sample {
+                datatypes::series::samples::SampleRef::Float(value) => value,
+                _ => 0.,
+            })
+            .collect::<Vec<_>>(),
+        vec![10., 20., 30., 40.]
+    );
+
+    let mut reserved = 0usize;
+    let mut shrunk = 0usize;
+    merge_raw_identity_charging(
+        &schema,
+        &chunks,
+        &mut |bytes| {
+            reserved += bytes;
+            Ok(())
+        },
+        &mut |bytes| shrunk += bytes,
+    )
+    .unwrap();
+    assert_eq!(
+        reserved,
+        4 * std::mem::size_of::<i64>() + 2 * std::mem::size_of::<Samples>()
+    );
+    assert_eq!(shrunk, 0);
+    assert!(shrunk <= reserved);
+}
+
+#[test]
+fn single_chunk_uses_ordered_fast_path() {
+    let result = merge_raw_identity(
+        &schema(1),
+        &[chunk(
+            b"k",
+            "v",
+            vec![2, 5],
+            vec![vec![Some(12.), Some(15.)]],
+        )],
+    )
+    .unwrap();
+    assert_eq!(result.time.as_buffer().as_ref(), &[2, 5]);
+    assert_eq!(result.fields.get(0).unwrap().len(), 2);
+}
+
+#[test]
+fn touching_ordered_chunks_use_general_duplicate_path() {
+    let schema = schema(1);
+    let chunks = [
+        chunk(b"k", "v", vec![1, 2], vec![vec![Some(10.), Some(20.)]]),
+        chunk(b"k", "v", vec![2, 3], vec![vec![Some(20.), Some(30.)]]),
+    ];
+    let mut reserved = 0usize;
+    let mut shrunk = 0usize;
+    let result = merge_raw_identity_charging(
+        &schema,
+        &chunks,
+        &mut |bytes| {
+            reserved += bytes;
+            Ok(())
+        },
+        &mut |bytes| shrunk += bytes,
+    )
+    .unwrap();
+    assert_eq!(result.time.as_buffer().as_ref(), &[1, 2, 3]);
+    assert_eq!(shrunk, 2 * 4 * std::mem::size_of::<(i64, usize, usize)>());
+    assert!(shrunk <= reserved);
+}
+
+#[test]
 fn equal_duplicates_collapse_but_bit_differences_conflict() {
     assert!(
         merge_raw_identity(
