@@ -894,10 +894,15 @@ impl Inserter {
             let (writes, progress) = dispatcher.prepare_tracked(writes, 1).await;
             let cancellation = CancellationToken::new();
             let _guard = cancellation.clone().drop_guard();
+            let counter = ctx.write_progress().cloned();
             let progress = common_runtime::spawn_global(async move {
-                dispatcher
+                let progress = dispatcher
                     .execute_tracked(writes, progress, None, Some(&cancellation))
-                    .await
+                    .await;
+                if let Some(counter) = counter {
+                    counter.add_written(progress.iter().map(|part| part.affected_rows).sum());
+                }
+                progress
             })
             .await
             .context(JoinTaskSnafu)?
@@ -2892,7 +2897,10 @@ mod tests {
                     1,
                     Arc::new(new_test_table_info(1, "table_1", [1].into_iter())),
                 )]);
-                let ctx = QueryContext::arc();
+                let counter = Arc::new(session::write_progress::WriteProgress::default());
+                let mut ctx = QueryContext::arc().fork();
+                ctx.set_write_progress(counter.clone());
+                let ctx = Arc::new(ctx);
                 let ctx = if confirmed {
                     Arc::new(ctx.with_confirmed_writes())
                 } else {
@@ -2946,6 +2954,7 @@ mod tests {
                     starts.try_recv().is_err(),
                     "cancelled caller started another retry"
                 );
+                assert_eq!(counter.written(), 1);
             }
         }
     }

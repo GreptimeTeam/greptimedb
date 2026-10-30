@@ -239,6 +239,7 @@ mod tests {
                 total_rows += rows.rows.len();
                 let (response_tx, response_rx) = oneshot::channel();
                 submissions.push(PendingBatch {
+                    _completion: None,
                     table_info: table.clone(),
                     batch: rows_to_record_batch(&rows, &table).unwrap(),
                     ctx: ctx.clone(),

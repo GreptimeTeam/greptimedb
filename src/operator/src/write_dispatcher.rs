@@ -14,7 +14,6 @@
 
 mod attribution;
 mod options;
-pub use attribution::WriteAttribution;
 mod progress;
 #[cfg(test)]
 mod tests;
@@ -44,6 +43,7 @@ use store_api::storage::RegionId;
 use table::table_name::TableName;
 use tokio_util::sync::CancellationToken;
 
+pub use self::attribution::WriteAttribution;
 pub use self::options::WriteRetryOptions;
 pub use self::progress::TrackedWrite;
 use crate::error::{self, FindRegionLeaderSnafu, RequestRegionSnafu};
@@ -228,7 +228,8 @@ impl WriteDispatcher {
         let progress = progress.as_ref();
         let attempts = future::join_all(writes.into_iter().map(|(peer, request)| async move {
             if self.retry.is_some() || progress.is_some() {
-                self.send_batch(peer, request, Vec::new(), histogram, progress).await
+                self.send_batch(peer, request, Vec::new(), histogram, progress)
+                    .await
             } else {
                 vec![(Vec::new(), self.send(peer, request, histogram).await)]
             }
@@ -689,9 +690,11 @@ impl WriteRetry {
                     .rebuild_tracked_write_requests(request, table_info, Some(owners))
                     .map_err(BoxedError::new)
                     .context(ExternalSnafu)?;
-                rebuilt_requests.extend(requests.into_iter().map(|(request, owners)| {
-                    ((request, WriteAttribution::default()), owners)
-                }));
+                rebuilt_requests.extend(
+                    requests
+                        .into_iter()
+                        .map(|(request, owners)| ((request, WriteAttribution::default()), owners)),
+                );
             } else {
                 let requests = partitioner
                     .rebuild_attributed_write(request, table_info, write.attribution)

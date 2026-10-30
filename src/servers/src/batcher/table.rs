@@ -749,12 +749,18 @@ mod tests {
             first.rows.extend(rows(20).rows);
             let first = rows_to_record_batch(&first, &table).unwrap();
             let second = rows_to_record_batch(&rows(2), &table).unwrap();
-            let ctx = Arc::new(QueryContext::arc().with_confirmed_writes());
+            let counters =
+                [0, 1].map(|_| Arc::new(session::write_progress::WriteProgress::default()));
+            let contexts = counters.each_ref().map(|counter| {
+                let mut ctx = QueryContext::arc().with_confirmed_writes();
+                ctx.set_write_progress(counter.clone());
+                Arc::new(ctx)
+            });
             let first_permit = batcher.acquire().await.unwrap();
             let second_permit = batcher.acquire().await.unwrap();
             let (first, second) = tokio::join!(
-                batcher.submit(table.clone(), first, ctx.clone(), first_permit),
-                batcher.submit(table, second, ctx, second_permit),
+                batcher.submit(table.clone(), first, contexts[0].clone(), first_permit),
+                batcher.submit(table, second, contexts[1].clone(), second_permit),
             );
             let first = timeout(Duration::from_secs(5), first.unwrap().write_progress())
                 .await
@@ -766,6 +772,10 @@ mod tests {
             assert!(first.error.is_some());
             assert_eq!(second.affected_rows, 1);
             assert!(second.error.is_none());
+            for counter in counters {
+                counter.wait().await;
+                assert_eq!(counter.written(), 1);
+            }
         }
     }
 

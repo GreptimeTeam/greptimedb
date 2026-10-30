@@ -356,10 +356,16 @@ async fn flush_batch_physical_tracked(
         }
     }
     let progress = write_dispatcher.dispatch_tracked(writes, inputs).await;
+    // A submission can contribute several logical batches; credit its counter once.
     let counters = table_batches
         .iter()
         .flat_map(|table| &table.batches)
-        .filter_map(|batch| batch.progress.as_ref().map(|counter| (batch.owner, counter)))
+        .filter_map(|batch| {
+            batch
+                .progress
+                .as_ref()
+                .map(|counter| (batch.owner, counter))
+        })
         .collect::<std::collections::HashMap<_, _>>();
     for (owner, counter) in counters {
         counter.add_written(progress[owner].affected_rows);
@@ -664,9 +670,12 @@ mod tests {
             let limiter = RequestLimiter::try_new(2).unwrap();
             let mut waiters = Vec::new();
             let mut receivers = Vec::new();
-            for _ in 0..2 {
+            let counters =
+                [0, 1].map(|_| Arc::new(session::write_progress::WriteProgress::default()));
+            for counter in &counters {
                 let (response_tx, response_rx) = oneshot::channel();
                 waiters.push(FlushWaiter {
+                    _completion: Some(counter.start()),
                     response_tx,
                     _permit: limiter.acquire().await.unwrap(),
                 });
@@ -677,6 +686,7 @@ mod tests {
                 .map(|owner| {
                     let mut batch = mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0);
                     batch.owner = owner;
+                    batch.progress = Some(counters[owner].clone());
                     batch
                 })
                 .collect();
@@ -733,6 +743,10 @@ mod tests {
                 dropped + (3 - expected_written) as u64
             );
             assert_eq!(ingested.get(), written + expected_written as u64);
+            for (counter, (affected_rows, _)) in counters.iter().zip(expected_progress) {
+                counter.wait().await;
+                assert_eq!(counter.written(), affected_rows as u64);
+            }
             for (receiver, (affected_rows, failed)) in receivers.into_iter().zip(expected_progress)
             {
                 let result = receiver.await.unwrap();
@@ -1109,10 +1123,7 @@ mod tests {
 
     #[async_trait]
     impl PhysicalFlushWriteDispatcher for MockFlushWriteDispatcher {
-        async fn dispatch(
-            &self,
-            _requests: Vec<RegionRequest>,
-        ) -> error::Result<usize> {
+        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 return Err(Error::Internal {
@@ -1139,10 +1150,7 @@ mod tests {
 
     #[async_trait]
     impl PhysicalFlushWriteDispatcher for AffectedRowsFlushWriteDispatcher {
-        async fn dispatch(
-            &self,
-            _requests: Vec<RegionRequest>,
-        ) -> error::Result<usize> {
+        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
             Ok(self.affected_rows)
         }
     }

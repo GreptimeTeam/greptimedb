@@ -26,7 +26,7 @@ use prometheus::Histogram;
 use tokio_util::sync::CancellationToken;
 
 use crate::write_dispatcher::{
-    RoutedWrite, WriteAttempt, WriteDispatcher, get_peer, write_region_id,
+    RoutedWrite, WriteAttempt, WriteAttribution, WriteDispatcher, get_peer, write_region_id,
 };
 
 /// A region payload and its original-input indices, in payload row order.
@@ -104,7 +104,7 @@ impl WriteDispatcher {
                 Ok(peer) => pending.push(RoutedWrite {
                     peer,
                     request: Arc::new(write.request),
-                    attribution: super::WriteAttribution::default(),
+                    attribution: WriteAttribution::default(),
                     owners: Some(write.owners),
                 }),
                 Err(error) => record_failure(&mut progress, &write.owners, error),
@@ -304,7 +304,13 @@ impl WriteDispatcher {
         }
         let batches = future::join_all(batches.into_iter().flat_map(|(peer, batches)| {
             batches.into_iter().map(move |batch| {
-                self.send_batch(Arc::clone(&peer), batch.request, batch.owners, histogram, None)
+                self.send_batch(
+                    Arc::clone(&peer),
+                    batch.request,
+                    batch.owners,
+                    histogram,
+                    None,
+                )
             })
         }));
         let singles = future::join_all(
