@@ -191,6 +191,8 @@ pub struct MitoRegion {
 pub(crate) struct RegionStats {
     /// The total bytes written to the region.
     pub(crate) written_bytes: Arc<AtomicU64>,
+    /// Parquet bytes committed by flushes since this region instance was opened.
+    pub(crate) flushed_parquet_bytes: AtomicU64,
     /// The total query CPU time of the region in nanoseconds.
     pub(crate) query_cpu_time: Arc<AtomicU64>,
     /// The total scanned bytes of the region.
@@ -201,6 +203,7 @@ impl RegionStats {
     pub(crate) fn new() -> Self {
         Self {
             written_bytes: Arc::new(AtomicU64::new(0)),
+            flushed_parquet_bytes: AtomicU64::new(0),
             query_cpu_time: Arc::new(AtomicU64::new(0)),
             query_scanned_bytes: Arc::new(AtomicU64::new(0)),
         }
@@ -737,6 +740,10 @@ impl MitoRegion {
             data_topic_latest_entry_id: topic_latest_entry_id,
             metadata_topic_latest_entry_id: topic_latest_entry_id,
             written_bytes,
+            flushed_parquet_bytes: self
+                .region_stats
+                .flushed_parquet_bytes
+                .load(Ordering::Relaxed),
             query_cpu_time,
             query_scanned_bytes,
             min_timestamp: time_range.map(|(min, _)| min),

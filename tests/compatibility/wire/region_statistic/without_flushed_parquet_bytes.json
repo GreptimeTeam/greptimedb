@@ -1,0 +1,1 @@
+{"num_rows":1,"memtable_size":2,"wal_size":3,"manifest_size":4,"sst_size":5,"sst_num":6,"index_size":7,"manifest":{"Mito":{"manifest_version":8,"flushed_entry_id":9,"file_removed_cnt":10}},"written_bytes":11}

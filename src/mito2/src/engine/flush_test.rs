@@ -352,6 +352,109 @@ async fn test_manual_flush_with_format(flat_format: bool) {
 }
 
 #[tokio::test]
+async fn test_flushed_parquet_bytes() {
+    for flat_format in [false, true] {
+        let mut env = TestEnv::with_prefix("flushed-parquet-bytes").await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat_format,
+                schedule_compaction_after_edit: false,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("compaction.type", "twcs")
+            .insert_option("compaction.twcs.trigger_file_num", "100")
+            .build();
+        let table_dir = request.table_dir.clone();
+        let schema = rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let statistic = || engine.get_region_statistic(region_id).unwrap();
+        assert_eq!(statistic().flushed_parquet_bytes, 0);
+
+        let mut previous_bytes = 0;
+        for start in [0, 10] {
+            put_rows(
+                &engine,
+                region_id,
+                Rows {
+                    schema: schema.clone(),
+                    rows: build_rows(start, start + 3),
+                },
+            )
+            .await;
+            assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+            flush_region(&engine, region_id, None).await;
+            let manifest = engine
+                .get_region(region_id)
+                .unwrap()
+                .manifest_ctx
+                .manifest()
+                .await;
+            let parquet_bytes: u64 = manifest.files.values().map(|file| file.file_size).sum();
+            assert!(parquet_bytes > previous_bytes);
+            assert_eq!(statistic().flushed_parquet_bytes, parquet_bytes);
+            previous_bytes = parquet_bytes;
+        }
+        flush_region(&engine, region_id, None).await;
+        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+
+        // A generic edit can add the same file metadata without producing a flush.
+        let file = engine
+            .get_region(region_id)
+            .unwrap()
+            .manifest_ctx
+            .manifest()
+            .await
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        engine
+            .edit_region(
+                region_id,
+                crate::manifest::action::RegionEdit {
+                    files_to_add: vec![file],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow {
+                            window_seconds: 3600,
+                        },
+                    ),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(statistic().flushed_parquet_bytes, previous_bytes);
+        assert_eq!(statistic().sst_num, 1);
+        reopen_region(&engine, region_id, table_dir, true, HashMap::new()).await;
+        assert!(statistic().sst_size > 0);
+        assert_eq!(statistic().flushed_parquet_bytes, 0);
+    }
+}
+
+#[tokio::test]
 async fn test_flush_engine() {
     test_flush_engine_with_format(false).await;
     test_flush_engine_with_format(true).await;

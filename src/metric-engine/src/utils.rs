@@ -80,6 +80,8 @@ fn merge_region_statistic(
             metadata_manifest_version: metadata_stat.manifest.data_manifest_version(),
         },
         written_bytes: metadata_stat.written_bytes + data_stat.written_bytes,
+        flushed_parquet_bytes: metadata_stat.flushed_parquet_bytes
+            + data_stat.flushed_parquet_bytes,
         query_cpu_time: data_stat.query_cpu_time,
         query_scanned_bytes: data_stat.query_scanned_bytes,
         data_topic_latest_entry_id: data_stat.data_topic_latest_entry_id,
@@ -148,6 +150,22 @@ mod tests {
         let region_id = RegionId::with_group_and_seq(1, 243, 2);
         let expected_region_id = RegionId::with_group_and_seq(1, METRIC_DATA_REGION_GROUP, 2);
         assert_eq!(to_data_region_id(region_id), expected_region_id);
+    }
+
+    #[test]
+    fn merge_region_statistic_sums_flushed_parquet_bytes() {
+        let metadata_stat = RegionStatistic {
+            flushed_parquet_bytes: 123,
+            ..Default::default()
+        };
+        let data_stat = RegionStatistic {
+            flushed_parquet_bytes: 456,
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_region_statistic(&metadata_stat, &data_stat).flushed_parquet_bytes,
+            579
+        );
     }
 
     #[test]

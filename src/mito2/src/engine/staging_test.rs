@@ -781,6 +781,15 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let staging_manifest = manager.staging_manifest().unwrap();
         assert_eq!(staging_manifest.files.len(), 3);
+        let parquet_bytes: u64 = staging_manifest
+            .files
+            .values()
+            .map(|file| file.file_size)
+            .sum();
+        assert_eq!(
+            region.region_statistic().flushed_parquet_bytes,
+            parquet_bytes
+        );
         assert_eq!(
             staging_manifest.metadata.partition_expr.as_ref().unwrap(),
             &partition_expr
@@ -843,6 +852,9 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert_eq!(sst_entries.iter().filter(|e| e.visible).count(), 1);
     assert_eq!(sst_entries.iter().filter(|e| !e.visible).count(), 2);
 
+    let flushed_parquet_bytes = region.region_statistic().flushed_parquet_bytes;
+    assert!(flushed_parquet_bytes > 0);
+
     // Exit staging mode successfully
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
@@ -855,6 +867,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert!(
         !region.is_staging(),
         "Region should no longer be in staging mode"
+    );
+
+    assert_eq!(
+        region.region_statistic().flushed_parquet_bytes,
+        flushed_parquet_bytes
     );
 
     // Verify staging manifests have been cleared

@@ -1849,6 +1849,13 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
             .await
             .manifest_flushed_entry_id
     );
+    assert_eq!(
+        engine
+            .get_region_statistic(REGION_A)
+            .unwrap()
+            .flushed_parquet_bytes,
+        0
+    );
     assert!(store.stop().await.is_err());
 }
 
