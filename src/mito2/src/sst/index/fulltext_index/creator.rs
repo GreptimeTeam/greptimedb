@@ -487,10 +487,10 @@ impl AltFulltextCreator {
     async fn finish(
         &mut self,
         puffin_writer: &mut SstPuffinWriter,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         put_options: PutOptions,
     ) -> Result<ByteCount> {
-        let target_key = column_id.encode();
+        let target_key = target.encode();
         match self {
             Self::Tantivy(creator) => {
                 let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
@@ -509,16 +509,16 @@ impl AltFulltextCreator {
         }
     }
 
-    async fn abort(&mut self, column_id: &IndexTarget) {
+    async fn abort(&mut self, target: &IndexTarget) {
         match self {
             Self::Tantivy(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Tantivy flavor, target: {:?}", target);
                 }
             }
             Self::Bloom(creator) => {
                 if let Err(err) = creator.abort().await {
-                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, col_id: {:?}", column_id);
+                    warn!(err; "Failed to abort the fulltext index creator in the Bloom Filter flavor, target: {:?}", target);
                 }
             }
         }

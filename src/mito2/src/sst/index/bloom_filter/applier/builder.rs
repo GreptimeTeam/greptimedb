@@ -143,15 +143,15 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     fn expected_predicate_target_types(&self) -> BTreeMap<IndexTarget, ConcreteDataType> {
         self.predicates
             .keys()
-            .filter_map(|col_id| {
+            .filter_map(|target| {
                 let ty =
-                    crate::sst::index::column::skipping_target_data_type(self.metadata, col_id)?;
-                Some((col_id.clone(), ty))
+                    crate::sst::index::column::skipping_target_data_type(self.metadata, target)?;
+                Some((target.clone(), ty))
             })
             .collect()
     }
 
-    /// Helper function to get the column id and type
+    /// Returns a column target and its type.
     fn column_target_and_type(
         &self,
         column_name: &str,
@@ -186,12 +186,12 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if lit.is_null() {
             return Ok(());
         }
-        let Some((column_id, data_type)) = self.expr_to_index_target(col)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(col)? else {
             return Ok(());
         };
         let value = encode_lit(lit, data_type)?;
         self.predicates
-            .entry(column_id)
+            .entry(target)
             .or_default()
             .push(InListPredicate {
                 list: BTreeSet::from([value]),
@@ -206,7 +206,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(());
         }
 
-        let Some((column_id, data_type)) = self.expr_to_index_target(&in_list.expr)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(&in_list.expr)? else {
             return Ok(());
         };
 
@@ -222,7 +222,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
         if !valid_predicates.is_empty() {
             self.predicates
-                .entry(column_id)
+                .entry(target)
                 .or_default()
                 .push(InListPredicate {
                     list: valid_predicates,
@@ -258,7 +258,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if lit.is_null() {
             return Ok(());
         }
-        let Some((column_id, data_type)) = self.expr_to_index_target(col)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(col)? else {
             return Ok(());
         };
 
@@ -266,7 +266,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         inlist.insert(encode_lit(lit, data_type.clone())?);
         if Self::collect_or_eq_list_rec(col, &data_type, or_list, &mut inlist)? {
             self.predicates
-                .entry(column_id)
+                .entry(target)
                 .or_default()
                 .push(InListPredicate { list: inlist });
         }

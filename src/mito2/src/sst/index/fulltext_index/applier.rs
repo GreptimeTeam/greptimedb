@@ -258,7 +258,7 @@ impl FulltextIndexApplier {
         let apply_start = Instant::now();
 
         let mut row_ids: Option<BTreeSet<RowId>> = None;
-        for (column_id, request) in self.requests.iter() {
+        for (target, request) in self.requests.iter() {
             // Tantivy tokens don't follow `matches_term` boundaries, e.g. `SimpleTokenizer`
             // keeps "错误error日志" as one token, so terms and patterns are left to the
             // bloom backend.
@@ -270,7 +270,7 @@ impl FulltextIndexApplier {
                 .apply_fine_one_column(
                     file_size_hint,
                     file_id,
-                    column_id,
+                    target,
                     request,
                     metrics.as_deref_mut(),
                 )
@@ -309,11 +309,11 @@ impl FulltextIndexApplier {
         &self,
         file_size_hint: Option<u64>,
         file_id: RegionIndexId,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         request: &FulltextRequest,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let target_key = column_id.encode();
+        let target_key = target.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
         let dir = self
             .index_source
@@ -386,7 +386,7 @@ impl FulltextIndexApplier {
         let (input, mut output) = Self::init_coarse_output(row_groups);
         let mut applied = false;
 
-        for (column_id, request) in self.requests.iter() {
+        for (target, request) in self.requests.iter() {
             if request.terms.is_empty() && request.likes.is_empty() {
                 continue;
             }
@@ -395,7 +395,7 @@ impl FulltextIndexApplier {
                 .apply_coarse_one_column(
                     file_id,
                     file_size_hint,
-                    column_id,
+                    target,
                     request,
                     &mut output,
                     metrics.as_deref_mut(),
@@ -426,12 +426,12 @@ impl FulltextIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-        column_id: &IndexTarget,
+        target: &IndexTarget,
         request: &FulltextRequest,
         output: &mut [(usize, Vec<Range<usize>>)],
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
-        let target_key = column_id.encode();
+        let target_key = target.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
         let Some(reader) = self
             .index_source
@@ -458,7 +458,7 @@ impl FulltextIndexApplier {
             let reader = CachedBloomFilterIndexBlobReader::new(
                 file_id.file_id(),
                 file_id.version,
-                column_id.clone(),
+                target.clone(),
                 Tag::Fulltext,
                 blob_size,
                 BloomFilterReaderImpl::new(range_reader),
