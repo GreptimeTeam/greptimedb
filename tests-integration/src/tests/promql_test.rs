@@ -6293,6 +6293,11 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
             1usize,
             "the per-series prefix under a global topk",
         ),
+        (
+            "sum(topk(1, abs(seg_a)))",
+            1usize,
+            "the whole per-series prefix is one segment",
+        ),
         // A boundary cannot carry a constant, so the constant stays inside the segment.
         (
             "sum(topk(1, seg_a)) + 1",
