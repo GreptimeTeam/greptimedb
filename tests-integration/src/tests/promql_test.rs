@@ -5899,6 +5899,127 @@ async fn native_promql_dynamic_scalars_match_prometheus_and_legacy() {
     assert_eq!(native, legacy);
 }
 
+/// The `ts` and first `Float64` column of a `TQL EVAL` answer, as values.
+///
+/// Answers are compared this way rather than as printed tables: the native route names a field
+/// after its compiled root while the existing planner names a computed column after the
+/// expression, and that difference is older than the native route's segmentation. A statement that
+/// groups nothing also has no label column, which `native_result_rows` needs, so this reads the
+/// two columns an aggregate answers with.
+fn eval_values(output: Output) -> Vec<(i64, f64)> {
+    let batches = match output.data {
+        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let timestamps = batch
+                .column_by_name("ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let values = batch
+                .columns()
+                .iter()
+                .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
+                .unwrap();
+            (0..batch.num_rows())
+                .map(move |row| (timestamps.value(row), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A `TQL EVAL` answer as the set of rows it holds: column names, then sorted rows.
+///
+/// Three things differ between the routes and none of them is the answer. This route names a value
+/// column after its compiled root (`val`) while the existing planner names it after the expression
+/// (`abs(val)`, `sum(topk_metric.val)`); the two emit columns in a different order; and this one is
+/// partitioned, so its rows arrive by partition rather than in one sequence. Comparing the answers
+/// as what they are - a set of (labels, timestamp, value) rows - leaves the values as the only thing
+/// the assertion can fail on.
+fn eval_text(output: Output) -> String {
+    use datafusion::arrow::array::RecordBatch;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::arrow::util::display::{ArrayFormatter, FormatOptions};
+
+    let batches = match output.data {
+        OutputData::Stream(stream) => futures::executor::block_on(collect_batches(stream)).unwrap(),
+        OutputData::RecordBatches(batches) => batches,
+        _ => unreachable!("TQL EVAL returns record batches"),
+    };
+    let mut named: Option<Vec<String>> = None;
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for batch in batches {
+        let batch = batch.into_df_record_batch();
+        let fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| {
+                let name = if field.data_type() == &DataType::Float64 {
+                    "value".to_string()
+                } else {
+                    field.name().clone()
+                };
+                (name, field.data_type().clone(), field.is_nullable())
+            })
+            .collect::<Vec<_>>();
+        // One column order for every batch: by name, so the two routes agree on it.
+        let mut order = (0..fields.len()).collect::<Vec<_>>();
+        order.sort_by(|left, right| fields[*left].0.cmp(&fields[*right].0));
+        let names = order
+            .iter()
+            .map(|index| fields[*index].0.clone())
+            .collect::<Vec<_>>();
+        match &named {
+            None => named = Some(names),
+            Some(first) => assert_eq!(first, &names, "the answers have different columns"),
+        }
+        let schema = Arc::new(Schema::new(
+            order
+                .iter()
+                .map(|index| {
+                    let (name, data_type, nullable) = fields[*index].clone();
+                    Arc::new(Field::new(name, data_type, nullable))
+                })
+                .collect::<Vec<_>>(),
+        ));
+        let columns = order
+            .iter()
+            .map(|index| batch.column(*index).clone())
+            .collect::<Vec<_>>();
+        let reordered =
+            RecordBatch::try_new(schema, columns).expect("the columns keep their types");
+        let formatters = reordered
+            .columns()
+            .iter()
+            .map(|column| {
+                ArrayFormatter::try_new(column.as_ref(), &FormatOptions::default())
+                    .expect("the answer formats")
+            })
+            .collect::<Vec<_>>();
+        for row in 0..reordered.num_rows() {
+            rows.push(
+                formatters
+                    .iter()
+                    .map(|formatter| formatter.value(row).to_string())
+                    .collect(),
+            );
+        }
+    }
+    rows.sort();
+    let mut out = named.unwrap_or_default().join(" | ");
+    for row in rows {
+        out.push('\n');
+        out.push_str(&row.join(" | "));
+    }
+    out
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_sum_topk_uses_global_topk_segment() {
     common_telemetry::init_default_ut_logging();
@@ -6092,41 +6213,136 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
         "the region answers one stream"
     );
 
-    // The answers are compared as values, as every native test compares them: this route names a
-    // computed column after its compiled root (`val`), while the existing planner names it after
-    // the expression (`sum(topk_metric.val)`). That difference is older than this segment split
-    // and is not what this test is about. The statement groups nothing, so there is no label
-    // column to compare either; `native_result_rows` wants one.
-    fn values(output: Output) -> Vec<(i64, f64)> {
-        let batches = match output.data {
-            OutputData::Stream(stream) => {
-                futures::executor::block_on(collect_batches(stream)).unwrap()
-            }
-            OutputData::RecordBatches(batches) => batches,
-            _ => unreachable!("TQL EVAL returns record batches"),
-        };
-        batches
-            .iter()
-            .flat_map(|batch| {
-                let timestamps = batch
-                    .column_by_name("ts")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap();
-                let values = batch
-                    .columns()
-                    .iter()
-                    .find_map(|column| column.as_any().downcast_ref::<Float64Array>())
-                    .unwrap();
-                (0..batch.num_rows())
-                    .map(move |row| (timestamps.value(row), values.value(row)))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
-    }
-    let legacy = values(native_tql_output(&instance, sql, false).await);
+    let legacy = eval_values(native_tql_output(&instance, sql, false).await);
     assert_eq!(rows, legacy, "native and legacy answers differ");
+}
+
+/// Segments are cut where the physical planner would otherwise have to gather a per-series prefix.
+///
+/// One statement per shape the cut can meet, each asserting only what the rule says: a tree that
+/// already runs on every partition stays one node, a matching tree routes instead of gathering, a
+/// global fold over per-series work cuts that work out, and a constant is never cut out because a
+/// boundary cannot carry one.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_segment_boundaries")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE seg_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE seg_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO seg_a VALUES ('a', 0, 2), ('b', 0, 7), ('c', 0, 11), ('a', 1000, 3), ('b', 1000, 13), ('c', 1000, 5); \
+         INSERT INTO seg_b VALUES ('a', 0, 4), ('b', 0, 1), ('c', 0, 22), ('a', 1000, 6), ('b', 1000, 26), ('c', 1000, 10)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    fn fused_in(
+        plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+
+    // `cuts` is how many per-series prefixes the statement has below a gathered node: the number
+    // of segment boundaries, so the plan holds `cuts + 1` fused nodes.
+    //
+    // `timestamp` over a computed vector reports the evaluation time, and that has to survive the
+    // boundary: the aggregate runs in the gathered segment and the projection above it reads the
+    // grid, which is what Prometheus reports for a sample the aggregate created. These answers
+    // carry labels, so they are compared whole rather than as bare values.
+    for query in ["timestamp(sum(seg_a))", "sum(timestamp(abs(seg_a)))"] {
+        let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(native, legacy, "{query}: answers differ");
+    }
+
+    for (query, cuts, why) in [
+        // A tree that answers each series on its own needs no gather, so nothing is cut.
+        (
+            "abs(seg_a)",
+            0usize,
+            "a per-series tree runs on every partition",
+        ),
+        // A matching tree routes its inputs; it does not gather them.
+        (
+            "seg_a / on(host) seg_b",
+            0usize,
+            "a matching tree routes rather than gathers",
+        ),
+        // The fold gathers, but the prefixes below it do not need that gather.
+        (
+            "sum(topk(1, seg_a))",
+            1usize,
+            "the per-series prefix under a global topk",
+        ),
+        // A boundary cannot carry a constant, so the constant stays inside the segment.
+        (
+            "sum(topk(1, seg_a)) + 1",
+            1usize,
+            "a constant is embedded, not cut out",
+        ),
+    ] {
+        let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+        observer.clear();
+        let native = eval_text(native_tql_output(&instance, &sql, true).await);
+        let root = observer.root_plan();
+        let frontend = fused_in(&root);
+        let mut regions = 0;
+        for plan in observer.region_plans() {
+            regions += fused_in(&plan).len();
+        }
+        assert_eq!(
+            frontend.len() + regions,
+            cuts + 1,
+            "{query}: {why}: expected {} fused nodes, found {} at the frontend and {} in the region: {}",
+            cuts + 1,
+            frontend.len(),
+            regions,
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        if cuts > 0 {
+            assert_eq!(
+                frontend.len(),
+                1,
+                "{query}: {why}: the gathered node is the frontend's own: {}",
+                datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+            );
+        }
+        let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+        assert_eq!(native, legacy, "{query}: answers differ");
+    }
+
+    // This two-table statement stays on the existing plan: a segment over `RawSeriesSource` cannot
+    // be region-local, so the cut cannot keep the prefix partitioned.
+    let query = "sum(max by (host) (seg_a)) / sum(seg_b)";
+    let sql = format!("TQL EVAL (0, 1, '1s') {query}");
+    observer.clear();
+    let native = eval_text(native_tql_output(&instance, &sql, true).await);
+    let root = observer.root_plan();
+    assert!(fused_in(&root).is_empty(), "{query}: {root:?}");
+    for plan in observer.region_plans() {
+        assert!(fused_in(&plan).is_empty(), "{query}: {plan:?}");
+    }
+    let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
+    assert_eq!(native, legacy, "{query}: answers differ");
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
