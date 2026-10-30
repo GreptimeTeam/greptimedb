@@ -34,6 +34,7 @@ use crate::metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED;
 pub struct RecordBatchWithTsIdx {
     pub(in crate::batcher::logical_table) progress:
         Option<Arc<session::write_progress::WriteProgress>>,
+    pub(in crate::batcher::logical_table) owner: usize,
     /// The aligned logical record batch.
     pub(in crate::batcher::logical_table) batch: RecordBatch,
     /// The timestamp column index in `batch`.
@@ -66,6 +67,7 @@ impl RecordBatchWithTsIdx {
 
         Ok(Self {
             progress: None,
+            owner: 0,
             batch,
             timestamp_index,
         })

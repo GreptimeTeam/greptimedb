@@ -575,10 +575,31 @@ impl Inserter {
         };
         let mut affected_rows = 0;
         let mut meta = OutputMeta::new_with_cost(write_cost as _);
+        let mut first_error = None;
         for result in results {
-            let output = result?;
-            affected_rows += output.extract_rows_and_cost().0;
-            meta.write_completions.extend(output.meta.write_completions);
+            match result {
+                Ok(output) => {
+                    affected_rows += output.extract_rows_and_cost().0;
+                    meta.write_completions.extend(output.meta.write_completions);
+                }
+                Err(error) if ctx.confirmed_writes() => {
+                    meta.write_completions
+                        .push(common_query::WriteCompletion::with_progress(async move {
+                            common_query::WriteProgress::failed(common_error::ext::BoxedError::new(
+                                error,
+                            ))
+                        }));
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if let Some(error) = first_error {
+            for completion in meta.write_completions {
+                let _ = completion.wait().await;
+            }
+            return Err(error);
         }
         Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
     }
@@ -856,6 +877,54 @@ impl Inserter {
         )?;
 
         let dispatcher = self.write_dispatcher.clone();
+        if ctx.confirmed_writes() {
+            let writes = normal_requests
+                .requests
+                .into_iter()
+                .map(|request| {
+                    let rows = request.rows.as_ref().map_or(0, |rows| rows.rows.len());
+                    crate::write_dispatcher::TrackedWrite {
+                        request: request_factory.build_insert(RegionInsertRequests {
+                            requests: vec![request],
+                        }),
+                        owners: vec![0; rows],
+                    }
+                })
+                .collect();
+            let (writes, progress) = dispatcher.prepare_tracked(writes, 1).await;
+            let cancellation = CancellationToken::new();
+            let _guard = cancellation.clone().drop_guard();
+            let counter = ctx.write_progress().cloned();
+            let progress = common_runtime::spawn_global(async move {
+                let progress = dispatcher
+                    .execute_tracked(writes, progress, None, Some(&cancellation))
+                    .await;
+                if let Some(counter) = counter {
+                    counter.add_written(progress.iter().map(|part| part.affected_rows).sum());
+                }
+                progress
+            })
+            .await
+            .context(JoinTaskSnafu)?
+            .into_iter()
+            .fold(
+                common_query::WriteProgress::default(),
+                |mut result, part| {
+                    result.merge(part);
+                    result
+                },
+            );
+            crate::metrics::DIST_INGEST_ROW_COUNT
+                .with_label_values(&[ctx.get_db_string().as_str()])
+                .inc_by(progress.affected_rows as u64);
+            let mut meta = OutputMeta::new_with_cost(write_cost as _);
+            let rows = progress.affected_rows;
+            meta.write_completions
+                .push(common_query::WriteCompletion::with_progress(async move {
+                    progress
+                }));
+            return Ok(Output::new(OutputData::AffectedRows(rows), meta));
+        }
         let request = request_factory.build_insert(normal_requests);
         let writes = dispatcher.prepare(vec![request]).await?;
         // Dropping the caller stops retries without abandoning in-flight writes.
@@ -2320,16 +2389,26 @@ fn release_mirror_pending_rows(mirror_pending_rows: &AtomicU64, rows: u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::task::Poll;
 
     use api::helper::ColumnDataTypeWrapper;
+    use api::region::RegionResponse;
     use api::v1::flow::FlowResponse;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
     use api::v1::{Row, RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::mock::MockError;
+    use common_error::status_code::StatusCode;
     use common_meta::cache::new_table_flownode_set_cache;
+    use common_meta::cache_invalidator::DummyCacheInvalidator;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
+    use common_meta::node_manager::{
+        Datanode, DatanodeManager, DatanodeRef, FlownodeManager, FlownodeRef,
+    };
     use common_meta::test_util::{MockDatanodeManager, MockFlownodeHandler, MockFlownodeManager};
     use common_query::native_histogram::NATIVE_HISTOGRAM_FIELD;
     use common_query::prelude::{greptime_native_histogram, set_default_prefix};
@@ -2340,11 +2419,13 @@ mod tests {
     use table::TableRef;
     use table::dist_table::DummyDataSource;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
+    use tokio::sync::{Semaphore, mpsc};
 
     use crate::insert::*;
     use crate::test_util::{
         create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
     };
+    use crate::write_dispatcher::{TrackedWrite, WriteRetryOptions};
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -2730,6 +2811,222 @@ mod tests {
 
         assert!(request_is_native_histogram(&request_schema));
         assert!(table_is_native_histogram(&table));
+    }
+
+    #[derive(Clone)]
+    struct GatedDatanodeHandler {
+        started: mpsc::UnboundedSender<u32>,
+        completed: mpsc::UnboundedSender<u32>,
+        release: Arc<Semaphore>,
+    }
+
+    #[async_trait::async_trait]
+    impl Datanode for GatedDatanodeHandler {
+        async fn handle_request(
+            &self,
+            request: Arc<api::v1::region::RegionRequest>,
+        ) -> common_meta::error::Result<RegionResponse> {
+            let Some(api::v1::region::region_request::Body::Inserts(requests)) = &request.body
+            else {
+                panic!("expected inserts");
+            };
+            let region = RegionId::from(requests.requests[0].region_id).region_number();
+            self.started.send(region).unwrap();
+            self.release.acquire().await.unwrap().forget();
+            self.completed.send(region).unwrap();
+            if region == 2 {
+                Err(common_meta::error::Error::retry_later(MockError::new(
+                    StatusCode::RegionBusy,
+                )))
+            } else {
+                Ok(RegionResponse::new(1))
+            }
+        }
+
+        async fn handle_query(
+            &self,
+            _request: common_query::request::QueryRequest,
+        ) -> common_meta::error::Result<common_recordbatch::SendableRecordBatchStream> {
+            unreachable!()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl DatanodeManager for GatedDatanodeHandler {
+        async fn datanode(&self, _peer: &Peer) -> DatanodeRef {
+            Arc::new(self.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlownodeManager for GatedDatanodeHandler {
+        async fn flownode(&self, _peer: &Peer) -> FlownodeRef {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_insert_cancellation_drains_inflight_writes() {
+        for confirmed in [false, true] {
+            for max_retries in [0, 2] {
+                let mut inserter = batcher_test_inserter().await;
+                let (started, mut starts) = mpsc::unbounded_channel();
+                let (completed, mut completions) = mpsc::unbounded_channel();
+                let release = Arc::new(Semaphore::new(0));
+                let node_manager = Arc::new(GatedDatanodeHandler {
+                    started,
+                    completed,
+                    release: release.clone(),
+                });
+                inserter.node_manager = node_manager.clone();
+                let dispatcher = Arc::new(
+                    WriteDispatcher::new(node_manager, inserter.partition_manager.clone())
+                        .with_retry(
+                            WriteRetryOptions {
+                                max_retries,
+                                initial_backoff: Duration::ZERO,
+                                max_backoff: Duration::ZERO,
+                                ..Default::default()
+                            },
+                            inserter.catalog_manager.clone(),
+                            Arc::new(DummyCacheInvalidator),
+                        ),
+                );
+                let inserter = inserter.with_write_dispatcher(dispatcher);
+                let table_infos = HashMap::from_iter([(
+                    1,
+                    Arc::new(new_test_table_info(1, "table_1", [1].into_iter())),
+                )]);
+                let counter = Arc::new(session::write_progress::WriteProgress::default());
+                let mut ctx = QueryContext::arc().fork();
+                ctx.set_write_progress(counter.clone());
+                let ctx = Arc::new(ctx);
+                let ctx = if confirmed {
+                    Arc::new(ctx.with_confirmed_writes())
+                } else {
+                    ctx
+                };
+                let requests = InstantAndNormalInsertRequests {
+                    normal_requests: RegionInsertRequests {
+                        requests: [1, 2]
+                            .map(|region| RegionInsertRequest {
+                                region_id: RegionId::new(1, region).as_u64(),
+                                rows: Some(Rows {
+                                    schema: vec![],
+                                    rows: vec![Row { values: vec![] }],
+                                }),
+                                ..Default::default()
+                            })
+                            .to_vec(),
+                    },
+                    instant_requests: RegionInsertRequests::default(),
+                };
+                let caller =
+                    tokio::spawn(
+                        async move { inserter.do_request(requests, &table_infos, &ctx).await },
+                    );
+                for _ in 0..2 {
+                    tokio::time::timeout(Duration::from_secs(5), starts.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                }
+                caller.abort();
+                assert!(caller.await.unwrap_err().is_cancelled());
+                release.add_permits(2);
+                // Closing the channel proves the detached dispatcher has finished.
+                let mut completed = tokio::time::timeout(Duration::from_secs(5), async {
+                    let mut regions = Vec::new();
+                    while let Some(region) = completions.recv().await {
+                        regions.push(region);
+                    }
+                    regions
+                })
+                .await
+                .unwrap();
+                completed.sort_unstable();
+                assert_eq!(
+                    completed,
+                    vec![1, 2],
+                    "confirmed={confirmed}, retries={max_retries}"
+                );
+                assert!(
+                    starts.try_recv().is_err(),
+                    "cancelled caller started another retry"
+                );
+                assert_eq!(counter.written(), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tracked_cancellation_stops_backoff() {
+        let inserter = batcher_test_inserter().await;
+        let (started, mut starts) = mpsc::unbounded_channel();
+        let (completed, mut completions) = mpsc::unbounded_channel();
+        let node_manager = Arc::new(GatedDatanodeHandler {
+            started,
+            completed,
+            release: Arc::new(Semaphore::new(2)),
+        });
+        let dispatcher = WriteDispatcher::new(node_manager, inserter.partition_manager.clone())
+            .with_retry(
+                WriteRetryOptions {
+                    max_retries: 2,
+                    initial_backoff: Duration::from_secs(60),
+                    max_backoff: Duration::from_secs(60),
+                    ..Default::default()
+                },
+                inserter.catalog_manager.clone(),
+                Arc::new(DummyCacheInvalidator),
+            );
+        let factory = RegionRequestFactory::new(RegionRequestHeader::default());
+        let requests = [1, 2]
+            .into_iter()
+            .map(|region| TrackedWrite {
+                request: factory.build_insert(RegionInsertRequests {
+                    requests: vec![RegionInsertRequest {
+                        region_id: RegionId::new(1, region).as_u64(),
+                        ..Default::default()
+                    }],
+                }),
+                owners: vec![(region - 1) as usize],
+            })
+            .collect();
+        let (writes, progress) = dispatcher.prepare_tracked(requests, 2).await;
+        let cancellation = CancellationToken::new();
+        let execute = dispatcher.execute_tracked(writes, progress, None, Some(&cancellation));
+        tokio::pin!(execute);
+        // Wait for both sends to complete before cancelling the backoff.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            future::poll_fn(|cx| {
+                assert!(execute.as_mut().poll(cx).is_pending());
+                if completions.len() == 2 {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        for region in [1, 2] {
+            assert_eq!(starts.try_recv().unwrap(), region);
+            assert_eq!(completions.try_recv().unwrap(), region);
+        }
+        cancellation.cancel();
+        let progress = tokio::time::timeout(Duration::from_secs(1), execute)
+            .await
+            .unwrap();
+        assert_eq!(progress[0].affected_rows, 1);
+        assert!(progress[0].error.is_none());
+        assert_eq!(progress[1].affected_rows, 0);
+        assert_eq!(
+            progress[1].error.as_ref().unwrap().retry_hint(),
+            RetryHint::Retryable
+        );
+        assert!(starts.try_recv().is_err());
     }
 
     // Keep global meter registration in one test, isolated by nextest's per-test process.
