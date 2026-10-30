@@ -531,6 +531,7 @@ mod tests {
                             path: vec!["value".into()],
                             data_type: ConcreteDataType::int64_datatype(),
                             inverted_index: false,
+                            fulltext_index: None,
                             skipping_index: Some(
                                 SkippingIndexOptions::new(2, 0.01, Default::default()).unwrap(),
                             ),

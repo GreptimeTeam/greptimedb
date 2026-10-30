@@ -158,6 +158,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
 
     let mut inverted_index = false;
     let mut skipping_index = None;
+    let mut fulltext_index = None;
 
     loop {
         if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL])
@@ -242,6 +243,45 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
                 )
                 .context(crate::error::SetSkippingIndexOptionSnafu)?,
             );
+        } else if parser.parse_keyword(Keyword::FULLTEXT) {
+            ensure!(
+                matches!(data_type, DataType::String(None)),
+                InvalidSqlSnafu {
+                    msg: "JSON2 FULLTEXT index only supports string type hints",
+                }
+            );
+            ensure!(
+                parser.parse_keyword(Keyword::INDEX),
+                InvalidSqlSnafu {
+                    msg: "expect INDEX after FULLTEXT keyword",
+                }
+            );
+            ensure!(
+                fulltext_index.is_none(),
+                InvalidSqlSnafu {
+                    msg: "duplicated FULLTEXT INDEX option for JSON2 type hint",
+                }
+            );
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(SyntaxSnafu)?
+                .into_iter()
+                .map(crate::util::parse_option_string)
+                .collect::<Result<Vec<_>>>()?;
+            for (key, _) in &options {
+                ensure!(
+                    crate::parsers::utils::validate_column_fulltext_create_option(key),
+                    InvalidSqlSnafu {
+                        msg: format!("invalid FULLTEXT INDEX option: {key}")
+                    }
+                );
+            }
+            fulltext_index = Some(
+                datatypes::schema::FulltextOptions::try_from(
+                    crate::statements::OptionMap::new(options).into_map(),
+                )
+                .context(crate::error::SetFulltextOptionSnafu)?,
+            );
         } else if matches!(parser.peek_token().token, Token::Comma | Token::RParen) {
             break;
         } else {
@@ -256,6 +296,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
         data_type,
         inverted_index,
         skipping_index,
+        fulltext_index,
     })
 }
 
@@ -339,6 +380,64 @@ mod tests {
         };
 
         create_table.columns.remove(0)
+    }
+
+    #[test]
+    fn test_json2_fulltext_index() {
+        use datatypes::schema::FulltextBackend;
+        for (options, backend) in [
+            ("", FulltextBackend::Bloom),
+            (
+                "WITH (backend='tantivy', analyzer='Chinese', case_sensitive='true')",
+                FulltextBackend::Tantivy,
+            ),
+            (
+                "WITH (backend='bloom', granularity='8', false_positive_rate='0.05')",
+                FulltextBackend::Bloom,
+            ),
+        ] {
+            let sql = format!(
+                "CREATE TABLE logs (attrs JSON2 (message STRING FULLTEXT INDEX {options} SKIPPING INDEX INVERTED INDEX), ts TIMESTAMP TIME INDEX)"
+            );
+            let column = parse_json2_column(&sql);
+            let options = column.extensions.json2_options.unwrap();
+            let settings = options.build_json_settings().unwrap();
+            let hint = &settings.type_hints()[0];
+            assert_eq!(hint.fulltext_index.as_ref().unwrap().backend, backend);
+            assert!(hint.fulltext_index.as_ref().unwrap().enable);
+            assert!(hint.inverted_index);
+            assert!(hint.skipping_index.is_some());
+            let rebuilt = parse_json2_column(&format!(
+                "CREATE TABLE logs (attrs JSON2 {options}, ts TIMESTAMP TIME INDEX)"
+            ));
+            assert_eq!(
+                settings,
+                rebuilt
+                    .extensions
+                    .json2_options
+                    .unwrap()
+                    .build_json_settings()
+                    .unwrap()
+            );
+        }
+        for hint in [
+            "message BIGINT FULLTEXT INDEX",
+            "message STRING FULLTEXT INDEX FULLTEXT INDEX",
+            "message STRING FULLTEXT",
+            "message STRING FULLTEXT INDEX WITH (analyzer='unknown')",
+            "message STRING FULLTEXT INDEX WITH (backend='unknown')",
+            "message STRING FULLTEXT INDEX WITH (granularity='0')",
+            "message STRING FULLTEXT INDEX WITH (false_positive_rate='0')",
+            "message STRING FULLTEXT INDEX WITH (unknown='1')",
+        ] {
+            let sql = format!("CREATE TABLE logs (attrs JSON2 ({hint}), ts TIMESTAMP TIME INDEX)");
+            let parsed = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            );
+            assert!(parsed.is_err(), "{sql}");
+        }
     }
 
     #[test]

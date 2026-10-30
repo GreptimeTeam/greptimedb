@@ -806,6 +806,9 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
                 data_type: data_type as i32,
                 datatype_extension,
                 inverted_index: hint.inverted_index,
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(api::v1::column_def::json_fulltext_options_to_proto),
                 skipping_index: hint.skipping_index.map(|options| {
                     api::v1::JsonSkippingIndexOptions {
                         granularity: options.granularity,

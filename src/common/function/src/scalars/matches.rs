@@ -108,6 +108,8 @@ impl MatchesFunction {
 
         let like_expr = ast.into_like_expr(col_name);
 
+        // The LIKE expression uses Utf8 literals; normalize all supported string layouts.
+        let data_array = datatypes::arrow::compute::cast(&data_array, &DataType::Utf8)?;
         let input_schema = Self::input_schema();
         let session_state = SessionStateBuilder::new().with_default_features().build();
         let planner = DefaultPhysicalPlanner::default();
@@ -119,7 +121,7 @@ impl MatchesFunction {
         )?;
 
         let arrow_schema = Arc::new(input_schema.as_arrow().clone());
-        let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array]).unwrap();
+        let input_record_batch = RecordBatch::try_new(arrow_schema, vec![data_array])?;
 
         let num_rows = input_record_batch.num_rows();
         let result = physical_expr.evaluate(&input_record_batch)?;
@@ -1291,6 +1293,22 @@ mod test {
             let parser = ParserContext { stack: vec![] };
             let ast = parser.parse_pattern(query).unwrap();
             assert_eq!(expected, ast, "{query}");
+        }
+    }
+
+    #[test]
+    fn evaluate_matches_string_layouts() {
+        let input: ArrayRef = Arc::new(StringArray::from(vec![
+            Some("error timeout"),
+            Some("healthy"),
+            None,
+        ]));
+        let expected: ArrayRef = Arc::new(BooleanArray::from(vec![Some(true), Some(false), None]));
+        let function = MatchesFunction::default();
+        for data_type in [DataType::Utf8, DataType::LargeUtf8, DataType::Utf8View] {
+            let input = datatypes::arrow::compute::cast(&input, &data_type).unwrap();
+            let actual = function.eval(input, "error").unwrap().to_array(3).unwrap();
+            assert_eq!(expected.as_ref(), actual.as_ref(), "{data_type}");
         }
     }
 

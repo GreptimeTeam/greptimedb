@@ -193,6 +193,40 @@ pub(crate) fn skipping_target_data_type(
         .map(|hint| hint.data_type.clone())
 }
 
+/// Resolves enabled fulltext options using a column or string hint's metadata.
+pub(crate) fn fulltext_target_options(
+    metadata: &RegionMetadata,
+    target: &IndexTarget,
+) -> Option<datatypes::schema::FulltextOptions> {
+    let path = match target {
+        IndexTarget::ColumnId(id) => {
+            return metadata
+                .column_by_id(*id)?
+                .column_schema
+                .fulltext_options()
+                .ok()?;
+        }
+        IndexTarget::JsonPath(path) => path,
+    };
+    let column = metadata.column_by_id(path.column_id())?;
+    if !column.column_schema.data_type.is_json2() {
+        return None;
+    }
+    let extension = column
+        .column_schema
+        .extension_type::<Json2ExtensionType>()
+        .ok()??;
+    extension
+        .metadata()
+        .json_settings()
+        .type_hints()
+        .iter()
+        .find(|hint| hint.path == path.path() && hint.data_type.is_string())?
+        .fulltext_index
+        .clone()
+        .filter(|options| options.enable)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
