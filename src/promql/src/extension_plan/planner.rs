@@ -24,7 +24,7 @@ use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datatypes::series::SeriesOrdering;
-use datatypes::series::frame::{FrameContent, FrameLabelMode, SeriesFrameDeclaration};
+use datatypes::series::frame::{FrameLabelMode, SeriesFrameDeclaration};
 use store_api::region_engine::RawLabelSource;
 use table::table::scan::{RegionScanExec, SeriesScanExec};
 
@@ -104,8 +104,8 @@ const METRIC_NAME: &str = "__name__";
 
 /// Builds the physical node of a [`FusedSeries`] over the raw series its inputs can provide.
 ///
-/// The node reads raw series frames. Below it is either the region scan itself, when the node runs
-/// in the region it reads, or an input that already produces explicit-label raw frames, when the
+/// The node reads series frames. Below it is either the region scan itself, when the node runs
+/// in the region it reads, or an input that already produces explicit-label frames, when the
 /// node runs above the regions of several tables and each [`RawSeriesSource`] answered for its own.
 /// Anything else in between - a filter, a projection that drops the frame, an exchange - produces a
 /// different frame, or no frame at all, and this layer cannot look under it.
@@ -131,7 +131,7 @@ fn plan_fused_series(
     if let Some(inputs) = physical_inputs
         .iter()
         .map(|input| {
-            explicit_raw_frame_ordering(input.schema().as_ref())
+            explicit_label_frame_ordering(input.schema().as_ref())
                 .map(|ordering| (Arc::clone(input), RawLabelSource::Explicit, ordering))
         })
         .collect::<Option<Vec<_>>>()
@@ -252,11 +252,9 @@ fn series_scan(
 }
 
 /// The ordering an input declares when it produces raw frames that carry their own labels.
-fn explicit_raw_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
+fn explicit_label_frame_ordering(schema: &Schema) -> Option<SeriesOrdering> {
     let declaration = SeriesFrameDeclaration::parse(schema).ok()?;
-    if declaration.content() != FrameContent::Raw
-        || declaration.labels() != FrameLabelMode::Explicit
-    {
+    if declaration.labels() != FrameLabelMode::Explicit {
         return None;
     }
     series_frame_ordering(schema).ok()
