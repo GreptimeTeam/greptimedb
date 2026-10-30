@@ -26,7 +26,35 @@
 //! What the tree cannot express yet is deliberate for this stage: `scalar(v)` has no node. The
 //! legality below is therefore about the operations that exist, not about PromQL's whole surface.
 
+use std::cell::Cell;
+use std::hash::Hash;
 use std::sync::Arc;
+
+const MAX_NATIVE_NODE_DEPTH: usize = 128;
+thread_local! {
+    static NATIVE_NODE_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct NativeNodeDepthGuard;
+impl NativeNodeDepthGuard {
+    fn enter<E: serde::de::Error>() -> std::result::Result<Self, E> {
+        NATIVE_NODE_DEPTH.with(|depth| {
+            let current = depth.get();
+            if current >= MAX_NATIVE_NODE_DEPTH {
+                return Err(E::custom(format!(
+                    "native tree nesting exceeds {MAX_NATIVE_NODE_DEPTH}"
+                )));
+            }
+            depth.set(current + 1);
+            Ok(Self)
+        })
+    }
+}
+impl Drop for NativeNodeDepthGuard {
+    fn drop(&mut self) {
+        NATIVE_NODE_DEPTH.with(|depth| depth.set(depth.get() - 1));
+    }
+}
 
 use datafusion::error::{DataFusionError, Result};
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
@@ -48,7 +76,7 @@ use crate::vector_match::{BinaryMatching, MatchingLabels, SetOp};
 /// a grid it is raw samples carrying their own timestamps. A scalar is one value per grid point
 /// and no labels. Intermediate aggregate state is a different type altogether, so an operation
 /// that cannot consume it is rejected by type rather than by convention.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub enum NativeType {
     /// Samples, evaluated when the schema carries a grid and raw otherwise.
     Samples(Arc<SeriesSchema>),
@@ -95,14 +123,12 @@ impl NativeType {
 
     /// Whether `self` binds the same thing as `other`: the same samples or the same state.
     ///
-    /// Bindings are compared by allocation identity, because a compiler that meant one schema or
-    /// one state has no reason to allocate it twice. A scalar is produced by a node and never
-    /// handed to one by a source, so it never matches. This is about the binding itself: grids are
-    /// aligned by [`EvalGrid::spec`] everywhere else, here and in the kernels.
+    /// Bindings compare their semantic content, not process-local allocation identity. Scalars are
+    /// produced by a node and never handed to one by a source, so they never match.
     fn same_binding(&self, other: &NativeType) -> bool {
         match (self, other) {
-            (Self::Samples(mine), Self::Samples(theirs)) => Arc::ptr_eq(mine, theirs),
-            (Self::AggregateState(mine), Self::AggregateState(theirs)) => Arc::ptr_eq(mine, theirs),
+            (Self::Samples(mine), Self::Samples(theirs)) => **mine == **theirs,
+            (Self::AggregateState(mine), Self::AggregateState(theirs)) => **mine == **theirs,
             _ => false,
         }
     }
@@ -112,7 +138,7 @@ impl NativeType {
 ///
 /// State is indexed by `(group labels, absolute grid index)`, so it carries the grid it was
 /// accumulated on. It is not a query value and does not pretend to be one.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct AggregateStateSchema {
     /// How the groups its rows are indexed by are identified.
     pub group: Grouping,
@@ -127,7 +153,7 @@ pub struct AggregateStateSchema {
 /// The binding records what the input was created for: the output a consumer type-checks against,
 /// and the ordering it guarantees. An instant selection and a window both read the ordering,
 /// rejecting an interleaved input; no other consumer reads it yet.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundInput {
     /// Child index in the DataFusion plan. The compiler initially assigns selector-occurrence
     /// indices; the caller maps them to child indices when constructing the plan.
@@ -146,14 +172,14 @@ pub struct BoundInput {
 /// A scalar that varies per grid point is the same [`NativeType::Scalar`] as this constant: what
 /// keeps a binary operation from label-matching it is its type, not its constness. The varying
 /// ones are [`NativeExpr::EvalTime`] and a binary operation between scalars.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BoundScalar {
     /// The constant value.
     pub value: f64,
 }
 
 /// An instant selection: the last sample at or before each grid point, within a lookback.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundInstant {
     /// How far back a sample may lie before it counts as stale.
     pub lookback_ms: i64,
@@ -168,7 +194,7 @@ pub struct BoundInstant {
 }
 
 /// What an instant selection reports at a grid point for the sample it selected there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum InstantValue {
     /// The sample itself.
     Sample,
@@ -183,7 +209,7 @@ pub enum InstantValue {
 ///
 /// The input and output grids are bound separately: a subquery evaluates its inner expression on
 /// its own grid and consumes the result directly, without resampling it onto the outer grid.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundWindow {
     /// The function this node runs.
     pub function: RangeFunction,
@@ -196,7 +222,7 @@ pub struct BoundWindow {
 }
 
 /// A chain of point-wise operations applied to a whole evaluated value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundMap {
     /// The operations, applied in order.
     pub ops: Arc<[MapOp]>,
@@ -205,7 +231,7 @@ pub struct BoundMap {
 /// A math function whose scalar parameters are bound as nodes, because at least one of them varies
 /// per grid point; Prometheus reads each parameter at every step. With constant parameters the same
 /// function is a [`MathOp`] in a [`BoundMap`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum ParameterizedOp {
     /// `round(v, to_nearest)`.
     Round,
@@ -230,7 +256,7 @@ impl ParameterizedOp {
 /// One operation of a map, applied to each series on its own: math over its float values, a
 /// function of its native histograms, or a change of its labels. Each can give two series one label
 /// set, which is why all live in a map.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub enum MapOp {
     Math(MathOp),
     Histogram(NativeHistogramFunction),
@@ -251,7 +277,7 @@ pub enum MapOp {
 /// [`RangeFunction::QuantileOverTime`] does.
 ///
 /// [`RangeFunction::QuantileOverTime`]: crate::range_eval::RangeFunction::QuantileOverTime
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum AggregateKind {
     /// `sum`: the total of each group's values at each grid point.
     Sum,
@@ -278,7 +304,7 @@ pub enum AggregateKind {
 }
 
 /// Where an aggregate sits in the execution, which decides whether its output is a query value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum AggregateStage {
     /// Every contribution to each group lies within this execution, so the output is complete.
     Complete,
@@ -296,7 +322,7 @@ pub enum AggregateStage {
 /// `without` written that way would group a query by labels it meant to remove.
 ///
 /// [`aggregate::Grouping`]: crate::aggregate::Grouping
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub enum Grouping {
     /// The labels a group is identified by; every other label is dropped.
     By(Arc<[Arc<str>]>),
@@ -305,7 +331,7 @@ pub enum Grouping {
 }
 
 /// An aggregate bound to its kind, grouping and stage.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Hash, Eq)]
 pub struct BoundAggregate {
     /// Which aggregate to compute.
     pub kind: AggregateKind,
@@ -321,7 +347,7 @@ pub struct BoundAggregate {
 ///
 /// Its constants are bound here, as a window's are: a `k` or a ratio only known at run time has no
 /// field.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum BoundVectorOp {
     /// `topk` (`top`) or `bottomk`: the `k` largest or smallest values of each group.
     TopK { k: f64, top: bool, group: Grouping },
@@ -349,7 +375,7 @@ pub enum BoundVectorOp {
 ///
 /// It has no cardinality, `bool` or fill: PromQL matches a set operator many-to-many and refuses
 /// the other modifiers on it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Hash)]
 pub struct BoundSetOp {
     /// `and`, `or` or `unless`.
     pub op: SetOp,
@@ -358,7 +384,7 @@ pub struct BoundSetOp {
 }
 
 /// What a node computes. Every variant holds a bound operation, never a name to resolve.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum NativeExpr {
     /// A scan or an exchange boundary.
     Input(BoundInput),
@@ -434,7 +460,7 @@ pub enum NativeExpr {
 }
 
 /// One node of a bound tree.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, Hash)]
 pub struct NativeNode {
     /// What this node computes, including its bound operands.
     pub expr: NativeExpr,
@@ -504,7 +530,7 @@ fn merge_shape_supported(node: &NativeNode) -> bool {
 ///
 /// The tree itself carries no run-time state: every execution builds its own, so one compiled plan
 /// can serve every partition.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq, Hash)]
 pub struct NativeTree {
     root: NativeNode,
 }
@@ -523,6 +549,37 @@ impl NativeTree {
     /// The root node.
     pub fn root(&self) -> &NativeNode {
         &self.root
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NativeNode {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let _guard = NativeNodeDepthGuard::enter::<D::Error>()?;
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            expr: NativeExpr,
+            output: NativeType,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            expr: wire.expr,
+            output: wire.output,
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for NativeTree {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire {
+            root: NativeNode,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::try_new(wire.root).map_err(serde::de::Error::custom)
     }
 }
 
@@ -1025,3 +1082,166 @@ fn invalid(reason: &str) -> DataFusionError {
 
 #[cfg(test)]
 mod tests;
+
+/// Encode a validated native tree in the versioned Postcard envelope.
+#[cfg(test)]
+pub(crate) fn encode_tree(tree: &NativeTree) -> Result<Vec<u8>, String> {
+    const MAGIC: &[u8; 4] = b"NPRQ";
+    const VERSION: u32 = 2;
+    const MAX_BYTES: usize = 1_048_576;
+    let payload = postcard::to_stdvec(tree).map_err(|e| e.to_string())?;
+    if payload.len() > MAX_BYTES {
+        return Err("oversized native tree payload".into());
+    }
+    let mut bytes = Vec::with_capacity(12 + payload.len());
+    bytes.extend_from_slice(MAGIC);
+    bytes.extend_from_slice(&VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    Ok(bytes)
+}
+
+/// Decode and validate a versioned native tree envelope.
+#[cfg(test)]
+pub(crate) fn decode_tree(bytes: &[u8]) -> Result<NativeTree, String> {
+    const MAGIC: &[u8; 4] = b"NPRQ";
+    const VERSION: u32 = 2;
+    const MAX_BYTES: usize = 1_048_576;
+    if bytes.len() < 12 {
+        return Err("truncated native tree envelope".into());
+    }
+    if &bytes[..4] != MAGIC {
+        return Err("invalid native tree magic".into());
+    }
+    let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+    if version != VERSION {
+        return Err(format!("unknown native tree version {version}"));
+    }
+    let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    if len > MAX_BYTES {
+        return Err("oversized native tree payload".into());
+    }
+    if bytes.len() < 12 + len {
+        return Err("truncated native tree payload".into());
+    }
+    if bytes.len() != 12 + len {
+        return Err("trailing bytes after native tree payload".into());
+    }
+    let (tree, remainder) = postcard::take_from_bytes::<NativeTree>(&bytes[12..])
+        .map_err(|e| format!("invalid native tree payload: {e}"))?;
+    if !remainder.is_empty() {
+        return Err("trailing bytes after native tree payload".into());
+    }
+    Ok(tree)
+}
+
+impl PartialEq for BoundScalar {
+    fn eq(&self, o: &Self) -> bool {
+        self.value.to_bits() == o.value.to_bits()
+    }
+}
+impl Eq for BoundScalar {}
+impl std::hash::Hash for BoundScalar {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.value.to_bits().hash(h);
+    }
+}
+impl PartialEq for AggregateKind {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Self::Quantile { quantile: a }, Self::Quantile { quantile: b }) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Self::Sum, Self::Sum)
+            | (Self::Avg, Self::Avg)
+            | (Self::Count, Self::Count)
+            | (Self::Min, Self::Min)
+            | (Self::Max, Self::Max)
+            | (Self::Group, Self::Group)
+            | (Self::Stddev, Self::Stddev)
+            | (Self::Stdvar, Self::Stdvar) => true,
+            _ => false,
+        }
+    }
+}
+impl Eq for AggregateKind {}
+impl std::hash::Hash for AggregateKind {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        if let Self::Quantile { quantile } = self {
+            quantile.to_bits().hash(h);
+        }
+    }
+}
+
+impl PartialEq for BoundVectorOp {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (
+                Self::TopK {
+                    k: a,
+                    top: b,
+                    group: c,
+                },
+                Self::TopK {
+                    k: x,
+                    top: y,
+                    group: z,
+                },
+            ) => a.to_bits() == x.to_bits() && b == y && c == z,
+            (Self::LimitK { k: a, group: b }, Self::LimitK { k: x, group: y }) => {
+                a.to_bits() == x.to_bits() && b == y
+            }
+            (Self::LimitRatio { ratio: a }, Self::LimitRatio { ratio: b }) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Self::Sort(a), Self::Sort(b)) => a == b,
+            (Self::Absent { labels: a }, Self::Absent { labels: b }) => a == b,
+            (Self::Histogram(a), Self::Histogram(b)) => a == b,
+            (
+                Self::CountValues { label: a, group: b },
+                Self::CountValues { label: x, group: y },
+            ) => a == x && b == y,
+            _ => false,
+        }
+    }
+}
+impl std::hash::Hash for BoundVectorOp {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        match self {
+            Self::TopK { k, top, group } => {
+                0u8.hash(h);
+                k.to_bits().hash(h);
+                top.hash(h);
+                group.hash(h)
+            }
+            Self::LimitK { k, group } => {
+                1u8.hash(h);
+                k.to_bits().hash(h);
+                group.hash(h)
+            }
+            Self::LimitRatio { ratio } => {
+                2u8.hash(h);
+                ratio.to_bits().hash(h)
+            }
+            Self::Sort(x) => {
+                3u8.hash(h);
+                x.hash(h)
+            }
+            Self::Absent { labels } => {
+                4u8.hash(h);
+                labels.hash(h)
+            }
+            Self::Histogram(x) => {
+                5u8.hash(h);
+                x.hash(h)
+            }
+            Self::CountValues { label, group } => {
+                6u8.hash(h);
+                label.hash(h);
+                group.hash(h)
+            }
+        }
+    }
+}
+impl Eq for BoundVectorOp {}

@@ -24,9 +24,11 @@ futures.workspace = true
 greptime-proto.workspace = true
 lazy_static.workspace = true
 mito-codec.workspace = true
+postcard.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 regex.workspace = true
+serde = { workspace = true, features = ["rc"] }
 snafu.workspace = true
 store-api.workspace = true
 table.workspace = true

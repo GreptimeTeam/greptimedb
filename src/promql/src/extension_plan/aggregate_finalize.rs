@@ -226,10 +226,7 @@ impl AggregateFinalize {
         )?))
     }
 
-    /// The comparable form of the split this node carries, for its plan line and its identity.
-    ///
-    /// [`BoundAggregate`] carries no `Eq`/`Hash` - a quantile's parameter is an `f64` - so its
-    /// `Debug` rendering stands in, the way [`FusedSeries`] renders the tree it runs.
+    /// The readable form of the split, for its plan line only.
     fn key(&self) -> String {
         format!("{:?} {:?} {:?}", self.op.kind, self.op.group, self.op.stage)
     }
@@ -284,12 +281,10 @@ impl UserDefinedLogicalNodeCore for AggregateFinalize {
 
 impl PartialEq for AggregateFinalize {
     fn eq(&self, other: &Self) -> bool {
-        // `NativeTree` carries no structural equality, so the rendered suffix stands in for it, as
-        // [`FusedSeries`] compares the tree it runs.
         self.promql == other.promql
-            && self.key() == other.key()
+            && self.op == other.op
             && self.binding == other.binding
-            && self.suffix.to_string() == other.suffix.to_string()
+            && self.suffix == other.suffix
             && self.input == other.input
             && self.output_schema == other.output_schema
     }
@@ -300,9 +295,9 @@ impl Eq for AggregateFinalize {}
 impl Hash for AggregateFinalize {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.promql.hash(state);
-        self.key().hash(state);
+        self.op.hash(state);
         self.binding.hash(state);
-        self.suffix.to_string().hash(state);
+        self.suffix.hash(state);
         self.input.hash(state);
         self.output_schema.hash(state);
     }
@@ -310,16 +305,15 @@ impl Hash for AggregateFinalize {
 
 impl PartialOrd for AggregateFinalize {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        // The rendered forms stand in for the trees, as they do in equality.
-        let mine = (self.promql.to_string(), self.key(), self.suffix.to_string());
-        let theirs = (
-            other.promql.to_string(),
-            other.key(),
-            other.suffix.to_string(),
-        );
-        match mine.partial_cmp(&theirs) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
+        match self.promql.cmp(&other.promql) {
+            Ordering::Equal => {}
+            ord => return Some(ord),
+        }
+        if self.op != other.op {
+            return None;
+        }
+        if self.suffix != other.suffix {
+            return None;
         }
         match self.binding.partial_cmp(&other.binding) {
             Some(Ordering::Equal) => {}

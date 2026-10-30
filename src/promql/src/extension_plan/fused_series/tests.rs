@@ -80,7 +80,7 @@ use store_api::region_engine::RawLabelSource;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, MAX_TAG_COUNT, OutputColumn, POLL_BUDGET,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -942,13 +942,40 @@ fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
     .unwrap();
     let bytes = node.serialize().unwrap();
     let decoded = FusedSeries::deserialize(&bytes).unwrap();
-    assert_eq!(
-        crate::native::wire::encode_prefix(decoded.tree()).unwrap(),
-        crate::native::wire::encode_prefix(node.tree()).unwrap()
-    );
+    assert_eq!(decoded.tree(), node.tree());
     assert_eq!(decoded.binding(), node.binding());
     assert_eq!(decoded.schema(), node.schema());
-    assert!(fused(rate_tree()).serialize().is_err());
+    let rows = fused(rate_tree());
+    let row_decoded = FusedSeries::deserialize(&rows.serialize().unwrap()).unwrap();
+    assert_eq!(row_decoded.schema(), rows.schema());
+    assert_eq!(row_decoded.tree(), rows.tree());
+
+    // The output schema owns the label layout; the source binding may have no tags or different
+    // labels after a tree operation such as label rewriting.
+    let empty_binding = binding_of(rows.tree(), raw_schema(), Vec::new());
+    let empty_tags = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        rate_tree(),
+        empty_binding,
+        vec![input_plan(frame_schema())],
+        output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let decoded = FusedSeries::deserialize(&empty_tags.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.schema(), empty_tags.schema());
+    assert_eq!(decoded.binding().tags, empty_tags.binding().tags);
+    assert_eq!(decoded.schema(), empty_tags.schema());
+
+    let projected = fused(binary_tree(raw_schema(), raw_schema()));
+    let projected_bytes = projected.serialize().unwrap();
+    let projected_decoded = FusedSeries::deserialize(&projected_bytes).unwrap();
+    assert_eq!(projected_decoded.schema(), projected.schema());
+
+    let partial = partial_node(AggregateKind::Sum);
+    let partial_decoded = FusedSeries::deserialize(&partial.serialize().unwrap()).unwrap();
+    assert_eq!(partial_decoded.partial_fold(), partial.partial_fold());
+    assert_eq!(partial_decoded.binding().tags, partial.binding().tags);
+    assert_eq!(partial_decoded.schema(), partial.schema());
     let mut bad_version = bytes.clone();
     bad_version[..4].copy_from_slice(&99u32.to_le_bytes());
     assert!(
@@ -958,6 +985,15 @@ fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
             .contains("version")
     );
     assert!(FusedSeries::deserialize(&bytes[..5]).is_err());
+    let mut trailing_payload = bytes.clone();
+    let payload_len = u32::from_le_bytes(trailing_payload[4..8].try_into().unwrap()) as usize;
+    trailing_payload.insert(8 + payload_len, 0);
+    trailing_payload[4..8].copy_from_slice(&((payload_len + 1) as u32).to_le_bytes());
+    assert!(FusedSeries::deserialize(&trailing_payload).is_err());
+
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(FusedSeries::deserialize(&trailing).is_err());
 }
 
 /// The `SeriesFrame` node of [`rate_tree`] declaring `tags` as its labels.
@@ -979,29 +1015,266 @@ fn envelope_node_with_tags(tags: Vec<String>) -> FusedSeries {
     .expect("the frame layout matches the evaluated root")
 }
 
-/// The largest tag count the envelope supports is written whole.
-#[test]
-fn fused_series_envelope_serializes_the_maximum_tag_count() {
-    let tags: Vec<String> = (0..MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
-    let node = envelope_node_with_tags(tags);
+fn mutate_envelope_schema(bytes: &[u8], mutate: impl FnOnce(&mut Vec<Field>)) -> Vec<u8> {
+    let (mut payload, remainder) =
+        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
+    assert!(remainder.is_empty());
+    let mut fields = payload
+        .output_schema
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
+    mutate(&mut fields);
+    payload.output_schema = Schema::new(fields);
+    let changed = postcard::to_stdvec(&payload).unwrap();
+    let mut result = Vec::with_capacity(8 + changed.len());
+    result.extend(3u32.to_le_bytes());
+    result.extend((changed.len() as u32).to_le_bytes());
+    result.extend(changed);
+    result
+}
+
+fn plain_envelope(tree: NativeTree, tags: Vec<String>, schema: Schema) -> Vec<u8> {
+    let binding = binding_of(&tree, raw_schema(), tags);
+    FusedSeries::try_new(
+        Arc::from(PROMQL),
+        tree,
+        binding,
+        vec![input_plan(frame_schema())],
+        Arc::new(datafusion::common::DFSchema::try_from(schema).unwrap()),
+    )
+    .unwrap()
+    .serialize()
+    .unwrap()
+}
+
+fn assert_decode_error(bytes: &[u8], expected: &str) {
+    let error = FusedSeries::deserialize(bytes).unwrap_err().to_string();
     assert!(
-        node.serialize().is_ok(),
-        "the maximum tag count must still serialize"
+        error.contains(expected),
+        "expected {expected:?}, got {error:?}"
     );
 }
 
-/// The encoder must refuse the tag count, so it never writes a payload its own decoder rejects.
 #[test]
-fn fused_series_envelope_rejects_excess_tag_count() {
-    let tags: Vec<String> = (0..=MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
-    let node = envelope_node_with_tags(tags);
-    let message = node.serialize().unwrap_err().to_string();
-    assert!(message.contains("too many FusedSeries tags"), "{message}");
-    assert!(message.contains(&MAX_TAG_COUNT.to_string()), "{message}");
-    assert!(
-        message.contains(&(MAX_TAG_COUNT + 1).to_string()),
-        "{message}"
+fn plain_rows_decode_rejects_invalid_schemas() {
+    let tree = rate_tree();
+    let base = output_schema();
+    let base_envelope = plain_envelope(
+        tree.clone(),
+        vec![HOST.into(), NAME.into()],
+        base.as_ref().clone(),
     );
+    let check = |schema: Schema, expected: &str| {
+        assert_decode_error(
+            &mutate_envelope_schema(&base_envelope, |fields| {
+                *fields = schema.fields().iter().map(|f| f.as_ref().clone()).collect()
+            }),
+            expected,
+        )
+    };
+    check(
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(HOST, DataType::Utf8, true),
+            Field::new(HOST, DataType::Utf8, true),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        "duplicate tag column",
+    );
+    check(
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        "duplicate time column",
+    );
+    // Binding labels do not override the labels in the serialized output schema.
+    let collision_schema = Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]);
+    let differing_binding = plain_envelope(tree.clone(), vec![HOST.into()], collision_schema);
+    assert!(FusedSeries::deserialize(&differing_binding).is_ok());
+    let time_tag = plain_envelope(
+        tree.clone(),
+        vec![TIME.into()],
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+    );
+    assert_decode_error(&time_tag, "cannot be the time column");
+    for datatype in [
+        DataType::Int64,
+        DataType::Timestamp(TimeUnit::Microsecond, None),
+    ] {
+        check(
+            Schema::new(vec![
+                Field::new(VALUE, DataType::Float64, true),
+                Field::new(HOST, DataType::Utf8, true),
+                Field::new(NAME, DataType::Utf8, true),
+                Field::new(TIME, datatype, false),
+            ]),
+            "must be Timestamp(Millisecond, None)",
+        );
+    }
+    check(
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(HOST, DataType::Utf8, true),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(TIME, DataType::Timestamp(TimeUnit::Millisecond, None), true),
+        ]),
+        "must not be nullable",
+    );
+    check(
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(HOST, DataType::Int64, true),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        "must be Utf8",
+    );
+    check(
+        Schema::new(vec![
+            Field::new(HOST, DataType::Utf8, true),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        "missing field column",
+    );
+    check(
+        Schema::new(vec![
+            Field::new(VALUE, DataType::Float64, true),
+            Field::new(OTHER, DataType::Float64, true),
+            Field::new(HOST, DataType::Utf8, true),
+            Field::new(NAME, DataType::Utf8, true),
+            Field::new(
+                TIME,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+        ]),
+        "must be Utf8",
+    );
+
+    let scalar = scalar_tree(grid(), 1.0);
+    let scalar_schema = Schema::new(vec![
+        Field::new(VALUE, DataType::Float64, true),
+        Field::new(HOST, DataType::Utf8, true),
+        Field::new(
+            TIME,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
+    ]);
+    let scalar_binding = FusedSeriesBinding {
+        grid: grid(),
+        metric_name: Some(Arc::from(METRIC)),
+        time_index: TIME.to_string(),
+        tags: vec![HOST.into()],
+    };
+    let scalar_bytes = FusedSeries::try_new(
+        Arc::from(PROMQL),
+        scalar,
+        scalar_binding,
+        vec![],
+        Arc::new(datafusion::common::DFSchema::try_from(scalar_schema).unwrap()),
+    )
+    .unwrap()
+    .serialize()
+    .unwrap();
+    assert_decode_error(&scalar_bytes, "scalar root cannot produce 1 tag columns");
+}
+
+#[test]
+fn series_frame_decode_rejects_schema_mismatch() {
+    let node = envelope_node_with_tags(vec![HOST.into(), NAME.into()]);
+    let bytes = node.serialize().unwrap();
+    let wrong = mutate_envelope_schema(&bytes, |fields| {
+        fields.push(Field::new("extra", DataType::Utf8, true))
+    });
+    assert_decode_error(&wrong, "FusedSeries SeriesFrame schema mismatch");
+}
+
+#[test]
+fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
+    let tree = rate_tree();
+    let node = FusedSeries::try_new_partial(
+        Arc::from(PROMQL),
+        tree.clone(),
+        partial_binding_of(&tree, &[HOST, JOB]),
+        vec![input_plan(frame_schema())],
+        partial_op(AggregateKind::Sum, &[HOST, JOB]),
+    )
+    .unwrap();
+    let bytes = node.serialize().unwrap();
+    let wrong_schema = mutate_envelope_schema(&bytes, |fields| {
+        fields.push(Field::new("extra", DataType::Utf8, true))
+    });
+    assert_decode_error(
+        &wrong_schema,
+        "partial FusedSeries output schema does not match state_schema(binding.tags)",
+    );
+
+    let reversed = mutate_envelope_schema(&bytes, |fields| fields.swap(1, 2));
+    assert_decode_error(
+        &reversed,
+        "partial FusedSeries output schema does not match state_schema(binding.tags)",
+    );
+
+    let mut wrong_format = bytes.clone();
+    let (mut payload, remainder) =
+        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
+    assert!(remainder.is_empty());
+    payload.format = FusedOutputFormat::SeriesFrame;
+    let changed = postcard::to_stdvec(&payload).unwrap();
+    wrong_format.truncate(8);
+    wrong_format[4..8].copy_from_slice(&(changed.len() as u32).to_le_bytes());
+    wrong_format.extend(changed);
+    assert_decode_error(&wrong_format, "partial FusedSeries must use PlainRows");
+}
+
+#[test]
+fn fused_series_envelope_round_trips_large_tag_lists() {
+    let tags: Vec<String> = (0..1025).map(|i| format!("t{i}")).collect();
+    let node = envelope_node_with_tags(tags);
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.binding().tags, node.binding().tags);
 }
 
 fn fused(tree: NativeTree) -> FusedSeries {

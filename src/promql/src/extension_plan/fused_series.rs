@@ -69,7 +69,7 @@ use datafusion::physical_plan::{
 use datatypes::series::SeriesOrdering;
 use datatypes::series::raw::RawSeriesChunk;
 use datatypes::series::samples::{DenseSamplesRef, FieldSpec, SampleRef, Samples, SeriesSchema};
-use datatypes::series::time::EvalGrid;
+use datatypes::series::time::{EvalGrid, GridSpec};
 use futures::Stream;
 use store_api::region_engine::RawLabelSource;
 
@@ -98,10 +98,6 @@ const METRIC_NAME: &str = "__name__";
 /// for. The budget makes that a poll that yields instead, and the waker makes sure it is polled
 /// again, so nothing is lost by stopping early.
 const POLL_BUDGET: usize = 64;
-
-/// Maximum number of tags the envelope carries, shared by [`FusedSeries::serialize`] and
-/// [`FusedSeries::deserialize`] so a serialized node is always one this version can rebuild.
-const MAX_TAG_COUNT: usize = 1024;
 
 /// The statement grid and output naming that travel with a compiled tree.
 ///
@@ -177,7 +173,9 @@ impl PartialOrd for FusedSeriesBinding {
 }
 
 /// The output representation fixed when a fused plan is built.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum FusedOutputFormat {
     /// The existing tabular query result.
     PlainRows,
@@ -235,191 +233,151 @@ pub struct FusedSeries {
     format: FusedOutputFormat,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FusedSeriesPayload {
+    tree: NativeTree,
+    grid: GridSpec,
+    metric_name: Option<Arc<str>>,
+    time_index: String,
+    tags: Vec<String>,
+    format: FusedOutputFormat,
+    promql: Arc<str>,
+    partial_fold: Option<BoundAggregate>,
+    output_schema: datafusion::arrow::datatypes::Schema,
+}
+
 impl FusedSeries {
-    /// Serializes the native tree and the binding required to reconstruct this plan node.
-    /// The PromQL text is included for diagnostics only and never drives execution; children
-    /// remain ordinary Substrait inputs. Version 1 supports only SeriesFrame without partial folds:
-    /// decoding must rebuild its output schema, and only SeriesFrame derives that schema from the tree.
+    /// Serializes the native tree and binding required to reconstruct this plan node.
+    /// Substrait carries children separately; the envelope contains only a version, payload
+    /// length and the single derived payload.
     pub fn serialize(&self) -> DataFusionResult<Vec<u8>> {
-        if self.format != FusedOutputFormat::SeriesFrame {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support PlainRows output schema".into(),
-            ));
-        }
-        if self.partial_fold.is_some() {
-            return Err(DataFusionError::NotImplemented(
-                "FusedSeries serialization does not support partial_fold".into(),
-            ));
-        }
-        fn text(out: &mut Vec<u8>, s: &str) -> DataFusionResult<()> {
-            let n = u32::try_from(s.len())
-                .map_err(|_| DataFusionError::Plan("FusedSeries string too long".into()))?;
-            out.extend(n.to_le_bytes());
-            out.extend(s.as_bytes());
-            Ok(())
-        }
-        let tree = crate::native::wire::encode_prefix(&self.tree)
-            .map_err(|e| DataFusionError::Plan(format!("cannot encode FusedSeries tree: {e}")))?;
-        let mut out = Vec::new();
-        out.extend(1u32.to_le_bytes());
-        out.extend(
-            u32::try_from(tree.len())
-                .map_err(|_| DataFusionError::Plan("FusedSeries tree too large".into()))?
-                .to_le_bytes(),
-        );
-        out.extend(tree);
-        let spec = self.binding.grid.spec();
-        out.extend(spec.start_ms.to_le_bytes());
-        out.extend(spec.step_ms.to_le_bytes());
-        out.extend(spec.len.to_le_bytes());
-        match &self.binding.metric_name {
-            Some(name) => {
-                out.push(1);
-                text(&mut out, name)?;
-            }
-            None => out.push(0),
-        }
-        text(&mut out, &self.binding.time_index)?;
-        if self.binding.tags.len() > MAX_TAG_COUNT {
-            return Err(DataFusionError::Plan(format!(
-                "too many FusedSeries tags: {} exceeds maximum {MAX_TAG_COUNT}",
-                self.binding.tags.len()
-            )));
-        }
-        out.extend(
-            u32::try_from(self.binding.tags.len())
-                .map_err(|_| DataFusionError::Plan("too many FusedSeries tags".into()))?
-                .to_le_bytes(),
-        );
-        for tag in &self.binding.tags {
-            text(&mut out, tag)?;
-        }
-        out.push(1); // explicit stable tag: SeriesFrame
-        text(&mut out, &self.promql)?;
+        let payload = FusedSeriesPayload {
+            tree: self.tree.clone(),
+            grid: self.binding.grid.spec(),
+            metric_name: self.binding.metric_name.clone(),
+            time_index: self.binding.time_index.clone(),
+            tags: self.binding.tags.clone(),
+            format: self.format,
+            promql: Arc::clone(&self.promql),
+            partial_fold: self.partial_fold.clone(),
+            output_schema: self.output_schema.as_arrow().clone(),
+        };
+        let encoded = postcard::to_stdvec(&payload).map_err(|e| {
+            DataFusionError::Plan(format!("cannot serialize FusedSeries payload: {e}"))
+        })?;
+        let len = u32::try_from(encoded.len())
+            .map_err(|_| DataFusionError::Plan("FusedSeries payload too large".into()))?;
+        let mut out = Vec::with_capacity(8 + encoded.len());
+        out.extend(3u32.to_le_bytes());
+        out.extend(len.to_le_bytes());
+        out.extend(encoded);
         Ok(out)
     }
 
-    /// Rebuilds a serialized SeriesFrame node. Substrait attaches its child plans separately.
+    /// Rebuilds a serialized FusedSeries node, validating its carried schema against the tree,
+    /// output format, and optional partial fold. Substrait attaches children separately.
     pub fn deserialize(bytes: &[u8]) -> DataFusionResult<Self> {
-        struct Reader<'a> {
-            b: &'a [u8],
-            p: usize,
+        if bytes.len() < 8 {
+            return Err(DataFusionError::Plan(
+                "truncated FusedSeries envelope".into(),
+            ));
         }
-        impl<'a> Reader<'a> {
-            fn take(&mut self, n: usize) -> DataFusionResult<&'a [u8]> {
-                let e = self
-                    .p
-                    .checked_add(n)
-                    .ok_or_else(|| DataFusionError::Plan("FusedSeries length overflow".into()))?;
-                if e > self.b.len() {
-                    return Err(DataFusionError::Plan(
-                        "truncated FusedSeries payload".into(),
-                    ));
-                }
-                let r = &self.b[self.p..e];
-                self.p = e;
-                Ok(r)
-            }
-            fn u8(&mut self) -> DataFusionResult<u8> {
-                Ok(self.take(1)?[0])
-            }
-            fn u32(&mut self) -> DataFusionResult<u32> {
-                Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-            }
-            fn i64(&mut self) -> DataFusionResult<i64> {
-                Ok(i64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-            }
-            fn u64(&mut self) -> DataFusionResult<u64> {
-                Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-            }
-            fn text(&mut self) -> DataFusionResult<String> {
-                let n = self.u32()? as usize;
-                String::from_utf8(self.take(n)?.to_vec())
-                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries UTF-8: {e}")))
-            }
-        }
-        let mut r = Reader { b: bytes, p: 0 };
-        let version = r.u32()?;
-        if version != 1 {
+        let version = u32::from_le_bytes(bytes[..4].try_into().unwrap());
+        if version != 3 {
             return Err(DataFusionError::Plan(format!(
                 "unsupported FusedSeries envelope version {version}"
             )));
         }
-        let n = r.u32()? as usize;
-        let tree = crate::native::wire::decode_prefix(r.take(n)?)
-            .map_err(|e| DataFusionError::Plan(format!("cannot decode FusedSeries tree: {e}")))?;
-        let grid = Arc::new(
-            EvalGrid::try_deferred(
-                datatypes::series::time::GridSpec::try_new(r.i64()?, r.i64()?, r.u64()?)
-                    .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
-            )
-            .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
-        );
-        let metric_name = match r.u8()? {
-            0 => None,
-            1 => Some(Arc::<str>::from(r.text()?)),
-            x => {
-                return Err(DataFusionError::Plan(format!(
-                    "invalid FusedSeries metric-name tag {x}"
-                )));
-            }
-        };
-        let time_index = r.text()?;
-        let count = r.u32()? as usize;
-        if count > MAX_TAG_COUNT {
-            return Err(DataFusionError::Plan(format!(
-                "too many FusedSeries tags: {count} exceeds maximum {MAX_TAG_COUNT}"
-            )));
+        let len = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
+        let end = 8usize
+            .checked_add(len)
+            .ok_or_else(|| DataFusionError::Plan("FusedSeries length overflow".into()))?;
+        if end != bytes.len() {
+            return Err(DataFusionError::Plan(if end > bytes.len() {
+                "truncated FusedSeries payload".into()
+            } else {
+                "trailing bytes in FusedSeries payload".into()
+            }));
         }
-        let mut tags = Vec::with_capacity(count);
-        for _ in 0..count {
-            tags.push(r.text()?)
-        }
-        let format = match r.u8()? {
-            1 => FusedOutputFormat::SeriesFrame,
-            x => {
-                return Err(DataFusionError::Plan(format!(
-                    "unsupported FusedSeries output format tag {x}"
-                )));
-            }
-        };
-        let promql = Arc::<str>::from(r.text()?);
-        if r.p != bytes.len() {
+        let (payload, remainder) = postcard::take_from_bytes::<FusedSeriesPayload>(&bytes[8..])
+            .map_err(|e| {
+                DataFusionError::Plan(format!("cannot deserialize FusedSeries payload: {e}"))
+            })?;
+        if !remainder.is_empty() {
             return Err(DataFusionError::Plan(
                 "trailing bytes in FusedSeries payload".into(),
             ));
         }
+        let FusedSeriesPayload {
+            tree,
+            grid,
+            metric_name,
+            time_index,
+            tags,
+            format,
+            promql,
+            partial_fold,
+            output_schema,
+        } = payload;
+        let tree = NativeTree::try_new(tree.root().clone())
+            .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries tree: {e}")))?;
+        let grid = Arc::new(
+            EvalGrid::try_deferred(grid)
+                .map_err(|e| DataFusionError::Plan(format!("invalid FusedSeries grid: {e}")))?,
+        );
         let children = vec![
             LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
                 produce_one_row: false,
-                schema: Arc::new(datafusion::common::DFSchema::empty())
+                schema: Arc::new(datafusion::common::DFSchema::empty()),
             });
             collect_source_schemas(&tree)?.len()
         ];
-        // A frame output declares the layout of the tree's evaluated root, which the tree itself
-        // carries. `try_new_with_format` compares the two, so passing an empty schema here would
-        // make every serialized frame node impossible to rebuild.
-        let output_schema = if format == FusedOutputFormat::SeriesFrame {
-            let evaluated = evaluated_output(&tree)?;
-            Arc::new(datafusion::common::DFSchema::try_from(
-                series_frame_output_schema(evaluated.as_ref())?,
-            )?)
-        } else {
-            Arc::new(datafusion::common::DFSchema::empty())
+        let binding = FusedSeriesBinding {
+            grid,
+            metric_name,
+            time_index,
+            tags,
         };
-        Self::try_new_with_format(
-            promql,
-            tree,
-            FusedSeriesBinding {
-                grid,
-                metric_name,
-                time_index,
-                tags,
-            },
-            children,
-            output_schema,
-            format,
-        )
+        let declared_schema = Arc::new(datafusion::common::DFSchema::try_from(output_schema)?);
+        if binding.tags.iter().any(|tag| tag == &binding.time_index) {
+            return Err(DataFusionError::Plan(
+                "tag column cannot be the time column".into(),
+            ));
+        }
+        if let Some(op) = partial_fold {
+            if format != FusedOutputFormat::PlainRows {
+                return Err(DataFusionError::Plan(
+                    "partial FusedSeries must use PlainRows".into(),
+                ));
+            }
+            let expected = Arc::new(datafusion::common::DFSchema::try_from(state_schema(
+                &binding.tags,
+            ))?);
+            if declared_schema.as_arrow() != expected.as_arrow() {
+                return Err(DataFusionError::Plan(
+                    "partial FusedSeries output schema does not match state_schema(binding.tags)"
+                        .into(),
+                ));
+            }
+            return Self::try_new_partial(promql, tree, binding, children, op);
+        }
+        let output_schema = if format == FusedOutputFormat::SeriesFrame {
+            let expected = series_frame_output_schema(evaluated_output(&tree)?.as_ref())?;
+            if declared_schema.as_arrow() != expected.as_ref() {
+                return Err(DataFusionError::Plan(
+                    "FusedSeries SeriesFrame schema mismatch".into(),
+                ));
+            }
+            declared_schema
+        } else {
+            validate_plain_output_schema(
+                &Arc::new(declared_schema.as_arrow().clone()),
+                &tree,
+                &binding.time_index,
+            )?;
+            declared_schema
+        };
+        Self::try_new_with_format(promql, tree, binding, children, output_schema, format)
     }
 
     /// The name this node is shown under.
@@ -587,19 +545,11 @@ impl FusedSeries {
         let Some(root) = self.tree.root().output.samples() else {
             return Vec::new();
         };
-        self.output_schema
-            .fields()
-            .iter()
-            .map(|field| field.name())
-            .filter(|name| {
-                *name != &self.binding.time_index
-                    && !root
-                        .fields
-                        .iter()
-                        .any(|field| field.name.as_ref() == name.as_str())
-            })
-            .cloned()
-            .collect()
+        output_tags_from_schema(
+            &Arc::new(self.output_schema.as_arrow().clone()),
+            &root.fields,
+            &self.binding.time_index,
+        )
     }
 }
 
@@ -657,17 +607,12 @@ impl UserDefinedLogicalNodeCore for FusedSeries {
 
 impl PartialEq for FusedSeries {
     fn eq(&self, other: &Self) -> bool {
-        // `NativeTree` carries no structural equality, so the rendered tree stands in for it. The
-        // renderer names every node with its bound operation and grids, which is what makes two
-        // nodes the same computation; comparing the text alone would call two different trees
-        // equal whenever their PromQL happens to read the same.
         self.promql == other.promql
-            && self.tree.to_string() == other.tree.to_string()
-            && tree_input_fields(&self.tree) == tree_input_fields(&other.tree)
+            && self.tree == other.tree
             && self.binding == other.binding
             && self.children == other.children
             && self.output_schema == other.output_schema
-            && partial_key(self.partial_fold.as_ref()) == partial_key(other.partial_fold.as_ref())
+            && self.partial_fold == other.partial_fold
             && self.format == other.format
     }
 }
@@ -680,7 +625,8 @@ impl Hash for FusedSeries {
         self.binding.hash(state);
         self.children.hash(state);
         self.output_schema.hash(state);
-        partial_key(self.partial_fold.as_ref()).hash(state);
+        self.tree.hash(state);
+        self.partial_fold.hash(state);
         self.format.hash(state);
     }
 }
@@ -699,21 +645,13 @@ impl PartialOrd for FusedSeries {
             Some(Ordering::Equal) => {}
             ord => return ord,
         }
-        match self.tree.to_string().partial_cmp(&other.tree.to_string()) {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
+        if self.tree != other.tree {
+            return None;
         }
-        match partial_key(self.partial_fold.as_ref())
-            .partial_cmp(&partial_key(other.partial_fold.as_ref()))
-        {
-            Some(Ordering::Equal) => {}
-            ord => return ord,
+        if self.partial_fold != other.partial_fold {
+            return None;
         }
         match self.format.cmp(&other.format) {
-            Ordering::Equal => {}
-            ord => return Some(ord),
-        }
-        match tree_input_fields(&self.tree).cmp(&tree_input_fields(&other.tree)) {
             Ordering::Equal => {}
             ord => return Some(ord),
         }
@@ -736,29 +674,6 @@ fn render_partial_fold(op: &BoundAggregate) -> String {
         kind => format!("{kind:?}").to_lowercase(),
     };
     format!("{kind} {group} {:?}", op.stage)
-}
-
-/// A stable comparable representation for an optional partial fold.
-fn partial_key(partial: Option<&BoundAggregate>) -> Option<String> {
-    partial.map(render_partial_fold)
-}
-
-/// The raw field names bound to each input leaf, retaining source association and leaf order.
-fn tree_input_fields(tree: &NativeTree) -> Vec<(usize, Vec<String>)> {
-    tree_inputs(tree)
-        .into_iter()
-        .map(|input| {
-            let fields = match &input.output {
-                NativeType::Samples(schema) => schema
-                    .fields
-                    .iter()
-                    .map(|field| field.name.to_string())
-                    .collect(),
-                NativeType::Scalar(_) | NativeType::AggregateState(_) => Vec::new(),
-            };
-            (input.source_index, fields)
-        })
-        .collect()
 }
 
 /// The schemas read by distinct raw sources, in dense source-index order.
@@ -904,6 +819,49 @@ pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<
         .collect())
 }
 
+fn output_tags_from_schema(schema: &SchemaRef, fields: &[FieldSpec], time: &str) -> Vec<String> {
+    schema
+        .fields()
+        .iter()
+        .filter(|field| {
+            field.name().as_str() != time && !fields.iter().any(|f| f.name.as_ref() == field.name())
+        })
+        .map(|field| field.name().clone())
+        .collect()
+}
+
+fn validate_plain_output_schema(
+    schema: &SchemaRef,
+    tree: &NativeTree,
+    time: &str,
+) -> DataFusionResult<()> {
+    let fields = match &tree.root().output {
+        NativeType::Samples(s) => s.fields.to_vec(),
+        NativeType::Scalar(_) => {
+            let non_time_columns = schema
+                .fields()
+                .iter()
+                .filter(|field| field.name().as_str() != time)
+                .count();
+            if non_time_columns != 1 {
+                return Err(DataFusionError::Plan(format!(
+                    "FusedSeriesExec scalar root cannot produce {} tag columns",
+                    non_time_columns.saturating_sub(1)
+                )));
+            }
+            scalar_root_fields(schema, &[], time)?
+        }
+        NativeType::AggregateState(_) => {
+            return Err(DataFusionError::Plan(
+                "PlainRows does not support aggregate-state roots".into(),
+            ));
+        }
+    };
+    let tags = output_tags_from_schema(schema, &fields, time);
+    classify_output(schema, &fields, &tags, time)?;
+    Ok(())
+}
+
 fn validate_physical_tree(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesSchema>>> {
     let schemas = collect_source_schemas(tree)?;
     if tree.root().output.grid().is_none() {
@@ -963,6 +921,17 @@ pub(crate) fn classify_output(
     tags: &[String],
     time_column: &str,
 ) -> DataFusionResult<Vec<OutputColumn>> {
+    if output_schema
+        .fields()
+        .iter()
+        .filter(|field| field.name().as_str() == time_column)
+        .count()
+        > 1
+    {
+        return Err(DataFusionError::Plan(format!(
+            "duplicate time column {time_column:?} in FusedSeriesExec output schema"
+        )));
+    }
     for (index, tag) in tags.iter().enumerate() {
         if tags[..index].contains(tag) {
             return Err(DataFusionError::Plan(format!(
