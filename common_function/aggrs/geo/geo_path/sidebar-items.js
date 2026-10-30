@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_LIST_FIELD_NAME","GEO_PATH_NAME","LATITUDE_FIELD","LONGITUDE_FIELD","TIMESTAMP_FIELD"],"struct":["GeoPathAccumulator"]};

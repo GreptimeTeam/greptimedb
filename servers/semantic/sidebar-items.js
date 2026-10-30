@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["METRIC_TYPE_COUNTER","METRIC_TYPE_GAUGE","METRIC_TYPE_GAUGE_HISTOGRAM","METRIC_TYPE_HISTOGRAM","METRIC_TYPE_INFO","METRIC_TYPE_STATESET","METRIC_TYPE_SUMMARY","METRIC_TYPE_UPDOWN_COUNTER"],"fn":["collapse_value","openmetrics_unit_to_ucum"],"struct":["SemanticIndex","SemanticIndexes"]};

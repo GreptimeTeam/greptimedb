@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["NAME"],"fn":["array_to_bool","float_array_to_bool","int_array_to_bool","to_boolean_array"],"struct":["IfFunction"]};

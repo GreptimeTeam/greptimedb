@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["WriteAttempt"],"fn":["acknowledged","direct_attribution","get_peer","merge_attempts","merge_response","resolve_peers","split_request","write_region_id","write_row_count"],"mod":["attribution","options"],"struct":["RoutedWrite","WriteAttribution","WriteDispatcher","WriteRetry","WriteRetryOptions"],"type":["WriteDispatcherRef"]};

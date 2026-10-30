@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DbResolution","MechanismSelection"],"fn":["record_auth_failure","resolve_db_info","send_error","send_password_authentication_failed","set_client_info","to_scram_secret"],"struct":["PgUserProviderSource","ZeroPidSecretKeyGenerator"]};

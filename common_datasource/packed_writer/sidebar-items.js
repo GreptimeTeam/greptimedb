@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WRITE_BYTES"],"fn":["check_cancelled"],"struct":["PackedTableWriter","PackedWriter","Upload","UploadLimits"],"type":["PackedWriterRef"]};

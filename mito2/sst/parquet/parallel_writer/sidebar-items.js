@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EncodeRuntime"],"fn":["abort_encoding_tasks","assign_fields","encode_fields"],"struct":["ParallelArrowWriter"],"type":["EncodedFields","FieldWriters"]};

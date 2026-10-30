@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TermKind"],"fn":["boundary_ok","classify_term"],"struct":["MatchesTermFinder","MatchesTermFunction"]};

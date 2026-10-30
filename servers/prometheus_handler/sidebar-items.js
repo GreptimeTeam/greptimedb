@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROMETHEUS_API_VERSION","PROMQL_SCHEMA_MATCHERS"],"fn":["resolve_schema_from_matchers"],"struct":["ParsedPromQuery"],"trait":["PrometheusHandler"],"type":["PrometheusHandlerRef"]};

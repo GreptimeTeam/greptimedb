@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["APPEND_SEPARATOR_NAME","PROCESSOR_DISSECT"],"enum":["Part","StartModifier"],"fn":["is_valid_char"],"struct":["DissectProcessor","EndModifier","Name","Pattern"]};

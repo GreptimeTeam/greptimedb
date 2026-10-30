@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["is_integral_zero","regproc_zero_sentinel"],"struct":["PgOidAliasExprPlanner"]};

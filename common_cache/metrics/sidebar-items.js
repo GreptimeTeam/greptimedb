@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["CacheMetrics","CacheSizeMetric","CacheSizeMetrics","CacheSizeRegistration","CacheSizeSource","OperationGuard","OperationMetrics"]};

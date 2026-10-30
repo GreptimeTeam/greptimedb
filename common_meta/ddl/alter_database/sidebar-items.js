@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["AlterDatabaseState"],"fn":["build_new_schema_value","twcs_trigger_alias"],"struct":["AlterDatabaseData","AlterDatabaseProcedure"]};

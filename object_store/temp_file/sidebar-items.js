@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["TEMPORARY_FILE_SCHEME","TEMPORARY_MARKER","TEMPORARY_PREFIX","TEMPORARY_SUFFIX"],"fn":["is_temporary_file","sweep_dir","sweep_temporary_files","temporary_path","writes_temporary_files"],"struct":["SweepReport"]};

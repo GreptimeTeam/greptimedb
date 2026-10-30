@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_object_store","extract_region_metadata","format_bytes","max_row_group_uncompressed_size","parse_config","parse_file_id","parse_path_type","parse_region_id"]};
