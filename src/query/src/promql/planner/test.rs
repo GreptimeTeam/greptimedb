@@ -2597,36 +2597,35 @@ async fn native_fused_delta_temporality_non_counter_math_still_folds() {
     }
 }
 
-/// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
+/// A whole-vector operation reaches the native route like any other call the compiler folds.
+///
+/// `sort` and `absent` read across a vector rather than one series at a time, which is why an
+/// earlier version of this route refused them by name. The refusal was a second capability list
+/// beside the compiler's, and it disagreed with it: these calls compile, so the list was the only
+/// thing turning them away.
 #[tokio::test]
-async fn native_fused_whole_vector_operation_falls_back() {
+async fn native_fused_whole_vector_operations_are_admitted() {
     for query in ["sort(some_metric)", "absent(some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` reads the whole vector and must not be placed region-side"
-        );
-        assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            find_fused_series(&native).is_some(),
+            "`{query}` compiles, so the native route plans it: {native:?}"
         );
     }
 }
 
+/// What the compiler has no node for still keeps the existing plan.
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
+        // A subquery evaluates its own body on a grid of its own, which this route does not offer.
         "sum_over_time(rate(some_metric[5m])[1h:])",
-        "histogram_count(some_metric)",
-        "ceil(some_metric)",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(
             !display.contains("FusedSeries"),
-            "`{query}` must not enter the limited native POC: {display}"
+            "`{query}` must not enter the native route: {display}"
         );
         // Falling back is the existing plan, not an approximation of it.
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2634,6 +2633,18 @@ async fn native_fused_unsupported_shape_falls_back() {
             display,
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// Pointwise and histogram calls compile, so they are planned rather than refused by name.
+#[tokio::test]
+async fn native_fused_pointwise_and_histogram_calls_are_admitted() {
+    for query in ["ceil(some_metric)", "histogram_count(some_metric)"] {
+        let native = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&native).is_some(),
+            "`{query}` compiles, so the native route plans it: {native:?}"
         );
     }
 }
