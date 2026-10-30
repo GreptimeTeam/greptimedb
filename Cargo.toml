@@ -64,6 +64,7 @@ members = [
     "src/promql",
     "src/puffin",
     "src/query",
+    "src/relational-engine",
     "src/standalone",
     "src/servers",
     "src/session",
@@ -355,6 +356,7 @@ plugins = { path = "src/plugins" }
 promql = { path = "src/promql" }
 puffin = { path = "src/puffin" }
 query = { path = "src/query" }
+relational-engine = { path = "src/relational-engine" }
 servers = { path = "src/servers" }
 session = { path = "src/session" }
 sql = { path = "src/sql" }

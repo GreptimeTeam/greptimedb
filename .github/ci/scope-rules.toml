@@ -141,6 +141,7 @@ engine = [
   "src/mito-codec/**",
   "src/metric-engine/**",
   "src/file-engine/**",
+  "src/relational-engine/**",
   "src/log-store/**",
   "src/common/wal/**",
 ]

@@ -87,6 +87,7 @@ pub struct SetRegionRoleStateRequest {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SetRegionRoleStateSuccess {
     File,
+    Relational,
     Mito {
         last_entry_id: entry::Id,
     },
@@ -100,6 +101,11 @@ impl SetRegionRoleStateSuccess {
     /// Returns a [SetRegionRoleStateSuccess::File].
     pub fn file() -> Self {
         Self::File
+    }
+
+    /// Returns a [SetRegionRoleStateSuccess::Relational].
+    pub fn relational() -> Self {
+        Self::Relational
     }
 
     /// Returns a [SetRegionRoleStateSuccess::Mito] with the `last_entry_id`.
@@ -120,7 +126,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the region.
     pub fn last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { last_entry_id } => Some(*last_entry_id),
             SetRegionRoleStateSuccess::Metric { last_entry_id, .. } => Some(*last_entry_id),
         }
@@ -129,7 +135,7 @@ impl SetRegionRoleStateSuccess {
     /// Returns the last entry id of the metadata of the region.
     pub fn metadata_last_entry_id(&self) -> Option<entry::Id> {
         match self {
-            SetRegionRoleStateSuccess::File => None,
+            SetRegionRoleStateSuccess::File | SetRegionRoleStateSuccess::Relational => None,
             SetRegionRoleStateSuccess::Mito { .. } => None,
             SetRegionRoleStateSuccess::Metric {
                 metadata_last_entry_id,
