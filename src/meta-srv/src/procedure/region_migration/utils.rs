@@ -44,14 +44,14 @@ pub struct RegionMigrationTaskBatch {
 }
 
 impl RegionMigrationTaskBatch {
-    /// Constructs a [`RegionMigrationTaskBatch`] from a vector of region migration procedure tasks.
+    /// Constructs a failover batch from tasks sharing the same source and destination.
     ///
     /// Aggregates region IDs, determines source and destination peers, sets an appropriate timeout,
     /// and assigns the trigger reason for the migration batch.
     ///
     /// # Panic
     /// if the `tasks` are empty.
-    pub fn from_tasks(tasks: Vec<(RegionMigrationProcedureTask, u32)>) -> Self {
+    pub fn from_failover_tasks(tasks: Vec<(RegionMigrationProcedureTask, u32)>) -> Self {
         let max_count = tasks.iter().map(|(_, count)| *count).max().unwrap_or(1);
         let region_ids = tasks.iter().map(|(r, _)| r.region_id).collect::<Vec<_>>();
         let from_peer = tasks[0].0.from_peer.clone();

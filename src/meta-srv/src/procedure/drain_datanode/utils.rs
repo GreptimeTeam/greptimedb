@@ -12,78 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
-
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManagerRef;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
-use common_meta::rpc::router::region_distribution;
 use common_time::util::current_time_millis;
-use futures::TryStreamExt;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
-use crate::procedure::drain_datanode::{Context, DrainDatanodePlan};
+use crate::procedure::drain_datanode::Context;
 use crate::selector::common;
-
-/// Builds the drain plan of `node_id`.
-///
-/// Walks the datanode table index and reads the authoritative table routes, so the plan
-/// reflects the routes rather than the index. Each table route is split by role with
-/// [`region_distribution`], which keys the regions by datanode id.
-pub(crate) async fn build_datanode_plan(
-    table_metadata_manager: &TableMetadataManagerRef,
-    node_id: DatanodeId,
-) -> Result<DrainDatanodePlan> {
-    let mut leader_regions = BTreeSet::new();
-    let mut follower_regions = BTreeSet::new();
-
-    let mut tables = table_metadata_manager
-        .datanode_table_manager()
-        .tables(node_id);
-    while let Some(value) = tables
-        .try_next()
-        .await
-        .context(error::TableMetadataManagerSnafu)?
-    {
-        let Some(table_route) = table_metadata_manager
-            .table_route_manager()
-            .table_route_storage()
-            .get(value.table_id)
-            .await
-            .context(error::TableMetadataManagerSnafu)?
-        else {
-            continue;
-        };
-        let TableRouteValue::Physical(table_route) = table_route else {
-            continue;
-        };
-
-        let mut distribution = region_distribution(&table_route.region_routes);
-        let Some(roles) = distribution.remove(&node_id) else {
-            continue;
-        };
-        leader_regions.extend(
-            roles
-                .leader_regions
-                .into_iter()
-                .map(|number| RegionId::new(value.table_id, number)),
-        );
-        follower_regions.extend(
-            roles
-                .follower_regions
-                .into_iter()
-                .map(|number| RegionId::new(value.table_id, number)),
-        );
-    }
-
-    Ok(DrainDatanodePlan {
-        leader_regions: leader_regions.into_iter().collect(),
-        follower_regions: follower_regions.into_iter().collect(),
-    })
-}
 
 /// Returns true if `node_id` still leads `region_id`.
 ///
@@ -125,7 +64,7 @@ pub(crate) fn ensure_drain_deadline(ctx: &Context) -> Result<()> {
 
     let remaining_leader_regions = ctx
         .volatile_ctx
-        .plan
+        .topic_batch
         .as_ref()
         .map_or(0, |plan| plan.leader_regions.len());
     error::ExceededDeadlineSnafu {
@@ -189,24 +128,30 @@ mod tests {
         env.create_table(vec![leader_region(first, 1), follower_region(second, 2, 1)])
             .await;
 
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
+        let mut ctx = env.context(new_persistent_context(
+            None,
+            DrainDatanodeStrategy::FailFast,
+        ));
+        ctx.start_scan().unwrap();
+        ctx.read_next_topic().await.unwrap();
 
-        assert_eq!(vec![first], plan.leader_regions);
-        assert_eq!(vec![second], plan.follower_regions);
+        assert_eq!(vec![first], ctx.volatile_ctx.leader_regions());
+        assert_eq!(1, ctx.volatile_ctx.follower_count);
     }
 
     #[tokio::test]
     async fn test_build_datanode_plan_of_empty_datanode() {
         let env = TestEnv::new().await;
 
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
+        let mut ctx = env.context(new_persistent_context(
+            None,
+            DrainDatanodeStrategy::FailFast,
+        ));
+        ctx.start_scan().unwrap();
+        ctx.read_next_topic().await.unwrap();
 
-        assert!(plan.leader_regions.is_empty());
-        assert!(plan.follower_regions.is_empty());
+        assert!(ctx.volatile_ctx.leader_regions().is_empty());
+        assert_eq!(0, ctx.volatile_ctx.follower_count);
     }
 
     #[tokio::test]
@@ -218,12 +163,15 @@ mod tests {
         env.create_table(vec![follower_region(region_id, 2, 1)])
             .await;
 
-        let plan = utils::build_datanode_plan(env.table_metadata_manager(), 1)
-            .await
-            .unwrap();
+        let mut ctx = env.context(new_persistent_context(
+            None,
+            DrainDatanodeStrategy::FailFast,
+        ));
+        ctx.start_scan().unwrap();
+        ctx.read_next_topic().await.unwrap();
 
-        assert!(plan.leader_regions.is_empty());
-        assert_eq!(vec![region_id], plan.follower_regions);
+        assert!(ctx.volatile_ctx.leader_regions().is_empty());
+        assert_eq!(1, ctx.volatile_ctx.follower_count);
     }
 
     #[tokio::test]

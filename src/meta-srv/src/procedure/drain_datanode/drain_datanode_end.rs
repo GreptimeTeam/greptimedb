@@ -39,7 +39,7 @@ impl State for DrainDatanodeEnd {
     ) -> Result<(Box<dyn State>, Status)> {
         let node_id = ctx.persistent_ctx.node_id;
         let migrated = ctx.volatile_ctx.migrated;
-        let follower_regions = ctx.volatile_ctx.follower_regions().len();
+        let follower_regions = ctx.volatile_ctx.follower_count;
         let failed_regions = ctx.volatile_ctx.failed_regions.clone();
 
         if !failed_regions.is_empty() {

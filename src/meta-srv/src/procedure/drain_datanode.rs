@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub(crate) mod check_drained;
+pub(crate) mod cursor;
 pub(crate) mod dispatch;
 pub(crate) mod drain_datanode_end;
 pub(crate) mod drain_datanode_start;
 pub(crate) mod manager;
 mod migration;
+mod scan;
 pub(crate) mod utils;
 
 #[cfg(test)]
@@ -47,6 +48,7 @@ use crate::procedure::drain_datanode::manager::{
     DrainDatanodeProcedureGuard, DrainDatanodeProcedureTracker,
 };
 use crate::procedure::region_migration::manager::RegionMigrationManagerRef;
+use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
 
 /// The default number of leader regions migrated concurrently.
 pub const DEFAULT_PARALLELISM: usize = 4;
@@ -68,13 +70,13 @@ pub enum DrainDatanodeStrategy {
     TryAll,
 }
 
-/// The regions placed on a datanode, split by role.
+/// One bounded window of the datanode drain scan.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DrainDatanodePlan {
-    /// The leader regions still to migrate, sorted and deduplicated.
+pub(crate) struct TopicBatch {
+    /// The leader regions in this window, sorted and deduplicated.
     pub leader_regions: Vec<RegionId>,
-    /// The follower regions of the datanode, sorted and deduplicated.
-    pub follower_regions: Vec<RegionId>,
+    /// The shared Kafka topic, or `None` for singleton local WAL migrations.
+    pub topic: Option<String>,
 }
 
 /// The persistent data of [`DrainDatanodeProcedure`].
@@ -96,10 +98,10 @@ pub struct PersistentContext {
 }
 
 /// A dispatched migration sub-procedure that is not settled yet.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SubprocedureMeta {
-    /// The region migrated by the sub-procedure.
-    pub region_id: RegionId,
+    /// The regions migrated by the sub-procedure.
+    pub region_ids: Vec<RegionId>,
     /// The procedure id of the sub-procedure.
     pub procedure_id: ProcedureId,
 }
@@ -110,21 +112,27 @@ pub struct SubprocedureMeta {
 /// bounded by [`MAX_RESCAN_ROUNDS`], and re-dispatches the regions that are still led by
 /// the drained datanode and have no running migration. Recovered migrations own their
 /// lifecycle and may finish after this drain procedure ends.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Default)]
 pub struct VolatileContext {
-    /// The drain plan, `None` until it is built by the first state that runs.
+    /// The current topic batch, retained until all its regions are settled.
     ///
-    /// [`DrainDatanodePlan::leader_regions`] is the remaining work: a region leaves it when
+    /// [`TopicBatch::leader_regions`] is the remaining work: a region leaves it when
     /// its migration succeeded, when it was given up by [`DrainDatanodeStrategy::TryAll`],
     /// when the drained datanode stopped leading it, or when another migration owns it.
-    pub plan: Option<DrainDatanodePlan>,
+    pub(crate) topic_batch: Option<TopicBatch>,
+    /// Paused metadata scan; dropped and rebuilt after a metadata read error.
+    pub(crate) scan: Option<scan::RegionScan>,
+    /// Number of followers seen in the current scan.
+    pub follower_count: usize,
+    /// Prepared migrations from the current topic batch, consumed by Dispatch.
+    pub(crate) migrations: Vec<RegionMigrationTaskBatch>,
     /// The migration sub-procedures of the current batch that are not settled yet.
     pub inflight_subprocedures: Vec<SubprocedureMeta>,
     /// The number of regions confirmed to have left the source while collecting batch results.
     pub migrated: usize,
     /// The regions given up by [`DrainDatanodeStrategy::TryAll`] in this run.
     pub failed_regions: Vec<RegionId>,
-    /// The number of plan build attempts in this run, including failed reads.
+    /// The number of full scan attempts in this run, including failed reads.
     pub rescan_round: u32,
 }
 
@@ -144,7 +152,6 @@ pub struct DrainDatanodeProcedureTask {
 }
 
 /// The context of [`DrainDatanodeProcedure`].
-#[derive(Clone)]
 pub struct Context {
     /// The persistent data of the procedure.
     pub persistent_ctx: PersistentContext,
@@ -185,11 +192,11 @@ impl Context {
 }
 
 impl Context {
-    /// Rebuilds the drain plan from the authoritative table routes.
+    /// Starts a fresh scan of the authoritative table routes.
     ///
-    /// Builds are bounded by [`MAX_RESCAN_ROUNDS`]: a datanode whose leader regions keep
+    /// Scans are bounded by [`MAX_RESCAN_ROUNDS`]: a datanode whose leader regions keep
     /// coming back must not be rescanned forever.
-    pub(crate) async fn rebuild_plan(&mut self) -> Result<()> {
+    pub(crate) fn start_scan(&mut self) -> Result<()> {
         let node_id = self.persistent_ctx.node_id;
         if self.volatile_ctx.rescan_round >= MAX_RESCAN_ROUNDS {
             return error::DrainDatanodeRescanExceededSnafu {
@@ -200,15 +207,40 @@ impl Context {
         }
 
         self.volatile_ctx.rescan_round += 1;
-        let plan = utils::build_datanode_plan(&self.table_metadata_manager, node_id).await?;
-        self.volatile_ctx.plan = Some(plan);
+        self.volatile_ctx.scan = Some(scan::RegionScan::new(
+            &self.table_metadata_manager,
+            node_id,
+            self.persistent_ctx.parallelism,
+        ));
+        self.volatile_ctx.follower_count = 0;
+        self.volatile_ctx.topic_batch = None;
 
         Ok(())
     }
 
-    /// Removes `region_id` from the current plan. A later scan may add it back.
+    /// Reads only the next bounded window. A read failure invalidates the scan so
+    /// retry starts from authoritative metadata instead of losing buffered entries.
+    pub(crate) async fn read_next_topic(&mut self) -> Result<()> {
+        let Some(mut scan) = self.volatile_ctx.scan.take() else {
+            return Ok(());
+        };
+        let next = scan
+            .next_batch(
+                &self.table_metadata_manager,
+                self.persistent_ctx.node_id,
+                &self.volatile_ctx.failed_regions,
+                self.region_migration_manager.tracker(),
+            )
+            .await?;
+        self.volatile_ctx.follower_count = scan.follower_count;
+        self.volatile_ctx.topic_batch = next;
+        self.volatile_ctx.scan = Some(scan);
+        Ok(())
+    }
+
+    /// Removes `region_id` from the current topic batch. A later scan may add it back.
     pub(crate) fn forget_leader_region(&mut self, region_id: RegionId) {
-        if let Some(plan) = self.volatile_ctx.plan.as_mut() {
+        if let Some(plan) = self.volatile_ctx.topic_batch.as_mut() {
             plan.leader_regions.retain(|region| *region != region_id);
         }
     }
@@ -217,16 +249,9 @@ impl Context {
 impl VolatileContext {
     /// Returns the leader regions still to migrate.
     pub(crate) fn leader_regions(&self) -> &[RegionId] {
-        self.plan
+        self.topic_batch
             .as_ref()
             .map_or(&[], |plan| plan.leader_regions.as_slice())
-    }
-
-    /// Returns the follower regions collected by the last plan build.
-    pub(crate) fn follower_regions(&self) -> &[RegionId] {
-        self.plan
-            .as_ref()
-            .map_or(&[], |plan| plan.follower_regions.as_slice())
     }
 }
 
@@ -271,7 +296,7 @@ pub(crate) trait State: Sync + Send + Debug {
 /// [`RegionMigrationProcedure`](crate::procedure::region_migration::RegionMigrationProcedure)
 /// sub-procedures, and rescans for regions that still need a new migration. Migrations
 /// already registered in the tracker continue independently and may outlive this
-/// procedure. Follower regions are collected but not removed yet.
+/// procedure. Follower regions are counted but not removed yet.
 pub(crate) struct DrainDatanodeProcedure {
     state: Box<dyn State>,
     context: Context,
@@ -427,10 +452,7 @@ mod tests {
 
         assert!(matches!(status, Status::Done { .. }));
         assert_eq!(0, ctx.volatile_ctx.migrated);
-        assert_eq!(
-            vec![RegionId::new(1024, 1)],
-            ctx.volatile_ctx.follower_regions()
-        );
+        assert_eq!(1, ctx.volatile_ctx.follower_count);
         assert!(
             !env.node_scheduling_manager
                 .is_schedulable(NodeSchedulingRole::Datanode, 1)
@@ -534,7 +556,7 @@ mod tests {
                         "parallelism": DEFAULT_PARALLELISM, "strategy": "FailFast",
                         "deadline_ms": persistent_ctx.deadline_ms,
                     },
-                    "state": {"drain_datanode_state": "CheckDrained"},
+                    "state": {"drain_datanode_state": "DrainDatanodeCursor"},
                 }),
                 json
             );
@@ -545,7 +567,7 @@ mod tests {
                 |persistent_ctx| env.context(persistent_ctx),
             )
             .unwrap();
-            assert!(recovered.context.volatile_ctx.plan.is_none());
+            assert!(recovered.context.volatile_ctx.topic_batch.is_none());
             drop(recovered);
             let id = ProcedureId::random();
             let message = common_procedure::store::ProcedureMessage {
