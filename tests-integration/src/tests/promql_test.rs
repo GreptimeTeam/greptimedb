@@ -4763,9 +4763,8 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         // both. The value column's *name* is not equal, and that is this route's existing naming for
         // a computed value column rather than anything this shape introduces: the node names its
         // fields after the tree's own root schema, while the existing planner names a computed column
-        // after its expression (see the comment above `legacy_output_columns` in
-        // `src/query/src/promql/planner/native.rs`; the same difference is pinned for a cross-table
-        // pair by `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
+        // after its expression (the same difference is pinned for a cross-table pair by
+        // `native_fused_cross_table_pair_reads_each_table_through_its_own_source`). So the
         // shape is asserted, and the value column's name is pinned as the raw field it comes from.
         assert_eq!(
             native_columns.len(),
