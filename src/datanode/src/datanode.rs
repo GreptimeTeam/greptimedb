@@ -2037,9 +2037,10 @@ mod tests {
         };
         opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
 
-        let object_store_manager = DatanodeBuilder::build_object_store_manager(&opts.storage)
-            .await
-            .unwrap();
+        let object_store_manager =
+            DatanodeBuilder::build_object_store_manager(&opts.storage, opts.node_id.unwrap())
+                .await
+                .unwrap();
 
         let mut builder = DatanodeBuilder::new(opts, Plugins::default(), kv_backend);
         let engines = builder

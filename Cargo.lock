@@ -12481,7 +12481,6 @@ dependencies = [
  "store-api",
  "table",
  "tokio",
- "url",
 ]
 
 [[package]]
@@ -15131,6 +15130,7 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "store-api",
+ "table",
  "tokio",
 ]
 
