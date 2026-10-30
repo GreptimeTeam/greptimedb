@@ -31,7 +31,6 @@ use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::access_layer::{RegionFilePathFactory, WriteCachePathProvider};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
@@ -146,7 +145,10 @@ impl FulltextIndexApplyMetrics {
 /// `FulltextIndexApplier` is responsible for applying fulltext index to the provided SST files
 pub struct FulltextIndexApplier {
     /// Requests to be applied.
-    requests: Arc<BTreeMap<ColumnId, FulltextRequest>>,
+    requests: Arc<BTreeMap<IndexTarget, FulltextRequest>>,
+
+    /// Expected JSON path fulltext settings from the current schema.
+    expected_json_options: BTreeMap<IndexTarget, datatypes::schema::FulltextOptions>,
 
     /// The source of the index.
     index_source: IndexSource,
@@ -166,7 +168,7 @@ impl FulltextIndexApplier {
         table_dir: String,
         path_type: PathType,
         store: ObjectStore,
-        requests: BTreeMap<ColumnId, FulltextRequest>,
+        requests: BTreeMap<IndexTarget, FulltextRequest>,
         puffin_manager_factory: PuffinManagerFactory,
     ) -> Self {
         let requests = Arc::new(requests);
@@ -175,9 +177,33 @@ impl FulltextIndexApplier {
         Self {
             predicate_key: PredicateKey::new_fulltext(requests.clone()),
             requests,
+            expected_json_options: BTreeMap::new(),
             index_source,
             bloom_filter_index_cache: None,
         }
+    }
+
+    /// Captures current JSON path settings for per-SST compatibility checks.
+    pub fn with_metadata(mut self, metadata: &store_api::metadata::RegionMetadata) -> Self {
+        self.expected_json_options = self
+            .requests
+            .keys()
+            .filter(|target| matches!(target, IndexTarget::JsonPath(_)))
+            .filter_map(|target| {
+                crate::sst::index::column::fulltext_target_options(metadata, target)
+                    .map(|options| (target.clone(), options))
+            })
+            .collect();
+        self
+    }
+
+    /// Returns whether every requested JSON path has compatible SST settings.
+    /// Conservatively skip this applier if any path changed; original predicates still run.
+    pub fn compatible_with_sst(&self, metadata: &store_api::metadata::RegionMetadata) -> bool {
+        self.expected_json_options.iter().all(|(target, expected)| {
+            crate::sst::index::column::fulltext_target_options(metadata, target).as_ref()
+                == Some(expected)
+        })
     }
 
     /// Sets the file cache.
@@ -244,7 +270,7 @@ impl FulltextIndexApplier {
                 .apply_fine_one_column(
                     file_size_hint,
                     file_id,
-                    *column_id,
+                    column_id,
                     request,
                     metrics.as_deref_mut(),
                 )
@@ -283,11 +309,11 @@ impl FulltextIndexApplier {
         &self,
         file_size_hint: Option<u64>,
         file_id: RegionIndexId,
-        column_id: ColumnId,
+        column_id: &IndexTarget,
         request: &FulltextRequest,
         metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<Option<BTreeSet<RowId>>> {
-        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let target_key = column_id.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_TANTIVY}-{target_key}");
         let dir = self
             .index_source
@@ -369,7 +395,7 @@ impl FulltextIndexApplier {
                 .apply_coarse_one_column(
                     file_id,
                     file_size_hint,
-                    *column_id,
+                    column_id,
                     request,
                     &mut output,
                     metrics.as_deref_mut(),
@@ -400,12 +426,12 @@ impl FulltextIndexApplier {
         &self,
         file_id: RegionIndexId,
         file_size_hint: Option<u64>,
-        column_id: ColumnId,
+        column_id: &IndexTarget,
         request: &FulltextRequest,
         output: &mut [(usize, Vec<Range<usize>>)],
         mut metrics: Option<&mut FulltextIndexApplyMetrics>,
     ) -> Result<bool> {
-        let target_key = IndexTarget::ColumnId(column_id).encode();
+        let target_key = column_id.encode();
         let blob_key = format!("{INDEX_BLOB_TYPE_BLOOM}-{target_key}");
         let Some(reader) = self
             .index_source
@@ -432,7 +458,7 @@ impl FulltextIndexApplier {
             let reader = CachedBloomFilterIndexBlobReader::new(
                 file_id.file_id(),
                 file_id.version,
-                IndexTarget::ColumnId(column_id),
+                column_id.clone(),
                 Tag::Fulltext,
                 blob_size,
                 BloomFilterReaderImpl::new(range_reader),

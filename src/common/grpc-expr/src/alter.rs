@@ -75,6 +75,16 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
                 path: hint.path,
                 data_type,
                 inverted_index: hint.inverted_index,
+                fulltext_index: hint
+                    .fulltext_index
+                    .map(api::v1::column_def::json_fulltext_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidJsonSettingsSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
                 skipping_index: hint
                     .skipping_index
                     .map(api::v1::column_def::json_skipping_options_from_proto)
@@ -437,6 +447,7 @@ mod tests {
                     data_type: ColumnDataType::String as i32,
                     inverted_index: enabled,
                     skipping_index: None,
+                    fulltext_index: None,
                     ..Default::default()
                 }],
                 max_auto_expanded_paths: Some(0),
@@ -496,6 +507,7 @@ mod tests {
                             data_type: ColumnDataType::String as i32,
                             inverted_index,
                             skipping_index: None,
+                            fulltext_index: None,
                             ..Default::default()
                         }],
                         max_auto_expanded_paths: Some(0),

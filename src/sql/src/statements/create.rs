@@ -210,6 +210,24 @@ impl Display for Json2Options {
                     options.index_type
                 )?;
             }
+            if let Some(options) = &hint.fulltext_index
+                && options.enable
+            {
+                write!(
+                    f,
+                    " FULLTEXT INDEX WITH (analyzer = '{}', case_sensitive = '{}', backend = '{}'",
+                    options.analyzer, options.case_sensitive, options.backend
+                )?;
+                if options.backend == datatypes::schema::FulltextBackend::Bloom {
+                    write!(
+                        f,
+                        ", granularity = '{}', false_positive_rate = '{}'",
+                        options.granularity,
+                        options.false_positive_rate()
+                    )?;
+                }
+                f.write_char(')')?;
+            }
             if hint.inverted_index {
                 f.write_str(" INVERTED INDEX")?;
             }
@@ -229,6 +247,7 @@ impl Json2Options {
                     data_type: sql_data_type_to_concrete_data_type(&hint.data_type)?,
                     inverted_index: hint.inverted_index,
                     skipping_index: hint.skipping_index.clone(),
+                    fulltext_index: hint.fulltext_index.clone(),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -246,6 +265,8 @@ pub struct JsonTypeHint {
     pub inverted_index: bool,
     /// Skipping index options for this hinted path.
     pub skipping_index: Option<SkippingIndexOptions>,
+    /// Fulltext index options for a string hinted path.
+    pub fulltext_index: Option<datatypes::schema::FulltextOptions>,
 }
 
 impl Column {
@@ -367,6 +388,7 @@ impl ColumnExtensions {
                     data_type,
                     inverted_index: hint.inverted_index,
                     skipping_index: hint.skipping_index,
+                    fulltext_index: hint.fulltext_index,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -832,6 +854,7 @@ mod tests {
                 data_type: DataType::Text,
                 inverted_index: true,
                 skipping_index: None,
+                fulltext_index: None,
             }],
         });
         assert!(!create.consume_sql_size_budget(&mut 4096));
@@ -853,6 +876,7 @@ mod tests {
                 data_type: DataType::Text,
                 inverted_index: false,
                 skipping_index: None,
+                fulltext_index: None,
             }],
         };
         assert_eq!(
@@ -1179,30 +1203,35 @@ ENGINE=mito
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
                     data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
                     data_type: ConcreteDataType::uint64_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["s".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["b".to_string()],
                     data_type: ConcreteDataType::boolean_datatype(),
                     inverted_index: false,
                     skipping_index: None,
+                    fulltext_index: None,
                 },
             ],
             None,
@@ -1230,6 +1259,7 @@ ENGINE=mito
                 data_type: ConcreteDataType::date_datatype(),
                 inverted_index: false,
                 skipping_index: None,
+                fulltext_index: None,
             }],
             None,
         )
