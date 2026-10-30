@@ -48,11 +48,14 @@ use datafusion::prelude::Expr as DfExpr;
 use datafusion_expr::Expr;
 use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
-use promql::extension_plan::{AggregateFinalize, FusedSeries, FusedSeriesBinding, RawSeriesSource};
+use datatypes::series::time::EvalGrid;
+use promql::extension_plan::{
+    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, RawSeriesSource,
+};
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    BoundAggregate, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeType,
-    reads_across_series,
+    AggregateStage, BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp, NativeExpr,
+    NativeNode, NativeTree, NativeType, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -621,10 +624,8 @@ impl PromPlanner {
             !reads_across_series(root) || pointwise_operand(root) || independent_scan_pair(root);
         // The split is only ever a one-child plan: it exports each partition's leaf state and merges
         // them above the region. A tree over two metric logical tables of ONE physical table is not
-        // split, because that node already runs one execution over every input partition: a
-        // `FusedSeries` with more than one input declares one partition, and its `execute` reads all
-        // of every input's partitions (`if self.inputs.len() > 1 { 0..count }` in `fused_series.rs`),
-        // so every group is folded in one place. Both of those inputs are `RawSeriesSource` children
+        // split, because a node whose locality is `SinglePartition` normalizes every input to one
+        // partition, so every group is folded in one place. Both of those inputs are `RawSeriesSource` children
         // (the two ids made `cross_table` true), each answering from its own region with frames that
         // carry their own labels, so the node is plannable above both. That plan needs no split to be
         // correct, so it falls through to the node below.
@@ -670,6 +671,22 @@ impl PromPlanner {
             return Ok(None);
         }
         if !per_partition && !multi_input {
+            if let Some(plan) = Box::pin(self.try_plan_topk_segment(
+                prom_expr,
+                query_engine_state,
+                &compiled.tree,
+                selectors.len(),
+                &children,
+                &source_tags,
+                &grid,
+                &time,
+                &tags,
+                &metric,
+            ))
+            .await?
+            {
+                return Ok(Some((plan, single_input_context)));
+            }
             if selectors.len() != 1
                 || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
@@ -811,6 +828,181 @@ impl PromPlanner {
         self.ctx = saved;
         drop(planned?);
         Ok((legacy_fields, legacy_tags))
+    }
+
+    /// Plans `sum(topk(k, prefix))` as two segments: the prefix per series, the global fold above.
+    ///
+    /// The cut goes below the `topk`, not below the `sum`. A segment holding a `topk` reads across
+    /// series and would gather its own input before evaluating the prefix, which is exactly the
+    /// parallelism the split exists to keep; cutting below the `topk` leaves the prefix on the scan's
+    /// partitions and puts the whole-vector work in one place above it.
+    ///
+    /// Two segments are built from one compiled tree rather than from re-parsed text: the child is
+    /// the prefix subtree, and the parent is the original tree with that subtree replaced by an
+    /// input bound to the child's evaluated frame. `None` for every other shape, so the statement
+    /// falls through to the routes that existed before this one.
+    #[allow(clippy::too_many_arguments)]
+    async fn try_plan_topk_segment(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+        tree: &NativeTree,
+        selector_count: usize,
+        children: &[LogicalPlan],
+        source_tags: &[Vec<String>],
+        grid: &Arc<EvalGrid>,
+        time_index: &str,
+        tags: &[String],
+        metric: &Option<Arc<str>>,
+    ) -> Result<Option<LogicalPlan>> {
+        if selector_count != 1 {
+            return Ok(None);
+        }
+        let NativeExpr::Aggregate { input, op } = &tree.root().expr else {
+            return Ok(None);
+        };
+        if op.stage != AggregateStage::Complete {
+            return Ok(None);
+        }
+        let NativeExpr::Vector {
+            input: prefix,
+            op: BoundVectorOp::TopK { .. },
+        } = &input.expr
+        else {
+            return Ok(None);
+        };
+        let Ok(child_tree) = NativeTree::try_new((**prefix).clone()) else {
+            return Ok(None);
+        };
+        let Ok(frame_schema) = FusedSeries::series_frame_schema(&child_tree) else {
+            return Ok(None);
+        };
+        let Ok(child_schema) = DFSchema::try_from(frame_schema.as_ref().clone()) else {
+            return Ok(None);
+        };
+        // Only the statement root is named by the text; the child is named for what it reads, so a
+        // plan shows which segment is which.
+        let Ok(child_plan) = FusedSeries::try_new_with_format(
+            Arc::from(format!("{prom_expr} (per-series prefix)").as_str()),
+            child_tree,
+            FusedSeriesBinding {
+                grid: Arc::clone(grid),
+                time_index: time_index.to_string(),
+                tags: tags.to_vec(),
+                metric_name: metric.clone(),
+            },
+            children.to_vec(),
+            Arc::new(child_schema),
+            FusedOutputFormat::SeriesFrame,
+        ) else {
+            return Ok(None);
+        };
+
+        let mut parent = tree.root().clone();
+        let NativeExpr::Aggregate { input, .. } = &mut parent.expr else {
+            return Ok(None);
+        };
+        let NativeExpr::Vector {
+            input: vector_input,
+            ..
+        } = &mut input.expr
+        else {
+            return Ok(None);
+        };
+        **vector_input = NativeNode {
+            expr: NativeExpr::Input(BoundInput {
+                source_index: 0,
+                output: prefix.output.clone(),
+                ordering: SeriesOrdering::Contiguous,
+            }),
+            output: prefix.output.clone(),
+        };
+        let Ok(parent_tree) = NativeTree::try_new(parent) else {
+            return Ok(None);
+        };
+        let Some(output_schema) = self
+            .fused_root_schema(
+                prom_expr,
+                query_engine_state,
+                &parent_tree,
+                source_tags,
+                time_index,
+            )
+            .await
+        else {
+            return Ok(None);
+        };
+        let Ok(parent_plan) = FusedSeries::try_new(
+            Arc::from(prom_expr.to_string()),
+            parent_tree,
+            FusedSeriesBinding {
+                grid: Arc::clone(grid),
+                time_index: time_index.to_string(),
+                // A node over an evaluated input binds neither tags nor a metric of its own: the
+                // frame it reads names each series.
+                tags: Vec::new(),
+                metric_name: metric.clone(),
+            },
+            vec![LogicalPlan::Extension(Extension {
+                node: Arc::new(child_plan),
+            })],
+            output_schema,
+        ) else {
+            return Ok(None);
+        };
+        Ok(Some(LogicalPlan::Extension(Extension {
+            node: Arc::new(parent_plan),
+        })))
+    }
+
+    /// The columns a [`FusedSeries`] node over `tree` produces.
+    ///
+    /// The field names are the compiled root's own, and the tag names are the ones the tree
+    /// derives. Where the tree cannot name them - a node this walk does not model - the existing
+    /// planner's tag list is the answer rather than a decline, because the statement is still
+    /// answerable and its tags are the ones that plan reports.
+    ///
+    /// `None` when the root is not a value the node can publish, or when a field would share a
+    /// name with a tag or the time index: the output names each column once.
+    async fn fused_root_schema(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+        tree: &NativeTree,
+        source_tags: &[Vec<String>],
+        time: &str,
+    ) -> Option<DFSchemaRef> {
+        let output_tags = match &tree.root().output {
+            NativeType::Scalar(_) => Vec::new(),
+            NativeType::Samples(_) => match fused_output_tags(tree.root(), source_tags) {
+                Some(output_tags) => output_tags,
+                None => {
+                    let (_, legacy_tags) = self
+                        .legacy_output_columns(prom_expr, query_engine_state)
+                        .await
+                        .ok()?;
+                    legacy_tags
+                }
+            },
+            NativeType::AggregateState(_) => return None,
+        };
+        let root_fields = match &tree.root().output {
+            NativeType::Samples(schema) => schema
+                .fields
+                .iter()
+                .map(|field| field.name.to_string())
+                .collect::<Vec<_>>(),
+            NativeType::Scalar(_) => vec![DEFAULT_FIELD_COLUMN.to_string()],
+            NativeType::AggregateState(_) => return None,
+        };
+        let mut column_names = std::collections::HashSet::new();
+        let columns = std::iter::once(time)
+            .chain(root_fields.iter().map(String::as_str))
+            .chain(output_tags.iter().map(String::as_str));
+        if !columns.clone().all(|name| column_names.insert(name)) {
+            return None;
+        }
+        fused_output_schema(&root_fields, &output_tags, time).ok()
     }
 
     /// The statement being planned, rebuilt from the evaluation numbers the planner holds.
@@ -987,7 +1179,45 @@ fn fused_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<V
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
         NativeExpr::ParameterizedMap { input, .. } => fused_output_tags(input, source_tags),
-        NativeExpr::Aggregate { .. } | NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
+        // An aggregate reports the grouping labels its input carries: `by(...)` keeps exactly the
+        // ones it names, and `without(...)` keeps the rest and drops the metric name, as Prometheus
+        // does.
+        //
+        // What this derives is the set of *output columns*, which is what the node's schema needs.
+        // It is not the complete runtime label set: a chunk's labels also carry the metric name,
+        // which is bound separately from these tag columns rather than being one of them. A
+        // grouping by `__name__` keeps that name in the labels while contributing no column here,
+        // and `sum by (__name__)` over one metric is still one column set.
+        NativeExpr::Aggregate { input, op } => {
+            let input_tags = fused_output_tags(input, source_tags)?;
+            Some(match &op.group {
+                Grouping::By(kept) => input_tags
+                    .into_iter()
+                    .filter(|tag| kept.iter().any(|name| name.as_ref() == tag.as_str()))
+                    .collect(),
+                Grouping::Without(dropped) => input_tags
+                    .into_iter()
+                    .filter(|tag| {
+                        tag != METRIC_NAME
+                            && !dropped.iter().any(|name| name.as_ref() == tag.as_str())
+                    })
+                    .collect(),
+            })
+        }
+        // Selecting some of the input's series keeps each one's own labels; `count_values` writes a
+        // new label and `histogram` folds bucket series into one histogram, so neither reports the
+        // input's set.
+        NativeExpr::Vector { input, op } => match op {
+            BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::LimitRatio { .. }
+            | BoundVectorOp::Sort(_) => fused_output_tags(input, source_tags),
+            // `absent` reports the labels its own matchers name, not its input's.
+            BoundVectorOp::CountValues { .. }
+            | BoundVectorOp::Histogram(_)
+            | BoundVectorOp::Absent { .. } => None,
+        },
+        NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -1642,10 +1872,29 @@ mod tests {
                 "{query}"
             );
         }
-        // An aggregate's labels are its groups, which this walk does not derive. The route still
-        // answers the query: it asks the existing planner for the columns instead of declining.
-        let aggregate = compiled_test_tree("sum by (host) (x)");
-        assert_eq!(None, fused_output_tags(aggregate.root(), &sources));
+        // An aggregate reports the grouping labels its input carries: `by` keeps exactly those,
+        // and `without` keeps the rest and drops the metric name.
+        // `x` is bound to the three tag columns below, so `without (instance)` keeps all three:
+        // `instance` is not one of them, and the metric name is not a column here at all.
+        for (query, expected) in [
+            ("sum by (host) (x)", vec!["host"]),
+            ("sum without (instance) (x)", vec!["host", "kind", "zone"]),
+            ("sum(x)", Vec::new()),
+        ] {
+            let aggregate = compiled_test_tree(query);
+            assert_eq!(
+                Some(expected.into_iter().map(String::from).collect::<Vec<_>>()),
+                fused_output_tags(aggregate.root(), &sources),
+                "{query}"
+            );
+        }
+        // Selecting some series keeps each one's own labels, whatever the grouping was.
+        let topk = compiled_test_tree("topk(1, x)");
+        assert_eq!(
+            Some(sources[0].clone()),
+            fused_output_tags(topk.root(), &sources),
+            "topk keeps the labels of the series it selects"
+        );
         // A label rewrite renames the label set below it, which this walk does not derive either.
         for query in [
             r#"label_replace(x, "dst", "$1", "src", "(.*)")"#,
