@@ -204,7 +204,8 @@ pub(crate) fn fulltext_target_options(
                 .column_by_id(*id)?
                 .column_schema
                 .fulltext_options()
-                .ok()?;
+                .ok()?
+                .filter(|options| options.enable);
         }
         IndexTarget::JsonPath(path) => path,
     };
