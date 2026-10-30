@@ -2720,9 +2720,9 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
 #[test]
 fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadata_path() {
     // Covers the metadata boundary between QueryCoverage and the
-    // frontend/distributed client API: only FencedRepairChunk carries a
+    // frontend/distributed client API: only the fenced variants carry a
     // non-empty snapshot_seqs map so the datanode can bind per-region
-    // snapshot upper bounds against the frozen high H. Other coverage
+    // snapshot upper bounds against the frozen fence. Other coverage
     // variants must produce an empty map.
     let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
     let coverage = QueryCoverage::FencedRepairChunk { high: high.clone() };
@@ -2734,6 +2734,17 @@ fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadat
     assert!(QueryCoverage::UnfilteredFull.snapshot_seqs().is_empty());
     assert!(QueryCoverage::ScopedBaseRepair.snapshot_seqs().is_empty());
     assert!(QueryCoverage::IncrementalDelta.snapshot_seqs().is_empty());
+
+    // A caller-fenced incremental delta binds its fence as the same per-region
+    // snapshot upper bounds and counts as an incremental delta.
+    let fenced = QueryCoverage::FencedIncrementalDelta { high: high.clone() };
+    assert_eq!(
+        fenced.snapshot_seqs(),
+        HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)])
+    );
+    assert!(fenced.is_incremental_delta());
+    assert!(QueryCoverage::IncrementalDelta.is_incremental_delta());
+    assert!(!QueryCoverage::FencedRepairChunk { high }.is_incremental_delta());
 }
 
 #[tokio::test]
@@ -4187,4 +4198,512 @@ async fn test_insert_plan_matching_failure_restores_consumed_dirty_marker() {
         state.dirty_time_windows.window_size(),
         std::time::Duration::from_secs(5)
     );
+}
+
+/// Task that can dispatch a fenced incremental delta: sequence-range-capable
+/// source and a registered sink table.
+async fn new_fenced_incremental_test_task() -> TestTaskParts {
+    let parts = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    configure_source_capability(&parts.query_engine, "mito", true).await;
+    register_twe_sink(&parts.query_engine, "missing_sink", 9210);
+    parts
+}
+
+/// Seeds incremental checkpoints plus a dirty signal and returns the insert plan
+/// of an ordinary incremental-delta round.
+async fn seed_fenced_incremental_plan(
+    task: &BatchingTask,
+    engine: &QueryEngineRef,
+    checkpoints: HashMap<u64, u64>,
+) -> PlanInfo {
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(checkpoints);
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let plan = task
+        .gen_insert_plan_unlocked(engine, Some(1))
+        .await
+        .expect("the dirty signal must generate an insert plan")
+        .expect("the dirty signal must produce a plan");
+    assert!(matches!(plan.coverage, QueryCoverage::IncrementalDelta));
+    plan
+}
+
+/// Records the real frontend request of a fenced incremental delta and succeeds
+/// with an affected-rows output.
+#[derive(Default)]
+struct FencedIncrementalHandler {
+    calls: std::sync::atomic::AtomicUsize,
+    mode: std::sync::Mutex<Option<String>>,
+    lower: std::sync::Mutex<Option<String>>,
+    upper: std::sync::Mutex<Option<HashMap<u64, u64>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for FencedIncrementalHandler
+{
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.mode.lock().unwrap() = ctx.extension(FLOW_INCREMENTAL_MODE).map(str::to_string);
+        *self.lower.lock().unwrap() = ctx
+            .extension(FLOW_INCREMENTAL_AFTER_SEQS)
+            .map(str::to_string);
+        *self.upper.lock().unwrap() = Some(ctx.snapshots());
+        let api::v1::greptime_request::Request::Query(request) = query else {
+            panic!("fenced incremental delta must issue a query request");
+        };
+        assert!(
+            matches!(
+                request.query,
+                Some(api::v1::query_request::Query::InsertIntoPlan(_))
+            ),
+            "the rewritten delta-sink merge must dispatch as an insert plan"
+        );
+        Ok(Output::new_with_affected_rows(0))
+    }
+}
+
+fn fenced_incremental_frontend(
+    recorded: &Arc<FencedIncrementalHandler>,
+) -> (
+    Arc<FrontendClient>,
+    Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError>,
+) {
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        recorded.clone();
+    let frontend = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+    (frontend, handler)
+}
+
+/// A valid caller-fenced delta dispatches the rewritten delta-sink merge with
+/// the checkpoint map as lower cursor and the fence as per-region snapshot
+/// upper bound, and the raw executor never advances checkpoints for it. Both a
+/// strictly advancing fence `F < C` and an equal fence `F == C` are dispatched.
+#[tokio::test]
+async fn test_fenced_incremental_delta_raw_dispatch_never_advances_checkpoints() {
+    let checkpoints = [(1_u64, 10_u64), (2_u64, 20_u64)];
+    for (case, high) in [
+        (
+            "advancing fence",
+            BTreeMap::from([(1_u64, 20_u64), (2_u64, 20_u64)]),
+        ),
+        ("equal fence", BTreeMap::from(checkpoints)),
+    ] {
+        let TestTaskParts {
+            task, query_engine, ..
+        } = new_fenced_incremental_test_task().await;
+        let plan_info =
+            seed_fenced_incremental_plan(&task, &query_engine, HashMap::from(checkpoints)).await;
+
+        let recording = Arc::new(PlanRecordingExecution::default());
+        let task = task.with_execution(Some(recording.clone()));
+        let recorded = Arc::new(FencedIncrementalHandler::default());
+        let (frontend, _handler) = fenced_incremental_frontend(&recorded);
+
+        let raw = task
+            .execute_plan_unlocked(
+                &query_engine,
+                &frontend,
+                &plan_info.plan,
+                &plan_info.dirty_restore,
+                &QueryCoverage::FencedIncrementalDelta { high: high.clone() },
+            )
+            .await
+            .unwrap()
+            .expect("the raw executor must dispatch the fenced incremental delta");
+        assert!(raw.0.is_ok(), "{case}: the dispatched query must succeed");
+
+        assert_eq!(recorded.calls.load(Ordering::SeqCst), 1, "{case}");
+        assert_eq!(
+            *recorded.mode.lock().unwrap(),
+            Some(FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE.to_string()),
+            "{case}: the request must carry the exact sequence_range mode"
+        );
+        assert_eq!(
+            *recorded.lower.lock().unwrap(),
+            Some(serde_json::json!({"1": 10, "2": 20}).to_string()),
+            "{case}: the request must read from the checkpoint map"
+        );
+        assert_eq!(
+            *recorded.upper.lock().unwrap(),
+            Some(
+                high.iter()
+                    .map(|(region, seq)| (*region, *seq))
+                    .collect::<HashMap<_, _>>()
+            ),
+            "{case}: the request must bind the fence as snapshot upper bounds"
+        );
+
+        let recorded_plans = recording.plans.lock().unwrap();
+        let merge_plan = recorded_plans
+            .first()
+            .expect("the execution hook must see the dispatched plan")
+            .to_string();
+        assert!(
+            merge_plan.contains("Left Join"),
+            "{case}: the dispatched plan must be the delta-sink merge rewrite:\n{merge_plan}"
+        );
+
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from(checkpoints),
+            "{case}: the raw executor must leave checkpoint advancement to its caller"
+        );
+        assert_eq!(
+            state.checkpoint_mode(),
+            CheckpointMode::Incremental,
+            "{case}: the raw executor must not change the checkpoint mode"
+        );
+    }
+}
+
+/// Invalid flow state and invalid lower/upper cursors are rejected as invalid
+/// queries before any dispatch or state write.
+#[tokio::test]
+async fn test_fenced_incremental_delta_rejects_invalid_state_or_bounds() {
+    struct Case {
+        name: &'static str,
+        reason: &'static str,
+        setup: fn(&mut TaskState),
+        high: BTreeMap<u64, u64>,
+    }
+
+    let cases = [
+        Case {
+            name: "full snapshot mode",
+            reason: "requires an enabled incremental flow",
+            setup: |state| {
+                state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+                state.mark_full_snapshot();
+            },
+            high: BTreeMap::from([(1_u64, 20_u64)]),
+        },
+        Case {
+            name: "incremental disabled",
+            reason: "requires an enabled incremental flow",
+            setup: |state| {
+                state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+                state.disable_incremental();
+            },
+            high: BTreeMap::from([(1_u64, 20_u64)]),
+        },
+        Case {
+            name: "empty checkpoints",
+            reason: "must extend the checkpoint bounds",
+            setup: |state| state.advance_checkpoints(HashMap::new()),
+            high: BTreeMap::from([(1_u64, 10_u64)]),
+        },
+        Case {
+            name: "empty high",
+            reason: "must extend the checkpoint bounds",
+            setup: |state| state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)])),
+            high: BTreeMap::new(),
+        },
+        Case {
+            name: "missing region",
+            reason: "must extend the checkpoint bounds",
+            setup: |state| {
+                state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]))
+            },
+            high: BTreeMap::from([(1_u64, 20_u64)]),
+        },
+        Case {
+            name: "extra region",
+            reason: "must extend the checkpoint bounds",
+            setup: |state| state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)])),
+            high: BTreeMap::from([(1_u64, 20_u64), (2_u64, 20_u64)]),
+        },
+        Case {
+            name: "backward high",
+            reason: "must extend the checkpoint bounds",
+            setup: |state| {
+                state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]))
+            },
+            high: BTreeMap::from([(1_u64, 9_u64), (2_u64, 20_u64)]),
+        },
+    ];
+
+    for case in cases {
+        let TestTaskParts {
+            task,
+            query_engine,
+            plan,
+            ..
+        } = new_fenced_incremental_test_task().await;
+        (case.setup)(&mut task.state.write().unwrap());
+        let checkpoints_before = task.state.read().unwrap().checkpoints().clone();
+        let mode_before = task.state.read().unwrap().checkpoint_mode();
+
+        let recorded = Arc::new(FencedIncrementalHandler::default());
+        let (frontend, _handler) = fenced_incremental_frontend(&recorded);
+        let result = task
+            .execute_plan_unlocked(
+                &query_engine,
+                &frontend,
+                &plan,
+                &DirtyRestore::Unscoped(dirty_marker()),
+                &QueryCoverage::FencedIncrementalDelta {
+                    high: case.high.clone(),
+                },
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!(
+                "{}: an invalid fence must be rejected before dispatch",
+                case.name
+            ),
+            Err(err) => err,
+        };
+
+        assert!(
+            matches!(err, Error::InvalidQuery { .. }),
+            "{}: expected an invalid query, got {err:?}",
+            case.name
+        );
+        assert!(
+            err.to_string().contains(case.reason),
+            "{}: expected {:?} in {err}",
+            case.name,
+            case.reason
+        );
+        assert_eq!(
+            recorded.calls.load(Ordering::SeqCst),
+            0,
+            "{}: an invalid fence must not dispatch a query",
+            case.name
+        );
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoints(),
+            &checkpoints_before,
+            "{}: an invalid fence must not write checkpoints",
+            case.name
+        );
+        assert_eq!(
+            state.checkpoint_mode(),
+            mode_before,
+            "{}: an invalid fence must not change the checkpoint mode",
+            case.name
+        );
+    }
+}
+
+/// Sources that cannot prove an exact sequence range — present but incapable, or
+/// not resolvable at all — never fall back to `memtable_only`: the emitted
+/// extensions fail the exact-mode guard and nothing is dispatched. Each case
+/// degrades exactly one source, so no capability-loop ordering can mask it.
+#[tokio::test]
+async fn test_fenced_incremental_delta_requires_sequence_range_mode_before_dispatch() {
+    for (case, incapable_source, missing_source) in [
+        ("incapable source", true, false),
+        ("unresolvable source", false, true),
+    ] {
+        let TestTaskParts {
+            mut task,
+            query_engine,
+            ..
+        } = new_fenced_incremental_test_task().await;
+        assert!(
+            !task.config.exact_sequence_range_required,
+            "{case}: the exact read requirement must not depend on the config flag"
+        );
+        let plan_info =
+            seed_fenced_incremental_plan(&task, &query_engine, HashMap::from([(1_u64, 10_u64)]))
+                .await;
+
+        if incapable_source {
+            // A present but non-mito source cannot prove `preserve_row_sequence`.
+            configure_source_capability(&query_engine, "file", true).await;
+        }
+        if missing_source {
+            // An unresolvable source makes the capability lookup fail, which the
+            // builder treats as incapable when exact reads are not required.
+            Arc::get_mut(&mut task.config)
+                .expect("test task config should be uniquely owned")
+                .source_table_names
+                .insert([
+                    DEFAULT_CATALOG_NAME.to_string(),
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "missing_source".to_string(),
+                ]);
+        }
+
+        let recorded = Arc::new(FencedIncrementalHandler::default());
+        let (frontend, _handler) = fenced_incremental_frontend(&recorded);
+        let result = task
+            .execute_plan_unlocked(
+                &query_engine,
+                &frontend,
+                &plan_info.plan,
+                &plan_info.dirty_restore,
+                &QueryCoverage::FencedIncrementalDelta {
+                    high: BTreeMap::from([(1_u64, 20_u64)]),
+                },
+            )
+            .await;
+        let err = match result {
+            Ok(_) => panic!("{case}: a non-capable source must not dispatch a fenced delta"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, Error::InvalidQuery { .. }), "{case}: {err:?}");
+        assert!(err.to_string().contains("sequence_range"), "{case}: {err}");
+        assert_eq!(
+            recorded.calls.load(Ordering::SeqCst),
+            0,
+            "{case}: a non-capable source must not dispatch a query"
+        );
+        let state = task.state.read().unwrap();
+        assert_eq!(
+            state.checkpoints(),
+            &BTreeMap::from([(1_u64, 10_u64)]),
+            "{case}: a rejected fence must not write checkpoints"
+        );
+        assert_eq!(
+            state.checkpoint_mode(),
+            CheckpointMode::Incremental,
+            "{case}: a rejected fence must not change the checkpoint mode"
+        );
+    }
+}
+
+/// An incremental-unsafe plan is skipped instead of degrading to an unfiltered
+/// full snapshot, and the pre-existing permanent incremental disable stays.
+#[tokio::test]
+async fn test_fenced_incremental_delta_unsafe_plan_skips_without_full_fallback() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query("SELECT number FROM numbers_with_ts").await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    register_number_only_sink(&query_engine, "missing_sink");
+    let plan_info =
+        seed_fenced_incremental_plan(&task, &query_engine, HashMap::from([(1_u64, 10_u64)])).await;
+
+    let recorded = Arc::new(FencedIncrementalHandler::default());
+    let (frontend, _handler) = fenced_incremental_frontend(&recorded);
+    let result = task
+        .execute_plan_unlocked(
+            &query_engine,
+            &frontend,
+            &plan_info.plan,
+            &plan_info.dirty_restore,
+            &QueryCoverage::FencedIncrementalDelta {
+                high: BTreeMap::from([(1_u64, 20_u64)]),
+            },
+        )
+        .await
+        .expect("an unsafe incremental plan must skip the round");
+
+    assert!(
+        result.is_none(),
+        "an unsafe incremental plan must not dispatch anything"
+    );
+    assert_eq!(recorded.calls.load(Ordering::SeqCst), 0);
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    assert_eq!(state.dirty_time_windows.len(), 1);
+    // Existing behavior: an unsafe plan permanently disables incremental reads.
+    assert!(state.is_incremental_disabled());
+}
+
+/// A dispatched frontend error is returned to the caller without touching
+/// checkpoints.
+#[tokio::test]
+async fn test_fenced_incremental_delta_frontend_error_leaves_checkpoints_unchanged() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_fenced_incremental_test_task().await;
+    let plan_info =
+        seed_fenced_incremental_plan(&task, &query_engine, HashMap::from([(1_u64, 10_u64)])).await;
+
+    let handler_invoked = Arc::new(AtomicBool::new(false));
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(ExactDeltaFailureHandler {
+            invoked: handler_invoked.clone(),
+        });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let raw = task
+        .execute_plan_unlocked(
+            &query_engine,
+            &frontend_client,
+            &plan_info.plan,
+            &plan_info.dirty_restore,
+            &QueryCoverage::FencedIncrementalDelta {
+                high: BTreeMap::from([(1_u64, 20_u64)]),
+            },
+        )
+        .await
+        .expect("the raw executor must return the dispatched execution result")
+        .expect("the raw executor must dispatch the fenced incremental delta");
+    assert!(
+        raw.0.is_err(),
+        "the dispatched exact delta must fail through the injected frontend handler"
+    );
+    assert!(handler_invoked.load(Ordering::SeqCst));
+
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+}
+
+/// The default execution wrapper rejects a fenced incremental delta before the
+/// raw executor runs, so it can neither dispatch a query nor touch checkpoints.
+#[tokio::test]
+async fn test_fenced_incremental_delta_default_wrapper_rejects_before_dispatch() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        plan,
+        ..
+    } = new_fenced_incremental_test_task().await;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    let recorded = Arc::new(FencedIncrementalHandler::default());
+    let (frontend, _handler) = fenced_incremental_frontend(&recorded);
+    let result = task
+        .execute_logical_plan_unlocked(
+            &query_engine,
+            &frontend,
+            &plan,
+            &DirtyRestore::Unscoped(dirty_marker()),
+            &QueryCoverage::FencedIncrementalDelta {
+                high: BTreeMap::from([(1_u64, 20_u64)]),
+            },
+        )
+        .await;
+    let err = match result {
+        Ok(_) => panic!("the default wrapper must reject a fenced incremental delta"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, Error::InvalidQuery { .. }), "{err:?}");
+    assert!(err.to_string().contains("raw-only"), "{err}");
+    assert_eq!(
+        recorded.calls.load(Ordering::SeqCst),
+        0,
+        "the default wrapper must reject before dispatch"
+    );
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
 }
