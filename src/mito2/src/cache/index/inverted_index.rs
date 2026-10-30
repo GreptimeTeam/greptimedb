@@ -199,7 +199,7 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
 
 /// Recovers the typed source retained by the range-reader adapter.
 fn map_page_error(error: Arc<std::io::Error>) -> Error {
-    if let Some(source) = crate::cache::index::find_shared_page_source::<Error>(&error) {
+    if let Some(source) = crate::cache::find_shared_page_source::<Error>(&error) {
         SharedReadSnafu.into_error(source)
     } else {
         CommonIoSnafu.into_error(std::io::Error::other(error))
