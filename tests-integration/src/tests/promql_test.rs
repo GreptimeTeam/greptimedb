@@ -4949,6 +4949,47 @@ async fn native_promql_declines_a_grouping_by_the_metric_name() {
     );
 }
 
+/// Ordinary Mito sources also decline a multi-source grouping by metric name.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_declines_mito_cross_table_grouping_by_metric_name() {
+    common_telemetry::init_default_ut_logging();
+    let (standalone, observer) = native_test_instance(GreptimeDbStandaloneBuilder::new(
+        "native_promql_mito_group_by_name",
+    ))
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE name_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE name_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO name_a VALUES ('a', 0, 2); \
+         INSERT INTO name_b VALUES ('b', 0, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let query = r#"sum by (__name__) (name_a{host="a"} or name_b{host="b"})"#;
+    let sql = format!("TQL EVAL (0, 0, '1s') {query}");
+    let (_, legacy_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, false).await).await;
+    assert!(
+        !legacy_rows.is_empty(),
+        "{query}: existing plan must answer"
+    );
+
+    observer.clear();
+    let (_, native_rows) =
+        native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
+    assert!(
+        observer.fused().is_none(),
+        "{query}: native must decline multi-source grouping by __name__"
+    );
+    assert_eq!(
+        native_rows, legacy_rows,
+        "{query}: compare the full labelled rows from both routes"
+    );
+}
+
 /// Unsupported `count_values` groupings keep the legacy plan before labels are lost or execution
 /// reaches a kernel refusal. The outer `sum` prevents a final-schema check from masking the latter.
 #[tokio::test(flavor = "multi_thread")]
@@ -6395,6 +6436,153 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     );
     let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
     assert_eq!(native, legacy, "{query}: answers differ");
+}
+
+/// Different selector offsets on two table sources stay bound to their own segment scans.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_offsets")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE off_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE off_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO off_a VALUES ('a', 0, 10), ('a', 60000, 20), ('a', 120000, 30); \
+         INSERT INTO off_b VALUES ('a', 0, 1), ('a', 60000, 2), ('a', 120000, 3)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // The two-region plan does not promise row order, so sort without deduplicating before comparing.
+    let sorted_rows = |mut rows: Vec<(i64, f64)>| {
+        rows.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        });
+        rows
+    };
+    let offset_query = "sum(off_a) / sum(off_b offset 60s)";
+    let offset_sql = format!("TQL EVAL (60, 120, '1m') {offset_query}");
+    observer.clear();
+    let legacy_output = native_tql_output(&instance, &offset_sql, false).await;
+    let legacy_rows = sorted_rows(eval_values(legacy_output));
+    let legacy_root = observer.root_plan();
+    let mut stack = vec![legacy_root.clone()];
+    while let Some(node) = stack.pop() {
+        assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
+        assert_ne!(
+            node.name(),
+            "AggregateFinalizeExec",
+            "legacy plan must not finalize"
+        );
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(legacy_rows, vec![(60_000, 20.0), (120_000, 15.0)]);
+
+    let unoffset_sql = "TQL EVAL (60, 120, '1m') sum(off_a) / sum(off_b)";
+    let unoffset_legacy = sorted_rows(eval_values(
+        native_tql_output(&instance, unoffset_sql, false).await,
+    ));
+    assert_eq!(unoffset_legacy, vec![(60_000, 10.0), (120_000, 10.0)]);
+    assert_ne!(
+        legacy_rows, unoffset_legacy,
+        "the offset must change the answer; otherwise this case does not prove the two segments \
+         carry distinct scan bounds"
+    );
+
+    observer.clear();
+    let offset_native = sorted_rows(eval_values(
+        native_tql_output(&instance, &offset_sql, true).await,
+    ));
+    assert_eq!(
+        offset_native, legacy_rows,
+        "native offset result differs from legacy"
+    );
+    observer.clear();
+    let unoffset_native = sorted_rows(eval_values(
+        native_tql_output(&instance, unoffset_sql, true).await,
+    ));
+    assert_eq!(
+        unoffset_native, unoffset_legacy,
+        "native unoffset result differs from legacy"
+    );
+    assert_ne!(
+        offset_native, unoffset_native,
+        "native offset must change the answer; otherwise the segments do not carry distinct scan bounds"
+    );
+
+    observer.clear();
+    let _ = native_tql_output(&instance, &offset_sql, true).await;
+    let root = observer.root_plan();
+    fn fused_in(
+        plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Vec<Arc<dyn datafusion::physical_plan::ExecutionPlan>> {
+        let mut found = Vec::new();
+        let mut stack = vec![plan.clone()];
+        while let Some(node) = stack.pop() {
+            if node.name() == "FusedSeriesExec" {
+                found.push(node.clone());
+            }
+            stack.extend(node.children().into_iter().cloned());
+        }
+        found
+    }
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let parent_nodes = fused_in(&root);
+    assert_eq!(
+        parent_nodes.len(),
+        1,
+        "frontend has one fused parent:\n{root_display}"
+    );
+    let children = parent_nodes[0].children();
+    assert_eq!(children.len(), 2, "parent has two scans:\n{root_display}");
+    let merge_scans = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let scan = if child.is::<CooperativeExec>() {
+                let wrapped = child.children();
+                assert_eq!(
+                    wrapped.len(),
+                    1,
+                    "child {index} cooperative wrapper:\\n{root_display}"
+                );
+                wrapped[0]
+            } else {
+                child
+            };
+            scan.downcast_ref::<MergeScanExec>()
+                .unwrap_or_else(|| panic!("child {index} is not a MergeScanExec: {root_display}"))
+        })
+        .collect::<Vec<_>>();
+    let scan_debug = merge_scans
+        .iter()
+        .map(|scan| format!("{scan:?}"))
+        .collect::<Vec<_>>();
+    assert!(scan_debug.iter().any(|debug| debug.contains("off_a")));
+    assert!(scan_debug.iter().any(|debug| debug.contains("off_b")));
+    assert!(scan_debug.iter().all(|debug| debug.contains("FusedSeries")));
+    assert_ne!(
+        scan_debug[0], scan_debug[1],
+        "segments must bind distinct scans"
+    );
+    // MergeScan Debug contains its table and remote segment plan; the offset/unoffset answer
+    // assertion above independently proves that the two time bounds affect results.
+    // Per-partition segment output evidence is asserted by
+    // `native_aggregate_test.rs::check_two_source_segregation`. Here, MergeScanExec keeps its
+    // remote segment plan privately and the observer cannot reach that region-side physical plan.
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
