@@ -699,33 +699,41 @@ impl RangeManipulateStream {
             .ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
-        let duplicate = (1..input.num_rows()).any(|i| {
-            !native_timestamps.is_null(i - 1)
-                && !native_timestamps.is_null(i)
-                && native_timestamps.value(i - 1) == native_timestamps.value(i)
-        });
-        let input = if duplicate {
-            let indices = (0..input.num_rows())
-                .filter(|&i| {
-                    i == 0
-                        || native_timestamps.is_null(i)
-                        || native_timestamps.is_null(i - 1)
-                        || native_timestamps.value(i) != native_timestamps.value(i - 1)
-                })
-                .map(|i| i as i64)
-                .collect::<Int64Array>();
-            let columns = input
-                .columns()
-                .iter()
-                .map(|column| compute::take(column, &indices, None))
-                .collect::<std::result::Result<Vec<_>, ArrowError>>()?;
-            RecordBatch::try_new(input.schema(), columns)?
+        let native_values = native_timestamps.values().as_ref();
+        let first_duplicate = if native_timestamps.null_count() == 0 {
+            native_values
+                .windows(2)
+                .position(|pair| pair[0] == pair[1])
+                .map(|index| index + 1)
         } else {
-            input
+            (1..input.num_rows()).find(|&i| {
+                !native_timestamps.is_null(i - 1)
+                    && !native_timestamps.is_null(i)
+                    && native_values[i - 1] == native_values[i]
+            })
+        };
+        let indices = first_duplicate.map(|first_duplicate| {
+            let mut indices = Vec::with_capacity(input.num_rows());
+            indices.extend(0..first_duplicate);
+            indices.extend((first_duplicate + 1..input.num_rows()).filter(|&i| {
+                native_timestamps.is_null(i)
+                    || native_timestamps.is_null(i - 1)
+                    || native_values[i] != native_values[i - 1]
+            }));
+            Int64Array::from_iter_values(indices.into_iter().map(|index| index as i64))
+        });
+        // Only sample columns need collapsing. Tags below still come from row zero of the
+        // original batch, and the aligned time index is replaced below. In particular, do not
+        // build a RecordBatch with collapsed sample columns and uncollapsed tags: Arrow requires
+        // all columns to have the same length.
+        let ts_column = match indices.as_ref() {
+            Some(indices) => compute::take(input.column(self.time_index), indices, None)?,
+            None => input.column(self.time_index).clone(),
         };
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
+        other_columns.remove(&self.time_index);
         // calculate the range
-        let (ranges, (start, end)) = self.calculate_range(&input)?;
+        let (ranges, (start, end)) = self.calculate_range_on_timestamps(&ts_column)?;
         // ignore this if all ranges are empty
         if ranges.iter().all(|(_, len)| *len == 0) {
             return Ok(None);
@@ -735,9 +743,12 @@ impl RangeManipulateStream {
         let mut new_columns = input.columns().to_vec();
         for index in self.field_columns.iter() {
             let _ = other_columns.remove(index);
-            let column = input.column(*index);
+            let column = match indices.as_ref() {
+                Some(indices) => compute::take(input.column(*index), indices, None)?,
+                None => input.column(*index).clone(),
+            };
             let new_column = Arc::new(
-                RangeArray::from_ranges(column.clone(), ranges.clone())
+                RangeArray::from_ranges(column, ranges.clone())
                     .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
                     .into_dict(),
             );
@@ -748,7 +759,6 @@ impl RangeManipulateStream {
         // only when its own data type already is that ABI: the output schema fixes the
         // dictionary value type, so a millisecond column carrying a timezone must be
         // converted like any other native unit.
-        let ts_column = input.column(self.time_index);
         let timestamp_values: ArrayRef = if self.offset == 0
             && matches!(
                 ts_column.data_type(),
@@ -759,7 +769,7 @@ impl RangeManipulateStream {
             // Shift in wide native precision before truncating toward zero, preserving
             // null validity.
             let scale = nanoseconds_per_native_tick(self.time_unit);
-            let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
+            let (timestamps, _) = timestamp_array_to_primitive(&ts_column).ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
             // Single pass over the timestamps: an i128 intermediate holds any native
@@ -837,12 +847,20 @@ impl RangeManipulateStream {
     /// Return values:
     /// - A vector of tuples where each tuple contains the start index and length of the range.
     /// - A tuple of the actual start/end timestamp used to calculate the range.
+    #[cfg(test)]
     #[allow(clippy::type_complexity)]
     fn calculate_range(
         &self,
         input: &RecordBatch,
     ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
-        let ts_column = input.column(self.time_index);
+        self.calculate_range_on_timestamps(input.column(self.time_index))
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn calculate_range_on_timestamps(
+        &self,
+        ts_column: &ArrayRef,
+    ) -> DataFusionResult<(Vec<(u32, u32)>, (i64, i64))> {
         let scale = nanoseconds_per_native_tick(self.time_unit);
         let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
             DataFusionError::Execution("Time index column is not a timestamp".into())
