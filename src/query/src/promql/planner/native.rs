@@ -149,8 +149,8 @@ pub(crate) fn hybrid_binary_admitted(
         && supported_matching
         && lhs.value_type() == ValueType::Vector
         && rhs.value_type() == ValueType::Vector
-        && admitted_selector(lhs).is_some()
-        && admitted_selector(rhs).is_some()
+        && single_selector_spine(lhs)
+        && single_selector_spine(rhs)
 }
 
 impl PromPlanner {
@@ -159,7 +159,10 @@ impl PromPlanner {
         expr: &PromExpr,
         query_engine_state: &QueryEngineState,
     ) -> Result<Option<(LogicalPlan, super::PromPlannerContext)>> {
-        if admitted_selector(expr).is_none() {
+        // This route hands the caller a selector's planner context, which is what its field
+        // columns and tags are read from. An expression whose output layout is not that selector's
+        // - an aggregate, a subquery, two data-bearing sides - therefore cannot be an operand here.
+        if !single_selector_spine(expr) {
             return Ok(None);
         }
         let saved = self.ctx.clone();
@@ -1764,28 +1767,44 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// The existing selector allowlist: a selector or supported unary calls over one selector.
-fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
+/// The shape a hybrid operand must have: one selector occurrence under parentheses, unary
+/// arithmetic, calls, or a binary whose other side is a compile-time constant.
+///
+/// This is a property of the expression's shape, not a list of the functions this route knows:
+/// every call is followed through its one data-bearing argument whatever it is named, because
+/// whether the compiler folds that name is the compiler's question, answered by `NotImplemented`.
+/// What is excluded is a shape whose output layout is not the selector's - an aggregate, a
+/// subquery, or a binary with two data-bearing sides - because an operand's planner context
+/// describes the selector it reads, and the hybrid caller takes field columns and tags off it.
+fn single_selector_spine(expr: &PromExpr) -> bool {
     match expr {
-        PromExpr::VectorSelector(selector) => Some(selector),
-        PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => Some(vs),
-        PromExpr::Paren(ParenExpr { expr }) => admitted_selector(expr),
-        PromExpr::Call(call)
-            if matches!(
-                call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
-            ) && call.args.args.len() == 1 =>
-        {
-            admitted_selector(&call.args.args[0])
+        PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) => true,
+        PromExpr::Paren(paren) => single_selector_spine(&paren.expr),
+        PromExpr::Unary(unary) => single_selector_spine(&unary.expr),
+        PromExpr::Call(call) => {
+            // Function parameters can be numeric constants or strings. `constant_value` only
+            // folds numeric expressions, so using it here would misclassify label_replace's
+            // string parameters as data. Calls carry their selector through their vector/matrix
+            // argument; require exactly one such argument and then validate its shape recursively.
+            let mut data_bearing =
+                call.args.args.iter().filter(|arg| {
+                    matches!(arg.value_type(), ValueType::Vector | ValueType::Matrix)
+                });
+            match (data_bearing.next(), data_bearing.next()) {
+                (Some(only), None) => single_selector_spine(only),
+                _ => false,
+            }
         }
-        PromExpr::Unary(unary) => admitted_selector(&unary.expr),
-        PromExpr::Binary(binary) if constant_value(&binary.lhs).is_some() => {
-            admitted_selector(&binary.rhs)
+        PromExpr::Binary(binary) => {
+            if constant_value(&binary.lhs).is_some() {
+                single_selector_spine(&binary.rhs)
+            } else if constant_value(&binary.rhs).is_some() {
+                single_selector_spine(&binary.lhs)
+            } else {
+                false
+            }
         }
-        PromExpr::Binary(binary) if constant_value(&binary.rhs).is_some() => {
-            admitted_selector(&binary.lhs)
-        }
-        _ => None,
+        _ => false,
     }
 }
 
@@ -1802,14 +1821,6 @@ fn collect_selectors<'a>(
         PromExpr::VectorSelector(selector) => out.push(Cow::Borrowed(selector)),
         PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => out.push(Cow::Borrowed(vs)),
         PromExpr::Paren(ParenExpr { expr }) => return collect_selectors(stmt, expr, out),
-        PromExpr::Call(call)
-            if matches!(
-                call.func.name,
-                "rate" | "increase" | "sum_over_time" | "abs" | "timestamp"
-            ) && call.args.args.len() == 1 =>
-        {
-            return collect_selectors(stmt, &call.args.args[0], out);
-        }
         PromExpr::Call(call) if call.func.name == "info" => {
             let Ok(InfoInput { selector, .. }) = info_input(stmt, &call.args.args) else {
                 return false;
@@ -1920,8 +1931,8 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, collect_selectors, fused_output_tags,
-        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
+        NATIVE_PROMQL_EXTENSION_KEY, collect_selectors, fused_output_tags, hybrid_binary_admitted,
+        independent_scan_pair, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2202,29 +2213,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn single_selector_admission_accepts_literal_broadcasts_and_unary() {
-        for query in ["x * 2", "2 - x", "(x * 2) + 3", "-x"] {
-            let expression = promql_parser::parser::parse(query).unwrap();
-            assert!(admitted_selector(&expression).is_some(), "{query}");
-        }
-        for query in ["time() + x", "scalar(x) + x", "x + y"] {
-            let expression = promql_parser::parser::parse(query).unwrap();
-            assert!(admitted_selector(&expression).is_none(), "{query}");
-        }
-        for query in [
-            "x",
-            "rate(x[5s])",
-            "sum_over_time(x[5s])",
-            "abs(x)",
-            "timestamp(x)",
-            "timestamp(abs(x))",
-        ] {
-            let expression = promql_parser::parser::parse(query).unwrap();
-            assert!(admitted_selector(&expression).is_some(), "{query}");
-        }
-    }
-
     fn hybrid_admission(query: &str) -> bool {
         let expression = promql_parser::parser::parse(query).unwrap();
         let promql_parser::parser::Expr::Binary(binary) = expression else {
@@ -2248,6 +2236,16 @@ mod tests {
             "A / (B + C)",
         ] {
             assert!(!hybrid_admission(query), "{query}");
+        }
+
+        for query in [
+            "ceil(A) / B",
+            "irate(A[5m]) / B",
+            "sort(A) / B",
+            "absent(A) / B",
+            "-A / B",
+        ] {
+            assert!(hybrid_admission(query), "{query}");
         }
     }
 
