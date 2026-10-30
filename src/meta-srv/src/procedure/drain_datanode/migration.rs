@@ -12,23 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_meta::DatanodeId;
 use common_meta::key::table_route::TableRouteValue;
 use common_meta::peer::Peer;
 use common_procedure::{
-    Context as ProcedureContext, ProcedureContext as SubmissionContext, ProcedureWithId, watcher,
+    Context as ProcedureContext, ProcedureContext as SubmissionContext, Status,
+    SubprocedureRecovery, watcher,
 };
 use common_telemetry::{error, info, warn};
 use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::{self, Result};
-use crate::metrics::METRIC_META_REGION_MIGRATION_FAIL;
-use crate::procedure::drain_datanode::{Context, DrainDatanodeStrategy, utils};
+use crate::metrics::{METRIC_META_REGION_MIGRATION_DATANODES, METRIC_META_REGION_MIGRATION_FAIL};
+use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
+use crate::procedure::drain_datanode::dispatch::Dispatch;
+use crate::procedure::drain_datanode::{
+    Context, DrainDatanodeStrategy, State, SubprocedureMeta, utils,
+};
 use crate::procedure::region_migration::DEFAULT_REGION_MIGRATION_TIMEOUT;
 use crate::procedure::region_migration::manager::{
     RegionMigrationProcedureTask, RegionMigrationTriggerReason,
 };
+use crate::procedure::region_migration::utils::RegionMigrationTaskBatch;
+use crate::utils::batch_aggregator::BatchAggregator;
 
 impl Context {
     /// Waits for every migration in the batch before applying the drain strategy.
@@ -54,16 +60,16 @@ impl Context {
                 .context(error::QueryProcedureSnafu)?;
             let Some(mut receiver) = receiver else {
                 warn!(
-                    "Migration sub-procedure {} of region {} is unknown, keep the region pending",
-                    meta.procedure_id, meta.region_id
+                    "Migration sub-procedure {} of regions {:?} is unknown, keep the region pending",
+                    meta.procedure_id, meta.region_ids
                 );
                 continue;
             };
             match watcher::wait(&mut receiver).await {
-                Ok(_) => migrated.push(meta.region_id),
+                Ok(_) => migrated.extend(meta.region_ids.iter().copied()),
                 Err(e) => {
-                    error!(e; "Migration sub-procedure {} of region {} failed", meta.procedure_id, meta.region_id);
-                    failed.push(meta.region_id);
+                    error!(e; "Migration sub-procedure {} of regions {:?} failed", meta.procedure_id, meta.region_ids);
+                    failed.extend(meta.region_ids.iter().copied());
                 }
             }
         }
@@ -107,15 +113,135 @@ impl Context {
 }
 
 impl Context {
-    /// Builds the migration sub-procedure of `region_id`.
-    ///
-    /// Returns `Ok(None)` when the region is no longer led by the drained datanode.
-    /// Otherwise returns the sub-procedure and its target.
-    pub async fn build_migration_procedure(
-        &self,
+    /// Selects destinations within the current topic and prepares complete migration batches.
+    pub(crate) async fn prepare_migrations(&mut self) -> Result<()> {
+        self.volatile_ctx.migrations.clear();
+        let Some(batch) = &self.volatile_ctx.topic_batch else {
+            return Ok(());
+        };
+        let group_by_destination = batch.topic.is_some();
+        let regions = batch.leader_regions.clone();
+        let mut tasks = Vec::new();
+        for region_id in regions {
+            if self.volatile_ctx.failed_regions.contains(&region_id)
+                || self.region_migration_manager.tracker().contains(region_id)
+            {
+                self.forget_leader_region(region_id);
+                continue;
+            }
+            match self.prepare_migration_task(region_id).await {
+                Ok(Some(task)) => tasks.push(task),
+                Ok(None) => self.forget_leader_region(region_id),
+                Err(e) => self.handle_batch_build_error(e, &[region_id])?,
+            }
+        }
+        let groups = if group_by_destination {
+            BatchAggregator::group(tasks.into_iter().map(|task| (task.to_peer.id, task)))
+                .into_iter()
+                .map(|(_, tasks)| tasks)
+                .collect::<Vec<_>>()
+        } else {
+            tasks.into_iter().map(|task| vec![task]).collect()
+        };
+        self.volatile_ctx.migrations = groups
+            .into_iter()
+            .map(|tasks| {
+                let first = &tasks[0];
+                RegionMigrationTaskBatch {
+                    region_ids: tasks.iter().map(|task| task.region_id).collect(),
+                    from_peer: first.from_peer.clone(),
+                    to_peer: first.to_peer.clone(),
+                    timeout: first.timeout,
+                    trigger_reason: first.trigger_reason,
+                }
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Builds detached children from batches already selected by the cursor.
+    pub(crate) async fn dispatch_migrations(
+        &mut self,
         procedure_ctx: &ProcedureContext,
+    ) -> Result<(Box<dyn State>, Status)> {
+        let node_id = self.persistent_ctx.node_id;
+        let mut children = Vec::new();
+        let mut inflight = Vec::new();
+        let mut targets = Vec::new();
+        // Keep the prepared batches until construction succeeds, so retries do not
+        // consume work from the metadata cursor twice.
+        for task in self.volatile_ctx.migrations.clone() {
+            let target_node_id = task.to_peer.id;
+            let region_ids = task.region_ids.clone();
+            let submission_context = match procedure_ctx.event_context.clone() {
+                Some(event_context) => SubmissionContext::from_event_context(event_context),
+                None => SubmissionContext::default(),
+            };
+            match self
+                .region_migration_manager
+                .build_batch_subprocedure(submission_context, task)
+                .await
+            {
+                Ok((result, child)) => {
+                    if !result.peer_conflict.is_empty() {
+                        let err = error::DrainDatanodeAbortSnafu {
+                            node_id,
+                            failed_regions: result.peer_conflict.clone(),
+                        }
+                        .build();
+                        self.handle_batch_build_error(err, &result.peer_conflict)?;
+                    }
+                    for region_id in region_ids
+                        .iter()
+                        .filter(|id| !result.submitted.contains(id))
+                    {
+                        self.forget_leader_region(*region_id);
+                    }
+                    if !result.table_not_found.is_empty() {
+                        warn!(
+                            "Skipping dropped regions while draining datanode {}: {:?}",
+                            node_id, result.table_not_found
+                        );
+                    }
+                    if let Some(child) = child {
+                        targets.push((target_node_id, result.submitted.len()));
+                        inflight.push(SubprocedureMeta {
+                            region_ids: result.submitted,
+                            procedure_id: child.id,
+                        });
+                        children.push(child);
+                    }
+                }
+                Err(e) => self.handle_batch_build_error(e, &region_ids)?,
+            }
+        }
+        self.volatile_ctx.migrations.clear();
+        self.volatile_ctx.inflight_subprocedures = inflight;
+        if children.is_empty() {
+            return Ok((Box::new(DrainDatanodeCursor), Status::executing(false)));
+        }
+        for (target, count) in targets {
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["src", &node_id.to_string()])
+                .inc_by(count as u64);
+            METRIC_META_REGION_MIGRATION_DATANODES
+                .with_label_values(&["desc", &target.to_string()])
+                .inc_by(count as u64);
+        }
+        Ok((
+            Box::new(Dispatch),
+            Status::Suspended {
+                subprocedures: children,
+                recovery: SubprocedureRecovery::Detach,
+                persist: false,
+            },
+        ))
+    }
+
+    async fn prepare_migration_task(
+        &self,
         region_id: RegionId,
-    ) -> Result<Option<(ProcedureWithId, DatanodeId)>> {
+    ) -> Result<Option<RegionMigrationProcedureTask>> {
         let node_id = self.persistent_ctx.node_id;
         let Some(table_route) = self
             .table_metadata_manager
@@ -144,28 +270,29 @@ impl Context {
         let to_peer =
             utils::select_migration_target(self, region_id, &region_route.follower_peers).await?;
 
-        let submission_context = match procedure_ctx.event_context.clone() {
-            Some(event_context) => SubmissionContext::from_event_context(event_context),
-            None => SubmissionContext::default(),
-        };
-        let target_node_id = to_peer.id;
-        let child = self
-            .region_migration_manager
-            .build_subprocedure(
-                submission_context,
-                RegionMigrationProcedureTask::new(
-                    region_id,
-                    Peer::empty(node_id),
-                    to_peer,
-                    DEFAULT_REGION_MIGRATION_TIMEOUT,
-                    RegionMigrationTriggerReason::Manual,
-                ),
-            )
-            .await?;
+        Ok(Some(RegionMigrationProcedureTask::new(
+            region_id,
+            Peer::empty(node_id),
+            to_peer,
+            DEFAULT_REGION_MIGRATION_TIMEOUT,
+            RegionMigrationTriggerReason::Manual,
+        )))
+    }
 
-        Ok(Some((child, target_node_id)))
+    fn handle_batch_build_error(&mut self, e: error::Error, regions: &[RegionId]) -> Result<()> {
+        if self.persistent_ctx.strategy == DrainDatanodeStrategy::FailFast {
+            return Err(e);
+        }
+        error!(e; "Gave up draining regions {:?}", regions);
+        METRIC_META_REGION_MIGRATION_FAIL.inc_by(regions.len() as u64);
+        for &region_id in regions {
+            self.forget_leader_region(region_id);
+            self.volatile_ctx.failed_regions.push(region_id);
+        }
+        Ok(())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use crate::error;
@@ -181,41 +308,52 @@ mod tests {
     use std::sync::Arc;
     use store_api::storage::RegionId;
     use tokio::sync::watch;
+
     #[tokio::test]
-    async fn test_build_migration_procedure_checks_route_and_guard() {
-        for leader_id in [1, 2] {
+    async fn test_failed_batch_reconciles_each_region() {
+        for strategy in [
+            DrainDatanodeStrategy::FailFast,
+            DrainDatanodeStrategy::TryAll,
+        ] {
             let env = TestEnv::new().await;
-            let region_id = RegionId::new(1024, 1);
-            env.create_table(vec![leader_region(region_id, leader_id)])
+            let pending = RegionId::new(1024, 1);
+            let moved = RegionId::new(1024, 2);
+            let removed = RegionId::new(2048, 1);
+            env.create_table(vec![leader_region(pending, 1), leader_region(moved, 2)])
                 .await;
-            let ctx = env.context(new_persistent_context(
-                Some(2),
-                DrainDatanodeStrategy::FailFast,
-            ));
-            let procedure_ctx =
-                crate::procedure::region_migration::test_util::TestingEnv::procedure_context();
-            let child = ctx
-                .build_migration_procedure(&procedure_ctx, region_id)
-                .await
-                .unwrap();
-            if leader_id == 2 {
-                assert!(child.is_none());
-                assert!(!env.region_migration_manager.tracker().contains(region_id));
-                continue;
+            let mut ctx = env.context(new_persistent_context(Some(2), strategy));
+            let regions = vec![pending, moved, removed];
+            seed_plan(&mut ctx, regions.clone());
+            let procedure_id = ProcedureId::random();
+            ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
+                region_ids: regions,
+                procedure_id,
+            }];
+            let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
+                procedure_id,
+                procedure_state_receiver(ProcedureState::failed(Arc::new(
+                    ProcedureError::external(MockError::new(StatusCode::Internal)),
+                ))),
+            )]));
+            let result = ctx
+                .wait_for_inflight_subprocedures(&procedure_ctx, strategy)
+                .await;
+            if strategy == DrainDatanodeStrategy::FailFast {
+                let error::Error::DrainDatanodeAbort { failed_regions, .. } = result.unwrap_err()
+                else {
+                    panic!("unexpected error");
+                };
+                assert_eq!(vec![pending], failed_regions);
+                assert_eq!(vec![pending], leader_regions(&ctx));
+            } else {
+                result.unwrap();
+                assert_eq!(vec![pending], ctx.volatile_ctx.failed_regions);
+                assert!(leader_regions(&ctx).is_empty());
             }
-            let (child, target) = child.unwrap();
-            assert_eq!(2, target);
-            assert!(env.region_migration_manager.tracker().contains(region_id));
-            let error = ctx
-                .build_migration_procedure(&procedure_ctx, region_id)
-                .await
-                .unwrap_err();
-            assert!(matches!(error, error::Error::MigrationRunning { .. }));
-            drop(child);
-            assert!(!env.region_migration_manager.tracker().contains(region_id));
+            assert_eq!(2, ctx.volatile_ctx.migrated);
+            assert!(ctx.volatile_ctx.inflight_subprocedures.is_empty());
         }
     }
-
     #[tokio::test]
     async fn test_drain_datanode_waits_for_migrated_batch() {
         let env = TestEnv::new().await;
@@ -228,7 +366,7 @@ mod tests {
         ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
-            region_id,
+            region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
         }];
         let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
@@ -257,7 +395,7 @@ mod tests {
         ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
-            region_id,
+            region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
         }];
         let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
@@ -291,7 +429,7 @@ mod tests {
         ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
-            region_id,
+            region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
         }];
         let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
@@ -324,7 +462,7 @@ mod tests {
         ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
-            region_id,
+            region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
         }];
         let procedure_ctx = procedure_context_with_receivers(HashMap::from([(
@@ -355,7 +493,7 @@ mod tests {
         ));
         seed_plan(&mut ctx, vec![region_id]);
         ctx.volatile_ctx.inflight_subprocedures = vec![SubprocedureMeta {
-            region_id,
+            region_ids: vec![region_id],
             procedure_id: ProcedureId::random(),
         }];
         let procedure_ctx = procedure_context_with_receivers(HashMap::new());
@@ -394,11 +532,11 @@ mod tests {
             let pending_id = ProcedureId::random();
             ctx.volatile_ctx.inflight_subprocedures = vec![
                 SubprocedureMeta {
-                    region_id: failed_region,
+                    region_ids: vec![failed_region],
                     procedure_id: failed_id,
                 },
                 SubprocedureMeta {
-                    region_id: succeeded_region,
+                    region_ids: vec![succeeded_region],
                     procedure_id: pending_id,
                 },
             ];
@@ -457,11 +595,11 @@ mod tests {
             let succeeded_id = ProcedureId::random();
             ctx.volatile_ctx.inflight_subprocedures = vec![
                 SubprocedureMeta {
-                    region_id: succeeded_region,
+                    region_ids: vec![succeeded_region],
                     procedure_id: succeeded_id,
                 },
                 SubprocedureMeta {
-                    region_id: failed_region,
+                    region_ids: vec![failed_region],
                     procedure_id: failed_id,
                 },
             ];

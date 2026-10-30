@@ -393,8 +393,56 @@ impl RegionMigrationManager {
 
     pub async fn submit_region_migration_task(
         &self,
-        mut task: RegionMigrationTaskBatch,
+        task: RegionMigrationTaskBatch,
     ) -> Result<SubmitRegionMigrationTaskResult> {
+        let procedure_context = ProcedureContext {
+            actor: None,
+            event_context: Some(PersistentEventContext::new(
+                task.trigger_reason.to_trigger_reason(),
+            )),
+        };
+        let from_peer_id = task.from_peer.id;
+        let to_peer_id = task.to_peer.id;
+        let (result, procedure) = self
+            .build_batch_subprocedure(procedure_context, task)
+            .await?;
+        if let Some(procedure) = procedure {
+            let procedure_id = procedure.id;
+            info!(
+                "Starting region migration procedure {procedure_id}, regions: {:?}, from_peer: {}, to_peer: {}",
+                result.submitted, from_peer_id, to_peer_id
+            );
+            let mut watcher = self
+                .procedure_manager
+                .submit(procedure)
+                .await
+                .context(error::SubmitProcedureSnafu)?;
+            let num_regions = result.submitted.len();
+            common_runtime::spawn_global(async move {
+                METRIC_META_REGION_MIGRATION_DATANODES
+                    .with_label_values(&["src", &from_peer_id.to_string()])
+                    .inc_by(num_regions as u64);
+                METRIC_META_REGION_MIGRATION_DATANODES
+                    .with_label_values(&["desc", &to_peer_id.to_string()])
+                    .inc_by(num_regions as u64);
+                if let Err(e) = watcher::wait(&mut watcher).await {
+                    error!(e; "Failed to wait region migration procedure {procedure_id}");
+                    METRIC_META_REGION_MIGRATION_FAIL.inc();
+                    return;
+                }
+                info!("Region migration procedure {procedure_id} finished successfully");
+            });
+        }
+        Ok(result)
+    }
+
+    /// Builds a batch without submitting it. The returned procedure owns the guards
+    /// of its submitted regions; skipped regions are reported separately.
+    pub(crate) async fn build_batch_subprocedure(
+        &self,
+        procedure_context: ProcedureContext,
+        mut task: RegionMigrationTaskBatch,
+    ) -> Result<(SubmitRegionMigrationTaskResult, Option<ProcedureWithId>)> {
         let (migrating_region_ids, procedure_guards) = self.extract_running_regions(&mut task);
         let RegionMigrationAnalysis {
             migrated,
@@ -406,16 +454,19 @@ impl RegionMigrationManager {
         } = analyze_region_migration_task(&task, &self.context_factory.table_metadata_manager)
             .await?;
         if pending.is_empty() {
-            return Ok(SubmitRegionMigrationTaskResult {
-                migrated,
-                leader_changed,
-                peer_conflict,
-                table_not_found,
-                region_not_found,
-                migrating: migrating_region_ids,
-                submitted: vec![],
-                procedure_id: None,
-            });
+            return Ok((
+                SubmitRegionMigrationTaskResult {
+                    migrated,
+                    leader_changed,
+                    peer_conflict,
+                    table_not_found,
+                    region_not_found,
+                    migrating: migrating_region_ids,
+                    submitted: vec![],
+                    procedure_id: None,
+                },
+                None,
+            ));
         }
 
         // Updates the region ids to the pending region ids.
@@ -447,94 +498,55 @@ impl RegionMigrationManager {
             }
         }
         if task.region_ids.is_empty() {
-            return Ok(SubmitRegionMigrationTaskResult {
-                migrated,
-                leader_changed,
-                peer_conflict,
-                table_not_found,
-                region_not_found,
-                migrating: migrating_region_ids,
-                submitted: vec![],
-                procedure_id: None,
-            });
+            return Ok((
+                SubmitRegionMigrationTaskResult {
+                    migrated,
+                    leader_changed,
+                    peer_conflict,
+                    table_not_found,
+                    region_not_found,
+                    migrating: migrating_region_ids,
+                    submitted: vec![],
+                    procedure_id: None,
+                },
+                None,
+            ));
         }
 
         let submitting_region_ids = task.region_ids.clone();
-        // TODO(weny): Pass the actor when region migration task submission propagates it.
-        let procedure_context = ProcedureContext {
-            actor: None,
-            event_context: Some(PersistentEventContext::new(
-                task.trigger_reason.to_trigger_reason(),
-            )),
-        };
-        let procedure_id = self
-            .submit_procedure_inner(
-                procedure_context,
-                task,
-                procedure_guards,
-                catalog_and_schema,
-            )
-            .await?;
-        Ok(SubmitRegionMigrationTaskResult {
-            migrated,
-            leader_changed,
-            peer_conflict,
-            table_not_found,
-            region_not_found,
-            migrating: migrating_region_ids,
-            submitted: submitting_region_ids,
-            procedure_id: Some(procedure_id),
-        })
-    }
-
-    async fn submit_procedure_inner(
-        &self,
-        procedure_context: ProcedureContext,
-        task: RegionMigrationTaskBatch,
-        procedure_guards: Vec<RegionMigrationProcedureGuard>,
-        catalog_and_schema: Vec<(String, String)>,
-    ) -> Result<ProcedureId> {
+        let submitted = task.region_ids.iter().copied().collect::<HashSet<_>>();
+        let procedure_guards = procedure_guards
+            .into_iter()
+            .filter(|guard| submitted.contains(&guard.region_id))
+            .collect();
         let procedure = RegionMigrationProcedure::new(
             PersistentContext::new(
                 catalog_and_schema,
-                task.from_peer.clone(),
-                task.to_peer.clone(),
-                task.region_ids.clone(),
+                task.from_peer,
+                task.to_peer,
+                task.region_ids,
                 task.timeout,
                 task.trigger_reason,
             ),
             self.context_factory.clone(),
             procedure_guards,
         );
-        let procedure_with_id =
+        let procedure =
             ProcedureWithId::with_random_id(Box::new(procedure)).with_context(procedure_context);
-        let procedure_id = procedure_with_id.id;
-        info!("Starting region migration procedure {procedure_id} for {task}");
-        let mut watcher = self
-            .procedure_manager
-            .submit(procedure_with_id)
-            .await
-            .context(error::SubmitProcedureSnafu)?;
-        let num_region = task.region_ids.len();
-
-        common_runtime::spawn_global(async move {
-            METRIC_META_REGION_MIGRATION_DATANODES
-                .with_label_values(&["src", &task.from_peer.id.to_string()])
-                .inc_by(num_region as u64);
-            METRIC_META_REGION_MIGRATION_DATANODES
-                .with_label_values(&["desc", &task.to_peer.id.to_string()])
-                .inc_by(num_region as u64);
-
-            if let Err(e) = watcher::wait(&mut watcher).await {
-                error!(e; "Failed to wait region migration procedure {procedure_id} for {task}");
-                METRIC_META_REGION_MIGRATION_FAIL.inc();
-                return;
-            }
-
-            info!("Region migration procedure {procedure_id} for {task} is finished successfully!");
-        });
-
-        Ok(procedure_id)
+        let procedure_id = procedure.id;
+        Ok((
+            SubmitRegionMigrationTaskResult {
+                migrated,
+                leader_changed,
+                peer_conflict,
+                table_not_found,
+                region_not_found,
+                migrating: migrating_region_ids,
+                submitted: submitting_region_ids,
+                procedure_id: Some(procedure_id),
+            },
+            Some(procedure),
+        ))
     }
 
     /// Builds a new region migration procedure for `task` without submitting it.

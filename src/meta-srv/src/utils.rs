@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod batch_aggregator;
 pub mod database;
 pub mod etcd;
 pub mod insert_forwarder;

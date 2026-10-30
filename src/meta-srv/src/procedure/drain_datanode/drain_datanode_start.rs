@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::key::NodeSchedulingRole;
-use crate::procedure::drain_datanode::check_drained::CheckDrained;
+use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
 use crate::procedure::drain_datanode::{Context, State};
 
 /// Fences the datanode before scanning its regions.
@@ -48,7 +48,7 @@ impl State for DrainDatanodeStart {
         // so that a metasrv restart resumes it. The plan and the progress of a run stay in
         // the volatile context, and a resumed procedure rebuilds the plan by rescanning the
         // datanode.
-        Ok((Box::new(CheckDrained), Status::executing(true)))
+        Ok((Box::new(DrainDatanodeCursor), Status::executing(true)))
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -62,7 +62,7 @@ mod tests {
     use store_api::storage::RegionId;
 
     use crate::key::NodeSchedulingRole;
-    use crate::procedure::drain_datanode::check_drained::CheckDrained;
+    use crate::procedure::drain_datanode::cursor::DrainDatanodeCursor;
     use crate::procedure::drain_datanode::drain_datanode_start::DrainDatanodeStart;
     use crate::procedure::drain_datanode::test_util::{
         TestEnv, leader_region, new_persistent_context,
@@ -71,7 +71,7 @@ mod tests {
     use crate::procedure::region_migration::test_util::TestingEnv;
 
     #[tokio::test]
-    async fn test_drain_datanode_start_transitions_to_check_drained() {
+    async fn test_drain_datanode_start_transitions_to_cursor() {
         let env = TestEnv::new().await;
         env.create_table(vec![leader_region(RegionId::new(1024, 1), 1)])
             .await;
@@ -87,10 +87,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(next.as_any().downcast_ref::<CheckDrained>().is_some());
+        assert!(
+            next.as_any()
+                .downcast_ref::<DrainDatanodeCursor>()
+                .is_some()
+        );
         // Registering the procedure is the only persisted step of the run.
         assert!(matches!(status, Status::Executing { persist: true, .. }));
-        assert!(ctx.volatile_ctx.plan.is_none());
+        assert!(ctx.volatile_ctx.topic_batch.is_none());
         assert!(
             !env.node_scheduling_manager
                 .is_schedulable(NodeSchedulingRole::Datanode, 1)

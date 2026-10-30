@@ -57,6 +57,7 @@ use crate::procedure::region_migration::{
 use crate::region::failure_detector::RegionFailureDetector;
 use crate::selector::SelectorOptions;
 use crate::state::StateRef;
+use crate::utils::batch_aggregator::BatchAggregator;
 
 /// `DatanodeHeartbeat` represents the heartbeat signal sent from a datanode.
 /// It includes identifiers for the cluster and datanode, a list of regions being monitored,
@@ -637,20 +638,10 @@ impl RegionSupervisor {
                 .await
             {
                 Ok(tasks) => {
-                    let mut grouped_tasks: HashMap<(u64, u64), Vec<_>> = HashMap::new();
-                    for (task, count) in tasks {
-                        grouped_tasks
-                            .entry((task.from_peer.id, task.to_peer.id))
-                            .or_default()
-                            .push((task, count));
-                    }
-
-                    for ((from_peer_id, to_peer_id), tasks) in grouped_tasks {
-                        if tasks.is_empty() {
-                            continue;
-                        }
-                        let task = RegionMigrationTaskBatch::from_tasks(tasks);
+                    for task in group_failover_tasks(tasks) {
                         let region_ids = task.region_ids.clone();
+                        let from_peer_id = task.from_peer.id;
+                        let to_peer_id = task.to_peer.id;
                         if let Err(err) = self.do_failover_tasks(task).await {
                             error!(err; "Failed to execute region failover for regions: {:?}, from_peer: {}, to_peer: {}", region_ids, from_peer_id, to_peer_id);
                         }
@@ -995,6 +986,20 @@ impl RegionSupervisor {
     }
 }
 
+/// Groups failover tasks by source and destination, preserving whole-group retry timeouts.
+fn group_failover_tasks(
+    tasks: Vec<(RegionMigrationProcedureTask, u32)>,
+) -> Vec<RegionMigrationTaskBatch> {
+    BatchAggregator::group(
+        tasks
+            .into_iter()
+            .map(|(task, count)| ((task.from_peer.id, task.to_peer.id), (task, count))),
+    )
+    .into_iter()
+    .map(|(_, tasks)| RegionMigrationTaskBatch::from_failover_tasks(tasks))
+    .collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::assert_matches;
@@ -1035,6 +1040,52 @@ pub(crate) mod tests {
         RegionSupervisor, RegionSupervisorTicker,
     };
     use crate::selector::test_utils::{RandomNodeSelector, new_test_selector_context};
+
+    #[test]
+    fn test_group_failover_tasks_preserves_batches_and_retry_timeout() {
+        use super::{
+            DEFAULT_REGION_MIGRATION_TIMEOUT, RegionMigrationProcedureTask, group_failover_tasks,
+        };
+        use crate::procedure::region_migration::RegionMigrationTriggerReason;
+        use common_meta::peer::Peer;
+        use store_api::storage::RegionId;
+
+        let tasks = (0..600)
+            .map(|i| {
+                (
+                    RegionMigrationProcedureTask::new(
+                        RegionId::new(1024, i),
+                        Peer::empty(1),
+                        Peer::empty(2 + (i % 2) as u64),
+                        DEFAULT_REGION_MIGRATION_TIMEOUT,
+                        RegionMigrationTriggerReason::Failover,
+                    ),
+                    if i >= 598 { 3 } else { 1 },
+                )
+            })
+            .collect();
+        let batches = group_failover_tasks(tasks);
+        assert_eq!(2, batches.len());
+        let mut regions = Vec::new();
+        for batch in batches {
+            assert_eq!(300, batch.region_ids.len());
+            assert_eq!(DEFAULT_REGION_MIGRATION_TIMEOUT * 3, batch.timeout);
+            assert_eq!(RegionMigrationTriggerReason::Failover, batch.trigger_reason);
+            assert_eq!(1, batch.from_peer.id);
+            assert!(
+                batch
+                    .region_ids
+                    .iter()
+                    .all(|id| { 2 + (id.region_number() % 2) as u64 == batch.to_peer.id })
+            );
+            regions.extend(batch.region_ids);
+        }
+        regions.sort_unstable();
+        assert_eq!(
+            (0..600).map(|i| RegionId::new(1024, i)).collect::<Vec<_>>(),
+            regions
+        );
+    }
 
     pub(crate) fn new_test_supervisor() -> (RegionSupervisor, Sender<Event>) {
         new_test_supervisor_with(
