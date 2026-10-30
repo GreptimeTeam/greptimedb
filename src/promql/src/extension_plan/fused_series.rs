@@ -561,6 +561,23 @@ impl FusedSeries {
         &self,
         inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
     ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        self.to_execution_plan_with_parallelism_option(inputs, None)
+    }
+
+    /// Builds the physical plan using an explicit target width for matching-local work.
+    pub fn to_execution_plan_with_parallelism(
+        &self,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        target_partitions: usize,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        self.to_execution_plan_with_parallelism_option(inputs, Some(target_partitions))
+    }
+
+    fn to_execution_plan_with_parallelism_option(
+        &self,
+        inputs: Vec<(Arc<dyn ExecutionPlan>, RawLabelSource, SeriesOrdering)>,
+        target_partitions: Option<usize>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
         let output_schema: SchemaRef = self.output_schema.inner().clone();
         if inputs.len() != self.children.len() {
             return Err(DataFusionError::Plan(format!(
@@ -585,18 +602,23 @@ impl FusedSeries {
             _ => None,
         };
         let matching_partitions = matching_policy.as_ref().map(|_| {
-            if let Some(source) = same_source(self.tree.root()) {
-                inputs
-                    .get(source)
-                    .map(|(input, _, _)| input.properties().partitioning.partition_count())
-                    .unwrap_or(1)
-            } else {
-                inputs
-                    .iter()
-                    .map(|(input, _, _)| input.properties().partitioning.partition_count())
-                    .max()
-                    .unwrap_or(1)
-            }
+            target_partitions.map_or_else(
+                || {
+                    if let Some(source) = same_source(self.tree.root()) {
+                        inputs
+                            .get(source)
+                            .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                            .unwrap_or(1)
+                    } else {
+                        inputs
+                            .iter()
+                            .map(|(input, _, _)| input.properties().partitioning.partition_count())
+                            .max()
+                            .unwrap_or(1)
+                    }
+                },
+                |target| target.max(1),
+            )
         });
         let window_sources = if evaluated
             && !normalize
@@ -725,6 +747,7 @@ impl FusedSeries {
             tags,
             self.partial_fold.clone(),
             self.format,
+            target_partitions,
         )?))
     }
 
@@ -1530,6 +1553,7 @@ pub struct FusedSeriesExec {
     /// Aggregate state exported by each partition, when this is the partial mode.
     partial_fold: Option<BoundAggregate>,
     format: FusedOutputFormat,
+    matching_parallelism: Option<usize>,
     /// This node's partitioning, emission and boundedness.
     properties: Arc<PlanProperties>,
 }
@@ -1563,6 +1587,7 @@ impl FusedSeriesExec {
             tags,
             None,
             FusedOutputFormat::PlainRows,
+            None,
         )
     }
 
@@ -1576,6 +1601,7 @@ impl FusedSeriesExec {
         tags: Vec<String>,
         partial_fold: Option<BoundAggregate>,
         format: FusedOutputFormat,
+        matching_parallelism: Option<usize>,
     ) -> DataFusionResult<Self> {
         let locality = input_locality(tree.root());
         let raw_schemas = validate_physical_tree(&tree)?;
@@ -1776,6 +1802,7 @@ impl FusedSeriesExec {
             properties,
             partial_fold,
             format,
+            matching_parallelism,
         })
     }
 
@@ -1872,6 +1899,7 @@ impl ExecutionPlan for FusedSeriesExec {
             self.tags.to_vec(),
             self.partial_fold.clone(),
             self.format,
+            self.matching_parallelism,
         )?))
     }
 

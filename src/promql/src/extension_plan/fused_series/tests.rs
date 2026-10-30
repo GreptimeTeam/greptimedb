@@ -1884,6 +1884,134 @@ async fn logical_two_source_tree_is_accepted_by_physical_adapter() {
     }
 }
 
+fn binary_identity_rows(batches: &[RecordBatch]) -> Vec<(Option<String>, i64, Option<f64>)> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let time = batch
+                .column_by_name(TIME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap();
+            let value = batch
+                .column_by_name(VALUE)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            let host = batch
+                .column_by_name(HOST)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        host.is_valid(row).then(|| host.value(row).to_string()),
+                        time.value(row),
+                        value.is_valid(row).then(|| value.value(row)),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Configured matching parallelism overrides both one-partition and uneven source widths.
+#[tokio::test]
+async fn matching_parallelism_uses_configured_width_without_changing_rows() {
+    let tree = binary_tree_over_sources(BinaryOp::Add, raw_schema(), raw_schema(), 0, 1);
+    let node = FusedSeries::try_new(
+        Arc::from("left + right"),
+        tree.clone(),
+        binding(&tree),
+        vec![input_plan(frame_schema()), input_plan(frame_schema())],
+        binary_output_schema().to_dfschema_ref().unwrap(),
+    )
+    .unwrap();
+    let mk_inputs = |left_parts: Vec<Vec<RecordBatch>>, right_parts: Vec<Vec<RecordBatch>>| {
+        vec![
+            (
+                memory_exec_partitioned(left_parts),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+            (
+                memory_exec_partitioned(right_parts),
+                RawLabelSource::Explicit,
+                SeriesOrdering::Contiguous,
+            ),
+        ]
+    };
+    let left = frame(&series_chunk("web-1", &[(GRID_START, 3.0)], true));
+    let right = frame(&series_chunk("web-1", &[(GRID_START, 4.0)], true));
+    for (parts, configured_width) in [(1, 4), (3, 4)] {
+        let left_parts = (0..parts)
+            .map(|i| if i == 0 { vec![left.clone()] } else { vec![] })
+            .collect();
+        let right_parts = (0..if parts == 3 { 2 } else { 1 })
+            .map(|i| if i == 0 { vec![right.clone()] } else { vec![] })
+            .collect();
+        let inputs = mk_inputs(left_parts, right_parts);
+        let parallel = node
+            .to_execution_plan_with_parallelism(inputs, configured_width)
+            .unwrap();
+        assert_eq!(
+            configured_width,
+            parallel
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+        let actual = binary_identity_rows(
+            &collect(parallel, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        );
+        let baseline_inputs = mk_inputs(
+            (0..parts)
+                .map(|i| if i == 0 { vec![left.clone()] } else { vec![] })
+                .collect(),
+            (0..if parts == 3 { 2 } else { 1 })
+                .map(|i| if i == 0 { vec![right.clone()] } else { vec![] })
+                .collect(),
+        );
+        let baseline = node
+            .to_execution_plan_with_parallelism(baseline_inputs, 1)
+            .unwrap();
+        assert_eq!(
+            1,
+            baseline
+                .properties()
+                .output_partitioning()
+                .partition_count()
+        );
+        let mut expected = binary_identity_rows(
+            &collect(baseline, SessionContext::default().task_ctx())
+                .await
+                .unwrap(),
+        );
+        let mut actual = actual;
+        let sort_rows = |rows: &mut Vec<(Option<String>, i64, Option<f64>)>| {
+            rows.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(a.1.cmp(&b.1))
+                    .then_with(|| a.2.unwrap_or_default().total_cmp(&b.2.unwrap_or_default()))
+            })
+        };
+        sort_rows(&mut expected);
+        sort_rows(&mut actual);
+        assert_eq!(
+            expected, actual,
+            "all labels/timestamps/values match width one without duplicates or omissions"
+        );
+        assert_eq!(1, actual.len());
+        assert_eq!(Some(7.0), actual[0].2);
+    }
+}
+
 /// Independent sources gather all child partitions, without zipping.
 #[tokio::test]
 async fn independent_sources_execute_all_partitions() {
