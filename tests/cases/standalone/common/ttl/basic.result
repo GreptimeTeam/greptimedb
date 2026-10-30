@@ -34,8 +34,10 @@ ADMIN compact_table('test_ttl');
 
 SELECT val from test_ttl;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 DROP TABLE test_ttl;
 

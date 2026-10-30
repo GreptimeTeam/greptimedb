@@ -167,8 +167,10 @@ fn evaluate_expr_to_millisecond(
         return Err(dispose_parse_error(Some(expr)));
     }
     let info = match scheduled_time {
-        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
-        None => SimplifyContext::default().with_current_time(),
+        Some(dt) => SimplifyContext::builder()
+            .with_query_execution_start_time(Some(dt))
+            .build(),
+        None => SimplifyContext::builder().with_current_time().build(),
     };
     let simplify_expr = ExprSimplifier::new(info).simplify(expr.clone())?;
     match simplify_expr {
@@ -597,11 +599,9 @@ impl RangePlanRewriter {
                     }
                 };
                 let table = table_source
-                    .as_any()
                     .downcast_ref::<DefaultTableSource>()
                     .context(UnknownTableSnafu)?
                     .table_provider
-                    .as_any()
                     .downcast_ref::<DfTableProviderAdapter>()
                     .context(UnknownTableSnafu)?
                     .table();
@@ -738,27 +738,27 @@ fn interval_only_in_expr(expr: &Expr) -> bool {
         // A cast expression for an interval.
         if matches!(
             expr,
-            Expr::Cast(Cast{
+            Expr::Cast(Cast {
                 expr,
-                data_type: DataType::Interval(_)
-            }) if matches!(&**expr, Expr::Literal(ScalarValue::Utf8(_), _))
+                field,
+            }) if matches!(field.data_type(), DataType::Interval(_))
+                && matches!(&**expr, Expr::Literal(ScalarValue::Utf8(_), _))
         ) {
             // Stop checking the sub `expr`,
             // which is a `Utf8` type and has already been tested above.
             return Ok(TreeNodeRecursion::Stop);
         }
 
-        if !matches!(
+        if !(matches!(
             expr,
             Expr::Literal(ScalarValue::IntervalDayTime(_), _)
                 | Expr::Literal(ScalarValue::IntervalMonthDayNano(_), _)
                 | Expr::Literal(ScalarValue::IntervalYearMonth(_), _)
                 | Expr::BinaryExpr(_)
-                | Expr::Cast(Cast {
-                    data_type: DataType::Interval(_),
-                    ..
-                })
-        ) {
+        ) || matches!(
+            expr,
+            Expr::Cast(Cast { field, .. }) if matches!(field.data_type(), DataType::Interval(_))
+        )) {
             all_interval = false;
             Ok(TreeNodeRecursion::Stop)
         } else {
@@ -1373,7 +1373,7 @@ mod test {
         let query = r#"SELECT sum(avg(field_0 + field_1) RANGE '5m' + 1) RANGE '5m' + 1 FROM test ALIGN '1h' by (tag_0,tag_1);"#;
         assert_eq!(
             do_query(query).await.unwrap_err().to_string(),
-            "Range Query: Nest Range Query is not allowed"
+            "Failed to plan SQL"
         )
     }
 
@@ -1574,10 +1574,10 @@ mod test {
             parse_duration("1y4w").unwrap()
         );
         // test cast expression
-        let args = vec![Expr::Cast(Cast {
-            expr: Box::new("15 minutes".lit()),
-            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
-        })];
+        let args = vec![Expr::Cast(Cast::new(
+            Box::new("15 minutes".lit()),
+            DataType::Interval(IntervalUnit::MonthDayNano),
+        ))];
         assert_eq!(
             parse_duration_expr(&args, 0).unwrap(),
             parse_duration("15m").unwrap()
@@ -1711,10 +1711,10 @@ mod test {
         assert!(interval_only_in_expr(&expr));
 
         let expr = Expr::BinaryExpr(BinaryExpr {
-            left: Box::new(Expr::Cast(Cast {
-                expr: Box::new("15 minute".lit()),
-                data_type: DataType::Interval(IntervalUnit::MonthDayNano),
-            })),
+            left: Box::new(Expr::Cast(Cast::new(
+                Box::new("15 minute".lit()),
+                DataType::Interval(IntervalUnit::MonthDayNano),
+            ))),
             op: Operator::Minus,
             right: Box::new(
                 ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(10, 0).into())).lit(),
@@ -1722,19 +1722,19 @@ mod test {
         });
         assert!(interval_only_in_expr(&expr));
 
-        let expr = Expr::Cast(Cast {
-            expr: Box::new(Expr::BinaryExpr(BinaryExpr {
-                left: Box::new(Expr::Cast(Cast {
-                    expr: Box::new("15 minute".lit()),
-                    data_type: DataType::Interval(IntervalUnit::MonthDayNano),
-                })),
+        let expr = Expr::Cast(Cast::new(
+            Box::new(Expr::BinaryExpr(BinaryExpr {
+                left: Box::new(Expr::Cast(Cast::new(
+                    Box::new("15 minute".lit()),
+                    DataType::Interval(IntervalUnit::MonthDayNano),
+                ))),
                 op: Operator::Minus,
                 right: Box::new(
                     ScalarValue::IntervalDayTime(Some(IntervalDayTime::new(10, 0).into())).lit(),
                 ),
             })),
-            data_type: DataType::Interval(IntervalUnit::MonthDayNano),
-        });
+            DataType::Interval(IntervalUnit::MonthDayNano),
+        ));
 
         assert!(interval_only_in_expr(&expr));
     }

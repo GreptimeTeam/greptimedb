@@ -532,7 +532,7 @@ mod tests {
     use datafusion_common::arrow::datatypes::{Float64Type, Int64Type};
     use datatypes::extension::json::Json2ExtensionType;
     use datatypes::types::parse_string_to_jsonb;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -593,6 +593,34 @@ mod tests {
         } else {
             field
         })
+    }
+
+    fn assert_json_or_string_eq(actual: Option<&str>, expected: Option<&str>) {
+        let is_json_container = |value: &str| {
+            matches!(
+                serde_json::from_str::<Value>(value),
+                Ok(Value::Object(_) | Value::Array(_))
+            )
+        };
+
+        match (actual, expected) {
+            (Some(actual), Some(expected))
+                if is_json_container(actual) || is_json_container(expected) =>
+            {
+                let actual_value = serde_json::from_str::<Value>(actual).unwrap_or_else(|error| {
+                    panic!("failed to parse actual JSON result {actual:?}: {error}")
+                });
+                let expected_value =
+                    serde_json::from_str::<Value>(expected).unwrap_or_else(|error| {
+                        panic!("failed to parse expected JSON result {expected:?}: {error}")
+                    });
+                assert_eq!(
+                    actual_value, expected_value,
+                    "JSON result mismatch: actual {actual:?}, expected {expected:?}"
+                );
+            }
+            _ => assert_eq!(actual, expected),
+        }
     }
 
     #[test]
@@ -895,7 +923,7 @@ mod tests {
             let result = result.as_string_view();
             assert_eq!(1, result.len());
             let actual = result.is_valid(0).then(|| result.value(0));
-            assert_eq!(actual, expect);
+            assert_json_or_string_eq(actual, expect);
         }
     }
 
@@ -1033,7 +1061,7 @@ mod tests {
             let result = result.as_string_view();
             assert_eq!(1, result.len());
             let actual = result.is_valid(0).then(|| result.value(0));
-            assert_eq!(actual, expect);
+            assert_json_or_string_eq(actual, expect);
         }
 
         let json_strings = [

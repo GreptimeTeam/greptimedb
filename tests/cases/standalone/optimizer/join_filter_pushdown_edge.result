@@ -100,7 +100,7 @@ EXPLAIN SELECT f.k, f.val FROM fact f
 |               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                 |
 |               | SubqueryAlias: f                                                                                                                                        |
 |               |   Filter: CAST(fact.val AS Int32) IS NOT NULL AND fact.ts >= TimestampMillisecond(1706572800000, None) AND fact.val > Float64(1)                        |
-|               |     TableScan: fact, partial_filters=[fact.ts >= TimestampMillisecond(1706572800000, None), fact.val > Float64(1), CAST(fact.val AS Int32) IS NOT NULL] |
+|               |     TableScan: fact, partial_filters=[CAST(fact.val AS Int32) IS NOT NULL, fact.ts >= TimestampMillisecond(1706572800000, None), fact.val > Float64(1)] |
 |               | ]]                                                                                                                                                      |
 |               |       Projection: d.k                                                                                                                                   |
 |               |         MergeScan [is_placeholder=false, remote_input=[                                                                                                 |

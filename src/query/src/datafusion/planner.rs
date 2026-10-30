@@ -19,7 +19,8 @@ use std::sync::Arc;
 use arrow_schema::DataType;
 use catalog::table_source::DfTableSourceProvider;
 use common_function::function::FunctionContext;
-use datafusion::common::TableReference;
+use datafusion::catalog::TableFunctionArgs;
+use datafusion::common::{DFSchema, TableReference};
 use datafusion::datasource::cte_worktable::CteWorkTable;
 use datafusion::datasource::file_format::{FileFormatFactory, format_as_file_type};
 use datafusion::datasource::provider_as_source;
@@ -33,12 +34,13 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::file_options::file_type::FileType;
 use datafusion_expr::planner::{ExprPlanner, TypePlanner};
 use datafusion_expr::var_provider::is_system_variables;
-use datafusion_expr::{AggregateUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::parser::Statement as DfStatement;
 use session::context::QueryContextRef;
 use snafu::{Location, ResultExt};
 
 use crate::datafusion::json_expr_planner::JsonExprPlanner;
+use crate::datafusion::pg_oid_alias_expr_planner::PgOidAliasExprPlanner;
 use crate::error::{CatalogSnafu, Result};
 use crate::query_engine::{DefaultPlanDecoder, QueryEngineState};
 
@@ -90,6 +92,7 @@ impl DfContextProviderAdapter {
 
         let mut expr_planners = SessionStateDefaults::default_expr_planners();
         expr_planners.insert(0, Arc::new(JsonExprPlanner));
+        expr_planners.insert(0, Arc::new(PgOidAliasExprPlanner));
 
         Ok(Self {
             engine_state,
@@ -161,6 +164,13 @@ impl ContextProvider for DfContextProviderAdapter {
         )
     }
 
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<HigherOrderUDF>> {
+        self.session_state
+            .higher_order_functions()
+            .get(name)
+            .cloned()
+    }
+
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.engine_state.aggr_function(name).map_or_else(
             || self.session_state.aggregate_functions().get(name).cloned(),
@@ -200,6 +210,14 @@ impl ContextProvider for DfContextProviderAdapter {
         names
     }
 
+    fn higher_order_function_names(&self) -> Vec<String> {
+        self.session_state
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
+    }
+
     fn udaf_names(&self) -> Vec<String> {
         let mut names = self.engine_state.aggr_names();
         names.extend(self.session_state.aggregate_functions().keys().cloned());
@@ -228,22 +246,47 @@ impl ContextProvider for DfContextProviderAdapter {
         name: &str,
         args: Vec<datafusion_expr::Expr>,
     ) -> DfResult<Arc<dyn TableSource>> {
-        if let Some(tbl_func) = self.engine_state.table_function(name) {
-            let provider = tbl_func.create_table_provider(&args)?;
-            Ok(provider_as_source(provider))
+        // Constant-fold the args before resolving the table function. DataFusion's
+        // SQL planner does not fold table-function arguments (constant folding
+        // happens later, in the analyzer), but table functions such as
+        // `generate_series`/`range` are resolved during planning and require
+        // literal bounds. Folding here lets immutable-UDF bounds like
+        // `array_upper(ARRAY[...], 1)` reach them as concrete literals.
+        // Non-constant args are returned unchanged by the simplifier.
+        let simplify_info = datafusion_expr::simplify::SimplifyContext::builder()
+            .with_config_options(Arc::clone(self.session_state.config_options()))
+            .with_query_execution_start_time(
+                self.session_state
+                    .execution_props()
+                    .query_execution_start_time,
+            )
+            .build();
+        let simplifier =
+            datafusion_optimizer::simplify_expressions::ExprSimplifier::new(simplify_info);
+        let schema = DFSchema::empty();
+        let args = args
+            .into_iter()
+            .map(|arg| {
+                simplifier
+                    .coerce(arg, &schema)
+                    .and_then(|arg| simplifier.simplify(arg))
+            })
+            .collect::<DfResult<Vec<_>>>()?;
+        let table_args = TableFunctionArgs::new(&args, &self.session_state);
+        let tbl_func = if let Some(tbl_func) = self.engine_state.table_function(name) {
+            tbl_func
         } else {
-            let tbl_func = self
-                .session_state
+            self.session_state
                 .table_functions()
                 .get(name)
                 .cloned()
                 .ok_or_else(|| {
                     DataFusionError::Plan(format!("table function '{name}' not found"))
-                })?;
-            let provider = tbl_func.create_table_provider(&args)?;
+                })?
+        };
+        let provider = tbl_func.create_table_provider_with_args(table_args)?;
 
-            Ok(provider_as_source(provider))
-        }
+        Ok(provider_as_source(provider))
     }
 
     fn create_cte_work_table(
@@ -260,6 +303,154 @@ impl ContextProvider for DfContextProviderAdapter {
     }
 
     fn get_type_planner(&self) -> Option<Arc<dyn TypePlanner>> {
-        None
+        // Provide the SQL planner with Postgres oid-alias type names
+        // (`regclass`, `regproc`, `regtype`, `regnamespace`, `oid`, ...) and
+        // `pg_catalog.`-qualified builtins. DataFusion rejects these as
+        // "Unsupported SQL type" otherwise. The planner maps each to its Arrow
+        // type so reverse / column-operand casts like `prorettype::regtype::text`
+        // parse. Forward name->oid casts (`'x'::regclass`) are resolved earlier,
+        // at SQL-parse time, by the `PostgresCompatibilityParser`'s built-in
+        // `RewriteRegCastToSubquery` rule.
+        // Stateless, so a fresh instance per query is cheap.
+        Some(Arc::new(
+            datafusion_pg_catalog::pg_catalog::oid_type_planner::PgOidTypePlanner,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use common_base::Plugins;
+    use datafusion::catalog::{TableFunction, TableFunctionArgs, TableFunctionImpl, TableProvider};
+    use datafusion::datasource::MemTable;
+    use datafusion::execution::SessionStateBuilder;
+    use datafusion::execution::context::{SessionConfig, SessionContext, SessionState};
+    use datafusion_common::ScalarValue;
+    use datafusion_expr::expr::BinaryExpr;
+    use datafusion_expr::{Expr, Operator, lit};
+    use session::context::QueryContext;
+
+    use super::*;
+    use crate::options::QueryOptions;
+
+    #[derive(Debug, Default)]
+    struct RecordingTableFunction {
+        called: AtomicBool,
+        args: Mutex<Vec<Expr>>,
+        target_partitions: Mutex<Option<usize>>,
+    }
+
+    impl TableFunctionImpl for RecordingTableFunction {
+        fn call_with_args(&self, args: TableFunctionArgs) -> DfResult<Arc<dyn TableProvider>> {
+            let session_state = args
+                .session()
+                .as_any()
+                .downcast_ref::<SessionState>()
+                .expect("table function must receive the SessionState");
+            *self.args.lock().unwrap() = args.exprs().to_vec();
+            *self.target_partitions.lock().unwrap() =
+                Some(session_state.config().target_partitions());
+            self.called.store(true, Ordering::SeqCst);
+
+            Ok(Arc::new(MemTable::try_new(
+                Arc::new(arrow_schema::Schema::empty()),
+                vec![vec![]],
+            )?))
+        }
+    }
+
+    fn query_engine_state() -> Arc<QueryEngineState> {
+        Arc::new(QueryEngineState::new(
+            catalog::memory::new_memory_catalog_manager().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Plugins::default(),
+            QueryOptions::default(),
+        ))
+    }
+
+    async fn context_provider(
+        engine_state: Arc<QueryEngineState>,
+        session_state: SessionState,
+    ) -> DfContextProviderAdapter {
+        DfContextProviderAdapter::try_new(engine_state, session_state, None, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
+    fn plus(left: Expr, right: Expr) -> Expr {
+        Expr::BinaryExpr(BinaryExpr {
+            left: Box::new(left),
+            op: Operator::Plus,
+            right: Box::new(right),
+        })
+    }
+
+    #[tokio::test]
+    async fn table_function_arguments_are_folded_before_engine_function_creation() {
+        let engine_state = query_engine_state();
+        let function = Arc::new(RecordingTableFunction::default());
+        engine_state.register_table_function(Arc::new(TableFunction::new(
+            "capture_engine_args".to_string(),
+            function.clone(),
+        )));
+        let provider = context_provider(engine_state.clone(), engine_state.session_state()).await;
+
+        provider
+            .get_table_function_source("capture_engine_args", vec![plus(lit(1_i64), lit(2_i64))])
+            .unwrap();
+
+        assert!(function.called.load(Ordering::SeqCst));
+        assert_eq!(
+            *function.args.lock().unwrap(),
+            vec![Expr::Literal(ScalarValue::Int64(Some(3)), None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn table_function_argument_simplification_errors_are_propagated() {
+        let engine_state = query_engine_state();
+        let function = Arc::new(RecordingTableFunction::default());
+        engine_state.register_table_function(Arc::new(TableFunction::new(
+            "reject_invalid_args".to_string(),
+            function.clone(),
+        )));
+        let provider = context_provider(engine_state.clone(), engine_state.session_state()).await;
+
+        let error = match provider
+            .get_table_function_source("reject_invalid_args", vec![plus(lit(true), lit(1_i64))])
+        {
+            Ok(_) => panic!("invalid table-function argument must fail planning"),
+            Err(error) => error,
+        };
+
+        assert!(!error.to_string().is_empty());
+        assert!(!function.called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn session_table_function_receives_table_function_args_session() {
+        let engine_state = query_engine_state();
+        let session_state = SessionStateBuilder::new_from_existing(engine_state.session_state())
+            .with_config(SessionConfig::new().with_target_partitions(7))
+            .build();
+        let session_context = SessionContext::new_with_state(session_state);
+        let function = Arc::new(RecordingTableFunction::default());
+        session_context.register_udtf("capture_session_args", function.clone());
+        let provider = context_provider(engine_state, session_context.state()).await;
+
+        provider
+            .get_table_function_source("capture_session_args", vec![lit(1_i64)])
+            .unwrap();
+
+        assert!(function.called.load(Ordering::SeqCst));
+        assert_eq!(*function.target_partitions.lock().unwrap(), Some(7));
     }
 }

@@ -26,7 +26,6 @@ use datafusion::arrow::compute;
 use datafusion::arrow::datatypes::{Float64Type, Int64Type, UInt8Type, UInt64Type};
 use datafusion::logical_expr::ColumnarValue;
 use datafusion_common::{DataFusionError, ScalarValue};
-use datafusion_expr::type_coercion::aggregates::INTEGERS;
 use datafusion_expr::{ScalarFunctionArgs, Signature, TypeSignature, Volatility};
 use datatypes::arrow::datatypes::{DataType, Field};
 use derive_more::Display;
@@ -34,6 +33,7 @@ use h3o::{CellIndex, LatLng, Resolution};
 use snafu::prelude::*;
 
 use crate::function::{Function, extract_args};
+use crate::helper::INTEGER_TYPES;
 use crate::scalars::geo::helpers;
 
 static CELL_TYPES: LazyLock<Vec<DataType>> =
@@ -42,11 +42,11 @@ static CELL_TYPES: LazyLock<Vec<DataType>> =
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static RESOLUTION_TYPES: &[DataType] = INTEGERS;
+static RESOLUTION_TYPES: &[DataType] = INTEGER_TYPES;
 
-static DISTANCE_TYPES: &[DataType] = INTEGERS;
+static DISTANCE_TYPES: &[DataType] = INTEGER_TYPES;
 
-static POSITION_TYPES: &[DataType] = INTEGERS;
+static POSITION_TYPES: &[DataType] = INTEGER_TYPES;
 
 /// Function that returns [h3] encoding cellid for a given geospatial coordinate.
 ///

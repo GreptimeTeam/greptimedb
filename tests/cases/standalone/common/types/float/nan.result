@@ -100,8 +100,10 @@ SELECT f FROM floats WHERE f>0;
 
 SELECT f FROM floats WHERE f>'nan'::FLOAT;
 
-++
-++
++---+
+| f |
++---+
++---+
 
 -- >=
 SELECT f FROM floats WHERE f>=1;
@@ -124,8 +126,10 @@ SELECT f FROM floats WHERE f>='nan'::FLOAT;
 -- <
 SELECT f FROM floats WHERE f<1;
 
-++
-++
++---+
+| f |
++---+
++---+
 
 SELECT f FROM floats WHERE f<'nan'::FLOAT;
 
@@ -257,8 +261,10 @@ SELECT d FROM doubles WHERE d>0;
 
 SELECT d FROM doubles WHERE d>'nan'::DOUBLE;
 
-++
-++
++---+
+| d |
++---+
++---+
 
 -- >=
 SELECT d FROM doubles WHERE d>=1;
@@ -281,8 +287,10 @@ SELECT d FROM doubles WHERE d>='nan'::DOUBLE;
 -- <
 SELECT d FROM doubles WHERE d<1;
 
-++
-++
++---+
+| d |
++---+
++---+
 
 SELECT d FROM doubles WHERE d<'nan'::DOUBLE;
 

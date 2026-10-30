@@ -31,8 +31,10 @@ tql eval (3000, 3000, '1s') http_requests{job="api",instance="0",env="production
 
 tql eval (3000, 3000, '1s') http_requests{job="web",instance="1",env="production"} * 5;
 
-++
-++
++-----+----------+-----+----+-----------------------------+
+| job | instance | env | ts | greptime_value * Float64(5) |
++-----+----------+-----+----+-----------------------------+
++-----+----------+-----+----+-----------------------------+
 
 tql eval (3000, 3000, '1s') http_requests{job="web",instance="1",env="production"} * 5 or http_requests{job="api",instance="0",env="production"} + 5;
 

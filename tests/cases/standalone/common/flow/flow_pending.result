@@ -47,6 +47,8 @@ Affected Rows: 0
 
 SELECT flow_name FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'pending_with_defer';
 
-++
-++
++-----------+
+| flow_name |
++-----------+
++-----------+
 

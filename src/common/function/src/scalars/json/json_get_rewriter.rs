@@ -59,10 +59,8 @@ impl FunctionRewrite for JsonGetRewriter {
 //   json_get(column, path, <data_type>)
 // )
 fn inject_type_from_cast_expr(cast: Cast) -> Result<Transformed<Expr>> {
-    let Cast {
-        expr,
-        mut data_type,
-    } = cast;
+    let Cast { expr, field } = cast;
+    let mut data_type = field.data_type().clone();
 
     let mut json_get = match *expr {
         Expr::ScalarFunction(f)
@@ -73,7 +71,7 @@ fn inject_type_from_cast_expr(cast: Cast) -> Result<Transformed<Expr>> {
         expr => {
             return Ok(Transformed::no(Expr::Cast(Cast {
                 expr: Box::new(expr),
-                data_type,
+                field,
             })));
         }
     };
@@ -204,10 +202,7 @@ mod tests {
         });
 
         // Create a cast expression: json_get(...)::int8
-        let cast_expr = Expr::Cast(Cast {
-            expr: Box::new(json_expr),
-            data_type: DataType::Int8,
-        });
+        let cast_expr = Expr::Cast(Cast::new(Box::new(json_expr), DataType::Int8));
 
         // Apply the rewriter
         let result = rewriter.rewrite(cast_expr, &schema, &config).unwrap();
@@ -279,10 +274,7 @@ mod tests {
 
         // Create an arrow cast function: cast(json_get(...), 'Int64')
         // Note: ArrowCastFunc doesn't exist in this codebase, so this test uses a simple cast instead
-        let arrow_cast_expr = Expr::Cast(Cast {
-            expr: Box::new(json_get_expr),
-            data_type: DataType::Int64,
-        });
+        let arrow_cast_expr = Expr::Cast(Cast::new(Box::new(json_get_expr), DataType::Int64));
 
         // Apply the rewriter
         let result = rewriter.rewrite(arrow_cast_expr, &schema, &config).unwrap();

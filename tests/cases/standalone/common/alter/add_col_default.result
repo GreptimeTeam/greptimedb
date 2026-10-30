@@ -39,8 +39,10 @@ SELECT * FROM test order by j;
 
 SELECT * FROM test where k != 3;
 
-++
-++
++---+---+---+
+| i | j | k |
++---+---+---+
++---+---+---+
 
 ALTER TABLE test ADD COLUMN host STRING DEFAULT '' PRIMARY KEY;
 
@@ -48,13 +50,17 @@ Affected Rows: 0
 
 SELECT * FROM test where host != '';
 
-++
-++
++---+---+---+------+
+| i | j | k | host |
++---+---+---+------+
++---+---+---+------+
 
 SELECT * FROM test where host != '' AND i = 3;
 
-++
-++
++---+---+---+------+
+| i | j | k | host |
++---+---+---+------+
++---+---+---+------+
 
 DROP TABLE test;
 

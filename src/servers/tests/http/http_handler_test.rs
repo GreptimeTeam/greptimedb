@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
@@ -31,10 +30,12 @@ use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::Result as DfResult;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
@@ -141,16 +142,19 @@ impl ExecutionPlan for PanickingMetricsExec {
         "PanickingMetricsExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -168,11 +172,11 @@ impl ExecutionPlan for PanickingMetricsExec {
         unimplemented!("test plan is never executed")
     }
 
-    fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
+    fn metrics(&self) -> Option<MetricsSet> {
         if self.metrics_calls.fetch_add(1, Ordering::Relaxed) >= self.panic_after {
             panic!("metrics collection panicked")
         }
-        Some(datafusion::physical_plan::metrics::MetricsSet::new())
+        Some(MetricsSet::new())
     }
 }
 

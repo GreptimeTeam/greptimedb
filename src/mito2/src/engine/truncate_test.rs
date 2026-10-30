@@ -155,7 +155,11 @@ async fn test_engine_truncate_region_basic_with_format(flat_format: bool) {
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let expected = "++\n++";
+    let expected = "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 
@@ -401,7 +405,11 @@ async fn test_engine_truncate_reopen_with_format(flat_format: bool) {
     let request = ScanRequest::default();
     let stream = engine.scan_to_stream(region_id, request).await.unwrap();
     let batches = RecordBatches::try_collect(stream).await.unwrap();
-    let expected = "++\n++";
+    let expected = "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     assert_eq!(expected, batches.pretty_print().unwrap());
 }
 

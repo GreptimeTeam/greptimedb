@@ -1,0 +1,71 @@
+SELECT host_name, metric_value, event_time
+FROM persisted_scan_filter
+ORDER BY host_name;
+
++-----------+--------------+---------------------+
+| host_name | metric_value | event_time          |
++-----------+--------------+---------------------+
+| alpha     | 10           | 2024-01-01T00:00:00 |
+| gamma     | 30           | 2024-01-01T00:02:00 |
++-----------+--------------+---------------------+
+
+SELECT region_name, row_count, value_sum, value_avg
+FROM persisted_grouped_aggregate
+ORDER BY region_name;
+
++-------------+-----------+-----------+-----------+
+| region_name | row_count | value_sum | value_avg |
++-------------+-----------+-----------+-----------+
+| east        | 2         | 10        | 10.0      |
+| west        | 2         | 35        | 17.5      |
++-------------+-----------+-----------+-----------+
+
+SELECT host_name, region_name
+FROM persisted_union
+ORDER BY host_name, region_name;
+
++-----------+-------------+
+| host_name | region_name |
++-----------+-------------+
+| alpha     | east        |
+| beta      | east        |
+| beta      | east        |
++-----------+-------------+
+
+SELECT host_name, metric_value, label_name
+FROM persisted_inner_join
+ORDER BY host_name;
+
++-----------+--------------+------------+
+| host_name | metric_value | label_name |
++-----------+--------------+------------+
+| alpha     | 10           | production |
+| beta      |              | staging    |
+| gamma     | 30           |            |
++-----------+--------------+------------+
+
+SELECT region_name, host_name, event_time, row_num
+FROM persisted_window
+ORDER BY region_name, row_num;
+
++-------------+-----------+---------------------+---------+
+| region_name | host_name | event_time          | row_num |
++-------------+-----------+---------------------+---------+
+| east        | alpha     | 2024-01-01T00:00:00 | 1       |
+| east        | beta      | 2024-01-01T00:01:00 | 2       |
+| west        | gamma     | 2024-01-01T00:02:00 | 1       |
+| west        | delta     | 2024-01-01T00:03:00 | 2       |
++-------------+-----------+---------------------+---------+
+
+SELECT host_name, event_day
+FROM persisted_date_format
+ORDER BY host_name;
+
++-----------+------------+
+| host_name | event_day  |
++-----------+------------+
+| alpha     | 2024-01-01 |
+| beta      | 2024-01-01 |
+| delta     | 2024-01-01 |
+| gamma     | 2024-01-01 |
++-----------+------------+

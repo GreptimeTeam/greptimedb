@@ -20,8 +20,10 @@ Affected Rows: 2
 
 SELECT * FROM demo ORDER BY ts;
 
-++
-++
++------+-----+--------+----+
+| host | cpu | memory | ts |
++------+-----+--------+----+
++------+-----+--------+----+
 
 COPY DATABASE public FROM '${SQLNESS_HOME}/demo/export/parquet/';
 

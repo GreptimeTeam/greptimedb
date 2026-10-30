@@ -144,9 +144,9 @@ EXPLAIN ANALYZE SELECT count(*) FROM n2;
 | stage | node | plan_|
 +-+-+-+
 | 0_| 0_|_ProjectionExec: expr=[count(Int64(1))@0 as count(*)] REDACTED
-|_|_|_AggregateExec: mode=Final, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_AggregateExec: mode=Final, gby=[], aggr=[__count_merge(__count_state(n2.ts)) as count(Int64(1))] REDACTED
 |_|_|_CoalescePartitionsExec REDACTED
-|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[count(Int64(1))] REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[], aggr=[__count_merge(__count_state(n2.ts)) as count(Int64(1))] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|

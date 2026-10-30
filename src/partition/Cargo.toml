@@ -18,6 +18,7 @@ common-query.workspace = true
 common-telemetry.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-optimizer.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 itertools.workspace = true
@@ -31,6 +32,7 @@ store-api.workspace = true
 table.workspace = true
 
 [dev-dependencies]
+common-time.workspace = true
 criterion.workspace = true
 rand = "0.8"
 

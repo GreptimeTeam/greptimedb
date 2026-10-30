@@ -725,7 +725,7 @@ mod test {
                                     df_scalar_fn: DfScalarFunction::try_from_raw_fn(
                                         RawDfScalarFn {
                                             f: BytesMut::from(
-                                                b"\x08\x02\"\x0f\x1a\r\n\x0b\xa2\x02\x08\n\0\x12\x04\x10\x1e \t\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
+                                                b"\x08\x02\x1a\x07\x8a\x02\x04\x08\x03\x18\x01\"\x0f\x1a\r\n\x0b\xa2\x02\x08\n\0\x12\x04\x10\x1e \t\"\n\x1a\x08\x12\x06\n\x04\x12\x02\x08\x01".as_ref(),
                                             ),
                                             input_schema: RelationType::new(vec![ColumnType::new(
                                                 ConcreteDataType::interval_month_day_nano_datatype(),
