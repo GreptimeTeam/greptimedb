@@ -1641,21 +1641,15 @@ impl FusedSeriesExec {
         let partition_count = inputs.first().map_or(1, |(input, _, _)| {
             input.properties().partitioning.partition_count()
         });
-        let has_evaluated_input = raw_schemas.iter().any(|schema| schema.eval_grid.is_some());
-        let has_raw_input = raw_schemas.iter().any(|schema| schema.eval_grid.is_none());
-        if has_evaluated_input && has_raw_input {
-            return Err(DataFusionError::Plan(
-                "FusedSeries cannot mix raw and evaluated inputs".into(),
-            ));
-        }
-        let evaluated_global =
-            has_evaluated_input && matches!(locality, InputLocality::SinglePartition);
-        let window_sources = if has_evaluated_input
+        let window_sources = if raw_schemas.iter().any(|schema| schema.eval_grid.is_some())
             && inputs
                 .iter()
                 .any(|(input, _, _)| input.properties().partitioning.partition_count() > 1)
         {
             partitioned_window_sources(tree.root())?
+                .into_iter()
+                .filter(|&index| raw_schemas[index].eval_grid.is_some())
+                .collect()
         } else {
             Vec::new()
         };
@@ -1713,6 +1707,8 @@ impl FusedSeriesExec {
                     "FusedSeries evaluated source {index} must declare contiguous ordering"
                 )));
             }
+            let evaluated_global = raw_schemas[index].eval_grid.is_some()
+                && matches!(locality, InputLocality::SinglePartition);
             let required_ordering = if evaluated_global || (inputs.len() > 1 && count > 1) {
                 SeriesOrdering::Contiguous
             } else {
