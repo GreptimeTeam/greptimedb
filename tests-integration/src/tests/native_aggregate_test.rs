@@ -289,6 +289,12 @@ struct ResultRow {
 struct QueryResult {
     /// Every column name, in schema order.
     columns: Vec<String>,
+    /// Label column names, in schema order.
+    label_columns: Vec<String>,
+    /// Time column name.
+    time_column: String,
+    /// Value column name.
+    value_column: String,
     /// The rows, in a canonical order.
     rows: Vec<ResultRow>,
 }
@@ -324,6 +330,11 @@ impl QueryResult {
                 )
             })
             .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let time_column = columns[time_index].clone();
+        let label_columns = label_indices
+            .iter()
+            .map(|index| columns[*index].clone())
             .collect::<Vec<_>>();
         let value_indices = fields
             .iter()
@@ -371,7 +382,14 @@ impl QueryResult {
             (left.ts_millis, &left.labels).cmp(&(right.ts_millis, &right.labels))
         });
 
-        Self { columns, rows }
+        let value_column = columns[value_indices[0]].clone();
+        Self {
+            columns,
+            label_columns,
+            time_column,
+            value_column,
+            rows,
+        }
     }
 }
 
@@ -1119,21 +1137,39 @@ fn assert_rows(actual: &[ResultRow], expected: &[ResultRow], context: &str) {
     }
 }
 
-/// Asserts both routes report the answer with the same columns.
-///
-/// The value column is named after the expression the frontend computes, which is the legacy naming:
-/// a native run that renamed it, or dropped, added or reordered a column, fails here rather than
-/// passing on values alone. Column order is not compared, only the answer's shape.
-fn assert_same_columns(native: &QueryResult, legacy: &QueryResult, query: &str) {
-    let sorted = |result: &QueryResult| {
-        let mut columns = result.columns.clone();
+/// Asserts the native route preserves legacy label/time columns and names its value field explicitly.
+fn assert_native_columns(
+    native: &QueryResult,
+    legacy: &QueryResult,
+    query: &str,
+    expected_value_column: &str,
+) {
+    let sorted = |columns: &[String]| {
+        let mut columns = columns.to_vec();
         columns.sort();
         columns
     };
     assert_eq!(
-        sorted(legacy),
-        sorted(native),
-        "`{query}`: the native route must report the columns the legacy plan reports"
+        legacy.time_column, native.time_column,
+        "`{query}`: native time column must match legacy"
+    );
+    assert_eq!(
+        sorted(&legacy.label_columns),
+        sorted(&native.label_columns),
+        "`{query}`: native label columns must match legacy, order-insensitively"
+    );
+    assert_eq!(
+        expected_value_column, native.value_column,
+        "`{query}`: native value column must use the compiled root field name"
+    );
+    assert_eq!(
+        1,
+        native
+            .columns
+            .iter()
+            .filter(|column| *column == expected_value_column)
+            .count(),
+        "`{query}`: native result must have exactly one value column"
     );
 }
 
@@ -1403,7 +1439,7 @@ async fn check_case(instance: &Arc<Instance>, observer: &NativePlanObserver, cas
     assert_rows(&legacy.rows, &case.expected, &format!("legacy `{query}`"));
 
     let (native, capture) = run_query(instance, promql, true, observer).await;
-    assert_same_columns(&native, &legacy, &query);
+    assert_native_columns(&native, &legacy, &query, "v");
     assert_rows(&native.rows, &case.expected, &format!("native `{query}`"));
 
     assert_eq!(
@@ -1566,7 +1602,7 @@ async fn native_aggregate_topk_over_global_partitions() {
     let (legacy, legacy_capture) = run(false).await;
     assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
     let (native, capture) = run(true).await;
-    assert_same_columns(&native, &legacy, &sql);
+    assert_native_columns(&native, &legacy, &sql, "v");
     assert_rows(
         &native.rows,
         &legacy.rows,
@@ -1674,6 +1710,16 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             &by_job(18.0, 12.0),
             true,
         ),
+        // The latest samples are 2, 6, 10, 4 and 8: clamp maps them to 2, 2, 2, 2 and 2,
+        // which the native fused tree and aggregate merge sum to 10 over this real Mito region.
+        AggregateCase {
+            partial_state: Some("partial state: sum by () Complete"),
+            ..case(
+                format!("sum(clamp({GAUGE_TABLE}, 1, 2))"),
+                &[(&[], 10.0)],
+                true,
+            )
+        },
         // The gauge's groups average to 6 and 6, and the producer's plan line has to name the
         // `avg by (job)` the split cut out: what a partition exports is that aggregate's state, not
         // the group's mean. The counter table's cases below are the ones whose answers can tell a
@@ -1980,7 +2026,7 @@ async fn native_histogram_quantile_over_the_cut_answers_what_the_complete_input_
             native.rows.len(),
             legacy.rows.len()
         );
-        assert_same_columns(&native, &legacy, &query);
+        assert_native_columns(&native, &legacy, &query, "v");
         // The equivalence the admission rests on: the rows the same statement reports over the
         // complete input, labels included.
         assert_rows(
