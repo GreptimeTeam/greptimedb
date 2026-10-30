@@ -349,6 +349,13 @@ mod tests {
             .unwrap()
             .unwrap();
 
+        let filter =
+            datafusion::logical_expr::col("region_id").eq(datafusion::logical_expr::lit(42_u64));
+        assert_eq!(
+            table.supports_filters_pushdown(&[&filter]).unwrap(),
+            vec![table::metadata::FilterPushDownType::Inexact],
+        );
+
         let request = ScanRequest {
             projection: Some(vec![0]),
             ..Default::default()

@@ -451,14 +451,9 @@ impl InvertedIndexer {
         self.temp_file_provider.cleanup().await
     }
 
-    /// Returns column-level index IDs, excluding JSON path targets.
-    pub fn indexed_column_ids(&self) -> impl Iterator<Item = ColumnId> + '_ {
-        self.index_targets
-            .iter()
-            .filter_map(|(target, _)| match target {
-                IndexTarget::ColumnId(col_id) => Some(*col_id),
-                IndexTarget::JsonPath(_) => None,
-            })
+    /// Returns the targets indexed by this creator.
+    pub fn indexed_targets(&self) -> impl Iterator<Item = &IndexTarget> {
+        self.index_targets.iter().map(|(target, _)| target)
     }
 
     pub fn memory_usage(&self) -> usize {
@@ -717,6 +712,7 @@ mod tests {
                             path: vec!["value".into()],
                             data_type: ConcreteDataType::int64_datatype(),
                             inverted_index: true,
+                            skipping_index: None,
                         }],
                         Some(0),
                     )
@@ -768,8 +764,7 @@ mod tests {
                     creator.update(&mut batch).await.unwrap();
                 }
             }
-            // JSON paths must not be advertised as ordinary column indexes.
-            assert_eq!(creator.indexed_column_ids().count(), 0);
+            assert_eq!(creator.indexed_targets().collect::<Vec<_>>(), vec![&target]);
             let store = mock_object_store();
             let manager = factory.build(
                 store.clone(),

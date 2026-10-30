@@ -20,12 +20,13 @@ mod regex_match;
 
 use std::collections::{BTreeMap, HashSet};
 
-use arrow_schema::extension::ExtensionType;
-use common_function::scalars::json::json_get::{JsonGetWithType, json_object_path};
+#[cfg(test)]
+use common_function::scalars::json::json_get::JsonGetWithType;
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
-use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::data_type::ConcreteDataType;
+#[cfg(test)]
 use datatypes::extension::json::Json2ExtensionType;
 use datatypes::value::Value;
 use index::inverted_index::search::predicate::Predicate;
@@ -242,77 +243,9 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
                 .map(|(id, ty)| (IndexTarget::ColumnId(id), ty)));
         }
 
-        let Expr::ScalarFunction(func) = expr else {
-            return Ok(None);
-        };
-
-        if func.func.name() != JsonGetWithType::NAME || !(2..=3).contains(&func.args.len()) {
-            return Ok(None);
-        }
-
-        let Some(name) = Self::column_name(&func.args[0]) else {
-            return Ok(None);
-        };
-
-        let Some(col) = self.metadata.column_by_name(name) else {
-            return Ok(None);
-        };
-
-        if !col.column_schema.data_type.is_json2() {
-            return Ok(None);
-        }
-
-        let Some(path_literal) = func.args[1]
-            .as_literal()
-            .and_then(|v| v.try_as_str())
-            .flatten()
-        else {
-            return Ok(None);
-        };
-
-        let Some(path) = json_object_path(path_literal).ok().flatten() else {
-            return Ok(None);
-        };
-
-        let Ok(Some(extension)) = col.column_schema.extension_type::<Json2ExtensionType>() else {
-            return Ok(None);
-        };
-
-        let Some(hint) = extension
-            .metadata()
-            .json_settings()
-            .type_hints()
-            .iter()
-            .find(|hint| hint.path == path && hint.inverted_index)
-        else {
-            return Ok(None);
-        };
-
-        if let Some(type_arg) = func.args.get(2) {
-            let Expr::Literal(value, _) = type_arg else {
-                return Ok(None);
-            };
-            if !value.is_null() {
-                return Ok(None);
-            }
-            // A type conversion may change comparison semantics and invalidate index pruning.
-            let result_type = value.data_type();
-            if result_type != hint.data_type.as_arrow_type()
-                && !(result_type.is_string() && hint.data_type.is_string())
-            {
-                return Ok(None);
-            }
-        }
-
-        if !(hint.data_type.is_numeric()
-            || hint.data_type.is_boolean()
-            || hint.data_type.is_string())
-        {
-            return Ok(None);
-        }
-        Ok(IndexTarget::new_json_path(col.column_id, path)
-            .ok()
-            .map(|target| (target, hint.data_type.clone())))
+        crate::sst::index::column::json_index_target(self.metadata, expr, |hint| {
+            hint.inverted_index
+        })
     }
 
     /// Helper function to get a non-null literal.
@@ -456,12 +389,14 @@ mod tests {
                     path: vec!["n".into()],
                     data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: true,
+                    skipping_index: None,
                 }],
                 vec![],
                 vec![JsonTypeHint {
                     path: vec!["n".into()],
                     data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
+                    skipping_index: None,
                 }],
             ] {
                 let mut sst = metadata.clone();
@@ -720,11 +655,13 @@ mod tests {
             path: path.into_iter().map(String::from).collect(),
             data_type: ConcreteDataType::string_datatype(),
             inverted_index,
+            skipping_index: None,
         })
         .chain(std::iter::once(JsonTypeHint {
             path: vec!["n".into()],
             data_type: ConcreteDataType::int64_datatype(),
             inverted_index: true,
+            skipping_index: None,
         }))
         .collect();
         column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(

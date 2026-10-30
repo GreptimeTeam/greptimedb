@@ -62,6 +62,9 @@ pub(crate) struct MutableInner {
     timezone: Timezone,
     query_timeout: Option<Duration>,
     read_preference: ReadPreference,
+    /// Latest procedure ID recorded during statement execution, before
+    /// `post_execute` hooks and protocol transmission.
+    last_procedure_id: Option<String>,
     /// Request-level WAL policy for ordinary inserts.
     skip_wal: bool,
     #[debug(skip)]
@@ -78,6 +81,7 @@ impl Default for MutableInner {
             timezone: get_timezone(None).clone(),
             query_timeout: None,
             read_preference: ReadPreference::Leader,
+            last_procedure_id: None,
             skip_wal: false,
             cursors: HashMap::with_capacity(0),
             warnings: VecDeque::new(),

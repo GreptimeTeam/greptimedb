@@ -75,6 +75,16 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
                 path: hint.path,
                 data_type,
                 inverted_index: hint.inverted_index,
+                skipping_index: hint
+                    .skipping_index
+                    .map(api::v1::column_def::json_skipping_options_from_proto)
+                    .transpose()
+                    .map_err(|err| {
+                        InvalidJsonSettingsSnafu {
+                            err: err.to_string(),
+                        }
+                        .build()
+                    })?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -426,12 +436,43 @@ mod tests {
                     path: vec!["service".into()],
                     data_type: ColumnDataType::String as i32,
                     inverted_index: enabled,
+                    skipping_index: None,
                     ..Default::default()
                 }],
                 max_auto_expanded_paths: Some(0),
             })
             .unwrap();
             assert_eq!(enabled, settings.type_hints()[0].inverted_index);
+        }
+    }
+
+    #[test]
+    fn test_json_settings_skipping_options_from_proto() {
+        for (granularity, rate, index_type, valid) in [
+            (8, 0.05, 0, true),
+            (0, 0.05, 0, false),
+            (8, 0.0, 0, false),
+            (8, 0.05, 9, false),
+        ] {
+            let settings = json_settings_from_proto(api::v1::JsonSettings {
+                type_hints: vec![api::v1::JsonTypeHint {
+                    path: vec!["service".into()],
+                    data_type: ColumnDataType::String as i32,
+                    skipping_index: Some(api::v1::JsonSkippingIndexOptions {
+                        granularity,
+                        index_type,
+                        false_positive_rate: rate,
+                    }),
+                    ..Default::default()
+                }],
+                max_auto_expanded_paths: Some(0),
+            });
+            assert_eq!(settings.is_ok(), valid);
+            if let Ok(settings) = settings {
+                let options = settings.type_hints()[0].skipping_index.as_ref().unwrap();
+                assert_eq!(options.granularity, granularity);
+                assert_eq!(options.false_positive_rate(), rate);
+            }
         }
     }
 
@@ -454,6 +495,7 @@ mod tests {
                             path: path.iter().map(|part| (*part).to_string()).collect(),
                             data_type: ColumnDataType::String as i32,
                             inverted_index,
+                            skipping_index: None,
                             ..Default::default()
                         }],
                         max_auto_expanded_paths: Some(0),

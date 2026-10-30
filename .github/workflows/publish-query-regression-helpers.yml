@@ -1,0 +1,166 @@
+name: Publish query regression helpers
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [main]
+    paths:
+      - src/cmd/src/bin/query_perf_fixture.rs
+      - src/cmd/src/bin/query_perf_fixture/**
+      - src/cmd/src/bin/query_regression_runner.rs
+      - src/cmd/src/bin/query_regression_runner/**
+      - docker/query-regression-helpers/**
+      - .github/workflows/publish-query-regression-helpers.yml
+      - .github/scripts/publish-query-regression-helpers.sh
+      - .github/scripts/build-query-regression-helpers.sh
+      - .github/scripts/update-query-regression-helpers-image.sh
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+# Serialize publication and updates of the repository image variable.
+concurrency:
+  group: publish-query-regression-helpers
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.provision.outputs.label }}
+      instance_id: ${{ steps.provision.outputs.instance_id }}
+      runner_name: ${{ steps.provision.outputs.runner_name }}
+    steps:
+      - name: Checkout trusted provisioning scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Provision ECS runner
+        id: provision
+        uses: ./.github/actions/aliyun-ecs-create
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+          security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+          instance-type: ${{ vars.ALIYUN_ECS_INSTANCE_TYPE }}
+          # Preserve query regression's original resource and janitor budgets.
+          system-disk-gib: '80'
+          ttl-hours: '4'
+          enable-docker: 'true'
+          resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+          image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+          runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+          runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+
+  build:
+    needs: provision
+    runs-on: ${{ needs.provision.outputs.label }}
+    timeout-minutes: 150
+    env:
+      CARGO_HOME: /home/runner/.cargo
+      CARGO_TARGET_DIR: /home/runner/query-regression-target
+      RUSTUP_HOME: /opt/rustup
+      RUSTUP_TOOLCHAIN: nightly-2026-03-21
+      RUSTUP_AUTO_INSTALL: "0"
+      CARGO_INCREMENTAL: "0"
+      RUSTFLAGS: -D warnings -C link-arg=-fuse-ld=mold
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build and validate helpers
+        run: bash .github/scripts/build-query-regression-helpers.sh
+      - name: Upload reusable helper image
+        uses: actions/upload-artifact@v4
+        with:
+          name: helpers-image
+          path: helpers-image/
+          compression-level: 1
+          retention-days: 7
+          if-no-files-found: error
+      - name: Upload build validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helpers-build-validation
+          path: helpers-validation/
+          if-no-files-found: warn
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      image: ${{ steps.publish.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: helpers-image
+          path: helpers-image/
+      - name: Login to registry
+        uses: docker/login-action@v3
+        with:
+          registry: greptime-registry.cn-hangzhou.cr.aliyuncs.com
+          username: ${{ secrets.ALICLOUD_USERNAME }}
+          password: ${{ secrets.ALICLOUD_PASSWORD }}
+      - name: Publish and verify helpers
+        id: publish
+        run: bash .github/scripts/publish-query-regression-helpers.sh
+      - name: Upload publication validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: helpers-publish-validation
+          path: |
+            helpers-validation/digest.txt
+            helpers-validation/extracted/helpers-image.json
+          if-no-files-found: warn
+
+  update-variable:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Update helpers image repository variable
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          HELPERS_IMAGE: ${{ needs.publish.outputs.image }}
+        run: bash .github/scripts/update-query-regression-helpers-image.sh
+
+  teardown:
+    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    needs: [provision, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout trusted teardown scripts
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Teardown ECS runner
+        uses: ./.github/actions/aliyun-ecs-delete
+        with:
+          access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+          instance-id: ${{ needs.provision.outputs.instance_id }}
+          runner-name: ${{ needs.provision.outputs.runner_name }}

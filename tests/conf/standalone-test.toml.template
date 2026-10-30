@@ -28,6 +28,7 @@ broker_endpoints = {kafka_wal_broker_endpoints | unescaped}
 type = 'File'
 data_home = '{data_home}'
 copy_root = '{copy_root}'
+probe_on_startup = false
 
 [grpc]
 bind_addr = '{addrs.grpc_addr}'

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod auth_handler;
+mod copy_in;
 mod fixtures;
 mod handler;
 mod server;
@@ -43,6 +44,7 @@ use session::context::Channel;
 use self::auth_handler::{PgUserProviderSource, ZeroPidSecretKeyGenerator};
 use self::handler::DefaultQueryParser;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
+use crate::query_handler::{CopyInHandlerRef, InfluxdbLineProtocolHandlerRef};
 
 pub(crate) struct GreptimeDBStartupParameters {
     version: String,
@@ -78,6 +80,12 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
     auth_source: Option<Arc<PgUserProviderSource>>,
+    copy_in_handler: CopyInHandlerRef,
+    /// Executes influxdb line-protocol batches flushed by a table-less
+    /// COPY FROM STDIN — the same handler the HTTP write endpoints use.
+    /// Absent on servers not wired for it; such connections reject the
+    /// influxdb format when a copy starts.
+    influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     force_tls: bool,
     auth_driver: AuthDriver<Arc<GreptimeDBStartupParameters>, UserInfoRef>,
     /// SCRAM selected; failures get the uniform metric label.
@@ -86,11 +94,18 @@ pub struct PostgresServerHandlerInner {
     batching_enabled: bool,
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
+
+    /// State of an in-progress `COPY ... FROM STDIN`; set when the copy
+    /// starts and taken when it finishes, fails or the connection drops.
+    copy_in_state: tokio::sync::Mutex<Option<copy_in::CopyInState>>,
 }
 
 #[derive(Builder)]
 pub(crate) struct MakePostgresServerHandler {
     query_handler: ServerSqlQueryHandlerRef,
+    copy_in_handler: CopyInHandlerRef,
+    #[builder(default)]
+    influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -109,6 +124,10 @@ impl PgWireServerHandlers for PostgresServerHandler {
     }
 
     fn startup_handler(&self) -> Arc<impl StartupHandler> {
+        self.0.clone()
+    }
+
+    fn copy_handler(&self) -> Arc<impl pgwire::api::copy::CopyHandler> {
         self.0.clone()
     }
 
@@ -136,6 +155,8 @@ impl MakePostgresServerHandler {
                 .user_provider
                 .clone()
                 .map(|p| Arc::new(PgUserProviderSource::new(p))),
+            copy_in_handler: self.copy_in_handler.clone(),
+            influxdb_handler: self.influxdb_handler.clone(),
             force_tls: self.force_tls,
             auth_driver: AuthDriver::new(self.param_provider.clone())
                 .with_pid_secret_key_generator(Arc::new(ZeroPidSecretKeyGenerator)),
@@ -144,6 +165,7 @@ impl MakePostgresServerHandler {
             batching_enabled,
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            copy_in_state: tokio::sync::Mutex::new(None),
         };
         PostgresServerHandler(Arc::new(handler))
     }

@@ -1021,6 +1021,7 @@ impl RepartitionProcedureFactory for DefaultRepartitionProcedureFactory {
 
 #[cfg(test)]
 mod tests {
+    use crate::procedure::test_util::{procedure_context_with_receivers, procedure_state_receiver};
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1057,8 +1058,7 @@ mod tests {
     use crate::procedure::repartition::repartition_end::RepartitionEnd;
     use crate::procedure::repartition::test_util::{
         TestingEnv, assert_parent_state, current_parent_region_routes, extract_subprocedure_ids,
-        new_parent_context, procedure_context_with_receivers, procedure_state_receiver, range_expr,
-        test_region_route, test_region_wal_options,
+        new_parent_context, range_expr, test_region_route, test_region_wal_options,
     };
     use crate::procedure::repartition::update_partition_metadata::{
         PartitionMetadataUpdate, UpdatePartitionMetadata,

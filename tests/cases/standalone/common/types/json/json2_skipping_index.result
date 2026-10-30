@@ -1,0 +1,550 @@
+-- Query indexed JSON paths alongside ordinary columns in flat SSTs.
+CREATE TABLE json2_skipping_query (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (
+        max_auto_expanded_paths = 0,
+        service.name STRING SKIPPING INDEX WITH (granularity='1'),
+        "service.name" STRING SKIPPING INDEX WITH (granularity='1'),
+        status BIGINT SKIPPING INDEX WITH (granularity='1'),
+        success BOOLEAN SKIPPING INDEX WITH (granularity='1'),
+        duration DOUBLE SKIPPING INDEX WITH (granularity='1'),
+        bytes BIGINT UNSIGNED SKIPPING INDEX WITH (granularity='1'),
+        unindexed STRING
+    ),
+    ordinary STRING SKIPPING INDEX WITH (granularity='1')
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat');
+
+Affected Rows: 0
+
+INSERT INTO json2_skipping_query VALUES
+    (1, '{"service":{"name":"api"},"service.name":"literal","status":200,"success":true,"duration":1.5,"bytes":18446744073709551615,"unindexed":"x"}', 'a'),
+    (2, '{"service":{"name":"worker"},"service.name":"api","status":500,"success":false,"duration":2.5,"bytes":42,"unindexed":"y"}', 'b'),
+    (3, '{}', 'c'), (4, NULL, 'd');
+
+Affected Rows: 4
+
+ADMIN FLUSH_TABLE('json2_skipping_query');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_skipping_query') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+-- Nested and literal dotted paths resolve to different targets.
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'api' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE json_get(attrs, '$."service.name"') = 'api' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+-- Integer predicates support equality, reversed ranges, BETWEEN, and IN.
+SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT = 200 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE 400 < attrs.status::BIGINT ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT BETWEEN 100 AND 300 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT IN (200, 500) ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+-- OR predicates work within one path and across different paths.
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'api' OR attrs.service.name = 'worker' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'api' OR json_get(attrs, '$."service.name"') = 'api' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+-- Regex, boolean, floating-point, and unsigned predicates return matching rows.
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name ~ '^a.*[ip]$' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.success::BOOLEAN = true ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.duration::DOUBLE > 2.0 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.bytes::BIGINT UNSIGNED = 18446744073709551615::BIGINT UNSIGNED ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+-- Ordinary and JSON index predicates can be combined.
+SELECT ts FROM json2_skipping_query WHERE ordinary = 'b' AND attrs.status::BIGINT > 400 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+-- Missing paths and null roots remain visible to IS NULL.
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name IS NULL ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.003 |
+| 1970-01-01T00:00:00.004 |
++-------------------------+
+
+-- Unindexed hints remain queryable.
+SELECT ts FROM json2_skipping_query WHERE attrs.unindexed = 'x' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+-- Implicit comparison and explicit conversion preserve query results.
+SELECT ts FROM json2_skipping_query WHERE attrs.status = '200' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.duration::BIGINT = 1 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+-- Verify equality and IN actually prune, including warm-cache reads.
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_bloom_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "max_part_range":\s*\{[^}]*\} "max_part_range":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'absent';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_bloom_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "max_part_range":\s*\{[^}]*\} "max_part_range":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT IN (900, 901);
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.status, NULL) IN (SET) ([900, 901]), projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.status\"), Int64(NULL)) IN ([Int64(900), Int64(901)])"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_bloom_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "max_part_range":\s*\{[^}]*\} "max_part_range":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'absent';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":4,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":4,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":4} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+INSERT INTO json2_skipping_query VALUES (5, '{"service":{"name":"api"},"status":201}', 'e');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_skipping_query');
+
++-------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_skipping_query') |
++-------------------------------------------+
+| 0                                         |
++-------------------------------------------+
+
+ADMIN COMPACT_TABLE('json2_skipping_query', 'swcs', '86400');
+
++--------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_skipping_query', 'swcs', '86400') |
++--------------------------------------------------------------+
+| 0                                                            |
++--------------------------------------------------------------+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_bloom_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "max_part_range":\s*\{[^}]*\} "max_part_range":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'absent';
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.service.name, NULL) = absent, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.service.name\"), Utf8View(NULL)) = Utf8View(\"absent\")"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":5,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":5,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":5} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'api' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.005 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT IN (200, 201, 500) ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.005 |
++-------------------------+
+
+-- Disable hints' indexes: results remain identical across existing SSTs.
+ALTER TABLE json2_skipping_query MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0, service.name STRING, "service.name" STRING, status BIGINT, success BOOLEAN, duration DOUBLE, bytes BIGINT UNSIGNED, unindexed STRING);
+
+Affected Rows: 0
+
+SELECT ts FROM json2_skipping_query WHERE attrs.service.name = 'api' ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.005 |
++-------------------------+
+
+SELECT ts FROM json2_skipping_query WHERE attrs.status::BIGINT IN (200, 201, 500) ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.005 |
++-------------------------+
+
+DROP TABLE json2_skipping_query;
+
+Affected Rows: 0
+
+-- Old SST without a path index, new SST with both index kinds, then a type change.
+CREATE TABLE json2_skipping_evolution (ts TIMESTAMP TIME INDEX, j JSON2 (n BIGINT)) WITH ('append_mode'='true');
+
+Affected Rows: 0
+
+INSERT INTO json2_skipping_evolution VALUES (1, '{"n":42}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_skipping_evolution');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_skipping_evolution') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+ALTER TABLE json2_skipping_evolution MODIFY COLUMN j JSON2 (n BIGINT SKIPPING INDEX WITH (granularity='1') INVERTED INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_skipping_evolution;
+
++--------------------------+---------------------------------------------------------------------------------------------------------------------+
+| Table                    | Create Table                                                                                                        |
++--------------------------+---------------------------------------------------------------------------------------------------------------------+
+| json2_skipping_evolution | CREATE TABLE IF NOT EXISTS "json2_skipping_evolution" (                                                             |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                                                                                       |
+|                          |   "j" JSON2(                                                                                                        |
+|                          |     max_auto_expanded_paths = 100,                                                                                  |
+|                          |     "n" BIGINT SKIPPING INDEX WITH (granularity = '1', false_positive_rate = '0.01', type = 'BLOOM') INVERTED INDEX |
+|                          |   ) NULL,                                                                                                           |
+|                          |   TIME INDEX ("ts")                                                                                                 |
+|                          | )                                                                                                                   |
+|                          |                                                                                                                     |
+|                          | ENGINE=mito                                                                                                         |
+|                          | WITH(                                                                                                               |
+|                          |   append_mode = 'true'                                                                                              |
+|                          | )                                                                                                                   |
++--------------------------+---------------------------------------------------------------------------------------------------------------------+
+
+INSERT INTO json2_skipping_evolution VALUES (2, '{"n":42}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_skipping_evolution');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_skipping_evolution') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+SELECT ts FROM json2_skipping_evolution WHERE json_get(j, '$.n') = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+ALTER TABLE json2_skipping_evolution MODIFY COLUMN j JSON2 (n DOUBLE SKIPPING INDEX WITH (granularity='1'));
+
+Affected Rows: 0
+
+INSERT INTO json2_skipping_evolution VALUES (3, '{"n":42.0}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_skipping_evolution');
+
++-----------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_skipping_evolution') |
++-----------------------------------------------+
+| 0                                             |
++-----------------------------------------------+
+
+SELECT ts FROM json2_skipping_evolution WHERE json_get(j, '$.n') = 42.0 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE json2_skipping_evolution;
+
++--------------------------+------------------------------------------------------------------------------------------------------+
+| Table                    | Create Table                                                                                         |
++--------------------------+------------------------------------------------------------------------------------------------------+
+| json2_skipping_evolution | CREATE TABLE IF NOT EXISTS "json2_skipping_evolution" (                                              |
+|                          |   "ts" TIMESTAMP(3) NOT NULL,                                                                        |
+|                          |   "j" JSON2(                                                                                         |
+|                          |     max_auto_expanded_paths = 100,                                                                   |
+|                          |     "n" DOUBLE SKIPPING INDEX WITH (granularity = '1', false_positive_rate = '0.01', type = 'BLOOM') |
+|                          |   ) NULL,                                                                                            |
+|                          |   TIME INDEX ("ts")                                                                                  |
+|                          | )                                                                                                    |
+|                          |                                                                                                      |
+|                          | ENGINE=mito                                                                                          |
+|                          | WITH(                                                                                                |
+|                          |   append_mode = 'true'                                                                               |
+|                          | )                                                                                                    |
++--------------------------+------------------------------------------------------------------------------------------------------+
+
+SELECT ts FROM json2_skipping_evolution WHERE json_get(j, '$.n') = 42.0 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+ADMIN COMPACT_TABLE('json2_skipping_evolution', 'swcs', '86400');
+
++------------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_skipping_evolution', 'swcs', '86400') |
++------------------------------------------------------------------+
+| 0                                                                |
++------------------------------------------------------------------+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_bloom_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "max_part_range":\s*\{[^}]*\} "max_part_range":REDACTED
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_skipping_evolution WHERE json_get(j, '$.n') = 99.0;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(j@1, $.n, NULL) = 99, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":0, "files":1, "file_ranges":1}, "projection": ["ts", "j"], "filters": ["json_get(j, Utf8(\"$.n\"), Float64(NULL)) = Float64(99)"], "time_range": "TimestampRange{{[#,#)}}", "file_summary": {"files":1,"rows":3,"row_groups":1,"size":REDACTED,"index_size":REDACTED}, "max_part_range":REDACTED, "files": [{"file_id":"REDACTED","time_range_start":"REDACTED","time_range_end":"REDACTED","rows":3,"size":REDACTED,"index_size":REDACTED}], "flat_format":REDACTED, "metrics_per_partition":{"rows_bloom_filtered":3} metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+SELECT ts FROM json2_skipping_evolution WHERE json_get(j, '$.n') = 42.0 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+DROP TABLE json2_skipping_evolution;
+
+Affected Rows: 0
+

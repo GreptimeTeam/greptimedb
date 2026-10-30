@@ -59,6 +59,7 @@ impl VersionControl {
         VersionControl {
             data: RwLock::new(VersionControlData {
                 version: Arc::new(version),
+                last_sequence: flushed_sequence,
                 committed_sequence: flushed_sequence,
                 last_entry_id: flushed_entry_id,
                 is_dropped: false,
@@ -76,16 +77,24 @@ impl VersionControl {
         self.data.read().unwrap().clone()
     }
 
+    /// Updates last sequence number to the maximum.
+    pub(crate) fn update_last_sequence(&self, seq: SequenceNumber) {
+        let mut data = self.data.write().unwrap();
+        data.last_sequence = data.last_sequence.max(seq);
+    }
+
     /// Updates the `committed_sequence` of version.
     pub(crate) fn set_committed_sequence(&self, seq: SequenceNumber) {
         let mut data = self.data.write().unwrap();
-        data.committed_sequence = seq;
+        data.committed_sequence = data.committed_sequence.max(seq);
+        data.last_sequence = data.last_sequence.max(data.committed_sequence);
     }
 
     /// Updates committed sequence and entry id.
     pub(crate) fn set_sequence_and_entry_id(&self, seq: SequenceNumber, entry_id: EntryId) {
         let mut data = self.data.write().unwrap();
-        data.committed_sequence = seq;
+        data.committed_sequence = data.committed_sequence.max(seq);
+        data.last_sequence = data.last_sequence.max(data.committed_sequence);
         data.last_entry_id = entry_id;
     }
 
@@ -162,6 +171,9 @@ impl VersionControl {
         } else {
             version_data.committed_sequence
         };
+        version_data.last_sequence = version_data
+            .last_sequence
+            .max(version_data.committed_sequence);
         version_data.version = new_version;
     }
 
@@ -312,6 +324,7 @@ impl VersionControl {
     /// Overwrites the current version with a new version.
     pub(crate) fn overwrite_current(&self, version: VersionRef) {
         let mut version_data = self.data.write().unwrap();
+        version_data.last_sequence = version_data.last_sequence.max(version.flushed_sequence);
         version_data.version = version;
     }
 
@@ -336,6 +349,8 @@ pub(crate) type VersionControlRef = Arc<VersionControl>;
 pub(crate) struct VersionControlData {
     /// Latest version.
     pub(crate) version: VersionRef,
+    /// Last allocated sequence number.
+    pub(crate) last_sequence: SequenceNumber,
     /// Sequence number of last committed data.
     ///
     /// Starts from 1 (zero means no data).
@@ -558,6 +573,63 @@ impl VersionBuilder {
             truncated_entry_id: self.truncated_entry_id,
             compaction_time_window,
             options: self.options,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_util::version_util::VersionControlBuilder;
+
+    #[test]
+    fn test_sequence_watermarks_are_monotonic() {
+        let builder = VersionControlBuilder::new();
+        let mut version = builder.build_version();
+        version.flushed_sequence = 8;
+        version.flushed_entry_id = 4;
+        let vc = VersionControl::new(version);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (8, 8)
+        );
+
+        vc.update_last_sequence(20);
+        vc.update_last_sequence(9);
+        vc.set_committed_sequence(10);
+        vc.set_committed_sequence(9);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (20, 10)
+        );
+        assert_eq!(vc.current().last_entry_id, 4);
+        vc.set_sequence_and_entry_id(12, 5);
+        vc.set_sequence_and_entry_id(4, 6);
+        assert_eq!(
+            (vc.current().last_sequence, vc.committed_sequence()),
+            (20, 12)
+        );
+        assert_eq!(vc.current().version.flushed_sequence, 8);
+
+        for sequence in [25, 11] {
+            vc.apply_edit(
+                Some(RegionEdit {
+                    files_to_add: vec![],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: Some(sequence),
+                }),
+                &[],
+                builder.file_purger(),
+            );
+            assert_eq!(
+                (vc.current().last_sequence, vc.committed_sequence()),
+                (25, 25)
+            );
+            assert_eq!(vc.current().last_entry_id, 6);
         }
     }
 }

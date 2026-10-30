@@ -759,6 +759,39 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .await
         .unwrap();
 
+    let region = engine.get_region(region_id).unwrap();
+    let file = {
+        let manager = region.manifest_ctx.manifest_manager.read().await;
+        manager
+            .staging_manifest()
+            .unwrap()
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone()
+    };
+    for expected in [11, 12] {
+        engine
+            .edit_region(
+                region_id,
+                RegionEdit {
+                    files_to_add: vec![file.clone()],
+                    files_to_remove: vec![],
+                    timestamp_ms: None,
+                    compaction_time_window: None,
+                    flushed_entry_id: None,
+                    flushed_sequence: None,
+                    committed_sequence: None,
+                },
+            )
+            .await
+            .unwrap();
+        let current = region.version_control.current();
+        assert_eq!(current.last_sequence, expected);
+        assert_eq!(current.committed_sequence, 10);
+    }
+
     // Verify we're in staging mode and staging manifests exist
     let data_home = env.data_home();
     let region_dir = format!("{}/data/test/1024_0000000000", data_home.display());
@@ -770,13 +803,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
         .unwrap();
     assert_eq!(
         staging_files_before.len(),
-        // Two files for flush operation
-        // One file for entering staging mode
-        3,
-        "Staging manifest directory should contain 3 files before exit, got: {:?}",
+        // Two flushes, two edits and entering staging mode.
+        5,
+        "Staging manifest directory should contain 5 files before exit, got: {:?}",
         staging_files_before
     );
-    let region = engine.get_region(region_id).unwrap();
     {
         let manager = region.manifest_ctx.manifest_manager.read().await;
         let staging_manifest = manager.staging_manifest().unwrap();
@@ -843,6 +874,104 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     assert_eq!(sst_entries.iter().filter(|e| e.visible).count(), 1);
     assert_eq!(sst_entries.iter().filter(|e| !e.visible).count(), 2);
 
+    // Streaming inspection must retain staging entries and their visibility.
+    {
+        use futures::StreamExt;
+
+        let mut batches = engine.scan_ssts_from_manifest(
+            &[datafusion_expr::col("region_id").eq(datafusion_expr::lit(region_id.as_u64()))],
+            1,
+        );
+        let mut actual = Vec::new();
+        while let Some(batch) = batches.next().await {
+            assert_eq!(batch.len(), 1);
+            actual.extend(batch);
+        }
+        actual.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        let mut expected = sst_entries;
+        expected.sort_unstable_by(|a, b| a.file_id.cmp(&b.file_id));
+        assert_eq!(actual, expected);
+    }
+
+    // Staging metadata overrides the same file in the normal manifest. Filter
+    // evaluation must use that winning metadata, even if it is not projected.
+    {
+        use futures::StreamExt;
+
+        let region = engine.get_region(region_id).unwrap();
+        let original = region
+            .manifest_ctx
+            .manifest_manager
+            .read()
+            .await
+            .manifest()
+            .files
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        let mut overridden = original.clone();
+        overridden.file_size = u64::MAX - 1;
+        for metadata in [overridden, original.clone()] {
+            region
+                .manifest_ctx
+                .manifest_manager
+                .write()
+                .await
+                .update(
+                    RegionMetaActionList::new(vec![RegionMetaAction::Edit(RegionEdit {
+                        files_to_add: vec![metadata.clone()],
+                        files_to_remove: vec![],
+                        timestamp_ms: None,
+                        compaction_time_window: None,
+                        flushed_entry_id: None,
+                        flushed_sequence: None,
+                        committed_sequence: None,
+                    })]),
+                    true,
+                )
+                .await
+                .unwrap();
+            let entries = engine.all_ssts_from_manifest().await;
+            assert_eq!(entries.len(), 3);
+            let matches = entries
+                .iter()
+                .filter(|entry| entry.file_id == original.file_id.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].file_size, metadata.file_size);
+            assert!(matches[0].visible);
+
+            let schema = store_api::sst_entry::ManifestSstEntry::schema();
+            let projection = ["file_id", "visible"]
+                .map(|name| {
+                    schema
+                        .column_schemas()
+                        .iter()
+                        .position(|c| c.name == name)
+                        .unwrap()
+                })
+                .to_vec();
+            let mut stream = engine.scan_ssts_from_manifest_projected(
+                &[datafusion_expr::col("file_size").eq(datafusion_expr::lit(metadata.file_size))],
+                1,
+                Some(&projection),
+            );
+            let mut filtered = Vec::new();
+            while let Some(batch) = stream.next().await {
+                filtered.extend(batch);
+            }
+            assert!(
+                filtered
+                    .iter()
+                    .any(|entry| entry.file_id == original.file_id.to_string())
+            );
+            if metadata.file_size == u64::MAX - 1 {
+                assert_eq!(filtered.len(), 1);
+            }
+        }
+    }
+
     // Exit staging mode successfully
     engine
         .set_region_role_state_gracefully(region_id, SettableRegionRoleState::Leader)
@@ -852,6 +981,11 @@ async fn test_staging_exit_success_with_manifests_with_format(flat_format: bool)
     // Verify we're back in normal mode
     let workers = &engine.inner.workers;
     let region = workers.get_region(region_id).unwrap();
+    let current = region.version_control.current();
+    assert_eq!(
+        (current.last_sequence, current.committed_sequence),
+        (12, 12)
+    );
     assert!(
         !region.is_staging(),
         "Region should no longer be in staging mode"

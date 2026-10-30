@@ -29,6 +29,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::error::Result;
 use crate::postgres::{MakePostgresServerHandler, MakePostgresServerHandlerBuilder};
+use crate::query_handler::CopyInHandlerRef;
+use crate::query_handler::InfluxdbLineProtocolHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 use crate::server::{AbortableStream, BaseTcpServer, Server};
 use crate::tls::ReloadableTlsServerConfig;
@@ -39,14 +41,22 @@ pub struct PostgresServer {
     tls_server_config: Arc<ReloadableTlsServerConfig>,
     keep_alive_secs: u64,
     batching_enabled: bool,
+    influxdb_handler: Option<InfluxdbLineProtocolHandlerRef>,
     bind_addr: Option<SocketAddr>,
     process_manager: Option<ProcessManagerRef>,
 }
 
 impl PostgresServer {
-    /// Creates a new Postgres server with provided query_handler and async runtime
+    /// Creates a new Postgres server with provided query_handler and async runtime.
+    ///
+    /// `query_handler` and `copy_in_handler` are expected to be handles to
+    /// the same frontend instance (the SQL and COPY FROM STDIN facets of
+    /// one object); they are separate parameters only because they are
+    /// separate traits.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         query_handler: ServerSqlQueryHandlerRef,
+        copy_in_handler: CopyInHandlerRef,
         force_tls: bool,
         tls_server_config: Arc<ReloadableTlsServerConfig>,
         keep_alive_secs: u64,
@@ -57,6 +67,7 @@ impl PostgresServer {
         let make_handler = Arc::new(
             MakePostgresServerHandlerBuilder::default()
                 .query_handler(query_handler.clone())
+                .copy_in_handler(copy_in_handler)
                 .user_provider(user_provider.clone())
                 .force_tls(force_tls)
                 .build()
@@ -68,6 +79,7 @@ impl PostgresServer {
             tls_server_config,
             keep_alive_secs,
             batching_enabled: false,
+            influxdb_handler: None,
             bind_addr: None,
             process_manager,
         }
@@ -79,12 +91,34 @@ impl PostgresServer {
         self
     }
 
+    /// Wires the influxdb line-protocol handler used by table-less
+    /// `COPY FROM STDIN WITH (FORMAT influxdb)` flushes — the same
+    /// handler the HTTP influxdb write endpoints use, so a flushed batch
+    /// runs through the identical pipeline.
+    pub fn with_influxdb_handler(mut self, handler: InfluxdbLineProtocolHandlerRef) -> Self {
+        self.influxdb_handler = Some(handler);
+        self
+    }
+
     fn accept(
         &self,
         io_runtime: Runtime,
         accepting_stream: AbortableStream,
     ) -> impl Future<Output = ()> + use<> {
-        let handler_maker = self.make_handler.clone();
+        // Assemble the per-connection handler directly, including any
+        // `with_*` wiring applied after construction (the influxdb
+        // line-protocol handler). Constructing the struct — instead of
+        // going through the builder — keeps this infallible: no
+        // `.build().unwrap()` on the hot accept path.
+        let make_handler = &self.make_handler;
+        let handler_maker = Arc::new(MakePostgresServerHandler {
+            query_handler: make_handler.query_handler.clone(),
+            copy_in_handler: make_handler.copy_in_handler.clone(),
+            influxdb_handler: self.influxdb_handler.clone(),
+            user_provider: make_handler.user_provider.clone(),
+            param_provider: make_handler.param_provider.clone(),
+            force_tls: make_handler.force_tls,
+        });
         let batching_enabled = self.batching_enabled;
         let tls_server_config = self.tls_server_config.clone();
         let process_manager = self.process_manager.clone();
