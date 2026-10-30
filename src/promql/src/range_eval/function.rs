@@ -23,7 +23,7 @@ use crate::go_sort;
 use crate::range_eval::{BatchKernel, FloatWindow, FloatWindows, RangeModifier, WindowKernel};
 
 /// A PromQL range-vector function over float and native histogram samples.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum RangeFunction {
     Rate,
     Increase,
@@ -610,4 +610,38 @@ fn median_absolute_deviation(
     deviations.clear();
     deviations.extend(values.iter().map(|value| (value - median).abs()));
     quantile(0.5, deviations, sorted)
+}
+
+impl PartialEq for RangeFunction {
+    fn eq(&self, o: &Self) -> bool {
+        match (self, o) {
+            (Self::QuantileOverTime(a), Self::QuantileOverTime(b))
+            | (Self::PredictLinear(a), Self::PredictLinear(b)) => a.to_bits() == b.to_bits(),
+            (
+                Self::DoubleExponentialSmoothing {
+                    smoothing: a,
+                    trend: b,
+                },
+                Self::DoubleExponentialSmoothing {
+                    smoothing: c,
+                    trend: d,
+                },
+            ) => a.to_bits() == c.to_bits() && b.to_bits() == d.to_bits(),
+            _ => std::mem::discriminant(self) == std::mem::discriminant(o),
+        }
+    }
+}
+impl Eq for RangeFunction {}
+impl std::hash::Hash for RangeFunction {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        std::mem::discriminant(self).hash(h);
+        match self {
+            Self::QuantileOverTime(x) | Self::PredictLinear(x) => x.to_bits().hash(h),
+            Self::DoubleExponentialSmoothing { smoothing, trend } => {
+                smoothing.to_bits().hash(h);
+                trend.to_bits().hash(h)
+            }
+            _ => (),
+        }
+    }
 }
