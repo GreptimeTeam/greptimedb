@@ -102,7 +102,8 @@ where
 
     async fn blob(&self, key: &str) -> Result<GuardWithMetadata<Self::Blob>> {
         let mut file = self.puffin_reader().await?;
-        let blob_metadata = self.get_blob_metadata(key, &mut file).await?;
+        let metadata = self.get_puffin_file_metadata(&mut file).await?;
+        let blob_metadata = Self::get_blob_metadata(key, &metadata)?;
         let blob = if blob_metadata.compression_codec.is_none() {
             // If the blob is not compressed, we can directly read it from the puffin file.
             Either::L(RandomReadBlob {
@@ -132,7 +133,8 @@ where
 
     async fn dir(&self, key: &str) -> Result<(GuardWithMetadata<Self::Dir>, DirMetrics)> {
         let mut file = self.puffin_reader().await?;
-        let blob_metadata = self.get_blob_metadata(key, &mut file).await?;
+        let metadata = self.get_puffin_file_metadata(&mut file).await?;
+        let blob_metadata = Self::get_blob_metadata(key, &metadata)?;
         let (dir, metrics) = self
             .stager
             .get_dir(
@@ -144,6 +146,7 @@ where
                     let blob_metadata = blob_metadata.clone();
                     Box::pin(Self::init_dir_to_stager(
                         file,
+                        metadata,
                         blob_metadata,
                         handle,
                         writer_provider,
@@ -166,26 +169,18 @@ where
         &self,
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
-        let id = self.handle.to_string();
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref()
-            && let Some(metadata) = cache.get_metadata(&id)
-        {
-            return Ok(metadata);
+        if let Some(cache) = &self.puffin_file_metadata_cache {
+            cache
+                .try_get_with(&self.handle.to_string(), async {
+                    reader.metadata().await.map(Arc::new)
+                })
+                .await
+        } else {
+            reader.metadata().await.map(Arc::new)
         }
-
-        let metadata = Arc::new(reader.metadata().await?);
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            cache.put_metadata(id, metadata.clone());
-        }
-        Ok(metadata)
     }
 
-    async fn get_blob_metadata(
-        &self,
-        key: &str,
-        file: &mut PuffinFileReader<F::Reader>,
-    ) -> Result<BlobMetadata> {
-        let metadata = self.get_puffin_file_metadata(file).await?;
+    fn get_blob_metadata(key: &str, metadata: &FileMetadata) -> Result<BlobMetadata> {
         let blob_metadata = metadata
             .blobs
             .iter()
@@ -218,12 +213,12 @@ where
 
     async fn init_dir_to_stager(
         mut file: PuffinFileReader<F::Reader>,
+        puffin_metadata: Arc<FileMetadata>,
         blob_metadata: BlobMetadata,
         handle: F::FileHandle,
         writer_provider: DirWriterProviderRef,
         accessor: F,
     ) -> Result<u64> {
-        let puffin_metadata = file.metadata().await?;
         let reader = file.blob_reader(&blob_metadata)?;
         let meta = reader.metadata().await.context(MetadataSnafu)?;
         let buf = reader

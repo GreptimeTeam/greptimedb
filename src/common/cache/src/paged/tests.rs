@@ -100,6 +100,12 @@ fn cache() -> (PagedCache<u64>, Arc<Observation>) {
     let events = observation.clone();
     let observer = PageCacheObserver {
         bytes: observation.bytes.bind(&[]),
+        capacity: crate::metrics::CacheSizeMetrics::new(
+            prometheus::Opts::new("test_page_capacity_bytes", "test"),
+            &[],
+        )
+        .unwrap()
+        .bind(&[]),
         loads: None,
         events: Arc::new(move |event| {
             if let PageEvent::Loaded { .. } = event {
