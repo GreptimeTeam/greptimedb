@@ -26,10 +26,13 @@ use common_procedure::{ProcedureInfo, ProcedureState};
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{AsyncRecordBatchStreamAdapter, DfRecordBatchStreamAdapter};
 use common_recordbatch::util::{ChainedRecordBatchStream, LimitedRecordBatchStream};
-use common_recordbatch::{DfSendableRecordBatchStream, SendableRecordBatchStream};
+use common_recordbatch::{
+    DfSendableRecordBatchStream, EmptyRecordBatchStream, SendableRecordBatchStream,
+};
 use datafusion::common::Result;
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::execution::TaskContext;
+use datafusion::logical_expr::LogicalPlan;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -61,16 +64,28 @@ impl DistributedInformationExtension {
         datanode_manager: DatanodeManagerRef,
         request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, crate::error::Error> {
+        let limit = request.scan.limit;
+        let plan = request
+            .build_plan()
+            .context(crate::error::DatafusionSnafu)?;
+        let stream = Self::inspect_query_stream(meta_client, datanode_manager, plan).await?;
+        match limit {
+            Some(limit) => Ok(Box::pin(LimitedRecordBatchStream::new(stream, limit))),
+            None => Ok(stream),
+        }
+    }
+
+    async fn inspect_query_stream(
+        meta_client: MetaClientRef,
+        datanode_manager: DatanodeManagerRef,
+        plan: LogicalPlan,
+    ) -> crate::error::Result<SendableRecordBatchStream> {
+        let schema = inspection_query_schema(&plan)?;
         let nodes = meta_client
             .list_nodes(Some(Role::Datanode))
             .await
             .map_err(BoxedError::new)
             .context(crate::error::ListNodesSnafu)?;
-
-        let limit = request.scan.limit;
-        let plan = request
-            .build_plan()
-            .context(crate::error::DatafusionSnafu)?;
 
         let streams = try_join_all(nodes.into_iter().map(|node| {
             let datanode_manager = datanode_manager.clone();
@@ -89,20 +104,37 @@ impl DistributedInformationExtension {
         }))
         .await?;
 
-        let chained =
-            ChainedRecordBatchStream::new(streams).context(crate::error::CreateRecordBatchSnafu)?;
-        match limit {
-            Some(limit) => Ok(Box::pin(LimitedRecordBatchStream::new(
-                Box::pin(chained),
-                limit,
-            ))),
-            None => Ok(Box::pin(chained)),
-        }
+        chain_inspection_streams(streams, schema)
     }
 }
 
+fn inspection_query_schema(plan: &LogicalPlan) -> crate::error::Result<SchemaRef> {
+    datatypes::schema::Schema::try_from(plan.schema().clone())
+        .map(Arc::new)
+        .map_err(|error| datafusion::common::DataFusionError::External(Box::new(error)))
+        .context(crate::error::DatafusionSnafu)
+}
+
+fn chain_inspection_streams(
+    streams: Vec<SendableRecordBatchStream>,
+    schema: SchemaRef,
+) -> crate::error::Result<SendableRecordBatchStream> {
+    if streams.is_empty() {
+        return Ok(Box::pin(EmptyRecordBatchStream::new(schema)));
+    }
+    Ok(Box::pin(
+        ChainedRecordBatchStream::new(streams).context(crate::error::CreateRecordBatchSnafu)?,
+    ))
+}
+
+#[derive(Debug, Clone)]
+enum InspectPlan {
+    Scan(DatanodeInspectRequest),
+    Query(LogicalPlan),
+}
+
 struct DistributedInspectExec {
-    request: DatanodeInspectRequest,
+    plan: InspectPlan,
     meta_client: MetaClientRef,
     datanode_manager: DatanodeManagerRef,
     schema: SchemaRef,
@@ -113,7 +145,7 @@ struct DistributedInspectExec {
 impl std::fmt::Debug for DistributedInspectExec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DistributedInspectExec")
-            .field("request", &self.request)
+            .field("plan", &self.plan)
             .field("schema", &self.schema)
             .finish_non_exhaustive()
     }
@@ -126,6 +158,20 @@ impl DistributedInspectExec {
         meta_client: MetaClientRef,
         datanode_manager: DatanodeManagerRef,
     ) -> Self {
+        Self::with_plan(
+            InspectPlan::Scan(request),
+            schema,
+            meta_client,
+            datanode_manager,
+        )
+    }
+
+    fn with_plan(
+        plan: InspectPlan,
+        schema: SchemaRef,
+        meta_client: MetaClientRef,
+        datanode_manager: DatanodeManagerRef,
+    ) -> Self {
         let arrow_schema = schema.arrow_schema().clone();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(arrow_schema.clone()),
@@ -134,7 +180,7 @@ impl DistributedInspectExec {
             Boundedness::Bounded,
         ));
         Self {
-            request,
+            plan,
             meta_client,
             datanode_manager,
             schema,
@@ -146,11 +192,19 @@ impl DistributedInspectExec {
 
 impl DisplayAs for DistributedInspectExec {
     fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "DistributedInspectExec: kind={:?}, scan={}, schema={:?}",
-            self.request.kind, self.request.scan, self.arrow_schema
-        )
+        match &self.plan {
+            InspectPlan::Scan(request) => write!(
+                f,
+                "DistributedInspectExec: kind={:?}, scan={}, schema={:?}",
+                request.kind, request.scan, self.arrow_schema
+            ),
+            InspectPlan::Query(plan) => write!(
+                f,
+                "DistributedInspectExec: query={}, schema={:?}",
+                plan.display(),
+                self.arrow_schema
+            ),
+        }
     }
 }
 
@@ -205,15 +259,27 @@ impl ExecutionPlan for DistributedInspectExec {
 
         let meta_client = self.meta_client.clone();
         let datanode_manager = self.datanode_manager.clone();
-        let request = self.request.clone();
+        let plan = self.plan.clone();
         let schema = self.schema.clone();
         let future = async move {
-            DistributedInformationExtension::inspect_datanode_stream(
-                meta_client,
-                datanode_manager,
-                request,
-            )
-            .await
+            match plan {
+                InspectPlan::Scan(request) => {
+                    DistributedInformationExtension::inspect_datanode_stream(
+                        meta_client,
+                        datanode_manager,
+                        request,
+                    )
+                    .await
+                }
+                InspectPlan::Query(plan) => {
+                    DistributedInformationExtension::inspect_query_stream(
+                        meta_client,
+                        datanode_manager,
+                        plan,
+                    )
+                    .await
+                }
+            }
             .map_err(BoxedError::new)
             .context(common_recordbatch::error::ExternalSnafu)
         };
@@ -295,6 +361,23 @@ impl InformationExtension for DistributedInformationExtension {
             request,
         )
         .await
+    }
+
+    fn supports_inspect_query_plan(&self) -> bool {
+        true
+    }
+
+    fn inspect_datanode_query_plan(
+        &self,
+        plan: LogicalPlan,
+    ) -> crate::error::Result<Option<Arc<dyn ExecutionPlan>>> {
+        let schema = inspection_query_schema(&plan)?;
+        Ok(Some(Arc::new(DistributedInspectExec::with_plan(
+            InspectPlan::Query(plan),
+            schema,
+            self.meta_client.clone(),
+            self.datanode_manager.clone(),
+        ))))
     }
 
     fn inspect_datanode_plan(
@@ -384,6 +467,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_inspection_query_plan_is_lazy_and_preserves_schema() {
+        let ctx = datafusion::prelude::SessionContext::new();
+        let remote = ctx
+            .sql("SELECT count(*), sum(value) FROM (VALUES (1), (2)) AS t(value)")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let extension = DistributedInformationExtension::new(
+            Arc::new(MetaClientBuilder::new(0, api::v1::meta::Role::Frontend).build()),
+            Arc::new(UnusedDatanodeManager),
+        );
+        assert!(extension.supports_inspect_query_plan());
+        let exec = extension
+            .inspect_datanode_query_plan(remote.clone())
+            .unwrap()
+            .unwrap();
+        assert_eq!(exec.schema(), remote.schema().inner().clone());
+        let inspect = exec.downcast_ref::<DistributedInspectExec>().unwrap();
+        let InspectPlan::Query(plan) = &inspect.plan else {
+            panic!("expected inspection query")
+        };
+        assert_eq!(plan, &remote);
+        assert!(exec.children().is_empty());
+        // Creating or dropping an unpolled execution must not contact metadata or datanodes.
+        for _ in 0..2 {
+            let stream = exec.execute(0, ctx.task_ctx()).unwrap();
+            assert_eq!(stream.schema(), exec.schema());
+            drop(stream);
+        }
+        assert!(exec.execute(1, ctx.task_ctx()).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_empty_inspection_query_stream_keeps_output_schema() {
+        use futures_util::StreamExt;
+
+        let ctx = datafusion::prelude::SessionContext::new();
+        let remote = ctx
+            .sql("SELECT count(*), sum(value) FROM (VALUES (1)) AS t(value)")
+            .await
+            .unwrap()
+            .into_unoptimized_plan();
+        let schema = inspection_query_schema(&remote).unwrap();
+        let mut stream = chain_inspection_streams(vec![], schema.clone()).unwrap();
+        assert_eq!(stream.schema(), schema);
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
     async fn test_sql_manifest_sort_stays_on_frontend() {
         let ctx = datafusion::prelude::SessionContext::new();
         ctx.register_table("ssts_manifest", Arc::new(ManifestScanProvider))
@@ -408,8 +540,11 @@ mod tests {
                 if let Some(scan) = plan.downcast_ref::<DistributedInspectExec>() {
                     found_scan = true;
                     // All matching rows must reach the frontend global sort.
-                    assert_eq!(scan.request.scan.limit, None);
-                    let remote = scan.request.clone().build_plan().unwrap();
+                    let InspectPlan::Scan(request) = &scan.plan else {
+                        panic!("expected scan plan")
+                    };
+                    assert_eq!(request.scan.limit, None);
+                    let remote = request.clone().build_plan().unwrap();
                     remote.apply(|node| {
                         assert!(!matches!(
                             node,

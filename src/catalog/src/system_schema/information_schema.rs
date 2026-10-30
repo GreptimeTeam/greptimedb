@@ -466,6 +466,21 @@ pub trait InformationExtension {
         request: DatanodeInspectRequest,
     ) -> std::result::Result<SendableRecordBatchStream, Self::Error>;
 
+    /// Whether this extension can execute an inspection query on every datanode.
+    fn supports_inspect_query_plan(&self) -> bool {
+        false
+    }
+
+    /// Builds a plan that executes an inspection query independently on each datanode.
+    /// The caller supplies a plan over reserved inspection tables and retains any
+    /// required global aggregation. The returned schema is the query output schema.
+    fn inspect_datanode_query_plan(
+        &self,
+        _plan: LogicalPlan,
+    ) -> std::result::Result<Option<Arc<dyn ExecutionPlan>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Builds a physical plan for datanode inspect if the extension can expose
     /// the distributed fan-in semantics to DataFusion.
     fn inspect_datanode_plan(
