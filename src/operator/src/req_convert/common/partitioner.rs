@@ -221,7 +221,7 @@ impl TablePartitioner {
                 .split_record_batch(routing.as_ref().unwrap_or(&batch))
                 .context(SplitInsertSnafu)?;
             return self
-                .build_tracked_bulk_insert_requests(batch, masks, owners, bulk.skip_wal)
+                .build_tracked_bulk_insert_requests(batch, masks, owners, Some(ipc), bulk.skip_wal)
                 .map(|requests| {
                     requests
                         .into_iter()
@@ -278,7 +278,7 @@ impl TablePartitioner {
             .rule
             .split_record_batch(&batch)
             .context(SplitInsertSnafu)?;
-        self.build_tracked_bulk_insert_requests(batch, masks, owners, skip_wal)
+        self.build_tracked_bulk_insert_requests(batch, masks, owners, None, skip_wal)
     }
 
     fn build_tracked_bulk_insert_requests(
@@ -286,6 +286,7 @@ impl TablePartitioner {
         batch: RecordBatch,
         masks: HashMap<RegionNumber, RegionMask>,
         owners: Vec<usize>,
+        original_ipc: Option<ArrowIpc>,
         skip_wal: bool,
     ) -> Result<Vec<(BulkInsertRequest, Vec<usize>)>> {
         ensure!(
@@ -308,7 +309,7 @@ impl TablePartitioner {
                 selected_owners,
             );
         }
-        self.build_bulk_insert_requests(batch, masks, None, skip_wal)?
+        self.build_bulk_insert_requests(batch, masks, original_ipc, skip_wal)?
             .into_iter()
             .map(|request| {
                 let owners =
@@ -1216,81 +1217,108 @@ mod tests {
             .find_table_partition_rule(&table_info)
             .await
             .unwrap();
-        let request = build_bulk_request(99, Some(0), vec![1, 20, 70]);
-        let header = request.header.clone();
-        let rerouted = rebuild_with_cached_table(&manager, &cache, request)
+        let partitioner = TablePartitioner::try_new(&manager, &table_info)
             .await
             .unwrap();
-        assert_eq!(rerouted.len(), 3);
-        let mut actual = Vec::new();
-        for request in rerouted {
-            assert_eq!(request.header, header);
-            let Some(Body::BulkInsert(bulk)) = request.body else {
-                panic!("expected bulk insert")
-            };
-            let region = RegionId::from_u64(bulk.region_id);
-            assert_eq!(region.table_id(), 1);
-            assert!(bulk.skip_wal);
-            assert_eq!(bulk.aligned_schema_version, None);
-            assert_eq!(
-                bulk.partition_expr_version.map(|v| v.value),
-                versions[&region.region_number()]
-            );
-            let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = bulk.body else {
-                panic!("expected Arrow IPC")
-            };
-            let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
-                .unwrap()
-                .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+        for tracked in [false, true] {
+            let request = build_bulk_request(99, Some(0), vec![1, 20, 70]);
+            let header = request.header.clone();
+            let rerouted = partitioner
+                .rebuild_tracked_write_requests(
+                    request,
+                    &table_info,
+                    tracked.then(|| vec![2, 0, 2]),
+                )
                 .unwrap();
-            assert_eq!(batch.num_rows(), 1);
-            let values = batch
-                .column(0)
-                .as_any()
-                .downcast_ref::<Int32Array>()
-                .unwrap();
-            actual.push((region.region_number(), values.value(0)));
-        }
-        actual.sort_unstable();
-        assert_eq!(actual, [(1, 70), (2, 20), (3, 1)]);
+            assert_eq!(rerouted.len(), 3);
+            let mut actual = Vec::new();
+            for (request, owners) in rerouted {
+                assert_eq!(request.header, header);
+                let Some(Body::BulkInsert(bulk)) = request.body else {
+                    panic!("expected bulk insert")
+                };
+                let region = RegionId::from_u64(bulk.region_id);
+                assert_eq!(region.table_id(), 1);
+                assert!(bulk.skip_wal);
+                assert_eq!(bulk.aligned_schema_version, None);
+                assert_eq!(
+                    bulk.partition_expr_version.map(|v| v.value),
+                    versions[&region.region_number()]
+                );
+                assert_eq!(
+                    owners,
+                    tracked.then(|| vec![if region.region_number() == 2 { 0 } else { 2 }])
+                );
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = bulk.body else {
+                    panic!("expected Arrow IPC")
+                };
+                let batch = FlightDecoder::try_from_schema_bytes(&ipc.schema)
+                    .unwrap()
+                    .try_decode_record_batch(&ipc.data_header, &ipc.payload)
+                    .unwrap();
+                assert_eq!(batch.num_rows(), 1);
+                let values = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int32Array>()
+                    .unwrap();
+                actual.push((region.region_number(), values.value(0)));
+            }
+            actual.sort_unstable();
+            assert_eq!(actual, [(1, 70), (2, 20), (3, 1)]);
 
-        // A leader-only change retains the original IPC buffers and schema hint.
-        let request = build_bulk_request(3, versions[&3], vec![1]);
-        let Some(Body::BulkInsert(bulk)) = request.body.as_ref() else {
-            unreachable!()
-        };
-        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
-            unreachable!()
-        };
-        let pointers = (
-            ipc.schema.as_ptr(),
-            ipc.data_header.as_ptr(),
-            ipc.payload.as_ptr(),
-        );
-        let rerouted = rebuild_with_cached_table(&manager, &cache, request)
-            .await
-            .unwrap();
-        assert_eq!(rerouted.len(), 1);
-        let Some(Body::BulkInsert(bulk)) = rerouted[0].body.as_ref() else {
-            unreachable!()
-        };
-        assert_eq!(
-            bulk.aligned_schema_version,
-            Some(AlignedSchemaVersion {
-                schema_version: 123
-            })
-        );
-        let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
-            unreachable!()
-        };
-        assert_eq!(
-            (
-                ipc.schema.as_ptr(),
-                ipc.data_header.as_ptr(),
-                ipc.payload.as_ptr()
-            ),
-            pointers
-        );
+            // Both unchanged routes and reroutes selecting all rows reuse the original IPC.
+            for (region, version, unchanged) in [(99, Some(0), false), (3, versions[&3], true)] {
+                let request = build_bulk_request(region, version, vec![1, 2, 3]);
+                let header = request.header.clone();
+                let Some(Body::BulkInsert(bulk)) = request.body.as_ref() else {
+                    unreachable!()
+                };
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
+                    unreachable!()
+                };
+                let pointers = (
+                    ipc.schema.as_ptr(),
+                    ipc.data_header.as_ptr(),
+                    ipc.payload.as_ptr(),
+                );
+                let rerouted = partitioner
+                    .rebuild_tracked_write_requests(
+                        request,
+                        &table_info,
+                        tracked.then(|| vec![2, 0, 2]),
+                    )
+                    .unwrap();
+                assert_eq!(rerouted.len(), 1);
+                let (request, owners) = &rerouted[0];
+                assert_eq!(request.header, header);
+                assert_eq!(owners, &tracked.then(|| vec![2, 0, 2]));
+                let Some(Body::BulkInsert(bulk)) = request.body.as_ref() else {
+                    unreachable!()
+                };
+                assert_eq!(bulk.region_id, RegionId::new(1, 3).as_u64());
+                assert!(bulk.skip_wal);
+                assert_eq!(bulk.partition_expr_version.map(|v| v.value), versions[&3]);
+                assert_eq!(
+                    bulk.aligned_schema_version,
+                    unchanged.then_some(AlignedSchemaVersion {
+                        schema_version: 123
+                    })
+                );
+                let Some(bulk_insert_request::Body::ArrowIpc(ipc)) = &bulk.body else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    (
+                        ipc.schema.as_ptr(),
+                        ipc.data_header.as_ptr(),
+                        ipc.payload.as_ptr()
+                    ),
+                    pointers,
+                    "tracked={tracked}, unchanged={unchanged}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -1375,6 +1403,7 @@ mod tests {
                             batch.clone(),
                             [(1, RegionMask::from(mask))].into_iter().collect(),
                             owners.clone(),
+                            None,
                             false,
                         )
                         .unwrap();
@@ -1414,6 +1443,7 @@ mod tests {
                 batch,
                 HashMap::new(),
                 vec![0; len + 1],
+                None,
                 false,
             );
             assert!(wrong.is_err());
