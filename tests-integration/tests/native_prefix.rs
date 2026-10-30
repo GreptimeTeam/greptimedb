@@ -635,18 +635,27 @@ async fn native_prefix_executes_over_real_mito_region() {
         );
     }
     let mut tampered = bytes;
-    // The tree envelope begins with a fixed magic marker and framed tree-length field. Mutate the
-    // native plan version after that envelope prefix rather than the Substrait framing.
-    let embedded = tampered
+    // Locate the complete FusedSeries envelope in the Substrait bytes. Its version is the first
+    // word and its payload length is the second; no payload-field offsets are needed here.
+    let envelope_at = tampered
         .windows(fused_payload.len())
         .position(|window| window == fused_payload.as_slice())
-        .expect("FusedSeries payload in Substrait plan");
-    let prefix_version = embedded + 12;
+        .expect("FusedSeries envelope in Substrait plan");
+    let version_bytes: [u8; 4] = tampered[envelope_at..envelope_at + 4]
+        .try_into()
+        .unwrap_or_else(|_| panic!("missing version bytes at {envelope_at}"));
+    let version = u32::from_le_bytes(version_bytes);
+    assert_eq!(version, 3, "observed version bytes: {version_bytes:?}");
+    let length_bytes: [u8; 4] = tampered[envelope_at + 4..envelope_at + 8]
+        .try_into()
+        .unwrap_or_else(|_| panic!("missing length bytes at {}", envelope_at + 4));
+    let payload_length = u32::from_le_bytes(length_bytes);
     assert_eq!(
-        &tampered[prefix_version..prefix_version + 4],
-        &2u32.to_le_bytes()
+        payload_length as usize,
+        fused_payload.len() - 8,
+        "observed length bytes: {length_bytes:?}"
     );
-    tampered[prefix_version] = 99;
+    tampered[envelope_at] = 99;
     let error = server
         .handle_remote_read(
             QueryRequest {
@@ -663,7 +672,7 @@ async fn native_prefix_executes_over_real_mito_region() {
         .err()
         .expect("invalid prefix rejected");
     assert!(
-        format!("{error:?}").contains("unknown native tree version"),
+        format!("{error:?}").contains("unsupported FusedSeries envelope version"),
         "{error:?}"
     );
 }

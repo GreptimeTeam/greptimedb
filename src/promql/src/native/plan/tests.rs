@@ -1574,8 +1574,6 @@ fn info_reads_the_sample_times_of_one_field() {
 fn native_tree_deserialization_enforces_node_depth_limit() {
     use super::MAX_NATIVE_NODE_DEPTH;
 
-    assert!(std::env::var_os("RUST_MIN_STACK").is_none());
-
     fn nested_maps(map_count: usize) -> NativeTree {
         let mut node = input_on(grid(0, 60_000, 1));
         let output = node.output.clone();
@@ -1593,18 +1591,24 @@ fn native_tree_deserialization_enforces_node_depth_limit() {
         NativeTree { root: node }
     }
 
-    // A leaf counts as a node too: 127 map wrappers plus the input gives exactly 128.
-    let at_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH - 1)).unwrap();
-    let decoded: NativeTree = postcard::from_bytes(&at_limit).unwrap();
-    assert!(decoded.root().validate().is_ok());
+    // CI sets a process-wide stack override, so use an explicit worker stack instead of the default.
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            // A leaf counts as a node too: 127 map wrappers plus the input gives exactly 128.
+            let at_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH - 1)).unwrap();
+            let decoded: NativeTree = postcard::from_bytes(&at_limit).unwrap();
+            assert!(decoded.root().validate().is_ok());
 
-    // Serialize the hostile value directly; it deliberately bypasses try_new so the 129-node
-    // shape reaches the shipping Postcard decoder without recursively validating on the way in.
-    // Postcard reduces custom serde errors to its unit error variant, so assert rejection here;
-    // the guard's message text is not available through this codec.
-    let over_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH)).unwrap();
-    let error = postcard::from_bytes::<NativeTree>(&over_limit).unwrap_err();
-    assert_eq!(error, postcard::Error::SerdeDeCustom);
+            // Build directly, bypassing try_new so the 129-node shape reaches the Postcard decoder.
+            // Postcard maps custom serde errors to a unit variant, so assert the rejection itself.
+            let over_limit = postcard::to_stdvec(&nested_maps(MAX_NATIVE_NODE_DEPTH)).unwrap();
+            let error = postcard::from_bytes::<NativeTree>(&over_limit).unwrap_err();
+            assert_eq!(error, postcard::Error::SerdeDeCustom);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

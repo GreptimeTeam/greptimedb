@@ -1084,6 +1084,7 @@ fn invalid(reason: &str) -> DataFusionError {
 mod tests;
 
 /// Encode a validated native tree in the versioned Postcard envelope.
+#[cfg(test)]
 pub(crate) fn encode_tree(tree: &NativeTree) -> Result<Vec<u8>, String> {
     const MAGIC: &[u8; 4] = b"NPRQ";
     const VERSION: u32 = 2;
@@ -1101,6 +1102,7 @@ pub(crate) fn encode_tree(tree: &NativeTree) -> Result<Vec<u8>, String> {
 }
 
 /// Decode and validate a versioned native tree envelope.
+#[cfg(test)]
 pub(crate) fn decode_tree(bytes: &[u8]) -> Result<NativeTree, String> {
     const MAGIC: &[u8; 4] = b"NPRQ";
     const VERSION: u32 = 2;

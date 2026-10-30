@@ -80,7 +80,7 @@ use store_api::region_engine::RawLabelSource;
 mod frame_output;
 
 use super::{
-    FusedOutputFormat, FusedSeries, FusedSeriesBinding, MAX_TAG_COUNT, OutputColumn, POLL_BUDGET,
+    FusedOutputFormat, FusedSeries, FusedSeriesBinding, OutputColumn, POLL_BUDGET,
     series_to_record_batch,
 };
 use crate::evaluated::EvaluatedChunk;
@@ -942,10 +942,7 @@ fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
     .unwrap();
     let bytes = node.serialize().unwrap();
     let decoded = FusedSeries::deserialize(&bytes).unwrap();
-    assert_eq!(
-        crate::native::plan::encode_tree(decoded.tree()).unwrap(),
-        crate::native::plan::encode_tree(node.tree()).unwrap()
-    );
+    assert_eq!(decoded.tree(), node.tree());
     assert_eq!(decoded.binding(), node.binding());
     assert_eq!(decoded.schema(), node.schema());
     let rows = fused(rate_tree());
@@ -988,6 +985,15 @@ fn fused_series_envelope_round_trip_and_rejects_unsupported_payloads() {
             .contains("version")
     );
     assert!(FusedSeries::deserialize(&bytes[..5]).is_err());
+    let mut trailing_payload = bytes.clone();
+    let payload_len = u32::from_le_bytes(trailing_payload[4..8].try_into().unwrap()) as usize;
+    trailing_payload.insert(8 + payload_len, 0);
+    trailing_payload[4..8].copy_from_slice(&((payload_len + 1) as u32).to_le_bytes());
+    assert!(FusedSeries::deserialize(&trailing_payload).is_err());
+
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(FusedSeries::deserialize(&trailing).is_err());
 }
 
 /// The `SeriesFrame` node of [`rate_tree`] declaring `tags` as its labels.
@@ -1010,46 +1016,20 @@ fn envelope_node_with_tags(tags: Vec<String>) -> FusedSeries {
 }
 
 fn mutate_envelope_schema(bytes: &[u8], mutate: impl FnOnce(&mut Vec<Field>)) -> Vec<u8> {
-    let mut pos = 4;
-    let tree_len = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4 + tree_len + 24;
-    let metric_tag = bytes[pos];
-    pos += 1;
-    if metric_tag == 1 {
-        let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4 + n;
-    }
-    let skip_text = |bytes: &[u8], pos: &mut usize| {
-        let n = u32::from_le_bytes(bytes[*pos..*pos + 4].try_into().unwrap()) as usize;
-        *pos += 4 + n;
-    };
-    skip_text(bytes, &mut pos); // time index
-    let tag_count = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-    for _ in 0..tag_count {
-        skip_text(bytes, &mut pos);
-    }
-    pos += 1; // format
-    skip_text(bytes, &mut pos); // PromQL text
-    let partial_tag = bytes[pos];
-    pos += 1;
-    if partial_tag == 1 {
-        let n = u32::from_le_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
-        pos += 4 + n;
-    }
-    let schema_len_at = pos;
-    let schema_len =
-        u32::from_le_bytes(bytes[schema_len_at..schema_len_at + 4].try_into().unwrap()) as usize;
-    let schema: Schema =
-        postcard::from_bytes(&bytes[schema_len_at + 4..schema_len_at + 4 + schema_len]).unwrap();
-    let mut fields = schema
+    let (mut payload, remainder) =
+        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
+    assert!(remainder.is_empty());
+    let mut fields = payload
+        .output_schema
         .fields()
         .iter()
         .map(|f| f.as_ref().clone())
-        .collect::<Vec<_>>();
+        .collect();
     mutate(&mut fields);
-    let changed = postcard::to_stdvec(&Schema::new(fields)).unwrap();
-    let mut result = bytes[..schema_len_at].to_vec();
+    payload.output_schema = Schema::new(fields);
+    let changed = postcard::to_stdvec(&payload).unwrap();
+    let mut result = Vec::with_capacity(8 + changed.len());
+    result.extend(3u32.to_le_bytes());
     result.extend((changed.len() as u32).to_le_bytes());
     result.extend(changed);
     result
@@ -1277,52 +1257,24 @@ fn partial_decode_rejects_format_schema_and_tag_order_mismatch() {
         "partial FusedSeries output schema does not match state_schema(binding.tags)",
     );
 
-    // The format tag follows fixed-width grid data and length-prefixed metric/time/tag strings.
     let mut wrong_format = bytes.clone();
-    let mut pos = 8 + crate::native::plan::encode_tree(node.tree()).unwrap().len() + 8 + 8 + 8;
-    let text_len = |b: &[u8], at: &mut usize| {
-        let n = u32::from_le_bytes(b[*at..*at + 4].try_into().unwrap()) as usize;
-        *at += 4 + n;
-    };
-    if wrong_format[pos] == 1 {
-        pos += 1;
-        text_len(&wrong_format, &mut pos); // metric name
-    } else {
-        pos += 1;
-    }
-    text_len(&wrong_format, &mut pos); // time index
-    let count = u32::from_le_bytes(wrong_format[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-    for _ in 0..count {
-        text_len(&wrong_format, &mut pos);
-    }
-    wrong_format[pos] = 1;
+    let (mut payload, remainder) =
+        postcard::take_from_bytes::<super::FusedSeriesPayload>(&bytes[8..]).unwrap();
+    assert!(remainder.is_empty());
+    payload.format = FusedOutputFormat::SeriesFrame;
+    let changed = postcard::to_stdvec(&payload).unwrap();
+    wrong_format.truncate(8);
+    wrong_format[4..8].copy_from_slice(&(changed.len() as u32).to_le_bytes());
+    wrong_format.extend(changed);
     assert_decode_error(&wrong_format, "partial FusedSeries must use PlainRows");
 }
 
-/// The largest tag count the envelope supports is written whole.
 #[test]
-fn fused_series_envelope_serializes_the_maximum_tag_count() {
-    let tags: Vec<String> = (0..MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
+fn fused_series_envelope_round_trips_large_tag_lists() {
+    let tags: Vec<String> = (0..1025).map(|i| format!("t{i}")).collect();
     let node = envelope_node_with_tags(tags);
-    assert!(
-        node.serialize().is_ok(),
-        "the maximum tag count must still serialize"
-    );
-}
-
-/// The encoder must refuse the tag count, so it never writes a payload its own decoder rejects.
-#[test]
-fn fused_series_envelope_rejects_excess_tag_count() {
-    let tags: Vec<String> = (0..=MAX_TAG_COUNT).map(|i| format!("t{i}")).collect();
-    let node = envelope_node_with_tags(tags);
-    let message = node.serialize().unwrap_err().to_string();
-    assert!(message.contains("too many FusedSeries tags"), "{message}");
-    assert!(message.contains(&MAX_TAG_COUNT.to_string()), "{message}");
-    assert!(
-        message.contains(&(MAX_TAG_COUNT + 1).to_string()),
-        "{message}"
-    );
+    let decoded = FusedSeries::deserialize(&node.serialize().unwrap()).unwrap();
+    assert_eq!(decoded.binding().tags, node.binding().tags);
 }
 
 fn fused(tree: NativeTree) -> FusedSeries {
