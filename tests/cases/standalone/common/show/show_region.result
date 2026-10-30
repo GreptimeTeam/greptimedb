@@ -45,8 +45,10 @@ SHOW REGION FROM another_table in public;
 -- SQLNESS REPLACE (\d{1}) PEER_ID
 SHOW REGION FROM another_table WHERE Leader = 'No';
 
-++
-++
++-------+--------+------+--------+
+| Table | Region | Peer | Leader |
++-------+--------+------+--------+
++-------+--------+------+--------+
 
 DROP TABLE my_table;
 

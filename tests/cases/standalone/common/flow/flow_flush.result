@@ -42,8 +42,10 @@ SELECT
 FROM
     out_num_cnt_basic;
 
-++
-++
++---------------------------------+-------------+
+| sum(numbers_input_basic.number) | time_window |
++---------------------------------+-------------+
++---------------------------------+-------------+
 
 DROP FLOW test_numbers_basic;
 

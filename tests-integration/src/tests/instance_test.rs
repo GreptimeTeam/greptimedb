@@ -3963,8 +3963,10 @@ WITH(
                 .await
                 .data;
             let expected = "\
-++
-++";
++---+----+
+| a | ts |
++---+----+
++---+----+";
 
             check_output_stream(output, expected).await;
             let output = execute_sql(&frontend, "drop table test_table").await.data;

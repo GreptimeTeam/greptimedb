@@ -122,8 +122,10 @@ Affected Rows: 0
 
 SELECT * from t2;
 
-++
-++
++-----+----+-----+
+| job | ts | val |
++-----+----+-----+
++-----+----+-----+
 
 INSERT INTO t2 VALUES ('job1', 0, 0), ('job2', 1, 1);
 
@@ -152,8 +154,10 @@ select * from foo order by host asc;
 
 SELECT * from t1 order by ts desc;
 
-++
-++
++------+----+-----+
+| host | ts | val |
++------+----+-----+
++------+----+-----+
 
 SELECT * from t2 order by ts desc;
 

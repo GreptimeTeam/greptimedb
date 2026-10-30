@@ -20,6 +20,7 @@ use common_error::ext::BoxedError;
 use common_telemetry::debug;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::functions::all_default_functions;
+use datafusion_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion_physical_expr::PhysicalExpr;
 use datafusion_substrait::logical_plan::consumer::DefaultSubstraitConsumer;
 use datatypes::data_type::ConcreteDataType as CDT;
@@ -101,11 +102,15 @@ pub(crate) async fn from_scalar_fn_to_df_fn_impl(
             context: "Failed to convert substrait scalar function to datafusion scalar function",
         }
     })?;
-    let phy_expr =
-        datafusion::physical_expr::create_physical_expr(&expr, &schema, &Default::default())
-            .context(DatafusionSnafu {
-                context: "Failed to create physical expression from logical expression",
-            })?;
+    let phy_expr = datafusion::physical_expr::create_physical_expr(
+        &expr,
+        &schema,
+        &Default::default(),
+        &PhysicalPlanningContext::default(),
+    )
+    .context(DatafusionSnafu {
+        context: "Failed to create physical expression from logical expression",
+    })?;
     Ok(phy_expr)
 }
 

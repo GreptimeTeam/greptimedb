@@ -1,34 +1,34 @@
-CREATE TABLE test(`id` INTEGER PRIMARY KEY, i INTEGER NULL, j TIMESTAMP TIME INDEX, k BOOLEAN);
+CREATE TABLE change_col_type_test(`id` INTEGER PRIMARY KEY, i INTEGER NULL, j TIMESTAMP TIME INDEX, k BOOLEAN);
 
-INSERT INTO test VALUES (1, 1, 1, false), (2, 2, 2, true);
+INSERT INTO change_col_type_test VALUES (1, 1, 1, false), (2, 2, 2, true);
 
-ALTER TABLE test MODIFY COLUMN "I" STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN "I" STRING;
 
-ALTER TABLE test MODIFY COLUMN k DATE;
+ALTER TABLE change_col_type_test MODIFY COLUMN k DATE;
 
-ALTER TABLE test MODIFY COLUMN id STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN id STRING;
 
-ALTER TABLE test MODIFY COLUMN j STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN j STRING;
 
-ALTER TABLE test MODIFY COLUMN I STRING;
+ALTER TABLE change_col_type_test MODIFY COLUMN I STRING;
 
-SELECT * FROM test;
+SELECT * FROM change_col_type_test;
 
-INSERT INTO test VALUES (3, "greptime", 3, true);
-
--- SQLNESS SORT_RESULT 3 1
-SELECT * FROM test;
-
-DESCRIBE test;
-
-ALTER TABLE test MODIFY COLUMN I INTEGER;
+INSERT INTO change_col_type_test VALUES (3, "greptime", 3, true);
 
 -- SQLNESS SORT_RESULT 3 1
-SELECT * FROM test;
+SELECT * FROM change_col_type_test;
 
-DESCRIBE test;
+DESCRIBE change_col_type_test;
 
-DROP TABLE test;
+ALTER TABLE change_col_type_test MODIFY COLUMN I INTEGER;
+
+-- SQLNESS SORT_RESULT 3 1
+SELECT * FROM change_col_type_test;
+
+DESCRIBE change_col_type_test;
+
+DROP TABLE change_col_type_test;
 
 CREATE TABLE ts_widen (host STRING, ts TIMESTAMP TIME INDEX);
 INSERT INTO ts_widen VALUES ("a", "2024-01-01 00:00:01");
@@ -118,6 +118,16 @@ SELECT * FROM ts_widen_part ORDER BY ts;
 -- new writes land in the right partition
 INSERT INTO ts_widen_part VALUES ("b", 2, "2024-01-02 00:00:00.000250");
 SELECT * FROM ts_widen_part ORDER BY ts;
+
+-- force the rows into SSTs so scans read old-unit data through the widened
+-- schema of a time-index-partitioned table (https://github.com/GreptimeTeam/greptimedb/issues/9747)
+ADMIN FLUSH_TABLE('ts_widen_part');
+
+SELECT * FROM ts_widen_part ORDER BY ts;
+
+SELECT * FROM ts_widen_part WHERE ts >= '2024-01-02 00:00:00' ORDER BY ts;
+
+SELECT * FROM ts_widen_part WHERE ts < '2024-01-02 00:00:00' ORDER BY ts;
 
 DROP TABLE ts_widen_part;
 

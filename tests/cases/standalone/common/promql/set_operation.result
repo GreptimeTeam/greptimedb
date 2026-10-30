@@ -225,8 +225,10 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} unless http_requests{insta
 -- eval instant at 50m http_requests{group="canary"} unless on(job) http_requests{instance="0"}
 tql eval (3000, 3000, '1s') http_requests{g="canary"} unless on(job) http_requests{instance="0"};
 
-++
-++
++----+-----+----------+---+----------------+
+| ts | job | instance | g | greptime_value |
++----+-----+----------+---+----------------+
++----+-----+----------+---+----------------+
 
 -- eval instant at 50m http_requests{group="canary"} unless on(job, instance) http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="1", job="api-server"} 400
@@ -244,8 +246,10 @@ tql eval (3000, 3000, '1s') http_requests{g="canary"} unless on(job, instance) h
 -- eval instant at 50m http_requests{group="canary"} unless ignoring(group, instance) http_requests{instance="0"}
 tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g, instance) http_requests{instance="0"};
 
-++
-++
++----+-----+----------+---+----------------+
+| ts | job | instance | g | greptime_value |
++----+-----+----------+---+----------------+
++----+-----+----------+---+----------------+
 
 -- eval instant at 50m http_requests{group="canary"} unless ignoring(group) http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="1", job="api-server"} 400

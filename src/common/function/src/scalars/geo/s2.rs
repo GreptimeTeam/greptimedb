@@ -25,6 +25,7 @@ use s2::latlng::LatLng;
 use snafu::ensure;
 
 use crate::function::{Function, extract_args};
+use crate::helper::INTEGER_TYPES;
 use crate::scalars::geo::helpers;
 use crate::scalars::geo::helpers::ensure_and_coerce;
 
@@ -34,7 +35,7 @@ static CELL_TYPES: LazyLock<Vec<DataType>> =
 static COORDINATE_TYPES: LazyLock<Vec<DataType>> =
     LazyLock::new(|| vec![DataType::Float32, DataType::Float64]);
 
-static LEVEL_TYPES: &[DataType] = datafusion_expr::type_coercion::aggregates::INTEGERS;
+static LEVEL_TYPES: &[DataType] = INTEGER_TYPES;
 
 /// Function that returns [s2] encoding cellid for a given geospatial coordinate.
 ///

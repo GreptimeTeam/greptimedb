@@ -61,8 +61,10 @@ ADMIN compact_table('test_ttl');
 
 SELECT val from test_ttl;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER TABLE test_ttl SET ttl = '1 minute';
 

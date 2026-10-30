@@ -48,8 +48,10 @@ select * from demo where host='test2' and idc='idc1' and collector='disk';
 
 select * from demo where host='test2' and idc='idc2';
 
-++
-++
++----+-------+------+-----+-----------+
+| ts | value | host | idc | collector |
++----+-------+------+-----+-----------+
++----+-------+------+-----+-----------+
 
 select * from demo where host='test3' and idc>'idc1';
 

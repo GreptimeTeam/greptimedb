@@ -59,6 +59,9 @@ select count(*), count(1), count(ts) from t;
 
 select count(*) as a, count(ts) as b from t;
 
+-- DF55 Substrait decoding preserves unique aggregate state names for cast arguments.
+select count(*), count(ts::bigint) from t;
+
 -- grouping sets are computed on the frontend, only the PostgreSQL dialect parses them
 -- SQLNESS PROTOCOL POSTGRES
 select host, idc, sum(val) from t group by grouping sets ((host, idc), (host)) order by host, idc;

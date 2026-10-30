@@ -77,19 +77,11 @@ impl ScanHintRule {
         let LogicalPlan::TableScan(mut table_scan) = plan else {
             return Ok(Transformed::no(plan));
         };
-        let Some(source) = table_scan
-            .source
-            .as_any()
-            .downcast_ref::<DefaultTableSource>()
-        else {
+        let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
         // The provider in the region server is [DummyTableProvider].
-        let Some(original) = source
-            .table_provider
-            .as_any()
-            .downcast_ref::<DummyTableProvider>()
-        else {
+        let Some(original) = source.table_provider.downcast_ref::<DummyTableProvider>() else {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         };
 
@@ -461,7 +453,7 @@ fn single_evaluation_projection_expr_allowed(
                 };
                 alias.name == column.name
                     && matches!(
-                        cast.data_type,
+                        cast.field.data_type(),
                         DataType::Timestamp(ArrowTimeUnit::Millisecond, None)
                     )
                     && matches!(
@@ -602,11 +594,8 @@ mod test {
         let mut requests = Vec::new();
         plan.apply_with_subqueries(|node| {
             if let LogicalPlan::TableScan(scan) = node
-                && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
-                && let Some(provider) = source
-                    .table_provider
-                    .as_any()
-                    .downcast_ref::<DummyTableProvider>()
+                && let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
+                && let Some(provider) = source.table_provider.downcast_ref::<DummyTableProvider>()
             {
                 requests.push((scan.table_name.to_string(), provider.scan_request()));
             }

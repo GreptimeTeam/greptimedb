@@ -40,10 +40,9 @@ impl TreeNodeRewriter for TableNamesExtractAndRewriter {
     ) -> datafusion::error::Result<Transformed<Self::Node>> {
         match node {
             LogicalPlan::TableScan(mut scan) => {
-                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                if let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
                     && let Some(provider) = source
                         .table_provider
-                        .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                     && provider.table().table_type() == TableType::Base
                 {

@@ -157,6 +157,10 @@ impl VectorOp for StructVector {
 
         for (index, &offset) in offsets.iter().enumerate() {
             for _ in previous_offset..offset {
+                #[expect(
+                    deprecated,
+                    reason = "VectorOp::replicate is infallible; retain its existing overflow behavior"
+                )]
                 output.extend(0, index, index + 1);
             }
             previous_offset = offset;

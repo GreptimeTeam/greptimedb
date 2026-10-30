@@ -29,7 +29,7 @@ use common_function::handlers::{
 use common_function::state::FunctionState;
 use common_stat::get_total_memory_bytes;
 use common_telemetry::warn;
-use datafusion::catalog::TableFunction;
+use datafusion::catalog::{Session, TableFunction};
 use datafusion::dataframe::DataFrame;
 use datafusion::error::Result as DfResult;
 use datafusion::execution::SessionStateBuilder;
@@ -64,6 +64,7 @@ use crate::optimizer::const_normalization::ConstNormalizationRule;
 use crate::optimizer::constant_term::MatchesConstantTermOptimizer;
 use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
+use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
@@ -228,11 +229,8 @@ impl QueryEngineState {
         physical_optimizer
             .rules
             .insert(6, Arc::new(PromqlTsidNarrowJoin));
-        // Enforce sorting AFTER custom rules that modify the plan structure
-        physical_optimizer.rules.insert(
-            7,
-            Arc::new(datafusion::physical_optimizer::enforce_sorting::EnforceSorting {}),
-        );
+        // Re-enforce sorting after custom rules update scan partitioning and distribution.
+        physical_optimizer.rules.insert(7, Arc::new(EnforceSorting));
         // Add rule for windowed sort
         physical_optimizer
             .rules
@@ -271,9 +269,9 @@ impl QueryEngineState {
             .with_optimizer_rules(optimizer.rules)
             .with_physical_optimizer_rules(physical_optimizer.rules)
             .build();
-
         let df_context = SessionContext::new_with_state(session_state);
         register_function_aliases(&df_context);
+        register_pg_catalog_compat(&df_context);
 
         Ok(Self {
             df_context,
@@ -503,10 +501,10 @@ impl QueryPlanner for DfQueryPlanner {
     async fn create_physical_plan(
         &self,
         logical_plan: &DfLogicalPlan,
-        session_state: &SessionState,
+        session: &dyn Session,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
         self.physical_planner
-            .create_physical_plan(logical_plan, session_state)
+            .create_physical_plan(logical_plan, session)
             .await
     }
 }
@@ -544,6 +542,22 @@ fn register_function_aliases(ctx: &SessionContext) {
             ctx.register_udaf(aliased);
         }
     }
+}
+
+/// Register the session-level (not function-registry) Postgres-compatibility
+/// extension sourced from `datafusion-pg-catalog`: widen Postgres `int4`
+/// bounds to `int8` for `generate_series`/`range` (their stock implementations
+/// require `int8` literals, and DF invokes them at planning time, before any
+/// analyzer rule can run).
+///
+/// The oid-alias type planner is supplied per SQL-planner context by
+/// [`DfContextProviderAdapter::get_type_planner`](crate::datafusion::planner::DfContextProviderAdapter::get_type_planner).
+/// Forward oid-alias name->oid resolution is handled at SQL-parse time by the
+/// `PostgresCompatibilityParser`'s built-in rewrite rule, not here.
+fn register_pg_catalog_compat(ctx: &SessionContext) {
+    datafusion_pg_catalog::pg_catalog::generate_series_arg_coercion::CoerceIntArgsToBigInt::widen(
+        ctx,
+    );
 }
 
 impl DfQueryPlanner {
@@ -612,7 +626,17 @@ impl MetricsMemoryPool {
     }
 }
 
+impl fmt::Display for MetricsMemoryPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}(inner_pool: {})", self.name(), self.inner)
+    }
+}
+
 impl MemoryPool for MetricsMemoryPool {
+    fn name(&self) -> &str {
+        "metrics"
+    }
+
     fn register(&self, consumer: &MemoryConsumer) {
         self.inner.register(consumer);
     }
@@ -821,7 +845,7 @@ mod tests {
         let plugins = Plugins::default();
         plugins.insert::<QueryRuntimeProviderRef>(Arc::new(ErrorRuntimeProvider));
 
-        let err = QueryEngineState::try_new(
+        let err = match QueryEngineState::try_new(
             catalog::memory::new_memory_catalog_manager().unwrap(),
             None,
             None,
@@ -831,8 +855,10 @@ mod tests {
             false,
             plugins,
             QueryOptions::default(),
-        )
-        .unwrap_err();
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected runtime provider error"),
+        };
 
         assert!(
             matches!(err, DataFusionError::Execution(message) if message == "runtime provider error")
@@ -944,7 +970,9 @@ mod tests {
         assert!(!env.disk_manager.tmp_files_enabled());
         let result = env.disk_manager.create_tmp_file("test spill");
         assert!(result.is_err());
-        assert!(format!("{}", result.unwrap_err()).contains("DiskManager is disabled"));
+        if let Err(error) = result {
+            assert!(format!("{error}").contains("DiskManager is disabled"));
+        }
     }
 
     #[test]

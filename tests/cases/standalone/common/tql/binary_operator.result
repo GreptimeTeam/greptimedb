@@ -8,8 +8,10 @@ Affected Rows: 3
 
 tql eval (0, 30, '10s'), data < 1;
 
-++
-++
++----+-----+
+| ts | val |
++----+-----+
++----+-----+
 
 tql eval (0, 30, '10s'), data + (1 < bool 2);
 

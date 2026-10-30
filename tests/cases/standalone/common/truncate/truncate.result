@@ -41,8 +41,10 @@ Affected Rows: 0
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-++
-++
++----+------+-----+--------+
+| ts | host | cpu | memory |
++----+------+-----+--------+
++----+------+-----+--------+
 
 -- truncate with time range
 INSERT INTO monitor(ts, host, cpu, memory) VALUES
@@ -102,8 +104,10 @@ Affected Rows: 0
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-++
-++
++----+------+-----+--------+
+| ts | host | cpu | memory |
++----+------+-----+--------+
++----+------+-----+--------+
 
 INSERT INTO monitor(ts, host, cpu, memory) VALUES 
 (1695217660000, 'host1', 88.8, 4096),
@@ -128,8 +132,10 @@ Affected Rows: 0
 
 SELECT ts, host, cpu, memory FROM monitor ORDER BY ts;
 
-++
-++
++----+------+-----+--------+
+| ts | host | cpu | memory |
++----+------+-----+--------+
++----+------+-----+--------+
 
 DROP TABLE monitor;
 

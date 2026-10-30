@@ -336,7 +336,7 @@ mod tests {
         };
         let plan = table.scan_to_plan(request).unwrap().unwrap();
 
-        assert!(plan.as_any().is::<EmptyExec>());
+        assert!(plan.as_ref().is::<EmptyExec>());
         assert_eq!(1, plan.schema().fields().len());
     }
 }

@@ -157,7 +157,11 @@ impl ExprPlanner for JsonExprPlanner {
     ///
     /// `Original` carries the possibly modified raw expression to subsequent planners and then
     /// DataFusion's default function construction. Returning `Planned` would short-circuit both.
-    fn plan_scalar(&self, mut expr: RawScalarExpr) -> Result<PlannerResult<RawScalarExpr>> {
+    fn plan_scalar(
+        &self,
+        mut expr: RawScalarExpr,
+        _schema: &DFSchema,
+    ) -> Result<PlannerResult<RawScalarExpr>> {
         push_function_arg_types(expr.func.as_ref(), &mut expr.args)?;
         Ok(PlannerResult::Original(expr))
     }
@@ -596,10 +600,13 @@ mod tests {
         let planner = JsonExprPlanner;
         let json_get = || json_get_expr(Expr::Column(Column::new_unqualified("j")), "a.b");
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: abs(),
-            args: vec![json_get()],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: abs(),
+                args: vec![json_get()],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };
@@ -608,13 +615,16 @@ mod tests {
             extract_json_get_type(&scalar.args[0])
         );
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: power(),
-            args: vec![
-                json_get(),
-                Expr::Column(Column::new_unqualified("exponent")),
-            ],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: power(),
+                args: vec![
+                    json_get(),
+                    Expr::Column(Column::new_unqualified("exponent")),
+                ],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };
@@ -679,10 +689,13 @@ mod tests {
         let mut typed = json_get();
         push_json_get_type_arg(&mut typed, &DataType::Float64)?;
 
-        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
-            func: coalesce(),
-            args: vec![json_get(), typed],
-        })?
+        let PlannerResult::Original(scalar) = planner.plan_scalar(
+            RawScalarExpr {
+                func: coalesce(),
+                args: vec![json_get(), typed],
+            },
+            &DFSchema::empty(),
+        )?
         else {
             unreachable!();
         };
