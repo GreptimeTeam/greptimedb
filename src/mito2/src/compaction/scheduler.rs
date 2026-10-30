@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub(crate) mod history;
 mod local;
 mod planning;
 mod state;
@@ -27,6 +28,8 @@ use common_telemetry::{debug, error, info, warn};
 use common_time::range::TimestampRange;
 pub(crate) use planning::CompactionPickFinished;
 pub use planning::CompactionRequest;
+#[cfg(test)]
+pub(crate) use planning::pick_automatic_for_test;
 pub(crate) use state::CompactionExecution;
 use state::{CompactionStatus, CompactionTrigger, DdlExecution, PendingCompaction};
 use store_api::storage::RegionId;
@@ -639,10 +642,6 @@ impl CompactionScheduler {
         schema_metadata_manager: SchemaMetadataManagerRef,
         made_progress: bool,
     ) -> CompactionTransition {
-        if !self.region_status.contains_key(&region_id) {
-            return CompactionTransition::NoAction;
-        }
-
         if let Some(ddls) = self.take_ready_ddls(region_id) {
             return CompactionTransition::DdlReady(ddls);
         }

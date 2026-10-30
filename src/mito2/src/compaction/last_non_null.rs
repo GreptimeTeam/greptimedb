@@ -58,47 +58,59 @@ impl Picker for LastNonNullPicker {
         let max_outputs = self.base_picker.max_background_tasks;
 
         // Find all possible compaction seeds
-        let Some(mut all_seeds) = self
+        let Some(all_seeds) = self
             .base_picker
             .pick_with_output_limit(region, None)
             .await?
         else {
             return Ok(None);
         };
-        let version = region.current_version.clone();
-        common_runtime::spawn_blocking_compact(move || {
-            let expired: HashSet<_> = all_seeds
-                .expired_ssts
-                .iter()
-                .map(FileHandle::file_id)
-                .collect();
-            // Include busy files and all levels/windows. Request ranges and
-            // TWCS size/file-count limits only constrain seeds, not correctness.
-            let all_files = version
-                .ssts
-                .levels()
-                .iter()
-                .flat_map(|level| level.files())
-                .filter(|file| !expired.contains(&file.file_id()))
-                .cloned()
-                .collect();
-            all_seeds.outputs =
-                build_closed_outputs(all_seeds.outputs, all_files, &version.metadata);
-            all_seeds.outputs.retain(|output| {
-                inputs_precede_memtables(&output.inputs, version.memtable_min_sequence)
-            });
-            if let Some(limit) = max_outputs {
-                // Only eligible closures consume the budget. Keep the high-priority
-                // tail because the compactor pops from the end of the output list.
-                let excess = all_seeds.outputs.len().saturating_sub(limit);
-                all_seeds.outputs.drain(..excess);
-            }
-            (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty())
-                .then_some(all_seeds)
-        })
-        .await
-        .context(JoinSnafu)
+        let (output, _) = close_outputs(region, all_seeds, max_outputs).await?;
+        Ok(output)
     }
+}
+
+/// Attempts seeds in priority order until valid closures fill the output budget.
+/// Returns indices into the original seed list for all attempted/absorbed seeds,
+/// including rejected closures but excluding seeds left behind by the budget.
+pub(crate) async fn close_outputs(
+    region: &CompactionRegion,
+    mut all_seeds: PickerOutput,
+    max_outputs: Option<usize>,
+) -> Result<(Option<PickerOutput>, Vec<usize>)> {
+    let version = region.current_version.clone();
+    common_runtime::spawn_blocking_compact(move || {
+        let expired: HashSet<_> = all_seeds
+            .expired_ssts
+            .iter()
+            .map(FileHandle::file_id)
+            .collect();
+        // Include busy files and all levels/windows. Request ranges and
+        // TWCS size/file-count limits only constrain seeds, not correctness.
+        let all_files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .filter(|file| !expired.contains(&file.file_id()))
+            .cloned()
+            .collect();
+        let (outputs, attempted_seeds) = build_closed_outputs(
+            all_seeds.outputs,
+            all_files,
+            &version.metadata,
+            ClosureLimits {
+                max_outputs,
+                memtable_min_sequence: version.memtable_min_sequence,
+            },
+        );
+        all_seeds.outputs = outputs;
+        let output = (!all_seeds.outputs.is_empty() || !all_seeds.expired_ssts.is_empty())
+            .then_some(all_seeds);
+        (output, attempted_seeds)
+    })
+    .await
+    .context(JoinSnafu)
 }
 
 /// Imported SSTs can be newer than pending writes. A merge must not attach an
@@ -116,6 +128,13 @@ pub(super) fn inputs_precede_memtables(
     })
 }
 
+/// Constraints checked on complete closures, never on partial seed inputs.
+#[derive(Default)]
+struct ClosureLimits {
+    max_outputs: Option<usize>,
+    memtable_min_sequence: Option<SequenceNumber>,
+}
+
 /// Each seed and snapshot file is consumed at most once. Absorbing a seed also
 /// absorbs its disconnected members: a merge stream must never be split across
 /// independently scheduled outputs.
@@ -123,7 +142,8 @@ fn build_closed_outputs(
     seeds: Vec<CompactionOutput>,
     files: Vec<FileHandle>,
     metadata: &RegionMetadataRef,
-) -> Vec<CompactionOutput> {
+    limits: ClosureLimits,
+) -> (Vec<CompactionOutput>, Vec<usize>) {
     // Maps every seed input to its seed, so a closure that reaches that input
     // can absorb the rest of the seed instead of letting it schedule separately.
     let seed_by_file: HashMap<_, _> = seeds
@@ -137,17 +157,29 @@ fn build_closed_outputs(
     let mut outputs = Vec::new();
     // The compactor pops from the end; retain TWCS's seed priority.
     for seed_index in (0..seeds.len()).rev() {
+        // Keep all seeds available for dependency absorption, but do not attempt
+        // lower-priority work after enough valid closures have filled the budget.
+        if outputs.len() >= limits.max_outputs.unwrap_or(usize::MAX) {
+            break;
+        }
         let Some(output) = seeds[seed_index].take() else {
             continue;
         };
         let output = expand_closure(output, &mut seeds, &seed_by_file, &mut remaining);
         // Defer the entire closure rather than truncate it around busy files.
-        if !output.inputs.iter().any(FileHandle::compacting) {
+        if !output.inputs.iter().any(FileHandle::compacting)
+            && inputs_precede_memtables(&output.inputs, limits.memtable_min_sequence)
+        {
             outputs.push(output);
         }
     }
     outputs.reverse();
-    outputs
+    let attempted_seeds = seeds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, seed)| seed.is_none().then_some(index))
+        .collect();
+    (outputs, attempted_seeds)
 }
 
 /// Expands one seed into its full merge closure: absorb every connected seed
@@ -198,7 +230,7 @@ fn extend_inputs(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use api::v1::region::compact_request;
     use common_time::Timestamp;
@@ -207,9 +239,13 @@ mod tests {
 
     use super::*;
     use crate::compaction::picker::new_picker;
+    use crate::compaction::scheduler::history::{PickHistory, PickKey};
+    use crate::compaction::scheduler::pick_automatic_for_test;
     use crate::compaction::test_util::{
         compaction_region_with_ssts, new_file_handle, new_file_handle_with_size_and_sequence,
     };
+    use crate::compaction::twcs::PickClass;
+    use crate::metrics::TWCS_SELECTED_CANDIDATES;
     use crate::region::options::{CompactionOptions, MergeMode};
     use crate::sst::file::{FileMeta, RegionFileId};
     use crate::test_util::memtable_util::metadata_for_test;
@@ -237,6 +273,8 @@ mod tests {
     #[case::absorbed_seeds(1, None, false, Some(2), vec![vec![2, 1], vec![0]])]
     #[case::busy_bridge_defers_both_seeds(1, None, true, Some(2), vec![vec![0]])]
     #[case::memtable_barrier_defers_both_seeds(1, Some(20), false, Some(2), vec![vec![0]])]
+    #[case::all_closures_rejected(0, None, true, Some(1), vec![])]
+    #[case::zero_budget(2, None, false, Some(0), vec![])]
     #[tokio::test]
     async fn test_output_limit_counts_eligible_closures(
         #[case] dependency_start_window: usize,
@@ -244,6 +282,7 @@ mod tests {
         #[case] busy: bool,
         #[case] limit: Option<usize>,
         #[case] expected_windows: Vec<Vec<usize>>,
+        #[values(false, true)] fair: bool,
     ) {
         // Three independent, eligible L0 windows. A large L1 dependency is not
         // a seed, but can reject the newest closure or connect two seeds.
@@ -293,13 +332,54 @@ mod tests {
             .unwrap()
             .set_compacting(busy);
         let request = compact_request::Options::Regular(Default::default());
-        let picker = new_picker(&request, &region.region_options, limit, None, false);
-
-        let picked = picker.pick(&region).await.unwrap().unwrap();
-        assert_eq!(expected_windows.len(), picked.outputs.len());
-        assert!(picked.expired_ssts.is_empty());
+        let picked = if fair {
+            let mut history = PickHistory::default();
+            let now = Instant::now();
+            let waiting_since = now - Duration::from_secs(120);
+            let keys: Vec<_> = (0..3)
+                .map(|window| PickKey {
+                    window: window * 3600,
+                    class: PickClass::L0Merge,
+                })
+                .collect();
+            history.observe_for_test(keys.iter().copied(), waiting_since);
+            let promoted = TWCS_SELECTED_CANDIDATES.with_label_values(&["l0_merge", "promoted"]);
+            let promoted_before = promoted.get();
+            let picked = pick_automatic_for_test(&region, &mut history, limit)
+                .await
+                .unwrap();
+            let mut attempted_windows: HashSet<_> =
+                expected_windows.iter().flatten().copied().collect();
+            if busy || memtable_min.is_some() {
+                // A rejected closure consumes turns but no output slot, including
+                // any lower-priority seeds that it absorbed through the bridge.
+                attempted_windows.extend(dependency_start_window..3);
+            }
+            assert_eq!(
+                promoted_before + attempted_windows.len() as u64,
+                promoted.get()
+            );
+            for (window, key) in keys.into_iter().enumerate() {
+                assert_eq!(
+                    (!attempted_windows.contains(&window)).then_some(waiting_since),
+                    history.priority_for_test(key, now).1,
+                    "window {window}"
+                );
+            }
+            picked
+        } else {
+            new_picker(&request, &region.region_options, limit, None, false)
+                .pick(&region)
+                .await
+                .unwrap()
+        };
+        let outputs = picked.map_or_else(Vec::new, |picked| {
+            assert!(picked.expired_ssts.is_empty());
+            picked.outputs
+        });
+        assert_eq!(expected_windows.len(), outputs.len());
         // The execution pops outputs from the end, not the front.
-        for (output, window_indices) in picked.outputs.iter().rev().zip(expected_windows) {
+        for (output, window_indices) in outputs.iter().rev().zip(expected_windows) {
             let mut expected: HashSet<_> = window_indices
                 .iter()
                 .flat_map(|&i| windows[i].iter().map(FileMeta::file_id))
@@ -313,12 +393,86 @@ mod tests {
         // The LastRow picker must retain its original seed cap and priority.
         region.region_options.merge_mode = Some(MergeMode::LastRow);
         let picker = new_picker(&request, &region.region_options, limit, None, false);
-        let picked = picker.pick(&region).await.unwrap().unwrap();
-        assert_eq!(limit.unwrap_or(3).min(3), picked.outputs.len());
-        for (output, window) in picked.outputs.iter().rev().zip(windows.iter().rev()) {
+        let outputs = picker
+            .pick(&region)
+            .await
+            .unwrap()
+            .map_or_else(Vec::new, |picked| picked.outputs);
+        assert_eq!(limit.unwrap_or(3).min(3), outputs.len());
+        for (output, window) in outputs.iter().rev().zip(windows.iter().rev()) {
             let expected: HashSet<_> = window.iter().map(FileMeta::file_id).collect();
             assert_eq!(expected, file_ids(&output.inputs));
         }
+    }
+
+    #[tokio::test]
+    async fn test_budget_excluded_l1_keeps_waiting_across_l0_picks() {
+        // R4-C1: an independent historical L1 seed must not consume a turn merely
+        // because it was enumerated for closure while the single slot serves L0.
+        let files = [(0, 1), (7200, 0)].into_iter().flat_map(|(start, level)| {
+            (0..4).map(move |i| FileMeta {
+                file_id: FileId::random(),
+                time_range: (
+                    Timestamp::new_second(start),
+                    Timestamp::new_second(start + 10),
+                ),
+                level,
+                file_size: 100,
+                sequence: std::num::NonZeroU64::new((start + i + 1) as u64),
+                ..Default::default()
+            })
+        });
+        let mut region = compaction_region_with_ssts(files, Duration::from_secs(60)).await;
+        region.ttl = None;
+        region.region_options.merge_mode = Some(MergeMode::LastNonNull);
+        let CompactionOptions::Twcs(opts) = &mut region.region_options.compaction;
+        opts.time_window = Some(Duration::from_secs(3600));
+        opts.inactive_window_l1_merge_trigger = 4;
+
+        let old = PickKey {
+            window: 0,
+            class: PickClass::FileReduction,
+        };
+        let mut history = PickHistory::default();
+        let start = Instant::now();
+        history.observe_for_test([old].into_iter(), start);
+        for _ in 0..3 {
+            let picked = pick_automatic_for_test(&region, &mut history, Some(1))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(1, picked.outputs.len());
+            assert_eq!(4, picked.outputs[0].inputs.len());
+            assert!(
+                picked.outputs[0]
+                    .inputs
+                    .iter()
+                    .all(|file| file.level() == 0)
+            );
+            assert_eq!(
+                Some(start),
+                history
+                    .priority_for_test(old, start + Duration::from_secs(120))
+                    .1
+            );
+        }
+
+        // Advance only the waiting age, without sleeping or acknowledging any
+        // execution. The same hot L0 remains eligible in the unchanged snapshot.
+        history.seed_for_test(old, start - Duration::from_secs(120));
+        let picked = pick_automatic_for_test(&region, &mut history, Some(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(1, picked.outputs.len());
+        assert_eq!(4, picked.outputs[0].inputs.len());
+        assert!(
+            picked.outputs[0]
+                .inputs
+                .iter()
+                .all(|file| file.level() == 1)
+        );
+        assert!(history.priority_for_test(old, Instant::now()).1.is_none());
     }
 
     // Cover absent/unknown boundaries and strict inequality without arithmetic
@@ -357,17 +511,30 @@ mod tests {
                 )
             })
             .collect();
-        let outputs =
-            build_closed_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
+        let (outputs, _) = build_closed_outputs(
+            vec![seed(vec![files[0].clone()])],
+            files.clone(),
+            &metadata,
+            ClosureLimits::default(),
+        );
         assert_eq!(1, outputs.len());
         assert_eq!(files.len(), outputs[0].inputs.len());
         assert_eq!(file_ids(&files), file_ids(&outputs[0].inputs));
     }
 
     #[rstest::rstest]
-    #[case(false)]
-    #[case(true)]
-    fn test_absorbed_seed_closes_disconnected_members_and_defers_busy_group(#[case] busy: bool) {
+    #[case::unlimited(false, None, vec![vec![0, 1, 2, 3], vec![4]], vec![0, 1, 2])]
+    #[case::busy_unlimited(true, None, vec![vec![4]], vec![0, 1, 2])]
+    #[case::one_slot(false, Some(1), vec![vec![0, 1, 2, 3]], vec![1, 2])]
+    #[case::busy_one_slot(true, Some(1), vec![vec![4]], vec![0, 1, 2])]
+    #[case::zero_budget(false, Some(0), vec![], vec![])]
+    #[case::busy_zero_budget(true, Some(0), vec![], vec![])]
+    fn test_absorbed_seed_closes_disconnected_members_and_defers_busy_group(
+        #[case] busy: bool,
+        #[case] max_outputs: Option<usize>,
+        #[case] expected_groups: Vec<Vec<usize>>,
+        #[case] expected_attempted: Vec<usize>,
+    ) {
         let metadata = metadata_for_test();
         let files: Vec<_> = [(0, 10), (10, 20), (100, 110), (110, 120), (200, 210)]
             .into_iter()
@@ -382,23 +549,28 @@ mod tests {
             priority_seed,
         ];
 
-        let mut outputs = build_closed_outputs(seeds, files.clone(), &metadata);
-        assert_eq!(if busy { 1 } else { 2 }, outputs.len());
-        if !busy {
-            let first = outputs.pop().unwrap();
-            assert_eq!(4, first.inputs.len());
-            assert_eq!(file_ids(&files[..4]), file_ids(&first.inputs));
-            // Preserve the absorbed seed's conservative tombstone policy.
-            assert!(!first.filter_deleted);
-        }
-        assert_eq!(
-            vec![files[4].file_id()],
-            outputs[0]
-                .inputs
-                .iter()
-                .map(FileHandle::file_id)
-                .collect::<Vec<_>>()
+        let (outputs, attempted) = build_closed_outputs(
+            seeds,
+            files.clone(),
+            &metadata,
+            ClosureLimits {
+                max_outputs,
+                ..Default::default()
+            },
         );
+        assert_eq!(expected_attempted, attempted);
+        assert_eq!(expected_groups.len(), outputs.len());
+        // Compare in execution priority order: the compactor pops from the end.
+        for (output, indices) in outputs.iter().rev().zip(expected_groups) {
+            let expected: HashSet<_> = indices
+                .iter()
+                .map(|&index| files[index].file_id())
+                .collect();
+            assert_eq!(indices.len(), output.inputs.len());
+            assert_eq!(expected, file_ids(&output.inputs));
+            // Preserve the absorbed seed's conservative tombstone policy.
+            assert!(!output.filter_deleted);
+        }
     }
 
     #[rstest::rstest]
@@ -435,8 +607,12 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let outputs =
-            build_closed_outputs(vec![seed(vec![files[0].clone()])], files.clone(), &metadata);
+        let (outputs, _) = build_closed_outputs(
+            vec![seed(vec![files[0].clone()])],
+            files.clone(),
+            &metadata,
+            ClosureLimits::default(),
+        );
         assert_eq!(1, outputs.len());
         assert_eq!(expected_count, outputs[0].inputs.len());
         assert_eq!(

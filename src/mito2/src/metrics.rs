@@ -136,6 +136,31 @@ lazy_static! {
         exponential_buckets(1.0, 10.0, 6).unwrap(),
     )
     .unwrap();
+    /// TWCS candidate planning wall time, including blocking-pool waits and
+    /// empty/error attempts. `mode` is fair or stateless, never a region ID.
+    pub static ref TWCS_PICK_ELAPSED: HistogramVec = register_histogram_vec!(
+        "greptime_mito_twcs_pick_elapsed_seconds",
+        "TWCS candidate planning wall time including blocking-pool waits",
+        &["mode"],
+        // 100us ~ 105s, so sub-second planning regressions are visible too.
+        exponential_buckets(0.0001, 4.0, 11).unwrap(),
+    ).unwrap();
+    /// Windows whose candidate discovery actually started, including windows
+    /// with no eligible candidates; excludes windows skipped by early exit.
+    pub static ref TWCS_SCANNED_WINDOWS: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_twcs_scanned_windows_total",
+        "TWCS windows evaluated during candidate discovery",
+        &["mode"],
+    ).unwrap();
+    /// Automatic seeds attempted within the output budget, including seeds
+    /// absorbed by or rejected with a LastNonNull closure. Excludes work left
+    /// behind by the budget; counts attempts, not admission or completion.
+    /// Promoted means the seed reached the waiting threshold at selection time.
+    pub static ref TWCS_SELECTED_CANDIDATES: IntCounterVec = register_int_counter_vec!(
+        "greptime_mito_twcs_selected_candidates_total",
+        "Automatic TWCS seeds selected by class and normal or promoted priority",
+        &["class", "priority"],
+    ).unwrap();
     /// Elapsed time of each successfully published compaction unit, labeled by `type`.
     /// - local: one dependency unit, from task start through worker apply acknowledgement
     /// - remote: one remote job, from request start through publication

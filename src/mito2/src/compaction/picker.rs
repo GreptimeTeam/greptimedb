@@ -140,21 +140,7 @@ pub fn new_picker(
         // within each disjoint, half-open output range, including LastNonNull.
         Arc::new(WindowedCompactionPicker::new(window).with_time_range(time_range)) as Arc<_>
     } else {
-        let picker = match &region_options.compaction {
-            CompactionOptions::Twcs(twcs_opts) => TwcsPicker {
-                trigger_file_num: twcs_opts.active_window_trigger_file_num,
-                active_window_l1_merge_trigger: twcs_opts.active_window_l1_merge_trigger,
-                inactive_window_trigger_file_num: twcs_opts.inactive_window_trigger_file_num,
-                inactive_window_l1_merge_trigger: twcs_opts.inactive_window_l1_merge_trigger,
-                time_window_seconds: twcs_opts.time_window_seconds(),
-                max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
-                append_mode: region_options.append_mode,
-                merge_mode: region_options.merge_mode(),
-                max_background_tasks,
-                time_range,
-                all_windows_inactive: manual,
-            },
-        };
+        let picker = new_twcs_picker(region_options, max_background_tasks, time_range, manual);
         if region_options.merge_mode() == MergeMode::LastNonNull {
             // LastNonNull correctness spans windows and levels, so wrap the seed
             // picker instead of trusting TWCS's independent windows.
@@ -162,6 +148,30 @@ pub fn new_picker(
         } else {
             Arc::new(picker)
         }
+    }
+}
+
+/// Builds the stateless TWCS strategy used for discovery and legacy picks.
+pub(crate) fn new_twcs_picker(
+    region_options: &RegionOptions,
+    max_background_tasks: Option<usize>,
+    time_range: Option<TimestampRange>,
+    manual: bool,
+) -> TwcsPicker {
+    match &region_options.compaction {
+        CompactionOptions::Twcs(twcs_opts) => TwcsPicker {
+            trigger_file_num: twcs_opts.active_window_trigger_file_num,
+            active_window_l1_merge_trigger: twcs_opts.active_window_l1_merge_trigger,
+            inactive_window_trigger_file_num: twcs_opts.inactive_window_trigger_file_num,
+            inactive_window_l1_merge_trigger: twcs_opts.inactive_window_l1_merge_trigger,
+            time_window_seconds: twcs_opts.time_window_seconds(),
+            max_output_file_size: twcs_opts.max_output_file_size.map(|r| r.as_bytes()),
+            append_mode: region_options.append_mode,
+            merge_mode: region_options.merge_mode(),
+            max_background_tasks,
+            time_range,
+            all_windows_inactive: manual,
+        },
     }
 }
 

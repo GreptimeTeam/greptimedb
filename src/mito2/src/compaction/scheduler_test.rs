@@ -412,6 +412,139 @@ async fn test_resident_region_survives_terminal_cycles_and_truncate() {
     assert!(!scheduler.region_status.contains_key(&id));
 }
 
+#[tokio::test]
+async fn test_pick_history_survives_cycles_but_not_region_replacement() {
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(8);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer);
+    use crate::compaction::scheduler::history::PickKey;
+    use crate::compaction::twcs::PickClass;
+    let key = PickKey {
+        window: 0,
+        class: PickClass::FileReduction,
+    };
+    let start = std::time::Instant::now();
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .pick_history
+        .observe_for_test([key].into_iter(), start);
+    let later = start + Duration::from_secs(120);
+    let priority = scheduler.region_status[&id]
+        .pick_history
+        .priority_for_test(key, later);
+    assert!(priority.1.is_some());
+    scheduler.region_status.get_mut(&id).unwrap().become_idle();
+    scheduler.register_region(&version, &env.access_layer);
+    assert_eq!(
+        priority,
+        scheduler.region_status[&id]
+            .pick_history
+            .priority_for_test(key, later)
+    );
+    scheduler.on_compaction_failed(id, Arc::new(InvalidSchedulerStateSnafu.build()));
+    assert_eq!(
+        priority,
+        scheduler.region_status[&id]
+            .pick_history
+            .priority_for_test(key, later)
+    );
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    let mut request = scheduler.region_status[&id].new_compaction_request(
+        scheduler.request_sender.clone(),
+        scheduler.engine_config.clone(),
+        scheduler.cache_manager.clone(),
+        &manifest,
+        scheduler.listener.clone(),
+        schemas,
+        1,
+    );
+    assert_eq!(priority, request.pick_history.priority_for_test(key, later));
+    request
+        .pick_history
+        .observe_for_test(std::iter::empty(), later);
+    assert_eq!(
+        priority,
+        scheduler.region_status[&id]
+            .pick_history
+            .priority_for_test(key, later)
+    );
+    let replacement = Arc::new(VersionControlBuilder::new().build());
+    scheduler.register_region(&replacement, &env.access_layer);
+    assert!(
+        scheduler.region_status[&id]
+            .pick_history
+            .priority_for_test(key, later)
+            .1
+            .is_none()
+    );
+}
+
+#[rstest::rstest]
+#[case::accepted_empty_plan(false)]
+#[case::failed_plan(true)]
+#[tokio::test]
+async fn test_empty_plan_prunes_history_but_failed_plan_preserves_it(#[case] failed: bool) {
+    use crate::compaction::scheduler::history::PickKey;
+    use crate::compaction::twcs::PickClass;
+
+    let env = SchedulerEnv::new().await;
+    let (tx, _rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = Arc::new(VersionControlBuilder::new().build());
+    let id = version.region_id();
+    let manifest = env
+        .mock_manifest_context(version.current().version.metadata.clone())
+        .await;
+    let (schemas, _) = mock_schema_metadata_manager();
+    scheduler.register_region(&version, &env.access_layer);
+    let status = scheduler.region_status.get_mut(&id).unwrap();
+    let key = PickKey {
+        window: 0,
+        class: PickClass::FileReduction,
+    };
+    let start = std::time::Instant::now();
+    let now = start + Duration::from_secs(120);
+    status
+        .pick_history
+        .observe_for_test([key].into_iter(), start);
+    status.start_picking_with_trigger(7, CompactionTrigger::Automatic);
+    let mut planned_history = status.pick_history.clone();
+    planned_history.observe_for_test(std::iter::empty(), now);
+    assert!(status.pick_history.priority_for_test(key, now).1.is_some());
+    let result = if failed {
+        CompactionPlanningResult::Error(Arc::new(InvalidSchedulerStateSnafu.build()))
+    } else {
+        CompactionPlanningResult::NoPlan(Some(planned_history))
+    };
+    scheduler
+        .handle_compaction_pick_finished(
+            CompactionPickFinished {
+                region_id: id,
+                plan_id: 7,
+                result,
+            },
+            &manifest,
+            schemas,
+        )
+        .await;
+    assert_eq!(
+        failed,
+        scheduler.region_status[&id]
+            .pick_history
+            .priority_for_test(key, now)
+            .1
+            .is_some()
+    );
+}
+
 /// Reads the real completion event produced by a wrapped DDL reply.
 async fn recv_ddl_completion(rx: &mut mpsc::Receiver<WorkerRequestWithTime>) -> (u64, usize) {
     let request = tokio::time::timeout(Duration::from_secs(5), rx.recv())
@@ -598,7 +731,10 @@ async fn test_schedule_empty() {
         .unwrap();
     assert!(scheduled);
     let finished = recv_compaction_pick_finished(&mut rx).await;
-    assert!(matches!(&finished.result, CompactionPlanningResult::NoPlan));
+    assert!(matches!(
+        &finished.result,
+        CompactionPlanningResult::NoPlan(_)
+    ));
     scheduler
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager.clone())
         .await;
@@ -626,7 +762,10 @@ async fn test_schedule_empty() {
         .unwrap();
     assert!(scheduled);
     let finished = recv_compaction_pick_finished(&mut rx).await;
-    assert!(matches!(&finished.result, CompactionPlanningResult::NoPlan));
+    assert!(matches!(
+        &finished.result,
+        CompactionPlanningResult::NoPlan(_)
+    ));
     scheduler
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
         .await;
@@ -715,7 +854,7 @@ async fn test_planning_followup_reports_automatic_schedule() {
             CompactionPickFinished {
                 region_id,
                 plan_id: 7,
-                result: CompactionPlanningResult::NoPlan,
+                result: CompactionPlanningResult::NoPlan(None),
             },
             &manifest_ctx,
             schema_metadata_manager,
@@ -813,7 +952,7 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
             CompactionPickFinished {
                 region_id,
                 plan_id: 7,
-                result: CompactionPlanningResult::NoPlan,
+                result: CompactionPlanningResult::NoPlan(None),
             },
             &manifest_ctx,
             schema_metadata_manager.clone(),
@@ -852,14 +991,32 @@ async fn test_ddl_fence_prevents_repeated_regular_followups() {
 
 #[tokio::test]
 async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
+    use crate::compaction::scheduler::history::PickKey;
+    use crate::compaction::twcs::PickClass;
+
     let job_scheduler = Arc::new(VecScheduler::default());
     let env = SchedulerEnv::new().await.scheduler(job_scheduler.clone());
     let (tx, mut rx) = mpsc::channel(4);
     let mut scheduler = env.mock_compaction_scheduler(tx);
     let version_control = compactable_version();
     let region_id = version_control.current().version.metadata.region_id;
+    scheduler.register_region(&version_control, &env.access_layer);
+    // Real discovery prunes this obsolete key only in its private snapshot.
+    let key = PickKey {
+        window: -999,
+        class: PickClass::FileReduction,
+    };
+    let now = std::time::Instant::now();
+    scheduler
+        .region_status
+        .get_mut(&region_id)
+        .unwrap()
+        .pick_history
+        .observe_for_test([key].into_iter(), now - Duration::from_secs(120));
     let (mut finished, manifest_ctx, schema_metadata_manager) =
         begin_pick_result(&env, &mut scheduler, &mut rx, &version_control).await;
+    let history = &scheduler.region_status[&region_id].pick_history;
+    assert!(history.priority_for_test(key, now).1.is_some());
     let (waiter_tx, mut waiter_rx) = oneshot::channel();
     scheduler
         .region_status
@@ -872,12 +1029,56 @@ async fn test_pick_result_mismatched_token_keeps_status_and_waiter_untouched() {
         .handle_compaction_pick_finished(finished, &manifest_ctx, schema_metadata_manager)
         .await;
 
+    let history = &scheduler.region_status[&region_id].pick_history;
+    assert!(history.priority_for_test(key, now).1.is_some());
     assert_eq!(job_scheduler.num_jobs(), 0);
     assert_eq!(scheduler.region_status[&region_id].active.waiters.len(), 1);
     assert_matches!(
         waiter_rx.try_recv(),
         Err(oneshot::error::TryRecvError::Empty)
     );
+}
+
+#[tokio::test]
+async fn test_cancelled_prepared_plan_preserves_resident_history() {
+    use crate::compaction::scheduler::history::PickKey;
+    use crate::compaction::twcs::PickClass;
+
+    let executor = Arc::new(VecScheduler::default());
+    let env = SchedulerEnv::new().await.scheduler(executor.clone());
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut scheduler = env.mock_compaction_scheduler(tx);
+    let version = compactable_version();
+    let id = version.region_id();
+    scheduler.register_region(&version, &env.access_layer);
+    // This obsolete key is pruned by real automatic discovery, but that private
+    // result must not leak into the resident history before/without acceptance.
+    let key = PickKey {
+        window: -999,
+        class: PickClass::FileReduction,
+    };
+    let now = std::time::Instant::now();
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .pick_history
+        .observe_for_test([key].into_iter(), now - Duration::from_secs(120));
+    let (finished, manifest, schemas) =
+        begin_pick_result(&env, &mut scheduler, &mut rx, &version).await;
+    let history = &scheduler.region_status[&id].pick_history;
+    assert!(history.priority_for_test(key, now).1.is_some());
+    scheduler
+        .region_status
+        .get_mut(&id)
+        .unwrap()
+        .request_cancel();
+    scheduler
+        .handle_compaction_pick_finished(finished, &manifest, schemas)
+        .await;
+    let history = &scheduler.region_status[&id].pick_history;
+    assert!(history.priority_for_test(key, now).1.is_some());
+    assert_eq!(0, executor.num_jobs());
 }
 
 #[tokio::test]
