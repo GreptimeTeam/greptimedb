@@ -3287,6 +3287,39 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
     }
 }
 
+/// A nested multi-source matching subtree is built as a segment consuming each source's explicit frames.
+#[tokio::test]
+async fn native_fused_multi_source_matching_segment_is_constructed() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(topk(1, some_metric / other_metric))",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native segmented fused root: {plan}");
+    let segments = fused
+        .children()
+        .iter()
+        .filter_map(|child| {
+            let LogicalPlan::Extension(Extension { node }) = child else {
+                return None;
+            };
+            node.as_any().downcast_ref::<FusedSeries>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        segments.iter().any(|segment| segment.children().len() == 2),
+        "expected the m/n matching subtree to be one two-child segment: {plan}"
+    );
+    assert!(
+        !plan
+            .display_indent()
+            .to_string()
+            .contains("PromSeriesDivide"),
+        "must not fall back to legacy: {plan}"
+    );
+}
+
 /// A two-source whole-vector statement uses two per-source prefix segments under one parent, and
 /// each segment binds its own source metric.
 #[tokio::test]

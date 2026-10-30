@@ -6311,6 +6311,69 @@ async fn native_promql_sum_topk_uses_global_topk_segment() {
     assert_eq!(rows, legacy, "native and legacy answers differ");
 }
 
+/// A cross-table segmented expression matches exact legacy values and uses the segmented route.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_multi_source_segments_match_legacy_values() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_multi_source_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE seg_m (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         CREATE TABLE seg_n (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)); \
+         INSERT INTO seg_m VALUES ('a', 0, 2), ('b', 0, 6), ('a', 60000, 4), ('b', 60000, 12), ('a', 120000, 8), ('b', 120000, 24); \
+         INSERT INTO seg_n VALUES ('a', 0, 1), ('b', 0, 2), ('a', 60000, 2), ('b', 60000, 4), ('a', 120000, 4), ('b', 120000, 8)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    let sql = "TQL EVAL (0, 120, '60s') sum(topk(1, seg_m / seg_n))";
+    observer.clear();
+    let native = eval_values(native_tql_output(&instance, sql, true).await);
+    assert_eq!(native, vec![(0, 3.0), (60_000, 3.0), (120_000, 3.0)]);
+    let root = observer.root_plan();
+    let fused = fused_nodes_in_root(&root);
+    // A cross-table statement splits in two here: the root folds `sum` over `topk`, which reads
+    // only the segment below it, and that segment is the `m / n` match over both tables. So the
+    // frontend tree holds the root and one segment - unlike a single-table `sum(topk(1, m))`,
+    // whose per-series prefix goes into the region and leaves one fused node above it.
+    let segment = fused
+        .iter()
+        .find(|node| node.children().len() == 2)
+        .expect("the m/n matching subtree must be one segment over both tables");
+    let child_debug = segment
+        .children()
+        .iter()
+        .map(|child| debug_merge_scan_child(child))
+        .collect::<Vec<_>>();
+    // A segment over two tables cannot sit inside either region, so it runs above them and reads
+    // each table through that table's own raw series reader. What the assertion has to rule out is
+    // the statement falling back at all: the segment exists, it binds one child per source, and
+    // each child names its own table rather than both reading one.
+    assert!(
+        child_debug
+            .iter()
+            .all(|debug| debug.contains("RawSeriesSource")),
+        "each source must be read through its own raw series source: {child_debug:?}"
+    );
+    assert!(
+        child_debug.iter().any(|debug| debug.contains("seg_m"))
+            && child_debug.iter().any(|debug| debug.contains("seg_n")),
+        "the two children must read different tables: {child_debug:?}"
+    );
+
+    let legacy = eval_values(native_tql_output(&instance, sql, false).await);
+    assert_eq!(legacy, native, "native/legacy mismatch");
+}
+
 /// Segments are cut where the physical planner would otherwise have to gather a per-series prefix.
 ///
 /// One statement per shape the cut can meet, each asserting only what the rule says: a tree that

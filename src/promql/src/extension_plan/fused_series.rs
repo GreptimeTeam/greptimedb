@@ -1311,7 +1311,7 @@ fn same_fields(left: &SeriesSchema, right: &SeriesSchema) -> bool {
 }
 
 /// Fields read by each distinct raw source in source-index order.
-pub(crate) fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
+pub fn tree_source_fields(tree: &NativeTree) -> DataFusionResult<Vec<Vec<String>>> {
     Ok(collect_source_schemas(tree)?
         .into_iter()
         .map(|schema| {
