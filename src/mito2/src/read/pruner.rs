@@ -152,6 +152,15 @@ impl PartitionPruner {
         pruned
     }
 
+    /// Returns the pre-filter mode for a file index in the scan input.
+    /// Defaults to [`PreFilterMode::SkipFields`] when no mode was recorded.
+    pub(crate) fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
+        self.pre_filter_modes
+            .get(file_index)
+            .copied()
+            .unwrap_or(PreFilterMode::SkipFields)
+    }
+
     /// Pre-fetches upcoming files starting from the given position.
     fn prefetch_upcoming_files(&self, current_pos: usize, partition_metrics: &PartitionMetrics) {
         let start = current_pos + 1;
@@ -166,13 +175,6 @@ impl PartitionPruner {
                 Some(partition_metrics.clone()),
             );
         }
-    }
-
-    fn pre_filter_mode(&self, file_index: usize) -> PreFilterMode {
-        self.pre_filter_modes
-            .get(file_index)
-            .copied()
-            .unwrap_or(PreFilterMode::SkipFields)
     }
 
     fn file_index(&self, index: RowGroupIndex) -> Option<usize> {

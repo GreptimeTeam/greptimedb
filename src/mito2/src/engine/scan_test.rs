@@ -4916,18 +4916,21 @@ async fn test_two_phase_sparse_metric_exact_sequence_cases() {
     }
 }
 
-/// A warmed two-phase exact scan must hit the existing range-result cache; a
+/// A warmed exact series scan must hit the existing range-result cache; a
 /// second upper bound over the same files and an unbounded scan must not reuse
 /// its rows.
+#[rstest::rstest]
+#[case(true)]
+#[case(false)]
 #[tokio::test]
-async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
+async fn test_sparse_metric_exact_sequence_cache_isolation(#[case] two_phase: bool) {
     let (_env, engine, region_id) = build_sparse_exact_metric_engine(
-        "test_two_phase_sparse_metric_exact_sequence_cache_isolation",
-        true,
+        "test_sparse_metric_exact_sequence_cache_isolation",
+        two_phase,
         ReadableSize::mb(64),
     )
     .await;
-    // Make the fixture file-only so the two-phase candidate and data ranges are cacheable.
+    // Make the fixture file-only so both series scan modes can cache their ranges.
     test_util::flush_region(&engine, region_id, None).await;
 
     let restrictive = ScanRequest {
@@ -4943,7 +4946,10 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
         let Scanner::Series(scanner) = scanner else {
             panic!("sparse metric scan must use SeriesScan");
         };
-        assert_eq!("two_phase", scanner.mode());
+        assert_eq!(
+            if two_phase { "two_phase" } else { "legacy" },
+            scanner.mode()
+        );
         assert_eq!(1, scanner.properties().num_partitions());
         let batches = RecordBatches::try_collect(scanner.build_stream().await.unwrap())
             .await
@@ -4956,18 +4962,20 @@ async fn test_two_phase_sparse_metric_exact_sequence_cache_isolation() {
 
     let (cold, _) = scan(restrictive.clone()).await;
     // Cache insertion is performed by the range stream's async concat task.
-    // Wait for the SeriesReader's data-stage entry, rather than treating a
-    // candidate-stage cache hit as evidence that the reader replayed its data.
+    // The data reader uses partition 0 in two-phase mode and partition 1 in legacy mode.
     let warm = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let (rows, verbose) = scan(restrictive.clone()).await;
-            // The single output partition is 0; the candidate distributor uses
-            // synthetic partition 1. Only a partition-0 hit proves data replay.
+            // Inspect the data reader rather than candidate-stage cache hits.
             let data_metrics = verbose
-                .split("\"partition\":0, \"metrics\":")
+                .split(if two_phase {
+                    "\"partition\":0, \"metrics\":"
+                } else {
+                    "\"partition\":1, \"metrics\":"
+                })
                 .nth(1)
                 .and_then(|metrics| metrics.split("\"partition\":").next())
-                .expect("missing two-phase data-reader metrics");
+                .expect("missing output-partition metrics");
             if data_metrics.contains("\"range_cache_hit\":") {
                 return rows;
             }

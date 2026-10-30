@@ -373,7 +373,7 @@ async fn build_series_partition_range(
     let range = filter.range;
     let cache_key = filter
         .enable_range_cache
-        .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range))
+        .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range, &partition_pruner))
         .flatten();
     let ctx = stream_ctx.clone();
     let metrics = part_metrics.clone();
