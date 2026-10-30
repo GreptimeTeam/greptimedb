@@ -8,7 +8,7 @@ runs:
         node-version: 24
     - name: Run Node GitHub script tests
       shell: bash
-      run: node --test .github/scripts/query-regression-comment.test.cjs .github/scripts/heavy-ci-policy.test.cjs .github/scripts/tests/nightly-merge.test.cjs
+      run: node --test .github/scripts/tests/ci-cache-policy.test.cjs .github/scripts/query-regression-comment.test.cjs .github/scripts/heavy-ci-policy.test.cjs .github/scripts/tests/nightly-merge.test.cjs
     - name: Setup uv
       uses: astral-sh/setup-uv@v3
       with:
