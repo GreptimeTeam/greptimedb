@@ -964,12 +964,44 @@ fn native_output_tags(node: &NativeNode, source_tags: &[Vec<String>]) -> Option<
         // Its parameters are scalars, which carry no labels, so what the node reports are its
         // input's labels.
         NativeExpr::ParameterizedMap { input, .. } => native_output_tags(input, source_tags),
-        NativeExpr::Vector {
-            input,
-            op: BoundVectorOp::Histogram(_),
-        } => native_output_tags(input, source_tags)
-            .map(|tags| tags.into_iter().filter(|tag| tag != "le").collect()),
-        NativeExpr::Vector { .. } | NativeExpr::Merge { .. } => None,
+        NativeExpr::Vector { input, op } => match op {
+            BoundVectorOp::TopK { .. }
+            | BoundVectorOp::LimitK { .. }
+            | BoundVectorOp::LimitRatio { .. }
+            | BoundVectorOp::Sort(_) => native_output_tags(input, source_tags),
+            BoundVectorOp::Histogram(_) => native_output_tags(input, source_tags)
+                .map(|tags| tags.into_iter().filter(|tag| tag != "le").collect()),
+            BoundVectorOp::Absent { labels } => Some(
+                labels
+                    .tags()
+                    .iter()
+                    .map(|label| label.name.to_string())
+                    .collect(),
+            ),
+            BoundVectorOp::CountValues { label, group } => {
+                let mut tags = native_output_tags(input, source_tags)?;
+                if !tags.contains(&label.to_string()) {
+                    tags.push(label.to_string());
+                }
+                Some(match group {
+                    Grouping::By(names) => {
+                        let mut output = tags
+                            .into_iter()
+                            .filter(|tag| names.iter().any(|name| name.as_ref() == tag))
+                            .collect::<Vec<_>>();
+                        if !output.contains(&label.to_string()) {
+                            output.push(label.to_string());
+                        }
+                        output
+                    }
+                    Grouping::Without(names) => tags
+                        .into_iter()
+                        .filter(|tag| !names.iter().any(|name| name.as_ref() == tag))
+                        .collect(),
+                })
+            }
+        },
+        NativeExpr::Merge { .. } => None,
         NativeExpr::Binary {
             left,
             right,
@@ -1584,6 +1616,33 @@ mod tests {
         assert_eq!(
             Some(vec!["host".to_string()]),
             native_output_tags(aggregate.root(), &sources)
+        );
+        // Whole-vector operators that retain series keep the input labels, while `absent` derives
+        // its output names from the compiler-bound label set and `count_values` adds its value tag.
+        let hostname_source = [vec!["hostname".to_string()]];
+        for query in [
+            "topk(10, sum by (hostname) (rate(x[5m])))",
+            "bottomk(10, sum by (hostname) (rate(x[5m])))",
+            "limitk(10, sum by (hostname) (rate(x[5m])))",
+            "limit_ratio(0.5, sum by (hostname) (rate(x[5m])))",
+            "sort(sum by (hostname) (rate(x[5m])))",
+        ] {
+            assert_eq!(
+                Some(vec!["hostname".to_string()]),
+                native_output_tags(compiled_test_tree(query).root(), &hostname_source),
+                "{query}"
+            );
+        }
+        let absent = compiled_test_tree("absent(x{host=\"a\", job=\"b\"})");
+        assert_eq!(
+            Some(vec!["host".to_string(), "job".to_string()]),
+            native_output_tags(absent.root(), &sources)
+        );
+        let count_values =
+            compiled_test_tree("count_values by (host) (\"sample\", sum by (host) (x))");
+        assert_eq!(
+            Some(vec!["host".to_string(), "sample".to_string()]),
+            native_output_tags(count_values.root(), &sources)
         );
         // A label rewrite renames the label set below it, which this walk does not derive either.
         for query in [
