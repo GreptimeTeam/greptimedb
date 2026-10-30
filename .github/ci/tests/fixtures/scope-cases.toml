@@ -9,6 +9,16 @@
 # `[]` means none.
 
 [[case]]
+name = "target selector change exercises all admitted suites"
+paths = [".github/scripts/select-fuzz-targets.py"]
+suites = ["*"]
+
+[[case]]
+name = "target selection rules change exercises all admitted suites"
+paths = [".github/scripts/fuzz-target-rules.toml"]
+suites = ["*"]
+
+[[case]]
 name = "server crate: the whole fuzz fleet except the pruning suite"
 note = "A change to `src/api` reaches every suite that builds the server binary."
 paths = [
