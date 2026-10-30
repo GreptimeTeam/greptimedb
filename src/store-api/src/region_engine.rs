@@ -751,9 +751,23 @@ mod tests {
 
     #[test]
     fn region_statistic_flush_bytes_compatibility() {
-        let legacy_bytes = include_bytes!(
-            "../../../tests/compatibility/wire/region_statistic/without_flushed_parquet_bytes.json"
-        );
+        let legacy_bytes = br#"{
+            "num_rows": 1,
+            "memtable_size": 2,
+            "wal_size": 3,
+            "manifest_size": 4,
+            "sst_size": 5,
+            "sst_num": 6,
+            "index_size": 7,
+            "manifest": {
+                "Mito": {
+                    "manifest_version": 8,
+                    "flushed_entry_id": 9,
+                    "file_removed_cnt": 10
+                }
+            },
+            "written_bytes": 11
+        }"#;
         let mut statistic = RegionStatistic::deserialize_from_slice(legacy_bytes).unwrap();
         assert_eq!(statistic.flushed_parquet_bytes, 0);
         statistic.flushed_parquet_bytes = 1234;
