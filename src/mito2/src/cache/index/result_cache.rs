@@ -167,15 +167,7 @@ impl FulltextIndexKey {
         let mem_usage = predicates
             .iter()
             .map(|(target, request)| {
-                let target_size = size_of::<IndexTarget>()
-                    + match target {
-                        IndexTarget::ColumnId(_) => 0,
-                        IndexTarget::JsonPath(path) => path
-                            .path()
-                            .iter()
-                            .map(|part| size_of::<String>() + part.len())
-                            .sum(),
-                    };
+                let target_size = target.approx_mem_size();
                 let query_size = request
                     .queries
                     .iter()
