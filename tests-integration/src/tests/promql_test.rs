@@ -2106,9 +2106,32 @@ fn assert_two_source_native_plan(
     assert_eq!(display.matches("source=1").count(), 1, "{display}");
 }
 
-fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
+fn output_values_per_partition(
+    plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+) -> Option<Vec<u64>> {
     use datafusion::physical_plan::metrics::MetricValue;
 
+    if plan.name() != "FusedSeriesExec" {
+        return None;
+    }
+    let partition_count = plan.output_partitioning().partition_count();
+    let metrics = plan.metrics()?;
+    let mut values_by_partition = vec![0_u64; partition_count];
+    let mut found_metric = false;
+    for metric in metrics.iter() {
+        if metric.value().name() == "native.root.output_values"
+            && let MetricValue::Count { count, .. } = metric.value()
+            && let Some(partition) = metric.partition()
+            && let Some(value) = values_by_partition.get_mut(partition)
+        {
+            *value += count.value() as u64;
+            found_metric = true;
+        }
+    }
+    found_metric.then_some(values_by_partition)
+}
+
+fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
     assert_eq!(plan.name(), "FusedSeriesExec");
     assert_eq!(plan.output_partitioning().partition_count(), 4);
     assert_eq!(
@@ -2116,16 +2139,9 @@ fn assert_four_native_partitions(plan: &Arc<dyn datafusion::physical_plan::Execu
         4,
         "fused scan must have four partitions"
     );
-    let mut values_by_partition = [0_u64; 4];
-    for metric in plan.metrics().expect("fused plan metrics").iter() {
-        if metric.value().name() == "native.root.output_values"
-            && let MetricValue::Count { count, .. } = metric.value()
-            && let Some(partition) = metric.partition()
-            && let Some(value) = values_by_partition.get_mut(partition)
-        {
-            *value += count.value() as u64;
-        }
-    }
+    let Some(values_by_partition) = output_values_per_partition(plan) else {
+        return;
+    };
     assert!(
         values_by_partition.iter().all(|value| *value > 0),
         "every native execution partition must produce values: {values_by_partition:?}"
@@ -7235,6 +7251,44 @@ async fn native_promql_corpus_route_matrix() {
         } else {
             "legacy"
         };
+        // For aggregate-split, counts are per-partition partial-state rows, not final query values.
+        let mut partition_vectors = Vec::new();
+        for plan in &regions {
+            let mut stack = vec![plan.clone()];
+            while let Some(node) = stack.pop() {
+                if node.name() == "FusedSeriesExec"
+                    && let Some(counts) = output_values_per_partition(&node)
+                {
+                    partition_vectors.push(counts);
+                }
+                stack.extend(node.children().into_iter().cloned());
+            }
+        }
+        // This is not a parallelism measurement: the matrix fixtures are not designed to
+        // distribute series across partition boundaries, so [4,0,0,0] means rows were read,
+        // not that the prefix is parallel. See native_aggregate_test.rs::check_two_source_segregation
+        // for the partition-filling fixture that asserts all four partitions are used.
+        let partitions_report = if route == "legacy" {
+            "n/a".to_string()
+        } else if partition_vectors.is_empty() {
+            "no metric".to_string()
+        } else {
+            for counts in &partition_vectors {
+                assert!(
+                    counts.iter().any(|count| *count > 0),
+                    "{} native execution produced no output values in any partition: {counts:?}; region plans: {region_displays:?}",
+                    case.label
+                );
+            }
+            partition_vectors
+                .iter()
+                .map(|counts| {
+                    let nonempty = counts.iter().filter(|count| **count > 0).count();
+                    format!("{counts:?} ({nonempty}/{})", counts.len())
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let rows_equal = native_rows == legacy_rows;
         if case.label == "L07" || case.label == "Q01" {
             let mut repeated_values = Vec::new();
@@ -7293,13 +7347,14 @@ async fn native_promql_corpus_route_matrix() {
                 }
             });
         let row = format!(
-            "{} | {} | {} | {} | {:.6e} | {}",
+            "{} | {} | {} | {} | {:.6e} | {} | {}",
             case.label,
             route,
             if route == "legacy" { "unknown" } else { "—" },
             rows_equal,
             max_rel_diff,
-            value_column
+            value_column,
+            partitions_report
         );
         common_telemetry::info!(
             "{row} | legacy rows={legacy_rows:?} legacy columns={legacy_columns:?} native rows={native_rows:?} native columns={native_columns:?} max_rel_diff={max_rel_diff:.6e} root:\n{root_display} region_plans={region_displays:?}"
@@ -7307,7 +7362,7 @@ async fn native_promql_corpus_route_matrix() {
         table_rows.push(row);
     }
     common_telemetry::info!(
-        "label | route | gate-if-legacy | rows==legacy | native value column\n{}",
+        "label | route | gate-if-legacy | rows==legacy | max rel diff | native value column | partitions used\n{}",
         table_rows.join("\n")
     );
 }
