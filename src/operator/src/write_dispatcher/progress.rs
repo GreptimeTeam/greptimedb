@@ -229,11 +229,11 @@ impl WriteDispatcher {
 
     async fn send_tracked_write(
         &self,
-        write: RoutedWrite,
+        mut write: RoutedWrite,
         histogram: Option<&Histogram>,
     ) -> (Vec<usize>, WriteAttempt) {
-        let owners = write.owners.clone().unwrap_or_default();
-        let attempt = if let Some(retry) = &self.retry {
+        let owners = write.owners.take().unwrap_or_default();
+        let mut attempt = if let Some(retry) = &self.retry {
             retry.send(write, histogram).await
         } else {
             let _timer = histogram.map(Histogram::start_timer);
@@ -246,6 +246,13 @@ impl WriteDispatcher {
                 },
             }
         };
+        if let WriteAttempt::Failed {
+            request: Some(write),
+            ..
+        } = &mut attempt
+        {
+            write.owners = Some(owners.clone());
+        }
         (owners, attempt)
     }
 

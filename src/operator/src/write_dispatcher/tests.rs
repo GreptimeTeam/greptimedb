@@ -2474,8 +2474,13 @@ async fn test_tracked_dispatch_records_each_send_attempt() {
                         owners: vec![0],
                     },
                     TrackedWrite {
-                        request: build_insert_request(&[2]),
-                        owners: vec![1],
+                        request: build_partitioned_request(
+                            WriteKind::Insert,
+                            2,
+                            None,
+                            &[20, 21, 22],
+                        ),
+                        owners: vec![1, 0, 1],
                     },
                 ],
                 2,
@@ -2489,10 +2494,10 @@ async fn test_tracked_dispatch_records_each_send_attempt() {
             server.attempt_counts()[&RegionId::new(1, 2).as_u64()],
             expected_attempts
         );
-        assert_eq!(progress[0].affected_rows, 1);
-        assert!(progress[0].error.is_none());
         let failed = failures > max_retries;
-        assert_eq!(progress[1].affected_rows, usize::from(!failed));
+        assert_eq!(progress[0].affected_rows, 1 + usize::from(!failed));
+        assert_eq!(progress[0].error.is_some(), failed);
+        assert_eq!(progress[1].affected_rows, 2 * usize::from(!failed));
         assert_eq!(progress[1].error.is_some(), failed);
     }
 }

@@ -344,16 +344,15 @@ async fn flush_batch_physical_tracked(
         if let Some(batch) =
             region_write::plan_region_batch(&combined_batch, physical_table_id, region, &mask)?
         {
-            for request in region_write::encode_region_write_requests(
-                vec![batch],
+            let request = region_write::encode_region_write_request(
+                batch,
                 ctx.skip_wal(),
                 &partition_versions,
-            )? {
-                writes.push(TrackedWrite {
-                    request,
-                    owners: selected.clone(),
-                });
-            }
+            )?;
+            writes.push(TrackedWrite {
+                request,
+                owners: selected,
+            });
         }
     }
     let progress = write_dispatcher.dispatch_tracked(writes, inputs).await;

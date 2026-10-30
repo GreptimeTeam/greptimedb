@@ -272,50 +272,43 @@ pub(crate) fn plan_region_batches(
     Ok(planned_batches)
 }
 
-/// Encodes each region batch with the partition version used to select its rows.
-pub(crate) fn encode_region_write_requests(
-    planned_batches: Vec<PlannedRegionBatch>,
+/// Encodes a region batch with the partition version used to select its rows.
+pub(crate) fn encode_region_write_request(
+    planned: PlannedRegionBatch,
     skip_wal: bool,
     partition_versions: &HashMap<u32, Option<u64>>,
-) -> Result<Vec<RegionRequest>> {
-    let mut region_writes = Vec::with_capacity(planned_batches.len());
-    for planned in planned_batches {
-        let region_id = planned.region_id;
-        let (schema_bytes, data_header, payload) = {
-            let _timer = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
-                .with_label_values(&["flush_physical_encode_ipc"])
-                .start_timer();
-            flight::record_batch_to_ipc(planned.batch).map_err(map_ipc_error)?
-        };
+) -> Result<RegionRequest> {
+    let region_id = planned.region_id;
+    let (schema_bytes, data_header, payload) = {
+        let _timer = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_physical_encode_ipc"])
+            .start_timer();
+        flight::record_batch_to_ipc(planned.batch).map_err(map_ipc_error)?
+    };
 
-        let request = RegionRequest {
-            header: Some(RegionRequestHeader {
-                tracing_context: TracingContext::from_current_span().to_w3c(),
-                ..Default::default()
-            }),
-            body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
-                skip_wal,
-                region_id: region_id.as_u64(),
-                partition_expr_version: partition_versions
-                    .get(&region_id.region_number())
-                    .copied()
-                    .flatten()
-                    .map(|value| PartitionExprVersion { value }),
-                // Set aligned_schema_version to None so that datanode will check the batch schema again to see if any
-                // column is missing.
-                aligned_schema_version: None,
-                body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
-                    schema: schema_bytes,
-                    data_header,
-                    payload,
-                })),
+    Ok(RegionRequest {
+        header: Some(RegionRequestHeader {
+            tracing_context: TracingContext::from_current_span().to_w3c(),
+            ..Default::default()
+        }),
+        body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+            skip_wal,
+            region_id: region_id.as_u64(),
+            partition_expr_version: partition_versions
+                .get(&region_id.region_number())
+                .copied()
+                .flatten()
+                .map(|value| PartitionExprVersion { value }),
+            // Set aligned_schema_version to None so that datanode will check the batch schema again to see if any
+            // column is missing.
+            aligned_schema_version: None,
+            body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                schema: schema_bytes,
+                data_header,
+                payload,
             })),
-        };
-
-        region_writes.push(request);
-    }
-
-    Ok(region_writes)
+        })),
+    })
 }
 
 pub(in crate::batcher::logical_table) fn map_ipc_error(error: GrpcError) -> Error {
@@ -352,7 +345,7 @@ mod tests {
     use crate::batcher::logical_table::batch_convert::{self, RecordBatchWithTsIdx, TableBatch};
     use crate::batcher::logical_table::region_write::{
         PhysicalFlushWriteDispatcher, PlannedRegionBatch, WriteDispatcherPhysicalFlushAdapter,
-        encode_region_write_requests, plan_region_batches,
+        encode_region_write_request, plan_region_batches,
     };
     use crate::metrics;
 
@@ -448,13 +441,9 @@ mod tests {
         assert_eq!(1, planned_batches[1].num_rows());
         assert_eq!(4, planned_batches[1].batch.num_columns());
 
-        let writes = encode_region_write_requests(
-            planned_batches,
-            false,
-            &HashMap::from([(1, Some(7)), (2, Some(8))]),
-        )
-        .unwrap();
-        for (index, write) in writes.into_iter().enumerate() {
+        let partition_versions = HashMap::from([(1, Some(7)), (2, Some(8))]);
+        for (index, planned) in planned_batches.into_iter().enumerate() {
+            let write = encode_region_write_request(planned, false, &partition_versions).unwrap();
             let Some(region_request::Body::BulkInsert(request)) = write.body else {
                 panic!("expected bulk")
             };
@@ -485,9 +474,9 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_region_write_requests_builds_bulk_insert_requests() {
-        check_encode_region_write_requests(false);
-        check_encode_region_write_requests(true);
+    fn test_encode_region_write_request_builds_bulk_insert_request() {
+        check_encode_region_write_request(false);
+        check_encode_region_write_request(true);
     }
 
     struct TwoRegionPartitionRule {
@@ -526,7 +515,7 @@ mod tests {
         }
     }
 
-    fn check_encode_region_write_requests(skip_wal: bool) {
+    fn check_encode_region_write_request(skip_wal: bool) {
         let planned_batch = PlannedRegionBatch {
             region_id: RegionId::new(1024, 1),
             batch: RecordBatch::try_new(
@@ -547,15 +536,11 @@ mod tests {
             )
             .unwrap(),
         };
-        let writes = encode_region_write_requests(
-            vec![planned_batch],
-            skip_wal,
-            &HashMap::from([(1, Some(7))]),
-        )
-        .unwrap();
+        let write =
+            encode_region_write_request(planned_batch, skip_wal, &HashMap::from([(1, Some(7))]))
+                .unwrap();
 
-        assert_eq!(1, writes.len());
-        let Some(region_request::Body::BulkInsert(request)) = &writes[0].body else {
+        let Some(region_request::Body::BulkInsert(request)) = &write.body else {
             panic!("expected bulk insert request");
         };
         assert_eq!(RegionId::new(1024, 1).as_u64(), request.region_id);
