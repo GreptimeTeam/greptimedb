@@ -6438,7 +6438,7 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
     assert_eq!(native, legacy, "{query}: answers differ");
 }
 
-/// Different selector offsets on two table sources stay bound to their own segment scans.
+/// Range-function prefixes on two table sources retain their own samples in each segment.
 #[tokio::test(flavor = "multi_thread")]
 async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bounds() {
     common_telemetry::init_default_ut_logging();
@@ -6583,6 +6583,113 @@ async fn native_promql_cross_table_aggregate_offsets_keep_independent_scan_bound
     // Per-partition segment output evidence is asserted by
     // `native_aggregate_test.rs::check_two_source_segregation`. Here, MergeScanExec keeps its
     // remote segment plan privately and the observer cannot reach that region-side physical plan.
+}
+
+/// A range function on each side of a cross-table division remains a cut candidate.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_promql_cross_table_range_aggregate_segments_keep_windows() {
+    common_telemetry::init_default_ut_logging();
+    let config = mito2::config::MitoConfig {
+        experimental_series_scan_v2: true,
+        ..Default::default()
+    };
+    let (standalone, observer) = native_test_instance(
+        GreptimeDbStandaloneBuilder::new("native_promql_cross_table_range_segments")
+            .with_mito_config(config),
+    )
+    .await;
+    let instance = standalone.fe_instance().clone();
+    execute_all(
+        &instance,
+        "CREATE TABLE rng_a (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         CREATE TABLE rng_b (host STRING, ts TIMESTAMP TIME INDEX, val DOUBLE, PRIMARY KEY(host)) ENGINE=mito; \
+         INSERT INTO rng_a VALUES ('a', 0, 0), ('a', 60000, 60), ('a', 120000, 120); \
+         INSERT INTO rng_b VALUES ('a', 0, 0), ('a', 60000, 30), ('a', 120000, 90)",
+        QueryContext::arc(),
+    )
+    .await;
+
+    // At t=60 the 2m increases are 60/30 = 2. At t=120 they are 120/90 = 4/3,
+    // so a window bound accidentally shared across sources changes the stepwise ratio.
+    let query = "sum(increase(rng_a[2m])) / sum(increase(rng_b[2m]))";
+    let sql = format!("TQL EVAL (60, 120, '1m') {query}");
+    let sorted_rows = |mut rows: Vec<(i64, f64)>| {
+        rows.sort_unstable_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then_with(|| left.1.total_cmp(&right.1))
+        });
+        rows
+    };
+
+    observer.clear();
+    let legacy_rows = sorted_rows(eval_values(native_tql_output(&instance, &sql, false).await));
+    let legacy_root = observer.root_plan();
+    let mut stack = vec![legacy_root];
+    while let Some(node) = stack.pop() {
+        assert_ne!(node.name(), "FusedSeriesExec", "legacy plan must not fuse");
+        assert_ne!(
+            node.name(),
+            "AggregateFinalizeExec",
+            "legacy plan must not finalize"
+        );
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(legacy_rows, vec![(60_000, 2.0), (120_000, 4.0 / 3.0)]);
+    assert_ne!(
+        legacy_rows[0].1, legacy_rows[1].1,
+        "different step values are needed to expose a wrong window boundary"
+    );
+
+    observer.clear();
+    let native_rows = sorted_rows(eval_values(native_tql_output(&instance, &sql, true).await));
+    assert_eq!(
+        native_rows, legacy_rows,
+        "native range result differs from legacy"
+    );
+
+    observer.clear();
+    let _ = native_tql_output(&instance, &sql, true).await;
+    let root = observer.root_plan();
+    let root_display = datafusion::physical_plan::displayable(root.as_ref())
+        .indent(true)
+        .to_string();
+    let mut fused = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        if node.name() == "FusedSeriesExec" {
+            fused.push(node.clone());
+        }
+        stack.extend(node.children().into_iter().cloned());
+    }
+    assert_eq!(fused.len(), 1, "one frontend parent:\n{root_display}");
+    let children = fused[0].children();
+    assert_eq!(children.len(), 2, "two source segments:\n{root_display}");
+    let scans = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let scan = if child.is::<CooperativeExec>() {
+                let wrapped = child.children();
+                assert_eq!(wrapped.len(), 1, "child {index} wrapper:\\n{root_display}");
+                wrapped[0]
+            } else {
+                child
+            };
+            scan.downcast_ref::<MergeScanExec>()
+                .unwrap_or_else(|| panic!("child {index} is not MergeScanExec:\\n{root_display}"))
+        })
+        .collect::<Vec<_>>();
+    let scan_debug = scans
+        .iter()
+        .map(|scan| format!("{scan:?}"))
+        .collect::<Vec<_>>();
+    assert!(scan_debug.iter().any(|debug| debug.contains("rng_a")));
+    assert!(scan_debug.iter().any(|debug| debug.contains("rng_b")));
+    assert!(scan_debug.iter().all(|debug| debug.contains("FusedSeries")));
+    // Per-partition segment evidence is covered by
+    // `native_aggregate_test.rs::check_two_source_segregation`; this harness cannot access the
+    // private region-side physical segment held by each MergeScanExec.
 }
 
 /// `round` and the `clamp` functions read a varying parameter at each step, as Prometheus does. A
