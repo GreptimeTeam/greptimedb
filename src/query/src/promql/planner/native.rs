@@ -683,12 +683,13 @@ impl PromPlanner {
         {
             return Ok(None);
         }
-        if !per_partition && !multi_input {
+        if !per_partition {
             // A tree whose fold can be split keeps that plan: it exports aggregate state rather
             // than whole samples, so it moves less between the two halves than a sample boundary
             // would. The general segmentation below is the fallback for the trees it declines,
             // which are the ones its per-series prefix cannot express.
-            if selectors.len() == 1
+            if !multi_input
+                && selectors.len() == 1
                 && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
             {
                 let (legacy_fields, legacy_tags) = self
@@ -721,11 +722,12 @@ impl PromPlanner {
                     single_input_context,
                 )));
             }
-            // The segmentation below is for a statement of one selector: it cuts that selector's
-            // per-series prefix out from under a whole-vector node. A statement reading several
-            // selectors has more than one such prefix and a matching relation between them, which
-            // this route does not place yet, so it keeps the plan it had.
-            if selectors.len() != 1 {
+            // A statement naming several selectors declines unless those selectors read more than
+            // one table. Without that, the count alone says nothing about whether the tree has more
+            // than one input to place, and the shapes it would admit - one metric named twice under
+            // a fold, such as `sum(m) / m` or `m + sum(m)` - are a plan the existing path already
+            // answers. A cut carrying two sources is declined in `build_inner_segment`.
+            if selectors.len() != 1 && !cross_table {
                 return Ok(None);
             }
             let plan = Box::pin(segment_tree(
@@ -743,10 +745,12 @@ impl PromPlanner {
                 &metric,
             ))
             .await?;
-            return match plan {
-                Some(plan) => Ok(Some((plan, single_input_context))),
-                None => Ok(None),
-            };
+            if let Some(plan) = plan {
+                return Ok(Some((plan, single_input_context)));
+            }
+            if !multi_input {
+                return Ok(None);
+            }
         }
         let tree = compiled.tree;
         // The tags are asked for before the fields, because the walk answers for a tree the
@@ -1199,9 +1203,15 @@ fn build_inner_segment(
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
-    // A segment carries one source's identity; naming that source keeps cutting independent of
-    // how many selectors the statement has. MatchingLocal can satisfy the cut predicate while
-    // reading two sources, but one segment cannot carry both sources' metric, tags, and time index.
+    // A segment carries one source's identity, and the scan it binds follows from it: binding the
+    // segment's own scan is what lets the physical planner place it in a region, and binding its
+    // own metric is what keeps two segments over two sources from reading the same series. Naming
+    // that source keeps cutting independent of how many selectors the statement has.
+    //
+    // One segment per source is this route's present scope, not a property of segments: a matching
+    // subtree over two sources is a cut candidate (`MatchingLocal` needs no gather), and such a
+    // statement falls back for want of a binding that carries two sources. `sum(topk(1, m / n))`
+    // is that shape.
     let &[index] = sources.as_slice() else {
         return None;
     };

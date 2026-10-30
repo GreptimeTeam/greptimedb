@@ -4785,18 +4785,52 @@ async fn native_promql_metric_two_aggregate_pair_matches_legacy() {
         );
         assert_eq!(legacy_rows, expected, "legacy: {query}");
 
-        // The native plan: one two-input node over both logical tables' scans, and no split.
+        // The native plan: the whole-vector parent at the frontend, one per-series prefix segment
+        // per region. Each segment binds its own source's metric, which is what makes the division
+        // read two different metrics rather than one read twice.
         observer.clear();
         let (native_columns, native_rows) =
             native_labelled_rows(native_tql_output(&instance, &sql, true).await).await;
-        let plan = observer.take();
-        assert_eq!(plan.name(), "FusedSeriesExec", "{query}");
-        assert_eq!(plan.output_partitioning().partition_count(), 1, "{query}");
-        assert_eq!(plan.children().len(), 2, "{query}");
+        let root = observer.root_plan();
         assert_eq!(
-            observer.take_raw_sources().len(),
+            root.name(),
+            "FusedSeriesExec",
+            "{query}: the parent is the frontend's own: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        assert_eq!(root.output_partitioning().partition_count(), 1, "{query}");
+        assert_eq!(
+            root.children().len(),
             2,
-            "{query}: each logical table answers through its own raw source"
+            "{query}: one input per segmented prefix: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+        );
+        // Each region answers one prefix: a repartition over the segment that evaluates the
+        // selector, over the scan bound to that selector's metric.
+        fn scan_metric(plan: &Arc<dyn datafusion::physical_plan::ExecutionPlan>) -> Option<String> {
+            if let Some(scan) = plan.downcast_ref::<SeriesScanExec>() {
+                return match scan.label_source() {
+                    store_api::region_engine::RawLabelSource::PrimaryKey {
+                        metric_name, ..
+                    } => Some(metric_name.to_string()),
+                    _ => None,
+                };
+            }
+            plan.children().into_iter().find_map(scan_metric)
+        }
+        let region_metrics = observer
+            .region_plans()
+            .iter()
+            .filter_map(scan_metric)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            std::collections::BTreeSet::from([
+                "native_pair_demo".to_string(),
+                "native_pair_other".to_string(),
+            ]),
+            region_metrics,
+            "{query}: each logical table must be scanned as its own metric: {}",
+            datafusion::physical_plan::displayable(root.as_ref()).indent(true)
         );
         assert!(
             !holds_split_merge(&observer.root_plan()),
@@ -6335,17 +6369,30 @@ async fn native_promql_cuts_segments_only_where_a_gather_would_swallow_them() {
         assert_eq!(native, legacy, "{query}: answers differ");
     }
 
-    // This two-table statement stays on the existing plan: a segment over `RawSeriesSource` cannot
-    // be region-local, so the cut cannot keep the prefix partitioned.
+    // This two-table statement is segmented: each segment binds its own scan, so it can be placed
+    // in a region. A cut carrying two sources is still declined in `build_inner_segment`, so each
+    // prefix the parent receives reads exactly one source.
     let query = "sum(max by (host) (seg_a)) / sum(seg_b)";
     let sql = format!("TQL EVAL (0, 1, '1s') {query}");
     observer.clear();
     let native = eval_text(native_tql_output(&instance, &sql, true).await);
     let root = observer.root_plan();
-    assert!(fused_in(&root).is_empty(), "{query}: {root:?}");
+    let frontend = fused_in(&root);
+    let mut regions = 0;
     for plan in observer.region_plans() {
-        assert!(fused_in(&plan).is_empty(), "{query}: {plan:?}");
+        regions += fused_in(&plan).len();
     }
+    assert_eq!(
+        frontend.len(),
+        1,
+        "{query}: the whole-vector parent is the frontend's own: {}",
+        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+    );
+    assert!(
+        regions >= 1,
+        "{query}: each prefix segment runs in a region: {}",
+        datafusion::physical_plan::displayable(root.as_ref()).indent(true)
+    );
     let legacy = eval_text(native_tql_output(&instance, &sql, false).await);
     assert_eq!(native, legacy, "{query}: answers differ");
 }

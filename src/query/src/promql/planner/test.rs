@@ -2315,9 +2315,28 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
             fused.partial_fold().is_none(),
             "{query}: a multi-input aggregate is not a split: {native}"
         );
+        let input_metrics = fused
+            .inputs()
+            .iter()
+            .map(|input| {
+                let LogicalPlan::Extension(Extension { node }) = input else {
+                    panic!("{query}: expected a segment FusedSeries input, got {input}");
+                };
+                node.as_any()
+                    .downcast_ref::<FusedSeries>()
+                    .unwrap_or_else(|| {
+                        panic!("{query}: expected a segment FusedSeries, got {input}")
+                    })
+                    .binding()
+                    .metric_name
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{query}: segment has no metric binding: {input}"))
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             vec!["some_metric".to_string(), "other_metric".to_string()],
-            fused_input_metrics(&native),
+            input_metrics,
             "{query}: {native}"
         );
     }
@@ -3255,6 +3274,100 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
         assert!(!prefix.contains("Map"), "{query}: {prefix}");
         assert!(!prefix.contains("Aggregate"), "{query}: {prefix}");
     }
+}
+
+/// A two-source whole-vector statement uses two per-source prefix segments under one parent, and
+/// each segment binds its own source metric.
+#[tokio::test]
+async fn native_fused_multi_source_aggregate_segmentation_plan() {
+    let provider = build_test_table_provider_with_tsid(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "m".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "n".to_string()),
+        ],
+        1,
+        1,
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("sum(max by (tag_0) (m)) / sum(n)", true, provider)
+            .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "expected two root children: {plan:?}"
+    );
+    for (child, expected_metric) in fused.children().iter().zip(["m", "n"]) {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected segment FusedSeries for {expected_metric}: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| {
+                panic!("expected segment FusedSeries for {expected_metric}: {plan:?}")
+            });
+        assert_eq!(
+            Some(expected_metric),
+            segment.binding().metric_name.as_deref(),
+            "segment metric binding should match its source: {plan:?}"
+        );
+        assert_eq!(
+            1,
+            segment.children().len(),
+            "segment should have one bare scan: {plan:?}"
+        );
+        let LogicalPlan::TableScan(scan) = &segment.children()[0] else {
+            panic!("segment should bind directly to its TableScan: {plan:?}");
+        };
+        assert_eq!(
+            "phy",
+            scan.table_name.table().to_string(),
+            "segment should bind directly to the shared physical table scan: {plan:?}"
+        );
+    }
+}
+
+/// Two sources on two physical tables: each segment binds its own table's scan, not the first
+/// source's scan for both.
+#[tokio::test]
+async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(max by (tag_0) (some_metric)) / sum(other_metric)",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    let mut bound = Vec::new();
+    for child in fused.children() {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected a segment FusedSeries: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| panic!("expected a segment FusedSeries: {plan:?}"));
+        let metric = segment
+            .binding()
+            .metric_name
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("segment binds no metric: {plan:?}"));
+        let [LogicalPlan::TableScan(scan)] = segment.children() else {
+            panic!("a segment binds exactly one scan: {plan:?}");
+        };
+        bound.push((metric, scan.table_name.table().to_string()));
+    }
+    assert_eq!(
+        vec![
+            ("some_metric".to_string(), "some_metric".to_string()),
+            ("other_metric".to_string(), "other_metric".to_string()),
+        ],
+        bound,
+        "each segment binds the scan of the table its metric lives in: {plan:?}"
+    );
 }
 
 /// A nested aggregate's outer names are the existing plan's: `sum(avg(x))` reports the outer `sum`.
