@@ -3297,11 +3297,17 @@ async fn native_fused_histogram_quantile_over_aggregate_splits() {
     assert!(display.contains("histogram_quantile"), "{display}");
 }
 
-/// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
-/// samples, a binary operation whose sibling is data would match one side's series before the merge,
-/// a sibling a call computes has no native node at all, and a group by a value field cannot be named
-/// by the state rows. A literal scalar sibling is not one of them: the operation is computed per
-/// series below the fold, or rebuilt over the merged values above it.
+/// A shape the split cannot keep correct keeps the existing plan: a binary operation whose sibling
+/// is data would match one side's series before the merge, a sibling a call computes has no native
+/// node at all, and a group by a value field cannot be named by the state rows. A literal scalar
+/// sibling is not one of them: the operation is computed per series below the fold, or rebuilt over
+/// the merged values above it.
+///
+/// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not on this list. `timestamp` over a
+/// computed vector reports the evaluation time, which is what Prometheus reports too - an aggregate
+/// makes a new sample at the evaluation instant rather than inheriting a stored one's time - and
+/// `instant_eval.rs` says so where it projects the grid's own timestamps. The segmentation route
+/// answers those, and `native_promql_timestamp_over_a_computed_vector` pins the values.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
@@ -3314,8 +3320,6 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
-        "timestamp(sum(some_metric))",
-        "sum(timestamp(abs(some_metric)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;

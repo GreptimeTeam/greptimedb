@@ -50,12 +50,13 @@ use datatypes::series::SeriesOrdering;
 use datatypes::series::samples::{FieldSpec, SeriesSchema};
 use datatypes::series::time::EvalGrid;
 use promql::extension_plan::{
-    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, RawSeriesSource,
+    AggregateFinalize, FusedOutputFormat, FusedSeries, FusedSeriesBinding, InputLocality,
+    RawSeriesSource, input_locality,
 };
 use promql::native::execute::NativeExecutionState;
 use promql::native::plan::{
-    AggregateStage, BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp, NativeExpr,
-    NativeNode, NativeTree, NativeType, reads_across_series,
+    BoundAggregate, BoundInput, BoundVectorOp, Grouping, MapOp, NativeExpr, NativeNode, NativeTree,
+    NativeType, reads_across_series,
 };
 use promql::vector_match::{Cardinality, MatchingLabels, SetOp};
 use promql_parser::label::{METRIC_NAME, Matchers};
@@ -671,11 +672,55 @@ impl PromPlanner {
             return Ok(None);
         }
         if !per_partition && !multi_input {
-            if let Some(plan) = Box::pin(self.try_plan_topk_segment(
+            // A tree whose fold can be split keeps that plan: it exports aggregate state rather
+            // than whole samples, so it moves less between the two halves than a sample boundary
+            // would. The general segmentation below is the fallback for the trees it declines,
+            // which are the ones its per-series prefix cannot express.
+            if selectors.len() == 1
+                && AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
+            {
+                let (legacy_fields, legacy_tags) = self
+                    .legacy_output_columns(prom_expr, query_engine_state)
+                    .await?;
+                let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
+                let Some(rawinput) = children.into_iter().next() else {
+                    return Ok(None);
+                };
+                let node = match AggregateFinalize::try_new(
+                    Arc::from(prom_expr.to_string()),
+                    compiled.tree,
+                    FusedSeriesBinding {
+                        grid,
+                        time_index: time,
+                        tags,
+                        metric_name: metric,
+                    },
+                    rawinput,
+                    output_schema,
+                ) {
+                    Ok(node) => node,
+                    Err(DataFusionError::NotImplemented(_)) => return Ok(None),
+                    Err(error) => return Err(error).context(DataFusionPlanningSnafu),
+                };
+                return Ok(Some((
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(node),
+                    }),
+                    single_input_context,
+                )));
+            }
+            // The segmentation below is for a statement of one selector: it cuts that selector's
+            // per-series prefix out from under a whole-vector node. A statement reading several
+            // selectors has more than one such prefix and a matching relation between them, which
+            // this route does not place yet, so it keeps the plan it had.
+            if selectors.len() != 1 {
+                return Ok(None);
+            }
+            let plan = Box::pin(segment_tree(
+                self,
                 prom_expr,
                 query_engine_state,
                 &compiled.tree,
-                selectors.len(),
                 &children,
                 &source_tags,
                 &grid,
@@ -683,44 +728,11 @@ impl PromPlanner {
                 &tags,
                 &metric,
             ))
-            .await?
-            {
-                return Ok(Some((plan, single_input_context)));
-            }
-            if selectors.len() != 1
-                || !AggregateFinalize::can_split(&compiled.tree, &series_schema.fields, &time)
-            {
-                return Ok(None);
-            }
-            let (legacy_fields, legacy_tags) = self
-                .legacy_output_columns(prom_expr, query_engine_state)
-                .await?;
-            let output_schema = fused_output_schema(&legacy_fields, &legacy_tags, &time)?;
-            let Some(rawinput) = children.into_iter().next() else {
-                return Ok(None);
+            .await?;
+            return match plan {
+                Some(plan) => Ok(Some((plan, single_input_context))),
+                None => Ok(None),
             };
-            let node = match AggregateFinalize::try_new(
-                Arc::from(prom_expr.to_string()),
-                compiled.tree,
-                FusedSeriesBinding {
-                    grid,
-                    time_index: time,
-                    tags,
-                    metric_name: metric,
-                },
-                rawinput,
-                output_schema,
-            ) {
-                Ok(node) => node,
-                Err(DataFusionError::NotImplemented(_)) => return Ok(None),
-                Err(error) => return Err(error).context(DataFusionPlanningSnafu),
-            };
-            return Ok(Some((
-                LogicalPlan::Extension(Extension {
-                    node: Arc::new(node),
-                }),
-                single_input_context,
-            )));
         }
         let tree = compiled.tree;
         // The tags are asked for before the fields, because the walk answers for a tree the
@@ -830,131 +842,6 @@ impl PromPlanner {
         Ok((legacy_fields, legacy_tags))
     }
 
-    /// Plans `sum(topk(k, prefix))` as two segments: the prefix per series, the global fold above.
-    ///
-    /// The cut goes below the `topk`, not below the `sum`. A segment holding a `topk` reads across
-    /// series and would gather its own input before evaluating the prefix, which is exactly the
-    /// parallelism the split exists to keep; cutting below the `topk` leaves the prefix on the scan's
-    /// partitions and puts the whole-vector work in one place above it.
-    ///
-    /// Two segments are built from one compiled tree rather than from re-parsed text: the child is
-    /// the prefix subtree, and the parent is the original tree with that subtree replaced by an
-    /// input bound to the child's evaluated frame. `None` for every other shape, so the statement
-    /// falls through to the routes that existed before this one.
-    #[allow(clippy::too_many_arguments)]
-    async fn try_plan_topk_segment(
-        &mut self,
-        prom_expr: &PromExpr,
-        query_engine_state: &QueryEngineState,
-        tree: &NativeTree,
-        selector_count: usize,
-        children: &[LogicalPlan],
-        source_tags: &[Vec<String>],
-        grid: &Arc<EvalGrid>,
-        time_index: &str,
-        tags: &[String],
-        metric: &Option<Arc<str>>,
-    ) -> Result<Option<LogicalPlan>> {
-        if selector_count != 1 {
-            return Ok(None);
-        }
-        let NativeExpr::Aggregate { input, op } = &tree.root().expr else {
-            return Ok(None);
-        };
-        if op.stage != AggregateStage::Complete {
-            return Ok(None);
-        }
-        let NativeExpr::Vector {
-            input: prefix,
-            op: BoundVectorOp::TopK { .. },
-        } = &input.expr
-        else {
-            return Ok(None);
-        };
-        let Ok(child_tree) = NativeTree::try_new((**prefix).clone()) else {
-            return Ok(None);
-        };
-        let Ok(frame_schema) = FusedSeries::series_frame_schema(&child_tree) else {
-            return Ok(None);
-        };
-        let Ok(child_schema) = DFSchema::try_from(frame_schema.as_ref().clone()) else {
-            return Ok(None);
-        };
-        // Only the statement root is named by the text; the child is named for what it reads, so a
-        // plan shows which segment is which.
-        let Ok(child_plan) = FusedSeries::try_new_with_format(
-            Arc::from(format!("{prom_expr} (per-series prefix)").as_str()),
-            child_tree,
-            FusedSeriesBinding {
-                grid: Arc::clone(grid),
-                time_index: time_index.to_string(),
-                tags: tags.to_vec(),
-                metric_name: metric.clone(),
-            },
-            children.to_vec(),
-            Arc::new(child_schema),
-            FusedOutputFormat::SeriesFrame,
-        ) else {
-            return Ok(None);
-        };
-
-        let mut parent = tree.root().clone();
-        let NativeExpr::Aggregate { input, .. } = &mut parent.expr else {
-            return Ok(None);
-        };
-        let NativeExpr::Vector {
-            input: vector_input,
-            ..
-        } = &mut input.expr
-        else {
-            return Ok(None);
-        };
-        **vector_input = NativeNode {
-            expr: NativeExpr::Input(BoundInput {
-                source_index: 0,
-                output: prefix.output.clone(),
-                ordering: SeriesOrdering::Contiguous,
-            }),
-            output: prefix.output.clone(),
-        };
-        let Ok(parent_tree) = NativeTree::try_new(parent) else {
-            return Ok(None);
-        };
-        let Some(output_schema) = self
-            .fused_root_schema(
-                prom_expr,
-                query_engine_state,
-                &parent_tree,
-                source_tags,
-                time_index,
-            )
-            .await
-        else {
-            return Ok(None);
-        };
-        let Ok(parent_plan) = FusedSeries::try_new(
-            Arc::from(prom_expr.to_string()),
-            parent_tree,
-            FusedSeriesBinding {
-                grid: Arc::clone(grid),
-                time_index: time_index.to_string(),
-                // A node over an evaluated input binds neither tags nor a metric of its own: the
-                // frame it reads names each series.
-                tags: Vec::new(),
-                metric_name: metric.clone(),
-            },
-            vec![LogicalPlan::Extension(Extension {
-                node: Arc::new(child_plan),
-            })],
-            output_schema,
-        ) else {
-            return Ok(None);
-        };
-        Ok(Some(LogicalPlan::Extension(Extension {
-            node: Arc::new(parent_plan),
-        })))
-    }
-
     /// The columns a [`FusedSeries`] node over `tree` produces.
     ///
     /// The field names are the compiled root's own, and the tag names are the ones the tree
@@ -1026,6 +913,383 @@ impl PromPlanner {
             lookback_delta: Duration::from_millis(self.ctx.lookback_delta as u64),
         })
     }
+}
+
+/// The subtrees a [`NativeNode`] reads, in the order the node evaluates them.
+fn node_children(expr: &NativeExpr) -> Vec<&NativeNode> {
+    match expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => Vec::new(),
+        NativeExpr::VectorOf { input }
+        | NativeExpr::Instant { input, .. }
+        | NativeExpr::Merge { input }
+        | NativeExpr::Window { input, .. }
+        | NativeExpr::Map { input, .. }
+        | NativeExpr::Timestamp { input }
+        | NativeExpr::Aggregate { input, .. }
+        | NativeExpr::Vector { input, .. } => vec![input],
+        NativeExpr::ParameterizedMap {
+            input, parameters, ..
+        } => std::iter::once(input.as_ref())
+            .chain(parameters.iter())
+            .collect(),
+        NativeExpr::Binary { left, right, .. } | NativeExpr::Set { left, right, .. } => {
+            vec![left, right]
+        }
+        NativeExpr::Info { base, info, .. } => vec![base, info],
+    }
+}
+
+/// `expr` with its children replaced, in the order [`node_children`] reports them.
+fn with_node_children(
+    expr: &NativeExpr,
+    mut children: std::vec::IntoIter<NativeNode>,
+) -> NativeExpr {
+    let mut next = || children.next().expect("one replacement per child");
+    match expr {
+        NativeExpr::Input(_) | NativeExpr::Scalar(_) | NativeExpr::EvalTime { .. } => expr.clone(),
+        NativeExpr::VectorOf { .. } => NativeExpr::VectorOf {
+            input: Box::new(next()),
+        },
+        NativeExpr::Instant { op, .. } => NativeExpr::Instant {
+            input: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::Merge { .. } => NativeExpr::Merge {
+            input: Box::new(next()),
+        },
+        NativeExpr::Window { op, .. } => NativeExpr::Window {
+            input: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::Map { op, .. } => NativeExpr::Map {
+            input: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::ParameterizedMap { op, parameters, .. } => NativeExpr::ParameterizedMap {
+            input: Box::new(next()),
+            op: *op,
+            parameters: (0..parameters.len()).map(|_| next()).collect(),
+        },
+        NativeExpr::Timestamp { .. } => NativeExpr::Timestamp {
+            input: Box::new(next()),
+        },
+        NativeExpr::Aggregate { op, .. } => NativeExpr::Aggregate {
+            input: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::Vector { op, .. } => NativeExpr::Vector {
+            input: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::Binary { matching, .. } => NativeExpr::Binary {
+            left: Box::new(next()),
+            right: Box::new(next()),
+            matching: matching.clone(),
+        },
+        NativeExpr::Set { op, .. } => NativeExpr::Set {
+            left: Box::new(next()),
+            right: Box::new(next()),
+            op: op.clone(),
+        },
+        NativeExpr::Info { selector, .. } => NativeExpr::Info {
+            base: Box::new(next()),
+            info: Box::new(next()),
+            selector: selector.clone(),
+        },
+    }
+}
+
+/// Whether a segment can hand `node`'s values to another segment.
+///
+/// A boundary carries an evaluated series frame: values addressed on a grid, under the labels of
+/// the series they belong to. A scalar is broadcast rather than carried, aggregate state is
+/// internal, and raw samples are what a scan produces - none of them is a frame, so a subtree
+/// producing one stays inside the segment that reads it.
+fn exportable(node: &NativeNode) -> bool {
+    node.output
+        .samples()
+        .is_some_and(|schema| schema.eval_grid.is_some())
+}
+
+/// Whether `node` contains a per-series prefix that a boundary could carry.
+///
+/// The cut is only ever between a node that must gather and a subtree that does not need to: that
+/// subtree is the prefix the gather would otherwise swallow. Without one, a tree that reads across
+/// series has nothing to hand over, and splitting it would only move the same work up a level.
+fn carries_prefix(node: &NativeNode) -> bool {
+    let expr = &node.expr;
+    node_children(expr)
+        .into_iter()
+        .any(|child| cut_as_segment(child) || carries_prefix(child))
+}
+
+/// Whether `node` becomes a segment of its own under a parent that must gather.
+///
+/// The parent reads across series, so it answers one partition and gathers whatever it reads. A
+/// subtree that answers each series on its own partitions does not need that gather, and keeping it
+/// inside the parent would apply the gather to it too. Cutting it out leaves its work on however
+/// many partitions its own input has.
+///
+/// Both ends of the comparison come from the classification the physical planner applies to the
+/// tree it builds, so a cut here is a tree the physical planner would also have had to gather.
+fn cut_as_segment(node: &NativeNode) -> bool {
+    exportable(node) && !matches!(input_locality(node), InputLocality::SinglePartition)
+}
+
+/// One segment: its tree rewritten to read only its own inputs, the scans it reads, and the
+/// subtrees cut out of it.
+///
+/// A segment has one index space of its own - the scans it reads first, in the order it first names
+/// them, then the subtrees cut out of it - because `FusedSeries` requires its source indices to be
+/// dense over its children.
+struct Segment {
+    node: NativeNode,
+    /// Original scan indices, in the order this segment's indices name them.
+    sources: Vec<usize>,
+    /// The subtrees cut out of this segment, each still in the original index space.
+    cut: Vec<NativeNode>,
+}
+
+/// Collects a segment's scans and cut subtrees, without descending into a cut.
+fn collect_segment(node: &NativeNode, sources: &mut Vec<usize>, cut: &mut Vec<NativeNode>) {
+    match &node.expr {
+        NativeExpr::Input(input) => {
+            if !sources.contains(&input.source_index) {
+                sources.push(input.source_index);
+            }
+        }
+        expr => {
+            for child in node_children(expr) {
+                if cut_as_segment(child) {
+                    cut.push(child.clone());
+                } else {
+                    collect_segment(child, sources, cut);
+                }
+            }
+        }
+    }
+}
+
+/// Rewrites a segment's tree so every leaf names its index in the segment's own space.
+fn rewrite_segment(
+    node: &NativeNode,
+    sources: &[usize],
+    cut_base: usize,
+    next_cut: &mut usize,
+) -> NativeNode {
+    let expr = match &node.expr {
+        NativeExpr::Input(input) => NativeExpr::Input(BoundInput {
+            source_index: sources
+                .iter()
+                .position(|&source| source == input.source_index)
+                .expect("the segment collected every scan it reads"),
+            output: input.output.clone(),
+            ordering: input.ordering,
+        }),
+        expr => {
+            let children = node_children(expr)
+                .into_iter()
+                .map(|child| {
+                    if cut_as_segment(child) {
+                        let index = cut_base + *next_cut;
+                        *next_cut += 1;
+                        NativeNode {
+                            expr: NativeExpr::Input(BoundInput {
+                                source_index: index,
+                                output: child.output.clone(),
+                                ordering: SeriesOrdering::Contiguous,
+                            }),
+                            output: child.output.clone(),
+                        }
+                    } else {
+                        rewrite_segment(child, sources, cut_base, next_cut)
+                    }
+                })
+                .collect::<Vec<_>>();
+            with_node_children(expr, children.into_iter())
+        }
+    };
+    NativeNode {
+        expr,
+        output: node.output.clone(),
+    }
+}
+
+/// Splits `node` into one segment and the subtrees cut out of it.
+fn cut_segments(node: &NativeNode) -> Segment {
+    let mut sources = Vec::new();
+    let mut cut = Vec::new();
+    collect_segment(node, &mut sources, &mut cut);
+    let cut_base = sources.len();
+    let mut next_cut = 0;
+    let rewritten = rewrite_segment(node, &sources, cut_base, &mut next_cut);
+    Segment {
+        node: rewritten,
+        sources,
+        cut,
+    }
+}
+
+/// Builds one segment's plan from a subtree, cutting its own per-series prefixes.
+///
+/// Returns the plan and the output columns the segment reports, which its parent names its own
+/// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
+fn build_inner_segment(
+    node: &NativeNode,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+    tags: &[String],
+    metric: &Option<Arc<str>>,
+) -> Option<(LogicalPlan, Vec<String>)> {
+    let segment = cut_segments(node);
+    let mut inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
+    let mut child_tags = Vec::with_capacity(inputs.capacity());
+    for &index in &segment.sources {
+        inputs.push(children.get(index)?.clone());
+        child_tags.push(source_tags.get(index)?.clone());
+    }
+    for cut in &segment.cut {
+        let (plan, cut_tags) =
+            build_inner_segment(cut, children, source_tags, grid, time_index, tags, metric)?;
+        inputs.push(plan);
+        child_tags.push(cut_tags);
+    }
+    let output_tags = fused_output_tags(&segment.node, &child_tags)?;
+    let tree = NativeTree::try_new(segment.node).ok()?;
+    if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
+        return None;
+    }
+    let frame = FusedSeries::series_frame_schema(&tree).ok()?;
+    let frame = DFSchema::try_from(frame.as_ref().clone()).ok()?;
+    let plan = FusedSeries::try_new_with_format(
+        Arc::from("segment"),
+        tree,
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: tags.to_vec(),
+            metric_name: metric.clone(),
+        },
+        inputs,
+        Arc::new(frame),
+        FusedOutputFormat::SeriesFrame,
+    )
+    .ok()?;
+    Some((
+        LogicalPlan::Extension(Extension {
+            node: Arc::new(plan),
+        }),
+        output_tags,
+    ))
+}
+
+/// Plans `tree` as several segments, or `None` when it is one node already.
+///
+/// A tree that reads across series answers one partition and gathers whatever it reads. Its
+/// per-series prefixes do not need that gather, so each becomes a segment of its own and keeps the
+/// partitions it was scanned with. Nothing else is cut: a tree that already runs on every partition
+/// has nothing to gain, and a tree that matches two vectors routes rather than gathers.
+///
+/// The cut is the physical planner's own classification of the same subtrees, so a plan this
+/// produces is one the physical planner would otherwise have had to gather as a whole.
+#[allow(clippy::too_many_arguments)]
+async fn segment_tree(
+    planner: &mut PromPlanner,
+    prom_expr: &PromExpr,
+    query_engine_state: &QueryEngineState,
+    tree: &NativeTree,
+    children: &[LogicalPlan],
+    source_tags: &[Vec<String>],
+    grid: &Arc<EvalGrid>,
+    time_index: &str,
+    tags: &[String],
+    metric: &Option<Arc<str>>,
+) -> Result<Option<LogicalPlan>> {
+    if !matches!(input_locality(tree.root()), InputLocality::SinglePartition) {
+        return Ok(None);
+    }
+    // A segment boundary has to carry something, and the only thing it can carry is a per-series
+    // prefix: a subtree that answers each series on its own and can be recomputed. A tree with no
+    // such subtree inside it has nothing to cut, and cutting anything else - an aggregate's own
+    // state, a constant - is either impossible or a plain recomputation of the same work in one
+    // more node. Cutting on locality alone would accept one here.
+    if !carries_prefix(tree.root()) {
+        return Ok(None);
+    }
+    // A statement the existing planner refuses is not one this route may answer. Its refusal is the
+    // product's answer for that statement - an operation with no kernel, or one whose arguments it
+    // rejects - and answering it here would turn an error into a value. Reading the existing plan's
+    // columns is how the rest of this route inherits that refusal; this call is that same check for
+    // a shape whose columns the derivation can name on its own.
+    if planner
+        .legacy_output_columns(prom_expr, query_engine_state)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let segment = cut_segments(tree.root());
+    if segment.cut.is_empty() {
+        return Ok(None);
+    }
+    let mut inputs = Vec::with_capacity(segment.sources.len() + segment.cut.len());
+    let mut child_tags = Vec::with_capacity(inputs.capacity());
+    for &index in &segment.sources {
+        let Some(child) = children.get(index) else {
+            return Ok(None);
+        };
+        inputs.push(child.clone());
+        child_tags.push(source_tags.get(index).cloned().unwrap_or_default());
+    }
+    for cut in &segment.cut {
+        let Some((plan, cut_tags)) =
+            build_inner_segment(cut, children, source_tags, grid, time_index, tags, metric)
+        else {
+            return Ok(None);
+        };
+        inputs.push(plan);
+        child_tags.push(cut_tags);
+    }
+    let Some(parent) = NativeTree::try_new(segment.node).ok() else {
+        return Ok(None);
+    };
+    // Nothing below can fall back once physical planning starts, so every tree this route commits
+    // to has to be one the runtime executes. A shape the runtime refuses - a grouping by a value
+    // field, an operation with no kernel - therefore keeps the plan it had.
+    if NativeExecutionState::try_new(&parent, Arc::new(UnboundedMemoryPool::default())).is_err() {
+        return Ok(None);
+    }
+    let Some(output_schema) = planner
+        .fused_root_schema(
+            prom_expr,
+            query_engine_state,
+            &parent,
+            &child_tags,
+            time_index,
+        )
+        .await
+    else {
+        return Ok(None);
+    };
+    let Ok(plan) = FusedSeries::try_new(
+        Arc::from(prom_expr.to_string()),
+        parent,
+        FusedSeriesBinding {
+            grid: Arc::clone(grid),
+            time_index: time_index.to_string(),
+            tags: tags.to_vec(),
+            metric_name: metric.clone(),
+        },
+        inputs,
+        output_schema,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(LogicalPlan::Extension(Extension {
+        node: Arc::new(plan),
+    })))
 }
 
 /// The columns a [`FusedSeries`] node produces.
