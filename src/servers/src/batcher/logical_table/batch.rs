@@ -158,7 +158,12 @@ pub(crate) async fn flush_batch(
 
     match result {
         Ok(progress) => {
-            metrics::FLUSH_TOTAL.inc();
+            if progress.iter().any(|result| result.error.is_some()) {
+                metrics::FLUSH_FAILURES.inc();
+            } else {
+                metrics::FLUSH_TOTAL.inc();
+                metrics::FLUSH_ROWS.observe(total_row_count as f64);
+            }
             let affected_rows = progress.iter().map(|result| result.affected_rows).sum();
             metrics::FLUSH_DROPPED_ROWS
                 .inc_by(total_row_count.saturating_sub(affected_rows) as u64);
@@ -168,13 +173,9 @@ pub(crate) async fn flush_batch(
                 .filter_map(|(owner, result)| result.error.is_none().then_some(owner))
                 .collect::<HashSet<_>>();
             for (waiter, result) in waiters.into_iter().zip(progress) {
-                metrics::FLUSH_ROWS.observe(result.affected_rows as f64);
                 operator::metrics::DIST_INGEST_ROW_COUNT
                     .with_label_values(&[db_string.as_str()])
                     .inc_by(result.affected_rows as u64);
-                if result.error.is_some() {
-                    metrics::FLUSH_FAILURES.inc();
-                }
                 let _ = waiter.response_tx.send(result);
             }
             let accepted = table_batches
@@ -616,9 +617,9 @@ mod tests {
         use common_query::WriteProgress;
         use operator::write_dispatcher::TrackedWrite;
 
-        struct PartialDispatcher;
+        struct ProgressDispatcher([(usize, bool); 2]);
         #[async_trait]
-        impl PhysicalFlushWriteDispatcher for PartialDispatcher {
+        impl PhysicalFlushWriteDispatcher for ProgressDispatcher {
             async fn dispatch(&self, _: Vec<RegionRequest>) -> error::Result<usize> {
                 unreachable!()
             }
@@ -636,74 +637,114 @@ mod tests {
                         .collect::<Vec<_>>(),
                     vec![0, 1, 1]
                 );
-                vec![
-                    WriteProgress {
-                        affected_rows: 1,
-                        error: None,
-                    },
-                    WriteProgress {
-                        affected_rows: 1,
-                        error: Some(Arc::new(BoxedError::new(
-                            error::InternalSnafu {
-                                err_msg: "lost acknowledgement",
-                            }
-                            .build(),
-                        ))),
-                    },
-                ]
+                self.0
+                    .iter()
+                    .map(|&(affected_rows, failed)| WriteProgress {
+                        affected_rows,
+                        error: failed.then(|| {
+                            Arc::new(BoxedError::new(
+                                error::InternalSnafu {
+                                    err_msg: "lost acknowledgement",
+                                }
+                                .build(),
+                            ))
+                        }),
+                    })
+                    .collect()
             }
         }
         let ctx = session::context::QueryContext::arc();
-        let limiter = RequestLimiter::try_new(2).unwrap();
-        let mut waiters = Vec::new();
-        let mut receivers = Vec::new();
-        for _ in 0..2 {
-            let (response_tx, response_rx) = oneshot::channel();
-            waiters.push(FlushWaiter {
-                response_tx,
-                _permit: limiter.acquire().await.unwrap(),
-            });
-            receivers.push(response_rx);
-        }
-        let batches = [0, 1, 1]
-            .into_iter()
-            .map(|owner| {
-                let mut batch = mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0);
-                batch.owner = owner;
-                batch
-            })
-            .collect();
-        let (notifier, _receiver) =
-            FlowNotifier::try_new(16, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
-        let dropped = metrics::FLUSH_DROPPED_ROWS.get();
-        flush_batch(
-            Batch {
-                table_batches: vec![TableBatch {
-                    table_name: "cpu".into(),
-                    table_id: 42,
-                    batches,
-                    row_count: 3,
-                }],
-                total_row_count: 3,
-                db_string: ctx.get_db_string(),
-                ctx,
-                waiters,
-            },
-            &MockFlushPartitionProvider {
-                partition_rule_calls: Arc::new(AtomicUsize::new(0)),
-            },
-            &PartialDispatcher,
-            &MockFlushCatalogProvider {
-                table: Some(mock_physical_table_metadata(1024)),
-            },
-            notifier,
-        )
-        .await;
-        assert_eq!(metrics::FLUSH_DROPPED_ROWS.get(), dropped + 1);
-        for (owner, receiver) in receivers.into_iter().enumerate() {
-            let result = receiver.await.unwrap();
-            assert_eq!(result.affected_rows, 1);
-            assert_eq!(result.error.is_some(), owner == 1);
+        let ingested = operator::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()]);
+        for (expected_progress, successful_flush, expected_timestamps) in [
+            ([(1, false), (2, false)], true, vec![1000; 3]),
+            ([(1, false), (1, true)], false, vec![1000]),
+            ([(0, true), (0, true)], false, vec![]),
+        ] {
+            let limiter = RequestLimiter::try_new(2).unwrap();
+            let mut waiters = Vec::new();
+            let mut receivers = Vec::new();
+            for _ in 0..2 {
+                let (response_tx, response_rx) = oneshot::channel();
+                waiters.push(FlushWaiter {
+                    response_tx,
+                    _permit: limiter.acquire().await.unwrap(),
+                });
+                receivers.push(response_rx);
+            }
+            let batches = [0, 1, 1]
+                .into_iter()
+                .map(|owner| {
+                    let mut batch = mock_aligned_tag_batch("tag1", "host-1", 1000, 1.0);
+                    batch.owner = owner;
+                    batch
+                })
+                .collect();
+            let (notifier, mut notifications) =
+                FlowNotifier::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+            let successes = metrics::FLUSH_TOTAL.get();
+            let failures = metrics::FLUSH_FAILURES.get();
+            let samples = metrics::FLUSH_ROWS.get_sample_count();
+            let sum = metrics::FLUSH_ROWS.get_sample_sum();
+            let dropped = metrics::FLUSH_DROPPED_ROWS.get();
+            let written = ingested.get();
+            flush_batch(
+                Batch {
+                    table_batches: vec![TableBatch {
+                        table_name: "cpu".into(),
+                        table_id: 42,
+                        batches,
+                        row_count: 3,
+                    }],
+                    total_row_count: 3,
+                    db_string: ctx.get_db_string(),
+                    ctx: ctx.clone(),
+                    waiters,
+                },
+                &MockFlushPartitionProvider {
+                    partition_rule_calls: Arc::new(AtomicUsize::new(0)),
+                },
+                &ProgressDispatcher(expected_progress),
+                &MockFlushCatalogProvider {
+                    table: Some(mock_physical_table_metadata(1024)),
+                },
+                notifier,
+            )
+            .await;
+            let expected_written: usize = expected_progress.iter().map(|(rows, _)| rows).sum();
+            assert_eq!(
+                metrics::FLUSH_TOTAL.get(),
+                successes + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_FAILURES.get(),
+                failures + u64::from(!successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_count(),
+                samples + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_sum(),
+                sum + if successful_flush { 3.0 } else { 0.0 }
+            );
+            assert_eq!(
+                metrics::FLUSH_DROPPED_ROWS.get(),
+                dropped + (3 - expected_written) as u64
+            );
+            assert_eq!(ingested.get(), written + expected_written as u64);
+            for (receiver, (affected_rows, failed)) in receivers.into_iter().zip(expected_progress)
+            {
+                let result = receiver.await.unwrap();
+                assert_eq!(result.affected_rows, affected_rows);
+                assert_eq!(result.error.is_some(), failed);
+            }
+            if !expected_timestamps.is_empty() {
+                let notification = notifications.try_recv().unwrap();
+                assert_eq!(notification.table_id, 42);
+                assert_eq!(notification.timestamps, expected_timestamps);
+            }
+            assert!(notifications.try_recv().is_err());
         }
     }
 

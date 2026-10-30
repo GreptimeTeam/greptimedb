@@ -126,6 +126,7 @@ mod tests {
     use crate::batcher::table::flow_notifier::{
         FLOW_NOTIFICATION_DROPPED, FlowNotification, FlowNotifier,
     };
+    use crate::batcher::table::metrics;
     use crate::batcher::table::pending_batch::PendingBatch;
     use crate::batcher::test_util::mock_table_flownode_cache;
 
@@ -184,15 +185,31 @@ mod tests {
                 vec![vec![1], vec![2]],
                 vec![(1, false), (1, false)],
                 vec![60_000, 120_000],
+                true,
             ),
             (
                 vec![vec![1, 20], vec![2], vec![3]],
                 vec![(1, true), (1, false), (1, false)],
                 vec![120_000, 180_000],
+                false,
             ),
-            (vec![vec![20], vec![20]], vec![(0, true), (0, true)], vec![]),
+            (
+                vec![vec![20], vec![20]],
+                vec![(0, true), (0, true)],
+                vec![],
+                false,
+            ),
+            (
+                vec![vec![1]; 100],
+                vec![(1, false); 100],
+                vec![60_000; 100],
+                true,
+            ),
         ];
-        for (inputs, expected_progress, expected_timestamps) in cases {
+        let ctx = Arc::new(QueryContext::arc().with_confirmed_writes());
+        let ingested = operator::metrics::DIST_INGEST_ROW_COUNT
+            .with_label_values(&[ctx.get_db_string().as_str()]);
+        for (inputs, expected_progress, expected_timestamps, successful_flush) in cases {
             let permits = Arc::new(Semaphore::new(inputs.len()));
             let mut submissions = Vec::new();
             let mut completions = Vec::new();
@@ -224,7 +241,7 @@ mod tests {
                 submissions.push(PendingBatch {
                     table_info: table.clone(),
                     batch: rows_to_record_batch(&rows, &table).unwrap(),
-                    ctx: Arc::new(QueryContext::arc().with_confirmed_writes()),
+                    ctx: ctx.clone(),
                     response_tx,
                     _permit: Arc::new(permits.clone().acquire_owned().await.unwrap()),
                 });
@@ -233,6 +250,12 @@ mod tests {
             // Keep a one-slot queue undrained so per-submission notifications lose timestamps.
             let (notifier, mut notifications) =
                 NotificationQueue::try_new(1, FLOW_NOTIFICATION_DROPPED.clone()).unwrap();
+            let successes = metrics::FLUSH_TOTAL.get();
+            let failures = metrics::FLUSH_FAILURES.get();
+            let samples = metrics::FLUSH_ROWS.get_sample_count();
+            let sum = metrics::FLUSH_ROWS.get_sample_sum();
+            let dropped = metrics::FLUSH_DROPPED_ROWS.get();
+            let written = ingested.get();
             flush_batch(
                 Batch {
                     submissions,
@@ -243,6 +266,32 @@ mod tests {
             )
             .await;
 
+            let expected_written: usize = expected_progress.iter().map(|(rows, _)| rows).sum();
+            assert_eq!(
+                metrics::FLUSH_TOTAL.get(),
+                successes + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_FAILURES.get(),
+                failures + u64::from(!successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_count(),
+                samples + u64::from(successful_flush)
+            );
+            assert_eq!(
+                metrics::FLUSH_ROWS.get_sample_sum(),
+                sum + if successful_flush {
+                    total_rows as f64
+                } else {
+                    0.0
+                }
+            );
+            assert_eq!(
+                metrics::FLUSH_DROPPED_ROWS.get(),
+                dropped + (total_rows - expected_written) as u64
+            );
+            assert_eq!(ingested.get(), written + expected_written as u64);
             for (completion, (affected_rows, failed)) in
                 completions.into_iter().zip(expected_progress)
             {
