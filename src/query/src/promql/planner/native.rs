@@ -595,6 +595,18 @@ impl PromPlanner {
             .iter()
             .map(|(_, _, _, _, tags)| tags.clone())
             .collect::<Vec<_>>();
+        // A segment carries one source's identity. Keeping each occurrence's scan and metadata
+        // aligned here lets the cutting step name that source independently of selector count.
+        let bare_scans = prepared
+            .iter()
+            .map(|(scan, ..)| scan.clone())
+            .collect::<Vec<_>>();
+        let per_source = prepared
+            .iter()
+            .map(|(_, _, metric, time_index, tags)| {
+                (metric.clone(), time_index.clone(), tags.clone())
+            })
+            .collect::<Vec<_>>();
         let children = prepared
             .into_iter()
             .map(|(scan, schema, metric, _, tags)| {
@@ -723,6 +735,8 @@ impl PromPlanner {
                 &compiled.tree,
                 &children,
                 &source_tags,
+                &bare_scans,
+                &per_source,
                 &grid,
                 &time,
                 &tags,
@@ -1176,25 +1190,26 @@ fn cut_segments(node: &NativeNode) -> Segment {
 ///
 /// Returns the plan and the output columns the segment reports, which its parent names its own
 /// columns by. `None` when any part cannot be built, so the statement keeps the plan it had.
+#[allow(clippy::type_complexity)]
 fn build_inner_segment(
     node: &NativeNode,
-    children: &[LogicalPlan],
-    source_tags: &[Vec<String>],
+    bare_scans: &[LogicalPlan],
+    per_source: &[(Option<Arc<str>>, String, Vec<String>)],
     grid: &Arc<EvalGrid>,
-    time_index: &str,
-    tags: &[String],
-    metric: &Option<Arc<str>>,
 ) -> Option<(LogicalPlan, Vec<String>)> {
     let mut sources = Vec::new();
     collect_segment_inputs(node, &mut sources);
-    let mut inputs = Vec::with_capacity(sources.len());
-    let mut child_tags = Vec::with_capacity(sources.len());
-    for &index in &sources {
-        inputs.push(children.get(index)?.clone());
-        child_tags.push(source_tags.get(index)?.clone());
-    }
+    // A segment carries one source's identity; naming that source keeps cutting independent of
+    // how many selectors the statement has. MatchingLocal can satisfy the cut predicate while
+    // reading two sources, but one segment cannot carry both sources' metric, tags, and time index.
+    let &[index] = sources.as_slice() else {
+        return None;
+    };
+    let input = bare_scans.get(index)?.clone();
+    let (metric, time_index, tags) = per_source.get(index)?;
+    let inputs = vec![input];
     let tree = NativeTree::try_new(rewrite_inner_segment(node, &sources)).ok()?;
-    let output_tags = fused_output_tags(tree.root(), &child_tags)?;
+    let output_tags = fused_output_tags(tree.root(), std::slice::from_ref(tags))?;
     if NativeExecutionState::try_new(&tree, Arc::new(UnboundedMemoryPool::default())).is_err() {
         return None;
     }
@@ -1205,8 +1220,8 @@ fn build_inner_segment(
         tree,
         FusedSeriesBinding {
             grid: Arc::clone(grid),
-            time_index: time_index.to_string(),
-            tags: tags.to_vec(),
+            time_index: time_index.clone(),
+            tags: tags.clone(),
             metric_name: metric.clone(),
         },
         inputs,
@@ -1231,7 +1246,7 @@ fn build_inner_segment(
 ///
 /// The cut is the physical planner's own classification of the same subtrees, so a plan this
 /// produces is one the physical planner would otherwise have had to gather as a whole.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn segment_tree(
     planner: &mut PromPlanner,
     prom_expr: &PromExpr,
@@ -1239,6 +1254,8 @@ async fn segment_tree(
     tree: &NativeTree,
     children: &[LogicalPlan],
     source_tags: &[Vec<String>],
+    bare_scans: &[LogicalPlan],
+    per_source: &[(Option<Arc<str>>, String, Vec<String>)],
     grid: &Arc<EvalGrid>,
     time_index: &str,
     tags: &[String],
@@ -1281,9 +1298,7 @@ async fn segment_tree(
         child_tags.push(source_tags.get(index).cloned().unwrap_or_default());
     }
     for cut in &segment.cut {
-        let Some((plan, cut_tags)) =
-            build_inner_segment(cut, children, source_tags, grid, time_index, tags, metric)
-        else {
+        let Some((plan, cut_tags)) = build_inner_segment(cut, bare_scans, per_source, grid) else {
             return Ok(None);
         };
         inputs.push(plan);
