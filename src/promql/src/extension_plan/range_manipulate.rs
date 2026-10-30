@@ -687,8 +687,12 @@ impl RangeManipulateStream {
         // path that does not deduplicate can still deliver two rows for one timestamp, and every
         // range function reads its samples from here, so collapse them once instead of
         // special-casing each function. Comparing native ticks rather than the millisecond
-        // payload keeps distinct sub-millisecond samples apart, and taking the last row of a
-        // group matches `MergeMode::LastRow`, the mode the deduplicating read path uses.
+        // payload keeps distinct sub-millisecond samples apart.
+        //
+        // The first row of a tied group wins, which is the row a deduplicating read keeps:
+        // storage orders equal primary key and timestamp by sequence descending and
+        // `FlatDedupReader` keeps the first row of each group, so the same rows seen through a
+        // deduplicating path yield the same value.
         let (native_timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
             .ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
@@ -701,10 +705,10 @@ impl RangeManipulateStream {
         let input = if duplicate {
             let indices = (0..input.num_rows())
                 .filter(|&i| {
-                    native_timestamps.is_null(i)
-                        || i + 1 == input.num_rows()
-                        || native_timestamps.is_null(i + 1)
-                        || native_timestamps.value(i) != native_timestamps.value(i + 1)
+                    i == 0
+                        || native_timestamps.is_null(i)
+                        || native_timestamps.is_null(i - 1)
+                        || native_timestamps.value(i) != native_timestamps.value(i - 1)
                 })
                 .map(|i| i as i64)
                 .collect::<Int64Array>();
@@ -1286,6 +1290,107 @@ mod test {
                 .unwrap()
                 .values(),
             &[29_600, 59_600]
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_timestamp_keeps_first_row_and_aligned_tags() {
+        use datafusion::arrow::array::{Float64Array, StringArray};
+
+        // Rows sharing a timestamp but carrying different values and tags show which row the
+        // collapse keeps, and that every column follows the same index instead of drifting apart.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                TIME_INDEX_COLUMN,
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+            Field::new("tag", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondArray::from(vec![
+                    5_000, 10_000, 10_000, 15_000,
+                ])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            ],
+        )
+        .unwrap();
+        let plan = RangeManipulate::new(
+            20_000,
+            20_000,
+            20_000,
+            0,
+            20_000,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            }),
+        )
+        .unwrap();
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+        )));
+        let batches = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap();
+        let out = &batches[0];
+        let values = RangeArray::try_new(
+            out.column(1)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let timestamps = RangeArray::try_new(
+            out.column(3)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        // The first row of the tied pair is kept, matching what a deduplicating read returns, so
+        // 2.0 survives and 3.0 is dropped.
+        assert_eq!(
+            values
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .values(),
+            &[1.0, 2.0, 4.0]
+        );
+        assert_eq!(
+            timestamps
+                .get(0)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .values(),
+            &[5_000, 10_000, 15_000]
+        );
+        // Tag columns are not range payloads, so the operator repeats the batch's first row for
+        // every output row: a batch holds one series, so every row's tag is that series' tag.
+        assert_eq!(
+            out.column(2)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![Some("a")]
         );
     }
 
