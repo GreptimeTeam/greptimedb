@@ -952,9 +952,12 @@ fn collect_source_schemas(tree: &NativeTree) -> DataFusionResult<Vec<Arc<SeriesS
 }
 
 #[derive(Clone, Debug)]
-enum InputLocality {
+pub enum InputLocality {
+    /// Each series is answered on its own, so the tree runs on whatever partitions its input has.
     PartitionLocal,
+    /// The tree pairs series of whole vectors by one match key, so those classes must meet.
     MatchingLocal(MatchingLabels),
+    /// The tree reads across series, so it needs every input on one partition.
     SinglePartition,
 }
 
@@ -1096,7 +1099,7 @@ fn matching_site(node: &NativeNode) -> Option<(&NativeNode, &NativeNode, &Matchi
     }
 }
 
-fn input_locality(root: &NativeNode) -> InputLocality {
+pub fn input_locality(root: &NativeNode) -> InputLocality {
     if let Some(index) = same_source(root) {
         let raw = root.output.samples().is_some_and(|_| {
             // The root's grid does not reliably indicate source content after windowing; inspect its bound inputs.
