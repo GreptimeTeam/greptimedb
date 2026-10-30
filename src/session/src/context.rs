@@ -304,15 +304,24 @@ impl QueryContext {
         self.write_progress = Some(progress);
     }
 
+    /// Forks this context to retain storage acknowledgements for partial write accounting.
+    ///
+    /// Insertion APIs returning `Output` may return `Ok` while carrying storage errors
+    /// in `Output.meta.write_completions`, even on synchronous write paths. Callers must
+    /// await `Output::write_progress()` and inspect both its acknowledged row count and
+    /// its `error` before treating the write as successful.
     pub fn with_confirmed_writes(&self) -> Self {
         let mut ctx = self.fork();
         ctx.confirmed_writes = true;
         ctx
     }
 
+    /// Whether insertion outputs retain storage acknowledgements and may defer errors.
+    /// See [`Self::with_confirmed_writes`] for the caller's completion-handling contract.
     pub fn confirmed_writes(&self) -> bool {
         self.confirmed_writes
     }
+
     /// Forks this context with an independent snapshot of mutable session data.
     ///
     /// Unlike [`Clone`], changes to the schema, user, timezone, and other fields

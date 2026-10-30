@@ -78,12 +78,12 @@ pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
     pub plan: Option<Arc<dyn ExecutionPlan>>,
     pub cost: OutputCost,
-    /// Process-local storage results attached by asynchronous ordinary-table batching.
+    /// Process-local storage results retained for asynchronous batching or confirmed writes.
     /// Callers needing confirmed writes must await these. Dropping them does not cancel writes.
     pub write_completions: Vec<WriteCompletion>,
 }
 
-/// Actual storage completion of an already accepted asynchronous write.
+/// Storage outcome of an already accepted write, whether synchronous or asynchronous.
 pub struct WriteCompletion(Pin<Box<dyn Future<Output = WriteProgress> + Send>>);
 
 /// Acknowledged rows for one original input, even when another part failed.
