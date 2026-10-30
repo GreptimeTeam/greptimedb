@@ -224,7 +224,7 @@ impl SystemTable for InformationSchemaFlows {
                     .make_flows(Some(request))
                     .await
                     .map(|x| x.into_df_record_batch())
-                    .map_err(datafusion::error::DataFusionError::from)
+                    .map_err(|err| datafusion::error::DataFusionError::External(Box::new(err)))
             }),
         ));
         Ok(Box::pin(

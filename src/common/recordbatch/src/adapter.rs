@@ -22,7 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use common_base::readable_size::ReadableSize;
-use common_error::ext::BoxedError;
 use common_telemetry::tracing::{Span, info_span};
 use common_time::util::format_nanoseconds_human_readable;
 use datafusion::arrow::compute::cast;
@@ -206,9 +205,7 @@ impl Stream for DfRecordBatchStreamAdapter {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(recordbatch)) => match recordbatch {
                 Ok(recordbatch) => Poll::Ready(Some(Ok(recordbatch.into_df_record_batch()))),
-                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(
-                    BoxedError::new(e),
-                ))))),
+                Err(e) => Poll::Ready(Some(Err(DataFusionError::External(Box::new(e))))),
             },
             Poll::Ready(None) => Poll::Ready(None),
         }
@@ -942,7 +939,7 @@ fn convert_map_to_json_binary(
 mod test {
     use std::time::Duration;
 
-    use common_error::ext::{ErrorExt, RetryHint};
+    use common_error::ext::BoxedError;
     use common_error::mock::MockError;
     use common_error::status_code::StatusCode;
     use datafusion::execution::TaskContext;
@@ -1302,23 +1299,6 @@ mod test {
             matches!(err, Error::External { .. }),
             "unexpected err {err}"
         );
-
-        for hint in [
-            RetryHint::NonRetryable,
-            RetryHint::Retryable,
-            RetryHint::RetryAfterRouteRefresh,
-        ] {
-            let error = error::ExternalSnafu.into_error(BoxedError::new(
-                MockError::new(StatusCode::RegionBusy).with_retry_hint(hint),
-            ));
-            let stream =
-                AsyncRecordBatchStreamAdapter::new(schema.clone(), new_future_stream(Err(error)));
-            let df_stream = DfRecordBatchStreamAdapter::new(Box::pin(stream));
-            let mut stream = RecordBatchStreamAdapter::try_new(Box::pin(df_stream)).unwrap();
-            let error = stream.next().await.unwrap().unwrap_err();
-            assert_eq!(error.status_code(), StatusCode::RegionBusy);
-            assert_eq!(error.retry_hint(), hint);
-        }
 
         let failed_to_init_stream =
             new_future_stream(Err(error::ExternalSnafu

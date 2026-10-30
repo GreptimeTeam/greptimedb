@@ -413,7 +413,7 @@ FROM
 
 SELECT st_distance_sphere_m(wkt_point_from_latlng(37.76938, -122.3889), 'POLYGON ((-121.491698 38.653343, -121.582353 38.556757, -121.469721 38.449287, -121.315883 38.541721, -121.491698 38.653343))');
 
-Error: 1001(Unsupported), Great circle distance between non-point objects are not supported for now.
+Error: 3001(EngineExecuteQuery), Great circle distance between non-point objects are not supported for now.
 
 SELECT
     st_contains(polygon1, p1),

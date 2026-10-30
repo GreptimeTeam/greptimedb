@@ -14,7 +14,7 @@
 
 use std::any::Any;
 
-use common_error::ext::{ErrorExt, RetryHint};
+use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::timestamp::TimestampNanosecond;
@@ -1043,58 +1043,5 @@ impl ErrorExt for Error {
 
     fn as_any(&self) -> &dyn Any {
         self
-    }
-
-    fn retry_hint(&self) -> RetryHint {
-        match self {
-            Error::InsertPipeline { source, .. } | Error::CreateTable { source, .. } => {
-                source.retry_hint()
-            }
-            Error::ExecuteInternalStatement { source, .. } | Error::DataFrame { source, .. } => {
-                source.retry_hint()
-            }
-            Error::Catalog { source, .. } => source.retry_hint(),
-            Error::CollectRecords { source, .. } => source.retry_hint(),
-            Error::CacheLoad { error, .. } => error.retry_hint(),
-            Error::TransformArrayElement { source, .. } => source.retry_hint(),
-            _ => RetryHint::NonRetryable,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use common_error::ext::BoxedError;
-    use common_error::mock::MockError;
-    use snafu::IntoError;
-
-    use super::*;
-
-    #[test]
-    fn test_insert_pipeline_preserves_retry_hint_through_cache() {
-        for hint in [
-            RetryHint::NonRetryable,
-            RetryHint::Retryable,
-            RetryHint::RetryAfterRouteRefresh,
-        ] {
-            let source = operator::error::ExternalSnafu.into_error(BoxedError::new(
-                MockError::new(StatusCode::RegionBusy).with_retry_hint(hint),
-            ));
-            let error = InsertPipelineSnafu.into_error(source);
-            assert_eq!(error.status_code(), StatusCode::RegionBusy);
-            assert_eq!(error.retry_hint(), hint);
-            let error = Error::CacheLoad {
-                error: Arc::new(error),
-                location: Location::default(),
-            };
-            assert_eq!(error.status_code(), StatusCode::RegionBusy);
-            assert_eq!(error.retry_hint(), hint);
-        }
-        assert_eq!(
-            PipelineMissingSnafu.build().retry_hint(),
-            RetryHint::NonRetryable
-        );
     }
 }

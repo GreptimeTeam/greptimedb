@@ -1008,56 +1008,72 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
 
 #[cfg(test)]
 mod tests {
+    use common_error::ext::PlainError;
     use common_error::mock::MockError;
     use common_error::{GREPTIME_DB_HEADER_ERROR_CODE, GREPTIME_DB_HEADER_ERROR_RETRY_HINT};
 
     use super::*;
 
+    #[test]
+    fn collect_recordbatch_preserves_poll_stream_status_in_tonic_status() {
+        let error = Error::CollectRecordbatch {
+            source: common_recordbatch::error::Error::PollStream {
+                error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                    "neutral error".to_string(),
+                    StatusCode::RequestOutdated,
+                )))),
+                location: Location::default(),
+            },
+            location: Location::default(),
+        };
+
+        let status: tonic::Status = error.into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status
+                .metadata()
+                .get(GREPTIME_DB_HEADER_ERROR_CODE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            (StatusCode::RequestOutdated as u32).to_string()
+        );
+    }
+
     #[tokio::test]
-    async fn test_storage_and_query_retry_hints_reach_tonic_status() {
+    async fn test_storage_write_retry_hints_reach_tonic_status() {
         for hint in [
             RetryHint::NonRetryable,
             RetryHint::Retryable,
             RetryHint::RetryAfterRouteRefresh,
         ] {
-            let source = || {
-                BoxedError::new(MockError::new(StatusCode::RequestOutdated).with_retry_hint(hint))
+            let source =
+                BoxedError::new(MockError::new(StatusCode::RequestOutdated).with_retry_hint(hint));
+            let completion = common_query::WriteCompletion::new(std::future::ready(Err(source)));
+            let error = Error::ExecuteGrpcQuery {
+                source: completion.wait().await.unwrap_err(),
+                location: Location::default(),
             };
-            let completion = common_query::WriteCompletion::new(std::future::ready(Err(source())));
-            for error in [
-                Error::ExecuteGrpcQuery {
-                    source: completion.wait().await.unwrap_err(),
-                    location: Location::default(),
-                },
-                Error::CollectRecordbatch {
-                    source: common_recordbatch::error::Error::PollStream {
-                        error: DataFusionError::External(Box::new(source())),
-                        location: Location::default(),
-                    },
-                    location: Location::default(),
-                },
-            ] {
-                let status: tonic::Status = error.into();
-                assert_eq!(status.code(), tonic::Code::InvalidArgument);
-                assert_eq!(
-                    status
-                        .metadata()
-                        .get(GREPTIME_DB_HEADER_ERROR_CODE)
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
-                    (StatusCode::RequestOutdated as u32).to_string()
-                );
-                assert_eq!(
-                    status
-                        .metadata()
-                        .get(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
-                        .unwrap()
-                        .to_str()
-                        .unwrap(),
-                    hint.as_str()
-                );
-            }
+            let status: tonic::Status = error.into();
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(GREPTIME_DB_HEADER_ERROR_CODE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                (StatusCode::RequestOutdated as u32).to_string()
+            );
+            assert_eq!(
+                status
+                    .metadata()
+                    .get(GREPTIME_DB_HEADER_ERROR_RETRY_HINT)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                hint.as_str()
+            );
         }
     }
 }
