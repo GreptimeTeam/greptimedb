@@ -117,7 +117,7 @@ impl FlowDualEngine {
         }
 
         warn!(
-            "FlowDualEngine is not done recovering, {} insert request waiting for recovery",
+            "FlowDualEngine is not done recovering, {} request waiting for recovery",
             waiting_req_cnt
         );
         // wait 3 seconds, check every 1 second
@@ -246,8 +246,29 @@ impl FlowDualEngine {
         let max_retry = 10;
         // keep trying to trigger consistent check
         while retry < max_retry {
-            if let Some(task) = self.check_task.lock().await.as_ref() {
-                task.trigger(false, allow_drop).await?;
+            let trigger_tx = self
+                .check_task
+                .lock()
+                .await
+                .as_ref()
+                .map(|task| task.trigger_tx.clone());
+            if let Some(trigger_tx) = trigger_tx {
+                let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+                trigger_tx
+                    .send((false, allow_drop, done_tx))
+                    .await
+                    .map_err(|_| {
+                        IllegalCheckTaskStateSnafu {
+                            reason: "Failed to send trigger signal",
+                        }
+                        .build()
+                    })?;
+                done_rx.await.map_err(|_| {
+                    IllegalCheckTaskStateSnafu {
+                        reason: "Failed to receive trigger signal",
+                    }
+                    .build()
+                })?;
                 break;
             }
             retry += 1;
@@ -422,7 +443,7 @@ impl FlowDualEngine {
                 let mut errors = vec![];
                 for flow_id in to_be_dropped {
                     let flow_id = *flow_id;
-                    if let Err(err) = self.remove_flow(flow_id).await {
+                    if let Err(err) = self.remove_flow_from_engines(flow_id).await {
                         errors.push((flow_id, err));
                     }
                 }
@@ -472,6 +493,26 @@ impl FlowDualEngine {
     /// Reconciles in-memory flow tasks from persisted metadata.
     pub async fn reconcile_flows_from_metadata(&self) -> Result<(), Error> {
         self.check_flow_consistent(true, true).await
+    }
+
+    async fn remove_flow_from_engines(&self, flow_id: FlowId) -> Result<(), Error> {
+        let mut error = None;
+        for result in [
+            self.streaming_engine.remove_flow(flow_id).await,
+            self.batching_engine.remove_flow(flow_id).await,
+        ] {
+            if let Err(err) = result
+                && !matches!(&err, Error::FlowNotFound { .. })
+                && error.is_none()
+            {
+                error = Some(err);
+            }
+        }
+        self.src_table2flow.write().await.remove_flow(flow_id);
+        match error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// TODO(discord9): also add a `exists` api using flow metadata manager's `exists` method
@@ -553,26 +594,6 @@ impl ConsistentCheckTask {
         })
     }
 
-    async fn trigger(&self, allow_create: bool, allow_drop: bool) -> Result<(), Error> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.trigger_tx
-            .send((allow_create, allow_drop, tx))
-            .await
-            .map_err(|_| {
-                IllegalCheckTaskStateSnafu {
-                    reason: "Failed to send trigger signal",
-                }
-                .build()
-            })?;
-        rx.await.map_err(|_| {
-            IllegalCheckTaskStateSnafu {
-                reason: "Failed to receive trigger signal",
-            }
-            .build()
-        })?;
-        Ok(())
-    }
-
     async fn stop(self) -> Result<(), Error> {
         self.shutdown_tx.send(()).await.map_err(|_| {
             IllegalCheckTaskStateSnafu {
@@ -604,6 +625,19 @@ impl SrcTableToFlow {
         self.batch.contains_key(&table_id)
     }
     fn add_flow(&mut self, flow_id: FlowId, flow_type: FlowType, src_table_ids: Vec<TableId>) {
+        if let Some((_, old_source_ids)) = self.flow_infos.remove(&flow_id) {
+            for source_id in old_source_ids {
+                for mapping in [&mut self.stream, &mut self.batch] {
+                    let is_empty = mapping.get_mut(&source_id).is_some_and(|flows| {
+                        flows.remove(&flow_id);
+                        flows.is_empty()
+                    });
+                    if is_empty {
+                        mapping.remove(&source_id);
+                    }
+                }
+            }
+        }
         let mapping = match flow_type {
             FlowType::Streaming => &mut self.stream,
             FlowType::Batching => &mut self.batch,
@@ -625,18 +659,15 @@ impl SrcTableToFlow {
     }
 
     fn remove_flow(&mut self, flow_id: FlowId) {
-        let mapping = match self.get_flow_type(flow_id) {
-            Some(FlowType::Streaming) => &mut self.stream,
-            Some(FlowType::Batching) => &mut self.batch,
-            None => return,
-        };
-        if let Some((_, src_table_ids)) = self.flow_infos.remove(&flow_id) {
-            for src_table in src_table_ids {
-                if let Some(flows) = mapping.get_mut(&src_table) {
-                    flows.remove(&flow_id);
-                }
-            }
-        }
+        self.stream.retain(|_, flows| {
+            flows.remove(&flow_id);
+            !flows.is_empty()
+        });
+        self.batch.retain(|_, flows| {
+            flows.remove(&flow_id);
+            !flows.is_empty()
+        });
+        self.flow_infos.remove(&flow_id);
     }
 
     fn get_flow_type(&self, flow_id: FlowId) -> Option<FlowType> {
@@ -669,46 +700,55 @@ impl FlowEngine for FlowDualEngine {
         let flow_id = args.flow_id;
         let src_table_ids = args.source_table_ids.clone();
 
-        let res = match flow_type {
-            FlowType::Batching => self.batching_engine.create_flow(args).await,
-            FlowType::Streaming => self.streaming_engine.create_flow(args).await,
-        }?;
+        let created = match flow_type {
+            FlowType::Batching => self.batching_engine.create_flow(args).await?,
+            FlowType::Streaming => self.streaming_engine.create_flow(args).await?,
+        };
+        if created.is_none() {
+            if self
+                .src_table2flow
+                .read()
+                .await
+                .flow_infos
+                .contains_key(&flow_id)
+            {
+                return Ok(None);
+            }
 
+            let source_table_ids = match flow_type {
+                FlowType::Batching => self.batching_engine.source_table_ids(flow_id).await?,
+                FlowType::Streaming => self.streaming_engine.source_table_ids(flow_id).await?,
+            };
+            let mut routing = self.src_table2flow.write().await;
+            if !routing.flow_infos.contains_key(&flow_id) {
+                routing.add_flow(flow_id, flow_type, source_table_ids);
+            }
+            return Ok(None);
+        }
+
+        let opposite_result = match flow_type {
+            FlowType::Batching => self.streaming_engine.remove_flow(flow_id).await,
+            FlowType::Streaming => self.batching_engine.remove_flow(flow_id).await,
+        };
         self.src_table2flow
             .write()
             .await
             .add_flow(flow_id, flow_type, src_table_ids);
 
-        Ok(res)
+        match opposite_result {
+            Err(Error::FlowNotFound { .. }) | Ok(()) => Ok(created),
+            Err(err) => Err(err),
+        }
     }
 
     async fn remove_flow(&self, flow_id: FlowId) -> Result<(), Error> {
-        let flow_type = self.src_table2flow.read().await.get_flow_type(flow_id);
-        let flow_type = match flow_type {
-            Some(flow_type) => Some(flow_type),
-            None if self.streaming_engine.flow_exist(flow_id).await? => Some(FlowType::Streaming),
-            None => None,
-        };
-
-        match flow_type {
-            Some(FlowType::Batching) => self.batching_engine.remove_flow(flow_id).await,
-            Some(FlowType::Streaming) => self.streaming_engine.remove_flow(flow_id).await,
-            None => {
-                // this can happen if flownode just restart, and is stilling creating the flow
-                // since now that this flow should dropped, we need to trigger the consistent check and allow drop
-                // this rely on drop flow ddl delete metadata first, see src/common/meta/src/ddl/drop_flow.rs
-                warn!(
-                    "Flow {} is not exist in the underlying engine, but exist in metadata",
-                    flow_id
-                );
-                self.try_sync_with_check_task(flow_id, true).await?;
-
-                Ok(())
-            }
-        }?;
-        // remove mapping
-        self.src_table2flow.write().await.remove_flow(flow_id);
-        Ok(())
+        let recovering = !self.is_recover_done();
+        let batching_exists = self.batching_engine.flow_exist(flow_id).await?;
+        let streaming_exists = self.streaming_engine.flow_exist(flow_id).await?;
+        if recovering || (!batching_exists && !streaming_exists) {
+            self.try_sync_with_check_task(flow_id, true).await?;
+        }
+        self.remove_flow_from_engines(flow_id).await
     }
 
     async fn flush_flow(&self, flow_id: FlowId) -> Result<usize, Error> {
@@ -734,7 +774,8 @@ impl FlowEngine for FlowDualEngine {
         match flow_type {
             Some(FlowType::Batching) => self.batching_engine.flow_exist(flow_id).await,
             Some(FlowType::Streaming) => self.streaming_engine.flow_exist(flow_id).await,
-            None => self.streaming_engine.flow_exist(flow_id).await,
+            None => Ok(self.streaming_engine.flow_exist(flow_id).await?
+                || self.batching_engine.flow_exist(flow_id).await?),
         }
     }
 
@@ -874,6 +915,9 @@ impl common_meta::node_manager::Flownode for FlowDualEngine {
                     query_ctx,
                     eval_schedule,
                 };
+                self.wait_for_all_flow_recover(1)
+                    .await
+                    .map_err(to_meta_err(snafu::location!()))?;
                 let ret = self
                     .create_flow(args)
                     .await
@@ -1010,12 +1054,611 @@ impl FlowEngine for StreamingEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use common_meta::ddl::create_flow::INTERNAL_EVAL_SCHEDULE_KEY;
+    use api::v1::flow::{CreateRequest, FlowRequest, FlowRequestHeader, flow_request};
+    use api::v1::{FlowId as ProtoFlowId, TableId as ProtoTableId, TableName};
 
-    use super::decode_internal_eval_schedule;
+    use common_base::Plugins;
+    use common_error::ext::{ErrorExt as _, RetryHint};
+    use common_meta::ddl::create_flow::{FlowType, INTERNAL_EVAL_SCHEDULE_KEY};
+    use common_meta::key::TableMetadataManager;
+    use common_meta::key::flow::FlowMetadataManager;
+    use common_meta::key::flow::flow_info::{FlowInfoValue, FlowScheduleConfig, FlowStatus};
+    use common_meta::key::table_route::TableRouteValue;
+    use common_meta::key::test_utils::new_test_table_info_with_name;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use query::options::QueryOptions;
+    use session::context::QueryContext;
+    use table::table_name::TableName as MetaTableName;
+    use tokio::sync::oneshot;
+
+    use super::{
+        ConsistentCheckTask, FlowDualEngine, SrcTableToFlow, decode_internal_eval_schedule,
+    };
+    use crate::adapter::tests::{StreamingHarness, mirror_request};
+    use crate::batching_mode::BatchingModeOptions;
+    use crate::batching_mode::engine::BatchingEngine;
+    use crate::batching_mode::frontend_client::FrontendClient;
+    use crate::engine::FlowEngine;
     use crate::error::Error;
+    use crate::test_utils::create_test_query_engine;
+    use crate::{CreateFlowArgs, adapter::StreamingEngine};
+
+    #[test]
+    fn test_source_flow_mapping_replaces_only_indexed_routes() {
+        let mut mapping = SrcTableToFlow::default();
+        mapping.add_flow(7, FlowType::Batching, vec![10, 11]);
+        mapping.add_flow(8, FlowType::Batching, vec![10]);
+        // A divergent association at the old recorded source must be cleaned in both modes.
+        mapping.stream.entry(10).or_default().insert(7);
+        mapping.add_flow(7, FlowType::Streaming, vec![13]);
+
+        assert!(!mapping.in_batch(11));
+        assert_eq!(mapping.batch.get(&10), Some(&HashSet::from([8])));
+        assert!(!mapping.in_stream(10));
+        assert_eq!(mapping.get_flow_type(8), Some(FlowType::Batching));
+        assert!(mapping.in_stream(13));
+        assert_eq!(mapping.get_flow_type(7), Some(FlowType::Streaming));
+    }
+
+    #[test]
+    fn test_source_flow_mapping_full_remove_clears_orphaned_routes() {
+        let mut mapping = SrcTableToFlow::default();
+        mapping.add_flow(7, FlowType::Streaming, vec![10]);
+        mapping.add_flow(8, FlowType::Batching, vec![11]);
+        mapping.stream.entry(12).or_default().insert(7);
+        mapping.flow_infos.remove(&7);
+        mapping.remove_flow(7);
+        assert!(!mapping.in_stream(10));
+        assert!(!mapping.in_stream(12));
+        assert!(mapping.in_batch(11));
+        assert_eq!(mapping.get_flow_type(8), Some(FlowType::Batching));
+    }
+
+    #[test]
+    fn test_source_flow_mapping_add_many_distinct_sources() {
+        let mut mapping = SrcTableToFlow::default();
+        for source in 0..4096 {
+            mapping.add_flow(source as u64 + 1, FlowType::Streaming, vec![source]);
+        }
+        assert!(mapping.in_stream(0));
+        assert!(mapping.in_stream(4095));
+        mapping.add_flow(1, FlowType::Batching, vec![4096]);
+        assert!(!mapping.in_stream(0));
+        assert!(mapping.in_batch(4096));
+        assert!(mapping.in_stream(4095));
+    }
+
+    async fn batch_startup_fixture() -> (Arc<FlowDualEngine>, Arc<BatchingEngine>, CreateFlowArgs) {
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let table_meta = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        table_meta.init().await.unwrap();
+        table_meta
+            .create_table_metadata(
+                new_test_table_info_with_name(1, "numbers_with_ts"),
+                TableRouteValue::physical(vec![]),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(kv_backend));
+        let query_engine = create_test_query_engine();
+        let catalog_manager = query_engine.engine_state().catalog_manager().clone();
+        let (frontend_client, _handler) =
+            FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+        let frontend_client = Arc::new(frontend_client);
+        let batching_engine = Arc::new(BatchingEngine::new(
+            frontend_client.clone(),
+            query_engine.clone(),
+            flow_metadata_manager.clone(),
+            table_meta.clone(),
+            catalog_manager.clone(),
+            BatchingModeOptions::default(),
+        ));
+        let streaming_engine = Arc::new(StreamingEngine::new(
+            None,
+            query_engine,
+            table_meta,
+            frontend_client,
+        ));
+        let dual_engine = Arc::new(FlowDualEngine::new(
+            streaming_engine,
+            batching_engine.clone(),
+            flow_metadata_manager,
+            catalog_manager,
+            Plugins::new(),
+        ));
+        let args = CreateFlowArgs {
+            flow_id: 9424,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+            source_table_ids: vec![1],
+            create_if_not_exists: false,
+            or_replace: false,
+            expire_after: None,
+            eval_interval: Some(10),
+            comment: None,
+            sql: "SELECT number, ts FROM numbers_with_ts".to_string(),
+            flow_options: HashMap::new(),
+            query_ctx: Some(QueryContext::arc().as_ref().clone()),
+            eval_schedule: None,
+        };
+        (dual_engine, batching_engine, args)
+    }
+
+    #[tokio::test]
+    async fn test_noop_create_preserves_and_repairs_batching_routes() {
+        let (dual_engine, batching_engine, args) = batch_startup_fixture().await;
+        dual_engine.set_done_recovering();
+        batching_engine.create_flow(args.clone()).await.unwrap();
+        dual_engine
+            .src_table2flow
+            .write()
+            .await
+            .add_flow(9424, FlowType::Batching, vec![1]);
+        let noop_args = CreateFlowArgs {
+            create_if_not_exists: true,
+            source_table_ids: vec![999],
+            ..args.clone()
+        };
+        assert!(
+            FlowEngine::create_flow(dual_engine.as_ref(), noop_args)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        {
+            let routing = dual_engine.src_table2flow.read().await;
+            assert_eq!(
+                routing.flow_infos.get(&9424),
+                Some(&(FlowType::Batching, vec![1]))
+            );
+            assert!(!routing.in_batch(999));
+        }
+        dual_engine.src_table2flow.write().await.remove_flow(9424);
+        let replay_args = CreateFlowArgs {
+            create_if_not_exists: true,
+            source_table_ids: vec![999],
+            ..args
+        };
+        assert!(
+            FlowEngine::create_flow(dual_engine.as_ref(), replay_args)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let routing = dual_engine.src_table2flow.read().await;
+        assert_eq!(
+            routing.flow_infos.get(&9424),
+            Some(&(FlowType::Batching, vec![1]))
+        );
+        assert!(routing.in_batch(1));
+        assert!(!routing.in_batch(999));
+    }
+
+    #[tokio::test]
+    async fn test_drop_waits_for_startup_recovery_before_cleaning_visible_batching_flow() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+        let (dual_engine, batching_engine, args) = batch_startup_fixture().await;
+        assert!(!dual_engine.is_recover_done());
+        batching_engine.create_flow(args).await.unwrap();
+        assert!(batching_engine.flow_exist(9424).await.unwrap());
+        // DROP begins with a visible engine flow and no published routing entry.
+        assert!(
+            !dual_engine
+                .src_table2flow
+                .read()
+                .await
+                .flow_infos
+                .contains_key(&9424)
+        );
+
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel(1);
+        let (trigger_tx, mut trigger_rx) =
+            tokio::sync::mpsc::channel::<(bool, bool, oneshot::Sender<()>)>(1);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let checker_engine = dual_engine.clone();
+        let checker_handle = common_runtime::spawn_global(async move {
+            let Some((allow_create, allow_drop, done_tx)) = trigger_rx.recv().await else {
+                return;
+            };
+            assert!(!allow_create);
+            assert!(allow_drop);
+            let _ = entered_tx.send(());
+            if release_rx.await.is_ok() {
+                checker_engine.src_table2flow.write().await.add_flow(
+                    9424,
+                    FlowType::Batching,
+                    vec![1],
+                );
+                checker_engine.set_done_recovering();
+                let _ = done_tx.send(());
+            }
+            let _ = shutdown_rx.recv().await;
+        });
+        *dual_engine.check_task.lock().await = Some(ConsistentCheckTask {
+            handle: checker_handle,
+            shutdown_tx,
+            trigger_tx,
+        });
+
+        let mut drop_flow = tokio::spawn({
+            let dual_engine = dual_engine.clone();
+            async move { FlowEngine::remove_flow(dual_engine.as_ref(), 9424).await }
+        });
+        tokio::time::timeout(TEST_TIMEOUT, entered_rx)
+            .await
+            .expect("DROP should trigger the checker during startup recovery")
+            .expect("checker should acknowledge trigger entry");
+        assert!(!dual_engine.is_recover_done());
+        assert!(
+            !drop_flow.is_finished(),
+            "DROP must wait for checker trigger"
+        );
+        let check_task_guard = tokio::time::timeout(TEST_TIMEOUT, dual_engine.check_task.lock())
+            .await
+            .expect("DROP must release the checker mutex while awaiting its trigger");
+        drop(check_task_guard);
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, &mut drop_flow)
+            .await
+            .expect("DROP should finish after recovery checker release")
+            .unwrap()
+            .unwrap();
+        assert!(dual_engine.is_recover_done());
+        assert!(!batching_engine.flow_exist(9424).await.unwrap());
+        let routing = dual_engine.src_table2flow.read().await;
+        assert!(!routing.flow_infos.contains_key(&9424));
+        assert!(!routing.in_batch(1));
+        drop(routing);
+
+        dual_engine.stop_flow_consistent_check_task().await.unwrap();
+    }
+
+    /// External CREATE must wait until startup recovery has registered the persisted flow.
+    #[tokio::test]
+    async fn test_external_create_waits_for_startup_recovery() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(10);
+        const FLOW_ID: u64 = 9426;
+        let h = StreamingHarness::new().await;
+        h.table(1, "old_source").await;
+        h.table(2, "new_source").await;
+        h.table(3, "old_sink").await;
+        h.table(4, "new_sink").await;
+        let metadata = Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new())));
+        let catalog_manager: catalog::CatalogManagerRef = h.catalog.clone();
+        let batching = Arc::new(BatchingEngine::new(
+            h.engine.frontend_client.clone(),
+            h.engine.query_engine.clone(),
+            metadata.clone(),
+            h.metadata.clone(),
+            catalog_manager.clone(),
+            BatchingModeOptions::default(),
+        ));
+        let dual = Arc::new(FlowDualEngine::new(
+            h.engine.clone(),
+            batching,
+            metadata.clone(),
+            catalog_manager,
+            Plugins::new(),
+        ));
+        let old_info = FlowInfoValue {
+            source_table_ids: vec![1],
+            all_source_table_names: vec![],
+            unresolved_source_table_names: vec![],
+            sink_table_name: MetaTableName {
+                catalog_name: "greptime".into(),
+                schema_name: "public".into(),
+                table_name: "old_sink".into(),
+            },
+            flownode_ids: Default::default(),
+            catalog_name: "greptime".into(),
+            query_context: None,
+            flow_name: "old_flow".into(),
+            raw_sql: "SELECT number, ts FROM old_source".into(),
+            expire_after: None,
+            eval_interval_secs: Some(3600),
+            comment: String::new(),
+            options: HashMap::from([(
+                FlowType::FLOW_TYPE_KEY.to_string(),
+                FlowType::BATCHING.to_string(),
+            )]),
+            status: FlowStatus::Active,
+            created_time: chrono::Utc::now(),
+            updated_time: chrono::Utc::now(),
+            eval_schedule: Some(FlowScheduleConfig::default_with_start(
+                ((chrono::Utc::now().timestamp() + 7200) / 3600) * 3600,
+                3600,
+            )),
+        };
+        metadata
+            .create_flow_metadata(FLOW_ID as u32, old_info, vec![])
+            .await
+            .unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let checker_dual = dual.clone();
+        let checker_metadata = metadata.clone();
+        let checker = common_runtime::spawn_global(async move {
+            let info = checker_metadata
+                .flow_info_manager()
+                .get(FLOW_ID as u32)
+                .await
+                .unwrap()
+                .unwrap();
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+            let args = CreateFlowArgs {
+                flow_id: FLOW_ID,
+                source_table_ids: info.source_table_ids,
+                sink_table_name: [
+                    info.sink_table_name.catalog_name,
+                    info.sink_table_name.schema_name,
+                    info.sink_table_name.table_name,
+                ],
+                create_if_not_exists: true,
+                or_replace: true,
+                expire_after: info.expire_after,
+                eval_interval: info.eval_interval_secs,
+                comment: Some(info.comment),
+                sql: info.raw_sql,
+                flow_options: info.options,
+                query_ctx: Some(QueryContext::arc().as_ref().clone()),
+                eval_schedule: info.eval_schedule,
+            };
+            FlowEngine::create_flow(checker_dual.as_ref(), args)
+                .await
+                .unwrap();
+            checker_dual.set_done_recovering();
+        });
+        tokio::time::timeout(TEST_TIMEOUT, entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let request = FlowRequest {
+            header: Some(FlowRequestHeader {
+                query_context: Some(QueryContext::arc().as_ref().clone().into()),
+                ..Default::default()
+            }),
+            body: Some(flow_request::Body::Create(CreateRequest {
+                flow_id: Some(ProtoFlowId { id: FLOW_ID as u32 }),
+                source_table_ids: vec![ProtoTableId { id: 2 }],
+                sink_table_name: Some(TableName {
+                    catalog_name: "greptime".into(),
+                    schema_name: "public".into(),
+                    table_name: "new_sink".into(),
+                }),
+                create_if_not_exists: true,
+                expire_after: None,
+                eval_interval: None,
+                comment: String::new(),
+                sql: "SELECT number, ts FROM new_source".into(),
+                flow_options: HashMap::from([(
+                    FlowType::FLOW_TYPE_KEY.to_string(),
+                    FlowType::STREAMING.to_string(),
+                )]),
+                or_replace: true,
+            })),
+        };
+        let err = tokio::time::timeout(
+            TEST_TIMEOUT,
+            common_meta::node_manager::Flownode::handle(dual.as_ref(), request.clone()),
+        )
+        .await
+        .expect("CREATE must refuse while recovery is held")
+        .unwrap_err();
+        assert_eq!(err.retry_hint(), RetryHint::Retryable);
+        assert!(!dual.is_recover_done());
+        assert!(!h.engine.flow_exist_inner(FLOW_ID).await.unwrap());
+        assert!(!dual.batching_engine.flow_exist(FLOW_ID).await.unwrap());
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(TEST_TIMEOUT, checker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dual.is_recover_done());
+        assert!(dual.batching_engine.flow_exist(FLOW_ID).await.unwrap());
+        common_meta::node_manager::Flownode::handle(dual.as_ref(), request)
+            .await
+            .unwrap();
+        assert!(
+            dual.streaming_engine
+                .flow_exist_inner(FLOW_ID)
+                .await
+                .unwrap()
+        );
+        assert!(!dual.batching_engine.flow_exist(FLOW_ID).await.unwrap());
+        let routing = dual.src_table2flow.read().await;
+        assert_eq!(
+            routing.flow_infos.get(&FLOW_ID),
+            Some(&(FlowType::Streaming, vec![2]))
+        );
+        assert!(!routing.in_stream(1));
+        assert!(!routing.in_batch(1));
+        assert!(routing.in_stream(2));
+        assert!(!routing.in_batch(2));
+        drop(routing);
+        FlowEngine::handle_flow_inserts(
+            dual.as_ref(),
+            api::v1::region::InsertRequests {
+                requests: vec![mirror_request(2, 0, &[7])],
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(h.take_numbers(), vec![("new_sink".into(), vec![7])]);
+    }
+
+    /// A streaming create that is cancelled after the streaming engine published the flow, but
+    /// before the dual engine recorded the source route, leaves the flow visible while mirror
+    /// input for its source table is dropped. Replaying the create is a no-op for the engine, so
+    /// it must repair the route from the engine's flow rather than from the request args.
+    #[tokio::test]
+    async fn test_streaming_create_replay_repairs_route_after_cancellation() {
+        const TEST_TIMEOUT: Duration = Duration::from_secs(5);
+        const FLOW_ID: u64 = 9425;
+
+        for replay_source in [1u32, 2u32] {
+            let h = StreamingHarness::new().await;
+            h.table(1, "source_original").await;
+            h.table(2, "source_replay").await;
+            h.table(3, "sink").await;
+
+            let flow_metadata_manager =
+                Arc::new(FlowMetadataManager::new(Arc::new(MemoryKvBackend::new())));
+            let catalog_manager: catalog::CatalogManagerRef = h.catalog.clone();
+            let batching_engine = Arc::new(BatchingEngine::new(
+                h.engine.frontend_client.clone(),
+                h.engine.query_engine.clone(),
+                flow_metadata_manager.clone(),
+                h.metadata.clone(),
+                catalog_manager.clone(),
+                BatchingModeOptions::default(),
+            ));
+            let dual_engine = Arc::new(FlowDualEngine::new(
+                h.engine.clone(),
+                batching_engine,
+                flow_metadata_manager,
+                catalog_manager,
+                Plugins::new(),
+            ));
+            dual_engine.set_done_recovering();
+
+            let args = CreateFlowArgs {
+                flow_id: FLOW_ID,
+                sink_table_name: ["greptime".into(), "public".into(), "sink".into()],
+                source_table_ids: vec![1],
+                create_if_not_exists: true,
+                or_replace: false,
+                expire_after: None,
+                eval_interval: None,
+                comment: None,
+                sql: "SELECT number, ts FROM source_original".to_string(),
+                flow_options: HashMap::from([(
+                    FlowType::FLOW_TYPE_KEY.to_string(),
+                    FlowType::STREAMING.to_string(),
+                )]),
+                query_ctx: Some(QueryContext::arc().as_ref().clone()),
+                eval_schedule: None,
+            };
+
+            // Cancel the create while it waits for the routing write lock: the streaming engine
+            // has published the flow, but no route is ever installed.
+            let guard = dual_engine.src_table2flow.write().await;
+            let mut cancelled = tokio::spawn({
+                let dual_engine = dual_engine.clone();
+                let args = args.clone();
+                async move { FlowEngine::create_flow(dual_engine.as_ref(), args).await }
+            });
+            tokio::time::timeout(TEST_TIMEOUT, async {
+                while !h.engine.flow_exist_inner(FLOW_ID).await.unwrap() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("create should publish the flow before blocking on the routing lock");
+            assert!(
+                !cancelled.is_finished(),
+                "create must still be blocked on the routing write guard"
+            );
+            assert!(!guard.flow_infos.contains_key(&FLOW_ID));
+            cancelled.abort();
+            let join_err = tokio::time::timeout(TEST_TIMEOUT, &mut cancelled)
+                .await
+                .expect("aborted create should settle")
+                .expect_err("aborted create must not return a flow");
+            assert!(join_err.is_cancelled());
+            assert!(h.engine.flow_exist_inner(FLOW_ID).await.unwrap());
+            drop(guard);
+
+            // Replaying the create is a no-op for the engine and must restore the route.
+            let replay_args = if replay_source == 1 {
+                args.clone()
+            } else {
+                CreateFlowArgs {
+                    source_table_ids: vec![replay_source],
+                    sql: "SELECT number, ts FROM source_replay".to_string(),
+                    ..args.clone()
+                }
+            };
+            assert!(
+                FlowEngine::create_flow(dual_engine.as_ref(), replay_args)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+
+            // Routing is the only path to the engine, so the mirror input must land in the sink.
+            FlowEngine::handle_flow_inserts(
+                dual_engine.as_ref(),
+                api::v1::region::InsertRequests {
+                    requests: vec![mirror_request(1, 0, &[7])],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(h.take_numbers(), vec![("sink".into(), vec![7])]);
+            {
+                let routing = dual_engine.src_table2flow.read().await;
+                assert_eq!(
+                    routing.flow_infos.get(&FLOW_ID),
+                    Some(&(FlowType::Streaming, vec![1])),
+                    "the replay must restore the original source route"
+                );
+                assert!(routing.in_stream(1));
+                assert!(!routing.in_batch(1));
+                if replay_source != 1 {
+                    assert!(!routing.in_stream(replay_source));
+                    assert!(!routing.in_batch(replay_source));
+                }
+            }
+            assert!(
+                FlowEngine::flow_exist(dual_engine.as_ref(), FLOW_ID)
+                    .await
+                    .unwrap()
+            );
+
+            // A later full create of the same flow from another valid source is still a no-op and
+            // must leave the original route intact.
+            let noop_args = CreateFlowArgs {
+                source_table_ids: vec![2],
+                sql: "SELECT number, ts FROM source_replay".to_string(),
+                ..args.clone()
+            };
+            assert!(
+                FlowEngine::create_flow(dual_engine.as_ref(), noop_args)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            {
+                let routing = dual_engine.src_table2flow.read().await;
+                assert_eq!(
+                    routing.flow_infos.get(&FLOW_ID),
+                    Some(&(FlowType::Streaming, vec![1]))
+                );
+                assert!(!routing.in_stream(2));
+            }
+            FlowEngine::handle_flow_inserts(
+                dual_engine.as_ref(),
+                api::v1::region::InsertRequests {
+                    requests: vec![mirror_request(1, 0, &[8])],
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(h.take_numbers(), vec![("sink".into(), vec![8])]);
+        }
+    }
 
     #[test]
     fn test_malformed_internal_eval_schedule_json_is_error() {
