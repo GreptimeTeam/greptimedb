@@ -238,11 +238,10 @@ impl PromPlanner {
         if !collect_selectors(&stmt, prom_expr, &mut selectors) {
             return Ok(None);
         }
-        // Preserve the original single-selector admission allowlist. Broader binary syntax is only
-        // considered for a multi-occurrence root, where the compiled-tree proof below constrains it.
-        if selectors.len() == 1 && !admitted_single_selector(prom_expr) {
-            return Ok(None);
-        }
+        // The compiler decides which calls and shapes this route answers: a name it has no kernel
+        // for comes back as `NotImplemented`, which is a decline below. A second list of names here
+        // refused expressions the compiler does fold - a call under an aggregate was admitted while
+        // the same call on its own was not - so there is one place that decides.
         let Ok(grid) = statement_grid(&stmt) else {
             return Ok(None);
         };
@@ -1765,51 +1764,6 @@ pub(crate) fn pointwise_operand(node: &NativeNode) -> bool {
     }
 }
 
-/// Whether a single-selector expression belongs to the native route's existing selector allowlist
-/// or is an aggregate expression handled by the aggregate split.
-fn admitted_single_selector(expr: &PromExpr) -> bool {
-    fn aggregate(expr: &PromExpr) -> bool {
-        match expr {
-            PromExpr::Aggregate(_aggregate) => true,
-            PromExpr::Paren(paren) => aggregate(&paren.expr),
-            PromExpr::Unary(unary) => aggregate(&unary.expr),
-            PromExpr::Binary(binary) => aggregate(&binary.lhs) || aggregate(&binary.rhs),
-            PromExpr::Call(call) => call.args.args.iter().any(|arg| aggregate(arg)),
-            _ => false,
-        }
-    }
-
-    admitted_selector(expr).is_some() || aggregate(expr) || dynamic_scalar(expr)
-}
-
-/// Whether `expr` calls `time()`, `vector()` or a date function without an argument.
-/// The compiled tree decides how such a statement runs.
-fn dynamic_scalar(expr: &PromExpr) -> bool {
-    match expr {
-        PromExpr::Call(call) => {
-            matches!(call.func.name, "time" | "vector")
-                || (call.args.args.is_empty()
-                    && matches!(
-                        call.func.name,
-                        "day_of_month"
-                            | "day_of_week"
-                            | "day_of_year"
-                            | "days_in_month"
-                            | "hour"
-                            | "minute"
-                            | "month"
-                            | "year"
-                    ))
-                || call.args.args.iter().any(|arg| dynamic_scalar(arg))
-        }
-        PromExpr::Paren(paren) => dynamic_scalar(&paren.expr),
-        PromExpr::Unary(unary) => dynamic_scalar(&unary.expr),
-        PromExpr::Binary(binary) => dynamic_scalar(&binary.lhs) || dynamic_scalar(&binary.rhs),
-        PromExpr::Aggregate(aggregate) => dynamic_scalar(&aggregate.expr),
-        _ => false,
-    }
-}
-
 /// The existing selector allowlist: a selector or supported unary calls over one selector.
 fn admitted_selector(expr: &PromExpr) -> Option<&VectorSelector> {
     match expr {
@@ -1966,9 +1920,8 @@ mod tests {
     use session::context::QueryContextBuilder;
 
     use super::{
-        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, admitted_single_selector,
-        collect_selectors, fused_output_tags, hybrid_binary_admitted, independent_scan_pair,
-        native_promql_requested, scan_time_filter,
+        NATIVE_PROMQL_EXTENSION_KEY, admitted_selector, collect_selectors, fused_output_tags,
+        hybrid_binary_admitted, independent_scan_pair, native_promql_requested, scan_time_filter,
     };
 
     fn compiled_test_tree(query: &str) -> NativeTree {
@@ -2269,10 +2222,6 @@ mod tests {
         ] {
             let expression = promql_parser::parser::parse(query).unwrap();
             assert!(admitted_selector(&expression).is_some(), "{query}");
-        }
-        for query in ["sum(x)", "sum by (job) (rate(x[5m]))"] {
-            let expression = promql_parser::parser::parse(query).unwrap();
-            assert!(admitted_single_selector(&expression), "{query}");
         }
     }
 
