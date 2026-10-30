@@ -694,6 +694,9 @@ impl SstMerger for DefaultSstMerger {
                     index_file_size: sst_info.index_metadata.file_size,
                     index_version: 0,
                     num_rows: sst_info.num_rows as u64,
+                    num_rows_is_logical: !append_mode
+                        && merge_mode == MergeMode::LastRow
+                        && output.filter_deleted,
                     num_row_groups: sst_info.num_row_groups,
                     sequence: sequence_metadata.file_sequence,
                     partition_expr: partition_expr.clone(),

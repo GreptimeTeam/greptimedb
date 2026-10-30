@@ -1,0 +1,146 @@
+-- The same results must hold with experimental_metadata_count enabled or disabled.
+CREATE TABLE metadata_count_test (
+  host STRING,
+  ts TIMESTAMP TIME INDEX,
+  v BIGINT,
+  PRIMARY KEY (host)
+) WITH ('compaction.type' = 'twcs', 'compaction.twcs.trigger_file_num' = '2');
+
+Affected Rows: 0
+
+INSERT INTO metadata_count_test VALUES ('a', 1000, 1), ('a', 2000, NULL), ('a', 3000, 3);
+
+Affected Rows: 3
+
+SELECT count(*) FROM metadata_count_test;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+ADMIN FLUSH_TABLE('metadata_count_test');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('metadata_count_test') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+INSERT INTO metadata_count_test VALUES ('a', 1000, 11), ('a', 4000, 4);
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('metadata_count_test');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('metadata_count_test') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+DELETE FROM metadata_count_test WHERE host = 'a' AND ts = 3000;
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('metadata_count_test');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('metadata_count_test') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+SELECT count(*) FROM metadata_count_test;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+ADMIN COMPACT_TABLE('metadata_count_test');
+
++--------------------------------------------+
+| ADMIN COMPACT_TABLE('metadata_count_test') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+SELECT count(*) FROM metadata_count_test;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT count(*) FROM metadata_count_test WHERE ts >= 1000 AND ts < 5000;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+SELECT count(*) FROM metadata_count_test WHERE ts < 3000;
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+SELECT count(*) FROM metadata_count_test WHERE ts = 1000 OR ts = 4000;
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+SELECT count(*) FROM metadata_count_test WHERE v > 3;
+
++----------+
+| count(*) |
++----------+
+| 2        |
++----------+
+
+SELECT count(v), count(DISTINCT ts) FROM metadata_count_test;
+
++------------------------------+----------------------------------------+
+| count(metadata_count_test.v) | count(DISTINCT metadata_count_test.ts) |
++------------------------------+----------------------------------------+
+| 2                            | 3                                      |
++------------------------------+----------------------------------------+
+
+INSERT INTO metadata_count_test VALUES ('a', 1000, 111), ('a', 5000, 5);
+
+Affected Rows: 2
+
+SELECT count(*) FROM metadata_count_test;
+
++----------+
+| count(*) |
++----------+
+| 4        |
++----------+
+
+DELETE FROM metadata_count_test WHERE host = 'a' AND ts = 1000;
+
+Affected Rows: 1
+
+SELECT count(*) FROM metadata_count_test;
+
++----------+
+| count(*) |
++----------+
+| 3        |
++----------+
+
+DROP TABLE metadata_count_test;
+
+Affected Rows: 0
+
