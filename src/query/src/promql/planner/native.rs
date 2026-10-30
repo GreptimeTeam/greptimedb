@@ -1282,6 +1282,13 @@ async fn segment_tree(
     if !carries_prefix(tree.root()) {
         return Ok(None);
     }
+    // A grouping by `__name__` keeps that label while the fused node's declared columns cannot
+    // name it. With multiple sources, groups differing only by metric name would therefore be
+    // reported under one label set. A single-source tree cannot merge distinct metric-name groups
+    // this way, so this restriction is specific to multi-source segmentation.
+    if children.len() > 1 && groups_by_metric_name(tree.root()) {
+        return Ok(None);
+    }
     // A statement the existing planner refuses is not one this route may answer. Its refusal is the
     // product's answer for that statement - an operation with no kernel, or one whose arguments it
     // rejects - and answering it here would turn an error into a value. Reading the existing plan's
