@@ -832,7 +832,7 @@ async fn test_tracked_cancellation_during_route_refresh_stops_retries() {
         )
         .await;
     let progress = dispatcher
-        .execute_tracked(writes, progress, Some(&cancellation))
+        .execute_tracked(writes, progress, None, Some(&cancellation))
         .await;
     assert!(cancellation.is_cancelled());
     assert_eq!(invalidator.calls.lock().unwrap().len(), 2);
@@ -1238,6 +1238,7 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
                         },
                     ],
                     2,
+                    None,
                 )
                 .await;
             assert_eq!(
@@ -2185,6 +2186,50 @@ async fn test_with_retry_can_disable_previously_enabled_retries() {
 }
 
 #[tokio::test]
+async fn test_tracked_dispatch_records_each_send_attempt() {
+    for (max_retries, failures, expected_attempts) in
+        [(0, 0, 1), (0, 1, 1), (2, 0, 1), (2, 1, 2), (2, 3, 3)]
+    {
+        let server = RegionTestServer::start().await;
+        server.fail_region(2, std::iter::repeat_n(RetryHint::Retryable, failures));
+        let dispatcher = server.create_dispatcher(max_retries).await;
+        let histogram = Histogram::with_opts(prometheus::HistogramOpts::new(
+            "tracked_write_attempts",
+            "Tracked write attempt time",
+        ))
+        .unwrap();
+        let progress = dispatcher
+            .dispatch_tracked(
+                vec![
+                    TrackedWrite {
+                        request: build_insert_request(&[1]),
+                        owners: vec![0],
+                    },
+                    TrackedWrite {
+                        request: build_insert_request(&[2]),
+                        owners: vec![1],
+                    },
+                ],
+                2,
+                Some(&histogram),
+            )
+            .await;
+
+        assert_eq!(histogram.get_sample_count(), (1 + expected_attempts) as u64);
+        assert_eq!(server.attempt_counts()[&RegionId::new(1, 1).as_u64()], 1);
+        assert_eq!(
+            server.attempt_counts()[&RegionId::new(1, 2).as_u64()],
+            expected_attempts
+        );
+        assert_eq!(progress[0].affected_rows, 1);
+        assert!(progress[0].error.is_none());
+        let failed = failures > max_retries;
+        assert_eq!(progress[1].affected_rows, usize::from(!failed));
+        assert_eq!(progress[1].error.is_some(), failed);
+    }
+}
+
+#[tokio::test]
 async fn test_exemplar_progress_retains_success_and_unknown_acknowledgements() {
     for retries in [0, 1] {
         let server = RegionTestServer::start().await;
@@ -2212,6 +2257,7 @@ async fn test_exemplar_progress_retains_success_and_unknown_acknowledgements() {
                     },
                 ],
                 2,
+                None,
             )
             .await;
         assert_eq!(progress[0].affected_rows, 1);
@@ -2276,7 +2322,7 @@ async fn test_tracked_progress_counts_noncontiguous_owners() {
             expected[*owner] += 1;
         }
         let progress = dispatcher
-            .dispatch_tracked(vec![TrackedWrite { request, owners }], 4)
+            .dispatch_tracked(vec![TrackedWrite { request, owners }], 4, None)
             .await;
         assert!(progress.iter().all(|p| p.error.is_none()));
         assert_eq!(

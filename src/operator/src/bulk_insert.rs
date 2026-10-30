@@ -74,7 +74,7 @@ impl Inserter {
             .collect();
         Ok(self
             .write_dispatcher
-            .dispatch_tracked(requests, inputs)
+            .dispatch_tracked(requests, inputs, None)
             .await)
     }
 

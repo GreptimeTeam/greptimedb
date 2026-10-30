@@ -171,7 +171,14 @@ impl PhysicalFlushWriteDispatcher for WriteDispatcherPhysicalFlushAdapter {
         inputs: usize,
     ) -> Vec<WriteProgress> {
         self.write_dispatcher
-            .dispatch_tracked(requests, inputs)
+            .dispatch_tracked(
+                requests,
+                inputs,
+                Some(
+                    &metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+                        .with_label_values(&["flush_write_region"]),
+                ),
+            )
             .await
     }
     async fn dispatch(&self, requests: Vec<RegionRequest>) -> Result<usize> {
@@ -326,19 +333,65 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
+    use api::region::RegionResponse;
     use api::v1::PartitionExprVersion;
-    use api::v1::region::{bulk_insert_request, region_request};
+    use api::v1::region::{
+        InsertRequest, InsertRequests, RegionRequest, bulk_insert_request, region_request,
+    };
     use arrow::array::{Array, BinaryArray, BooleanArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
     use common_grpc::flight::FlightDecoder;
+    use common_meta::ddl::test_util::datanode_handler::DatanodeWatcher;
+    use common_meta::test_util::MockDatanodeManager;
+    use operator::test_util::{create_partition_rule_manager, prepare_mocked_backend};
+    use operator::write_dispatcher::{TrackedWrite, WriteDispatcher};
     use partition::partition::{PartitionRule, RegionMask};
     use store_api::storage::RegionId;
 
     use crate::batcher::logical_table::batch_convert::{self, RecordBatchWithTsIdx, TableBatch};
     use crate::batcher::logical_table::region_write::{
-        PlannedRegionBatch, encode_region_write_requests, plan_region_batches,
+        PhysicalFlushWriteDispatcher, PlannedRegionBatch, WriteDispatcherPhysicalFlushAdapter,
+        encode_region_write_requests, plan_region_batches,
     };
+    use crate::metrics;
+
+    #[tokio::test]
+    async fn test_tracked_dispatch_records_flush_write_region_metric() {
+        let partitions = create_partition_rule_manager(prepare_mocked_backend().await).await;
+        let (sender, _receiver) = tokio::sync::mpsc::channel(1);
+        let handler = DatanodeWatcher::new(sender).with_handler(|_, _| Ok(RegionResponse::new(1)));
+        let dispatcher = WriteDispatcherPhysicalFlushAdapter {
+            write_dispatcher: Arc::new(WriteDispatcher::new(
+                Arc::new(MockDatanodeManager::new(handler)),
+                partitions,
+            )),
+        };
+        let histogram = metrics::PENDING_ROWS_BATCH_FLUSH_STAGE_ELAPSED
+            .with_label_values(&["flush_write_region"]);
+        let before = histogram.get_sample_count();
+        let progress = dispatcher
+            .dispatch_tracked(
+                vec![TrackedWrite {
+                    request: RegionRequest {
+                        body: Some(region_request::Body::Inserts(InsertRequests {
+                            requests: vec![InsertRequest {
+                                region_id: RegionId::new(1, 1).as_u64(),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    },
+                    owners: vec![0],
+                }],
+                1,
+            )
+            .await;
+
+        assert_eq!(progress[0].affected_rows, 1);
+        assert!(progress[0].error.is_none());
+        assert_eq!(histogram.get_sample_count(), before + 1);
+    }
 
     #[test]
     fn test_plan_region_batches_preserves_partition_columns_through_encoding() {

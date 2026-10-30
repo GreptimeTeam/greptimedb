@@ -21,6 +21,7 @@ use common_error::ext::{BoxedError, ErrorExt, RetryHint};
 use common_meta::error::{Error, UnexpectedSnafu};
 use common_query::WriteProgress;
 use futures::future;
+use prometheus::Histogram;
 use tokio_util::sync::CancellationToken;
 
 use crate::write_dispatcher::{
@@ -36,13 +37,16 @@ pub struct TrackedWrite {
 
 impl WriteDispatcher {
     /// Collects acknowledgements per input across shared flushes and repartition retries.
+    /// Records each datanode send attempt, including retries, in the optional histogram.
     pub async fn dispatch_tracked(
         &self,
         requests: Vec<TrackedWrite>,
         inputs: usize,
+        histogram: Option<&Histogram>,
     ) -> Vec<WriteProgress> {
         let (writes, progress) = self.prepare_tracked(requests, inputs).await;
-        self.execute_tracked(writes, progress, None).await
+        self.execute_tracked(writes, progress, histogram, None)
+            .await
     }
 
     /// Resolves routes before tracked writes are detached from the caller.
@@ -107,6 +111,7 @@ impl WriteDispatcher {
         &self,
         mut pending: Vec<RoutedWrite>,
         mut progress: Vec<WriteProgress>,
+        histogram: Option<&Histogram>,
         cancellation: Option<&CancellationToken>,
     ) -> Vec<WriteProgress> {
         let mut backoff = self.retry.as_ref().map(|retry| {
@@ -124,8 +129,9 @@ impl WriteDispatcher {
             let attempts = future::join_all(pending.into_iter().map(|write| async {
                 let owners = write.owners.clone().unwrap_or_default();
                 let attempt = if let Some(retry) = &self.retry {
-                    retry.send(write, None).await
+                    retry.send(write, histogram).await
                 } else {
+                    let _timer = histogram.map(Histogram::start_timer);
                     let datanode = self.node_manager.datanode(&write.peer).await;
                     match datanode.handle(write.request).await {
                         Ok(response) => WriteAttempt::Success(response),

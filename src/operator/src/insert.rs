@@ -896,7 +896,7 @@ impl Inserter {
             let _guard = cancellation.clone().drop_guard();
             let progress = common_runtime::spawn_global(async move {
                 dispatcher
-                    .execute_tracked(writes, progress, Some(&cancellation))
+                    .execute_tracked(writes, progress, None, Some(&cancellation))
                     .await
             })
             .await
@@ -2986,7 +2986,7 @@ mod tests {
             .collect();
         let (writes, progress) = dispatcher.prepare_tracked(requests, 2).await;
         let cancellation = CancellationToken::new();
-        let execute = dispatcher.execute_tracked(writes, progress, Some(&cancellation));
+        let execute = dispatcher.execute_tracked(writes, progress, None, Some(&cancellation));
         tokio::pin!(execute);
         // Wait for both sends to complete before cancelling the backoff.
         tokio::time::timeout(
