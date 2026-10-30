@@ -16,7 +16,6 @@ mod attribution;
 mod options;
 pub use attribution::WriteAttribution;
 mod progress;
-pub use progress::TrackedWrite;
 #[cfg(test)]
 mod tests;
 
@@ -46,6 +45,7 @@ use table::table_name::TableName;
 use tokio_util::sync::CancellationToken;
 
 pub use self::options::WriteRetryOptions;
+pub use self::progress::TrackedWrite;
 use crate::error::{self, FindRegionLeaderSnafu, RequestRegionSnafu};
 use crate::req_convert::TablePartitioner;
 
