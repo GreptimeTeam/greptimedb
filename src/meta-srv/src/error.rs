@@ -130,6 +130,18 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "Drain datanode {} exceeded the maximum rescan rounds: {}",
+        node_id,
+        max_rounds
+    ))]
+    DrainDatanodeRescanExceeded {
+        node_id: DatanodeId,
+        max_rounds: u32,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "Another procedure is operating the region: {} on peer: {}",
         region_id,
         peer_id
@@ -1273,9 +1285,10 @@ impl ErrorExt for Error {
             | Error::RegionRouteNotFound { .. }
             | Error::MigrationAbort { .. }
             | Error::MigrationRunning { .. }
+            | Error::RegionMigrated { .. }
             | Error::DrainDatanodeRunning { .. }
             | Error::DrainDatanodeAbort { .. }
-            | Error::RegionMigrated { .. } => StatusCode::Unexpected,
+            | Error::DrainDatanodeRescanExceeded { .. } => StatusCode::Unexpected,
             Error::TableNotFound { .. } => StatusCode::TableNotFound,
             Error::SaveClusterInfo { source, .. }
             | Error::InvalidClusterInfoFormat { source, .. }
