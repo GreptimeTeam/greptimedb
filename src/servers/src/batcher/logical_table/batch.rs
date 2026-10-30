@@ -334,6 +334,7 @@ async fn flush_batch_physical_tracked(
                 // Avoid bitmap range setup for single-row submissions.
                 usize::from(bits.value(offset))
             } else {
+                // `offset` is mask-relative; the raw buffer also needs the mask's slice offset.
                 bits.inner()
                     .count_set_bits_offset(bits.offset() + offset, num_rows)
             };
