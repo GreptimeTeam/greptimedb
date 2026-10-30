@@ -118,7 +118,8 @@ impl FulltextIndexer {
                 }
             }
             for (target, options) in targets {
-                // A fresh UUID gives each path its own filesystem-safe directory.
+                // fulltext_path generates a fresh UUID for each target, so JSON paths
+                // in the same column use separate intermediate directories.
                 let intm_path =
                     intermediate_manager.fulltext_path(region_id, sst_file_id, column.column_id);
 
