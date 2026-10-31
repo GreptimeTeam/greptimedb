@@ -26,7 +26,7 @@ const checked = '- [x] Merge during the nightly window <!-- nightly-merge -->';
 
 async function run({ sync = false, body = checked, labels = ['merge nightly'],
   detail = {}, current = {}, threads = [[true]], count = 1, dryRun = false,
-  failFirst = false } = {}) {
+  failFirst = false, enqueueError = Error('head changed') } = {}) {
   const calls = [];
   let page = 0;
   const github = {
@@ -43,7 +43,7 @@ async function run({ sync = false, body = checked, labels = ['merge nightly'],
     graphql: async (query, args) => {
       if (query.includes('mutation')) {
         calls.push(['enqueue', args]);
-        if (failFirst && calls.filter(call => call[0] === 'enqueue').length === 1) throw Error('head changed');
+        if (failFirst && calls.filter(call => call[0] === 'enqueue').length === 1) throw enqueueError;
         return {};
       }
       if (query.includes('reviewThreads')) {
@@ -122,4 +122,32 @@ test('label-only opt-in survives PRs without a template and does not require a c
   }
   // The label is authoritative for admission, even before checkbox synchronization.
   assert.equal((await run({ body: checked.replace('[x]', '[ ]') })).some(call => call[0] === 'enqueue'), true);
+});
+
+const stackMessage = 'This pull request is part of a stack and must be enqueued using the asynchronous merge REST API. For more information, see https://docs.github.com/rest/pulls/pulls#merge-a-pull-request-asynchronously';
+
+test('stacked PR rejection is skipped without consuming the successful enqueue cap', async () => {
+  const calls = await run({ count: 7, failFirst: true,
+    enqueueError: Object.assign(Error('GraphQL request failed'), { errors: [{ message: stackMessage }] }) });
+  assert.equal(calls.some(c => c[0] === 'failed'), false);
+  assert.deepEqual(calls.find(c => c[0] === 'summary')[1], [
+    ['PR', 'Result'], ['1', 'Skipped: stacked PR'],
+    ...[2, 3, 4, 5, 6].map(number => [String(number), 'Enqueued'])
+  ]);
+  assert.deepEqual(calls.filter(c => c[0] === 'enqueue').map(c => c[1].id),
+    ['PR_1', 'PR_2', 'PR_3', 'PR_4', 'PR_5', 'PR_6']);
+});
+
+test('mixed or unstructured errors are not mistaken for a stacked PR rejection', async () => {
+  for (const enqueueError of [
+    Error(stackMessage),
+    Object.assign(Error('GraphQL request failed'), { errors: [] }),
+    Object.assign(Error('GraphQL request failed'), { errors: [{ message: stackMessage }, { message: 'Forbidden' }] })
+  ]) {
+    const calls = await run({ count: 2, failFirst: true, enqueueError });
+    assert.equal(calls.filter(c => c[0] === 'failed').length, 1);
+    assert.deepEqual(calls.find(c => c[0] === 'summary')[1], [
+      ['PR', 'Result'], ['1', 'Failed: see workflow logs'], ['2', 'Enqueued']
+    ]);
+  }
 });
