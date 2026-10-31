@@ -35,12 +35,14 @@ mod codec;
 mod csv;
 mod influxdb;
 mod options;
+mod otlp;
 mod parse;
 
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::influxdb::InfluxdbRequest;
+use crate::query_handler::PipelineHandlerRef;
 use api::helper::ColumnDataTypeWrapper;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::{
@@ -48,6 +50,7 @@ use api::v1::{
 };
 use async_trait::async_trait;
 use codec::{CopyFormat, RecordParser};
+use common_catalog::consts::{TRACE_TABLE_NAME, TRACE_TABLE_NAME_SESSION_KEY};
 use common_grpc::precision::Precision;
 use common_query::OutputData;
 use common_telemetry::{info, warn};
@@ -57,12 +60,15 @@ use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use futures::{Sink, SinkExt, stream};
 use influxdb::InfluxdbOptions;
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
+use otlp::{OtlpOptions, OtlpSignal};
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::results::{CopyResponse, Response, Tag};
 use pgwire::api::{ClientInfo, PgWireConnectionState};
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
+use prost::Message;
 use session::context::QueryContextRef;
 use table::metadata::TableInfo;
 
@@ -84,11 +90,10 @@ use crate::postgres::utils::convert_err;
 /// the per-batch fixed costs negligible.
 pub(crate) const COPY_IN_FLUSH_ROWS: usize = 32768;
 
-/// Upper bound of an influxdb COPY FROM STDIN payload. One COPY
-/// statement is one bounded ingestion request (the whole payload is
-/// buffered like one HTTP write body); a larger import is multiple COPY
-/// statements. Streaming ingest may arrive later, with framing owned by
-/// the shared line-protocol parser rather than the COPY layer.
+/// Upper bound of a table-less COPY FROM STDIN payload (influxdb line
+/// protocol, OTLP). One COPY statement is one bounded ingestion request
+/// (the whole payload is buffered like one HTTP request body); a larger
+/// import is multiple COPY statements.
 pub(crate) const COPY_IN_MAX_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 /// Builds a format from the format-neutral option set.
@@ -102,6 +107,8 @@ const REGISTERED_FORMATS: &[(&str, FormatBuilder)] = &[
     ("csv", csv::build_csv_codec),
     ("influxdb", influxdb::build_influxdb_codec),
     ("influxdb_line", influxdb::build_influxdb_codec),
+    ("otlp", otlp::build_otlp_codec),
+    ("otlp_metrics", otlp::build_otlp_codec),
     ("text", build_unimplemented_text_codec),
     ("txt", build_unimplemented_text_codec),
     ("binary", build_unimplemented_binary_codec),
@@ -268,6 +275,10 @@ enum Payload {
         data: Vec<u8>,
         precision: Option<Precision>,
     },
+    /// The whole buffered OTLP payload with its validated options,
+    /// decoded and completed as one request at `CopyDone` through the
+    /// matching OTLP pipeline.
+    Otlp { data: Vec<u8>, options: OtlpOptions },
 }
 
 impl CopyInState {
@@ -327,6 +338,22 @@ impl CopyInState {
         }
     }
 
+    /// State for the OTLP format: the whole binary payload is buffered
+    /// and completed once at `CopyDone` through the matching OTLP
+    /// pipeline. Binary: the advertised wire format code is 1.
+    fn new_otlp(options: &OtlpOptions, query_ctx: QueryContextRef) -> Self {
+        Self {
+            query_ctx,
+            payload: Payload::Otlp {
+                data: Vec::new(),
+                options: options.clone(),
+            },
+            codec_name: "otlp",
+            codec_format_code: 1,
+            rows_written: 0,
+        }
+    }
+
     /// The wire format code advertised to the client.
     pub(crate) fn format_code(&self) -> i8 {
         self.codec_format_code
@@ -337,7 +364,7 @@ impl CopyInState {
     fn feed(&mut self, data: &[u8]) -> PgWireResult<()> {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.feed(data)?),
-            Payload::Influxdb { data: buffered, .. } => {
+            Payload::Influxdb { data: buffered, .. } | Payload::Otlp { data: buffered, .. } => {
                 if buffered.len() + data.len() > COPY_IN_MAX_PAYLOAD_BYTES {
                     return Err(bad_copy_data(format!(
                         "COPY FROM STDIN payload exceeds the {} limit; split the import into multiple COPY statements",
@@ -356,7 +383,7 @@ impl CopyInState {
         match &mut self.payload {
             Payload::Table { parser, rows, .. } => rows.extend(parser.finish()?),
             // The whole payload is one request body; nothing to finalize.
-            Payload::Influxdb { .. } => {}
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => {}
         }
         Ok(())
     }
@@ -365,7 +392,7 @@ impl CopyInState {
         match &self.payload {
             Payload::Table { rows, .. } => rows.len() >= COPY_IN_FLUSH_ROWS,
             // Completed once at CopyDone, not mid-stream.
-            Payload::Influxdb { .. } => false,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => false,
         }
     }
 
@@ -393,6 +420,17 @@ impl CopyInState {
                 rows: Some(rows),
             }],
         })
+    }
+
+    /// Takes the buffered OTLP payload and its options, if any.
+    fn take_otlp(&mut self) -> Option<(OtlpOptions, Vec<u8>)> {
+        let Payload::Otlp { options, data } = &mut self.payload else {
+            return None;
+        };
+        if data.is_empty() {
+            return None;
+        }
+        Some((options.clone(), std::mem::take(data)))
     }
 
     /// Takes the buffered payload as one line-protocol request body, if
@@ -558,11 +596,26 @@ impl PostgresServerHandlerInner {
                 }
                 CopyInState::new_influxdb(options, query_ctx)
             }
+            // OTLP forbids a target table too — the payload's resource
+            // metrics route to their own tables — and completes through
+            // the OTLP metrics pipeline; the server must be wired.
+            CopyFormat::Otlp(options) => {
+                if !stmt.table.is_empty() {
+                    return Err(unsupported(format!(
+                        "format otlp routes each record to its own table; \"COPY {} FROM STDIN\" must not name one",
+                        stmt.table.join(".")
+                    )));
+                }
+                if self.otlp_handler.is_none() {
+                    return Err(unsupported("this server is not wired for the otlp format"));
+                }
+                CopyInState::new_otlp(options, query_ctx)
+            }
         };
         let num_columns = match &state.payload {
             Payload::Table { grpc_schema, .. } => grpc_schema.len(),
             // No fixed column set: the format routes per record.
-            Payload::Influxdb { .. } => 0,
+            Payload::Influxdb { .. } | Payload::Otlp { .. } => 0,
         };
         let format_code = state.format_code();
 
@@ -585,6 +638,14 @@ impl PostgresServerHandlerInner {
         // timestamp alignment and inserts are identical to an HTTP
         // write of the same bytes. The context stays this connection's
         // postgres context.
+        if let Some((options, bytes)) = state.take_otlp() {
+            let Some(otlp_handler) = &self.otlp_handler else {
+                return Err(unsupported("this server is not wired for the otlp format"));
+            };
+            return self
+                .flush_otlp(otlp_handler, options, bytes, query_ctx)
+                .await;
+        }
         if let Some(request) = state.take_lines()? {
             let Some(influxdb_handler) = &self.influxdb_handler else {
                 return Err(unsupported(
@@ -616,6 +677,158 @@ impl PostgresServerHandlerInner {
             }
         }
     }
+
+    /// Completes an OTLP copy through the pipeline the matching
+    /// OTLP/HTTP endpoint uses — the payload is decoded with the same
+    /// protobuf types and handed to the same handler methods with the
+    /// same context preparation, so both ingestion routes are
+    /// identical. The context stays this connection's postgres context
+    /// apart from the signal-specific preparation below.
+    async fn flush_otlp(
+        &self,
+        otlp_handler: &crate::query_handler::OpenTelemetryProtocolHandlerRef,
+        options: OtlpOptions,
+        bytes: Vec<u8>,
+        query_ctx: QueryContextRef,
+    ) -> PgWireResult<u64> {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+        use pipeline::{GreptimePipelineParams, PipelineWay, SelectInfo};
+        use session::protocol_ctx::{MetricType, OtlpMetricCtx, ProtocolCtx};
+
+        // The HTTP routes derive the pipeline handler from the same
+        // protocol handler via trait upcasting; so does the copy.
+        let pipeline_handler: PipelineHandlerRef = otlp_handler.clone();
+        match options.signal {
+            OtlpSignal::Metrics {
+                promote_all_resource_attrs,
+                resource_attrs,
+                promote_scope_attrs,
+                translation_strategy,
+            } => {
+                // Same context preparation as the HTTP metrics route.
+                let mut ctx = (*query_ctx).clone();
+                ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                    promote_all_resource_attrs,
+                    resource_attrs,
+                    promote_scope_attrs,
+                    with_metric_engine: self.otlp_with_metric_engine,
+                    // Set by the frontend from its config.
+                    resource_info: false,
+                    metric_type: MetricType::Init,
+                    metric_translation_strategy: translation_strategy,
+                }));
+                let request = ExportMetricsServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outcome = otlp_handler
+                    .metrics(request, Arc::new(ctx))
+                    .await
+                    .map_err(convert_err)?;
+                // Same failure semantics as the HTTP route: a payload
+                // whose points were all rejected is an error, not a
+                // successful `COPY 0`.
+                if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+                    return Err(all_rejected_error(
+                        "data points",
+                        outcome.rejected_data_points,
+                        outcome.error_message.as_deref(),
+                    ));
+                }
+                // Rows are the accepted data points.
+                Ok(outcome.accepted_data_points.max(0) as u64)
+            }
+            OtlpSignal::Traces {
+                table_name,
+                pipeline_name,
+                pipeline_version,
+                pipeline_params,
+            } => {
+                let table_name = table_name.unwrap_or_else(|| TRACE_TABLE_NAME.to_string());
+                // Same context preparation as the HTTP traces route.
+                let mut ctx = (*query_ctx).clone();
+                ctx.set_extension(TRACE_TABLE_NAME_SESSION_KEY, &table_name);
+                let pipeline = PipelineWay::from_name_and_default(
+                    pipeline_name.as_deref(),
+                    pipeline_version.as_deref(),
+                    None,
+                )
+                .map_err(convert_err)?;
+                let request = ExportTraceServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outcome = otlp_handler
+                    .traces(
+                        pipeline_handler,
+                        request,
+                        pipeline,
+                        GreptimePipelineParams::from_params(pipeline_params.as_deref()),
+                        table_name,
+                        Arc::new(ctx),
+                    )
+                    .await
+                    .map_err(convert_err)?;
+                // Same failure semantics as the HTTP route.
+                if outcome.accepted_spans == 0 && outcome.rejected_spans > 0 {
+                    return Err(all_rejected_error(
+                        "spans",
+                        outcome.rejected_spans as i64,
+                        outcome.error_message.as_deref(),
+                    ));
+                }
+                // Rows are the accepted spans.
+                Ok(outcome.accepted_spans as u64)
+            }
+            OtlpSignal::Logs {
+                table_name,
+                pipeline_name,
+                pipeline_version,
+                pipeline_params,
+                extract_keys,
+            } => {
+                let table_name = table_name.unwrap_or_else(|| "opentelemetry_logs".to_string());
+                // Same select semantics as the HTTP extract-keys header.
+                let select_info = match extract_keys.as_deref() {
+                    Some(keys) if !keys.is_empty() => SelectInfo::from(keys.to_string()),
+                    _ => Default::default(),
+                };
+                let pipeline = PipelineWay::from_name_and_default(
+                    pipeline_name.as_deref(),
+                    pipeline_version.as_deref(),
+                    Some(PipelineWay::OtlpLogDirect(Box::new(select_info))),
+                )
+                .map_err(convert_err)?;
+                let request = ExportLogsServiceRequest::decode(bytes.as_slice())
+                    .map_err(|e| bad_copy_data(format!("invalid OTLP payload: {e}")))?;
+                let outputs = otlp_handler
+                    .logs(
+                        pipeline_handler,
+                        request,
+                        pipeline,
+                        GreptimePipelineParams::from_params(pipeline_params.as_deref()),
+                        table_name,
+                        query_ctx,
+                    )
+                    .await
+                    .map_err(convert_err)?;
+                // Rows are the affected rows across the outputs.
+                Ok(outputs
+                    .iter()
+                    .map(|o| match &o.data {
+                        OutputData::AffectedRows(rows) => *rows as u64,
+                        _ => 0,
+                    })
+                    .sum())
+            }
+        }
+    }
+}
+
+/// The error for an OTLP payload whose points/spans were all rejected,
+/// carrying the pipeline's reason when it provided one.
+fn all_rejected_error(kind: &str, rejected: i64, reason: Option<&str>) -> PgWireError {
+    bad_copy_data(match reason {
+        Some(reason) => format!("OTLP ingestion rejected all {rejected} {kind}: {reason}"),
+        None => format!("OTLP ingestion rejected all {rejected} {kind}"),
+    })
 }
 
 fn adjust_query_context(
