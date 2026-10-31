@@ -37,6 +37,8 @@ always_run = [
   # `fuzz-test` seeds the corpus every fuzz job starts from.
   ".github/scripts/kind-with-registry.sh",
   ".github/scripts/prepare-fuzz-corpus.sh",
+  ".github/scripts/select-fuzz-targets.py",
+  ".github/scripts/fuzz-target-rules.toml",
   ".github/scripts/run-fuzz-targets.sh",
   ".github/scripts/collect-fuzz-target-artifacts.sh",
   ".github/scripts/wait-kafka-ready.sh",

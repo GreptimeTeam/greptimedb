@@ -28,6 +28,9 @@ runs:
     - name: Run fuzz orchestration script tests
       shell: bash
       run: .github/scripts/run-fuzz-targets-test.sh
+    - name: Run fuzz target selection tests
+      shell: bash
+      run: python3 -m unittest discover -s .github/scripts/tests -p 'test_select_fuzz_targets.py'
     - name: Run CI comment-command tests
       shell: bash
       run: python3 .github/scripts/tests/test_ci_slash.py
