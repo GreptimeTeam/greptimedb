@@ -228,6 +228,9 @@ impl BatchingTask {
                         }
                     }
                 }
+                QueryCoverage::FencedIncrementalDelta { .. } => unreachable!(
+                    "FencedIncrementalDelta is rejected by the default wrapper; only the raw execute_plan_unlocked dispatches it under a caller-owned guard"
+                ),
             }
         } else {
             if matches!(coverage, QueryCoverage::FencedRepairChunk { .. }) {
