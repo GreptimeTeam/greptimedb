@@ -460,6 +460,111 @@ async fn prepared_sources_share_discovery_and_read_independently() {
     engine.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn two_phase_raw_fallback_preserves_key_then_time_order() {
+    let (_env, engine, region) = fixture_with(true).await;
+    for round in 0..3 {
+        for tsid in 0..4 {
+            for offset in 0..3 {
+                write(
+                    &engine,
+                    &region,
+                    tsid,
+                    round * 10_000 + offset * 1_000,
+                    Some((tsid + 1) as f64),
+                )
+                .await;
+            }
+        }
+        flush_region(&engine, region.region_id, None).await;
+    }
+    // The residual field predicate must buffer past its 4096-row batch boundary while
+    // retaining a single series' ordered stream.
+    for offset in 0..4_100 {
+        write(&engine, &region, 0, 50_000 + offset, Some(1.0)).await;
+    }
+    flush_region(&engine, region.region_id, None).await;
+
+    let mut scanner = SeriesScan::new(
+        scan_input(
+            &region,
+            region.series_index_store.clone().unwrap(),
+            SelectedFormat::Columnar,
+            (0..region.version().metadata.column_metadatas.len()).collect(),
+        ),
+        true,
+    );
+    assert_eq!("two_phase", scanner.mode.as_str());
+    let binding = labels(scanner.metadata());
+    assert_eq!(
+        SeriesOrdering::KeyThenTime,
+        scanner.raw_series_ordering().unwrap()
+    );
+    let ctx = QueryScanContext::default();
+    let metrics = ExecutionPlanMetricsSet::new();
+    assert!(
+        scanner
+            .prepare_series(&ctx, &metrics, &binding)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let ranges = scanner
+        .properties()
+        .partitions
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        ranges.len() >= 2,
+        "fixture must produce multiple candidate assignment ranges"
+    );
+    scanner
+        .prepare(PrepareRequest::default().with_ranges(vec![
+            ranges.iter().step_by(2).copied().collect(),
+            ranges.iter().skip(1).step_by(2).copied().collect(),
+        ]))
+        .unwrap();
+    assert_eq!(2, scanner.properties().num_partitions());
+
+    let mut owners = std::collections::HashMap::new();
+    for partition in 0..2 {
+        let stream = scanner
+            .scan_series_partition(&ctx, &metrics, partition, &binding)
+            .unwrap()
+            .unwrap();
+        assert_eq!(SeriesOrdering::KeyThenTime, stream.ordering());
+        let mut previous_key: Option<Vec<u8>> = None;
+        let mut previous_time = None;
+        for chunk in stream.try_collect::<Vec<_>>().await.unwrap() {
+            let key = chunk.primary_key.to_vec();
+            if previous_key.as_ref().is_some_and(|prev| prev != &key) {
+                assert!(previous_key.as_ref().unwrap() < &key);
+                previous_time = None;
+            }
+            if let Some(time) = previous_time {
+                assert!(chunk.time.timestamp(0).unwrap() > time);
+            }
+            for i in 0..chunk.time.len() {
+                let time = chunk.time.timestamp(i).unwrap();
+                if i > 0 {
+                    assert!(time > chunk.time.timestamp(i - 1).unwrap());
+                }
+                previous_time = Some(time);
+            }
+            assert!(
+                owners
+                    .insert(key.clone(), partition)
+                    .is_none_or(|owner| owner == partition)
+            );
+            previous_key = Some(key);
+        }
+    }
+    assert_eq!(4, owners.len());
+    engine.stop().await.unwrap();
+}
+
 #[rstest::rstest]
 #[case::legacy(false)]
 #[case::two_phase(true)]
@@ -473,11 +578,7 @@ async fn native_scan_falls_back_to_raw_sources_until_columnar_coverage(#[case] v
     let ctx = QueryScanContext::default();
     let metrics = ExecutionPlanMetricsSet::new();
     // The three flushed SSTs only have columnar artifacts after `build`.
-    let fallback_ordering = if v2 {
-        SeriesOrdering::Contiguous
-    } else {
-        SeriesOrdering::KeyThenTime
-    };
+    let fallback_ordering = SeriesOrdering::KeyThenTime;
     let raw_scanner = engine
         .handle_query(region.region_id, request.clone())
         .await
