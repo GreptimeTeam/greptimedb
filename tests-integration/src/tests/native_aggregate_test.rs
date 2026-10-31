@@ -1676,6 +1676,68 @@ async fn native_aggregate_topk_over_global_partitions() {
     // rather than the merge.
 }
 
+/// The native route executes `sum(clamp(...))` to 10 in `field_0`; the full standalone's legacy
+/// route also answers 10. The planner unit harness is the one where legacy rejects `clamp`, because
+/// its bare `MemoryCatalogManager` does not resolve the function; that divergence is pinned by
+/// `native_fused_clamp_aggregate_is_admitted`, not by this standalone integration test.
+#[tokio::test(flavor = "multi_thread")]
+async fn native_aggregate_clamp_executes_on_both_routes() {
+    common_telemetry::init_default_ut_logging();
+
+    let observer = Arc::new(NativePlanObserver::default());
+    let plugins = Plugins::new();
+    plugins.insert(Arc::clone(&observer) as PhysicalPlanWrapperRef);
+    let standalone = GreptimeDbStandaloneBuilder::new("native_aggregate_clamp")
+        .with_query_options(QueryOptions {
+            experimental_native_promql: true,
+            ..Default::default()
+        })
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = Arc::clone(standalone.fe_instance());
+    setup_fixture(&instance).await;
+    let promql = format!("sum(clamp({GAUGE_TABLE}, 1, 2))");
+    let query = tql_eval(&promql);
+
+    let (native, capture) = run_query(&instance, &promql, true, &observer).await;
+    assert_eq!(1, native.rows.len(), "native `{query}`");
+    assert_eq!(EVAL_MILLIS, native.rows[0].ts_millis, "native `{query}`");
+    assert!(native.rows[0].labels.is_empty(), "native `{query}` labels");
+    assert!(
+        close_enough(native.rows[0].value.unwrap(), 10.0),
+        "native `{query}` value"
+    );
+    assert_eq!("v", native.value_column, "native `{query}` value column");
+    assert_eq!(2, native.columns.len(), "native `{query}` columns");
+    assert_eq!(1, capture.fused.len(), "native `{query}` fused producers");
+    for fused in &capture.fused {
+        assert_fused_reads_scan_directly(fused, &format!("native `{query}`"));
+        let plan = displayable(fused.as_ref()).indent(false).to_string();
+        assert!(
+            plan.contains("partial state: sum by () Complete"),
+            "native `{query}` must export the aggregate partial state:\n{plan}"
+        );
+    }
+    assert!(
+        !capture.finalize.is_empty(),
+        "native `{query}` must execute the frontend aggregate finalize"
+    );
+
+    // The planner unit harness uses a bare MemoryCatalogManager and rejects clamp in legacy
+    // planning. The standalone query context registers clamp for legacy, so this test deliberately
+    // pins the separately observed standalone behavior instead of routing through check_case.
+    let (legacy, legacy_capture) = run_query(&instance, &promql, false, &observer).await;
+    assert!(legacy_capture.fused.is_empty() && legacy_capture.finalize.is_empty());
+    assert_eq!(1, legacy.rows.len(), "legacy `{query}`");
+    assert_eq!(EVAL_MILLIS, legacy.rows[0].ts_millis, "legacy `{query}`");
+    assert!(legacy.rows[0].labels.is_empty(), "legacy `{query}` labels");
+    assert!(
+        close_enough(legacy.rows[0].value.unwrap(), 10.0),
+        "legacy `{query}` value"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
     common_telemetry::init_default_ut_logging();
@@ -1710,16 +1772,6 @@ async fn native_aggregate_complete_over_four_nonempty_mito_partitions() {
             &by_job(18.0, 12.0),
             true,
         ),
-        // The latest samples are 2, 6, 10, 4 and 8: clamp maps them to 2, 2, 2, 2 and 2,
-        // which the native fused tree and aggregate merge sum to 10 over this real Mito region.
-        AggregateCase {
-            partial_state: Some("partial state: sum by () Complete"),
-            ..case(
-                format!("sum(clamp({GAUGE_TABLE}, 1, 2))"),
-                &[(&[], 10.0)],
-                true,
-            )
-        },
         // The gauge's groups average to 6 and 6, and the producer's plan line has to name the
         // `avg by (job)` the split cut out: what a partition exports is that aggregate's state, not
         // the group's mean. The counter table's cases below are the ones whose answers can tell a
