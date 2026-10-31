@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Benchmarks for `cache_flat_range_stream` overhead.
+//! Benchmarks for the production range-result loader.
 //!
-//! Compares consuming batches from a plain stream vs through the caching wrapper
-//! that clones batches for the range cache.
+//! Compares a plain stream with cold-cache construction through the loader.
+//! Warm reuse, concurrent sharing, and remote I/O are measured separately.
 //!
 //! Run with:
 //! ```sh
