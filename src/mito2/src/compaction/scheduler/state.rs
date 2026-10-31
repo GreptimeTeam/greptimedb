@@ -28,6 +28,7 @@ use crate::access_layer::AccessLayerRef;
 use crate::cache::CacheManagerRef;
 use crate::compaction::compactor::CompactionVersion;
 use crate::compaction::picker::PickerOutput;
+use crate::compaction::scheduler::history::PickHistory;
 use crate::compaction::scheduler::local::LocalCompaction;
 use crate::compaction::scheduler::planning::CompactionRequest;
 use crate::config::MitoConfig;
@@ -319,6 +320,8 @@ impl DdlExecution {
 
 /// Scheduling state retained for the lifetime of a loaded region.
 pub(super) struct CompactionStatus {
+    /// Resident automatic-pick history, retained across batches until region unload.
+    pub(crate) pick_history: PickHistory,
     /// Id of the region.
     pub(super) region_id: RegionId,
     /// Version control of the region.
@@ -350,6 +353,7 @@ impl CompactionStatus {
         access_layer: AccessLayerRef,
     ) -> CompactionStatus {
         CompactionStatus {
+            pick_history: PickHistory::default(),
             region_id,
             version_control,
             access_layer,
@@ -529,6 +533,7 @@ impl CompactionStatus {
         let start_time = Instant::now();
 
         CompactionRequest {
+            pick_history: self.pick_history.clone(),
             engine_config,
             current_version,
             access_layer: self.access_layer.clone(),
