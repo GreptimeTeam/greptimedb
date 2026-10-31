@@ -279,7 +279,7 @@ impl SeriesScan {
         }
         match self.mode {
             SeriesScanMode::Legacy => SeriesOrdering::KeyThenTime,
-            SeriesScanMode::TwoPhase => SeriesOrdering::Contiguous,
+            SeriesScanMode::TwoPhase => SeriesOrdering::KeyThenTime,
         }
     }
 

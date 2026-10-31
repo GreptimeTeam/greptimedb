@@ -2315,9 +2315,28 @@ async fn native_fused_metric_engine_two_aggregate_pair_is_one_execution() {
             fused.partial_fold().is_none(),
             "{query}: a multi-input aggregate is not a split: {native}"
         );
+        let input_metrics = fused
+            .inputs()
+            .iter()
+            .map(|input| {
+                let LogicalPlan::Extension(Extension { node }) = input else {
+                    panic!("{query}: expected a segment FusedSeries input, got {input}");
+                };
+                node.as_any()
+                    .downcast_ref::<FusedSeries>()
+                    .unwrap_or_else(|| {
+                        panic!("{query}: expected a segment FusedSeries, got {input}")
+                    })
+                    .binding()
+                    .metric_name
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{query}: segment has no metric binding: {input}"))
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             vec!["some_metric".to_string(), "other_metric".to_string()],
-            fused_input_metrics(&native),
+            input_metrics,
             "{query}: {native}"
         );
     }
@@ -2578,36 +2597,35 @@ async fn native_fused_delta_temporality_non_counter_math_still_folds() {
     }
 }
 
-/// A whole-vector operation is not a per-series tree, so it stays on the existing plan.
+/// A whole-vector operation reaches the native route like any other call the compiler folds.
+///
+/// `sort` and `absent` read across a vector rather than one series at a time, which is why an
+/// earlier version of this route refused them by name. The refusal was a second capability list
+/// beside the compiler's, and it disagreed with it: these calls compile, so the list was the only
+/// thing turning them away.
 #[tokio::test]
-async fn native_fused_whole_vector_operation_falls_back() {
+async fn native_fused_whole_vector_operations_are_admitted() {
     for query in ["sort(some_metric)", "absent(some_metric)"] {
         let native = build_native_fused_plan(query, true).await;
-        let without_flag = build_native_fused_plan(query, false).await;
         assert!(
-            find_fused_series(&native).is_none(),
-            "`{query}` reads the whole vector and must not be placed region-side"
-        );
-        assert_eq!(
-            native.display_indent().to_string(),
-            without_flag.display_indent().to_string(),
-            "`{query}` must keep the existing plan, not an approximation of it"
+            find_fused_series(&native).is_some(),
+            "`{query}` compiles, so the native route plans it: {native:?}"
         );
     }
 }
 
+/// What the compiler has no node for still keeps the existing plan.
 #[tokio::test]
 async fn native_fused_unsupported_shape_falls_back() {
     for query in [
+        // A subquery evaluates its own body on a grid of its own, which this route does not offer.
         "sum_over_time(rate(some_metric[5m])[1h:])",
-        "histogram_count(some_metric)",
-        "ceil(some_metric)",
     ] {
         let plan = build_native_fused_plan(query, true).await;
         let display = plan.display_indent().to_string();
         assert!(
             !display.contains("FusedSeries"),
-            "`{query}` must not enter the limited native POC: {display}"
+            "`{query}` must not enter the native route: {display}"
         );
         // Falling back is the existing plan, not an approximation of it.
         let without_flag = build_native_fused_plan(query, false).await;
@@ -2615,6 +2633,18 @@ async fn native_fused_unsupported_shape_falls_back() {
             display,
             without_flag.display_indent().to_string(),
             "`{query}` must keep the existing plan"
+        );
+    }
+}
+
+/// Pointwise and histogram calls compile, so they are planned rather than refused by name.
+#[tokio::test]
+async fn native_fused_pointwise_and_histogram_calls_are_admitted() {
+    for query in ["ceil(some_metric)", "histogram_count(some_metric)"] {
+        let native = build_native_fused_plan(query, true).await;
+        assert!(
+            find_fused_series(&native).is_some(),
+            "`{query}` compiles, so the native route plans it: {native:?}"
         );
     }
 }
@@ -3257,6 +3287,133 @@ async fn native_fused_nested_aggregate_splits_at_the_innermost_aggregate() {
     }
 }
 
+/// A nested multi-source matching subtree is built as a segment consuming each source's explicit frames.
+#[tokio::test]
+async fn native_fused_multi_source_matching_segment_is_constructed() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(topk(1, some_metric / other_metric))",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native segmented fused root: {plan}");
+    let segments = fused
+        .children()
+        .iter()
+        .filter_map(|child| {
+            let LogicalPlan::Extension(Extension { node }) = child else {
+                return None;
+            };
+            node.as_any().downcast_ref::<FusedSeries>()
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        segments.iter().any(|segment| segment.children().len() == 2),
+        "expected the m/n matching subtree to be one two-child segment: {plan}"
+    );
+    assert!(
+        !plan
+            .display_indent()
+            .to_string()
+            .contains("PromSeriesDivide"),
+        "must not fall back to legacy: {plan}"
+    );
+}
+
+/// A two-source whole-vector statement uses two per-source prefix segments under one parent, and
+/// each segment binds its own source metric.
+#[tokio::test]
+async fn native_fused_multi_source_aggregate_segmentation_plan() {
+    let provider = build_test_table_provider_with_tsid(
+        &[
+            (DEFAULT_SCHEMA_NAME.to_string(), "m".to_string()),
+            (DEFAULT_SCHEMA_NAME.to_string(), "n".to_string()),
+        ],
+        1,
+        1,
+    )
+    .await;
+    let plan =
+        build_native_fused_plan_with_provider("sum(max by (tag_0) (m)) / sum(n)", true, provider)
+            .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    assert_eq!(
+        2,
+        fused.children().len(),
+        "expected two root children: {plan:?}"
+    );
+    for (child, expected_metric) in fused.children().iter().zip(["m", "n"]) {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected segment FusedSeries for {expected_metric}: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| {
+                panic!("expected segment FusedSeries for {expected_metric}: {plan:?}")
+            });
+        assert_eq!(
+            Some(expected_metric),
+            segment.binding().metric_name.as_deref(),
+            "segment metric binding should match its source: {plan:?}"
+        );
+        assert_eq!(
+            1,
+            segment.children().len(),
+            "segment should have one bare scan: {plan:?}"
+        );
+        let LogicalPlan::TableScan(scan) = &segment.children()[0] else {
+            panic!("segment should bind directly to its TableScan: {plan:?}");
+        };
+        assert_eq!(
+            "phy",
+            scan.table_name.table().to_string(),
+            "segment should bind directly to the shared physical table scan: {plan:?}"
+        );
+    }
+}
+
+/// Two sources on two physical tables: each segment binds its own table's scan, not the first
+/// source's scan for both.
+#[tokio::test]
+async fn native_fused_multi_source_segments_bind_their_own_table_scan() {
+    let plan = build_native_fused_plan_with_provider(
+        "sum(max by (tag_0) (some_metric)) / sum(other_metric)",
+        true,
+        native_two_table_provider(vec![]).await,
+    )
+    .await;
+    let fused = find_fused_series(&plan).expect("native multi-source fused root: {plan:?}");
+    let mut bound = Vec::new();
+    for child in fused.children() {
+        let LogicalPlan::Extension(Extension { node }) = child else {
+            panic!("expected a segment FusedSeries: {plan:?}");
+        };
+        let segment = node
+            .as_any()
+            .downcast_ref::<FusedSeries>()
+            .unwrap_or_else(|| panic!("expected a segment FusedSeries: {plan:?}"));
+        let metric = segment
+            .binding()
+            .metric_name
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("segment binds no metric: {plan:?}"));
+        let [LogicalPlan::TableScan(scan)] = segment.children() else {
+            panic!("a segment binds exactly one scan: {plan:?}");
+        };
+        bound.push((metric, scan.table_name.table().to_string()));
+    }
+    assert_eq!(
+        vec![
+            ("some_metric".to_string(), "some_metric".to_string()),
+            ("other_metric".to_string(), "other_metric".to_string()),
+        ],
+        bound,
+        "each segment binds the scan of the table its metric lives in: {plan:?}"
+    );
+}
+
 /// A nested aggregate's outer names are the existing plan's: `sum(avg(x))` reports the outer `sum`.
 #[tokio::test]
 async fn native_fused_nested_aggregate_keeps_the_outer_names() {
@@ -3297,11 +3454,17 @@ async fn native_fused_histogram_quantile_over_aggregate_splits() {
     assert!(display.contains("histogram_quantile"), "{display}");
 }
 
-/// A shape the split cannot keep correct keeps the existing plan: a quantile's state is the group's
-/// samples, a binary operation whose sibling is data would match one side's series before the merge,
-/// a sibling a call computes has no native node at all, and a group by a value field cannot be named
-/// by the state rows. A literal scalar sibling is not one of them: the operation is computed per
-/// series below the fold, or rebuilt over the merged values above it.
+/// A shape the split cannot keep correct keeps the existing plan: a binary operation whose sibling
+/// is data would match one side's series before the merge, a sibling a call computes has no native
+/// node at all, and a group by a value field cannot be named by the state rows. A literal scalar
+/// sibling is not one of them: the operation is computed per series below the fold, or rebuilt over
+/// the merged values above it.
+///
+/// `timestamp(sum(m))` and `sum(timestamp(abs(m)))` are not on this list. `timestamp` over a
+/// computed vector reports the evaluation time, which is what Prometheus reports too - an aggregate
+/// makes a new sample at the evaluation instant rather than inheriting a stored one's time - and
+/// `instant_eval.rs` says so where it projects the grid's own timestamps. The segmentation route
+/// answers those, and `native_promql_timestamp_over_a_computed_vector` pins the values.
 #[tokio::test]
 async fn native_fused_unsplittable_aggregate_falls_back() {
     for query in [
@@ -3314,8 +3477,6 @@ async fn native_fused_unsplittable_aggregate_falls_back() {
         // native node, so the statement keeps the existing plan.
         "sum(some_metric) / scalar(some_metric)",
         "sum by (field_0) (some_metric)",
-        "timestamp(sum(some_metric))",
-        "sum(timestamp(abs(some_metric)))",
     ] {
         let native = build_native_fused_plan(query, true).await;
         let without_flag = build_native_fused_plan(query, false).await;

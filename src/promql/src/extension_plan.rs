@@ -25,7 +25,6 @@ mod range_manipulate;
 mod raw_series_source;
 mod scalar_calculate;
 mod series_divide;
-mod series_gather;
 mod series_repartition;
 #[cfg(test)]
 mod test_util;
@@ -46,6 +45,7 @@ use datatypes::data_type::DataType as _;
 pub use empty_metric::{EmptyMetric, EmptyMetricExec, EmptyMetricStream, build_special_time_expr};
 pub use fused_series::{
     FusedOutputFormat, FusedSeries, FusedSeriesBinding, FusedSeriesExec, FusedSeriesStream,
+    InputLocality, input_locality, tree_source_fields,
 };
 pub use histogram_fold::{
     HistogramFold, HistogramFoldExec, HistogramFoldOperation, HistogramFoldStream,
