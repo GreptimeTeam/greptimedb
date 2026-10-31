@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["region_manifest_path"],"struct":["FileRegionManifest"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ALTER_DATABASE_EVENT_TYPE","CREATE_DATABASE_EVENT_TYPE","DROP_DATABASE_EVENT_TYPE","PAYLOAD_VERSION","TTL_OPTION_NAME"],"enum":["AlterDatabaseIntent","DatabaseDdlPayload"],"struct":["AlterDatabasePayload","CreateDatabasePayload","DatabaseDdlEvent","DatabaseOptionIntent","DropDatabasePayload"]};

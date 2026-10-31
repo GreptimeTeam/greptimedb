@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SEGMENT_SIZE"],"struct":["ExternalSorter","Posting"]};

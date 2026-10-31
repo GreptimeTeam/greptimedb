@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW"],"fn":["build_mailbox","build_procedure_manager","ddl_soft_drop_enabled","ddl_soft_drop_retention"],"struct":["DdlManagerConfigureContext","MetasrvBuilder"]};

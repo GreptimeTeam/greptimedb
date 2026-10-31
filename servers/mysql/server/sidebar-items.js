@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CLIENT_DISCONNECT_ERROR_KINDS","DEFAULT_RESULT_SET_WRITE_BUFFER_SIZE","MYSQL_SERVER"],"struct":["MysqlServer","MysqlSpawnConfig","MysqlSpawnRef"]};

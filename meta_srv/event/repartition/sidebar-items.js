@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PAYLOAD_VERSION","REPARTITION_EVENT_TYPE","REPARTITION_GROUP_EVENT_TYPE"],"struct":["RepartitionEvent","RepartitionGroupEvent","RepartitionGroupSubmittedPayload","RepartitionSubmittedPayload","RepartitionTopology","RepartitionTopologyRow","RepartitionTopologySource"]};

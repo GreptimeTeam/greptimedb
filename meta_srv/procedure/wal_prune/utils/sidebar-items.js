@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PARTITION","DELETE_RECORDS_TIMEOUT"],"fn":["delete_records","find_pruneable_entry_id_for_topic","get_offsets_for_topic","get_partition_client","missing_region_ids","should_trigger_prune","update_pruned_entry_id"]};

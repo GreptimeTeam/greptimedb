@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fold","groups_accumulator"],"struct":["Extremum","ExtremumAccumulator"]};

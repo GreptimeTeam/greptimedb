@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["MetaClientSelector"],"trait":["FrontendClient","FrontendSelector"],"type":["FrontendClientPtr"]};

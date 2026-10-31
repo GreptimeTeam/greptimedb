@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["flush_batch","flush_batch_physical","flush_batch_with_managers","notify_waiters","spawn_flush"],"struct":["Batch"]};

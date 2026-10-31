@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["EvalError"],"struct":["ArrowSnafu","CastValueSnafu","DataTypeSnafu","DatafusionSnafu","ExternalSnafu","InternalSnafu","InvalidArgumentSnafu","OverflowSnafu","TryFromValueSnafu","TypeMismatchSnafu"]};
