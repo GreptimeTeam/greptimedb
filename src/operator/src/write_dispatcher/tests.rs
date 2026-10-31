@@ -417,6 +417,59 @@ fn build_insert_request(regions: &[u32]) -> RegionRequest {
 }
 
 #[tokio::test]
+async fn test_direct_partial_progress_with_and_without_retries() {
+    for max_retries in [0, 1] {
+        let server = RegionTestServer::start().await;
+        server.fail_region(1, [RetryHint::Retryable; 2]);
+        let dispatcher = server.create_dispatcher(max_retries).await;
+        let mut request = build_insert_request(&[1, 2]);
+        if let Some(Body::Inserts(inserts)) = &mut request.body {
+            for insert in &mut inserts.requests {
+                insert.rows = Some(Rows {
+                    rows: vec![Row::default()],
+                    ..Default::default()
+                });
+            }
+        }
+        let writes = dispatcher.prepare(vec![request]).await.unwrap();
+        let progress = Arc::new(WriteProgress::default());
+        assert!(
+            dispatcher
+                .execute_with_progress(writes, None, None, Some(progress.clone()))
+                .await
+                .is_err()
+        );
+        assert_eq!(progress.written(), 1);
+        assert_eq!(server.attempt_counts()[&RegionId::new(1, 2).as_u64()], 1);
+    }
+}
+
+#[tokio::test]
+async fn test_shared_batch_partial_progress_credits_only_its_owners() {
+    for max_retries in [0, 1] {
+        let server = RegionTestServer::start().await;
+        server.fail_region(1, [RetryHint::Retryable; 2]);
+        let dispatcher = server.create_dispatcher(max_retries).await;
+        let first = Arc::new(WriteProgress::default());
+        let second = Arc::new(WriteProgress::default());
+        let writes = vec![
+            (
+                build_partitioned_request(WriteKind::BulkInsert, 1, None, &[70]),
+                WriteAttribution::new(1, Some(first.clone())),
+            ),
+            (
+                build_partitioned_request(WriteKind::BulkInsert, 2, None, &[20]),
+                WriteAttribution::new(1, Some(second.clone())),
+            ),
+        ];
+        assert!(dispatcher.dispatch_attributed(writes, None).await.is_err());
+        assert_eq!(first.written(), 0);
+        assert_eq!(second.written(), 1);
+        assert_eq!(server.attempt_counts()[&RegionId::new(1, 2).as_u64()], 1);
+    }
+}
+
+#[tokio::test]
 async fn test_write_retry_disabled_and_enabled_ablation() {
     common_telemetry::init_default_ut_logging();
     for regions in [vec![1], vec![1, 2]] {
@@ -628,6 +681,7 @@ async fn test_should_retry_requires_a_retained_request_and_budget() {
     };
     let retryable = || {
         failure(Some(RoutedWrite {
+            attribution: Default::default(),
             peer: Arc::new(Peer::new(1, "peer")),
             request: Arc::new(build_insert_request(&[1])),
         }))
@@ -1037,10 +1091,18 @@ fn request_parts(request: &RegionRequest) -> (u32, Option<u64>, Vec<i32>) {
 
 #[tokio::test]
 async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
-    for kind in [WriteKind::Insert, WriteKind::Delete, WriteKind::BulkInsert] {
+    for (kind, fail_repartitioned) in [
+        (WriteKind::Insert, false),
+        (WriteKind::Delete, false),
+        (WriteKind::BulkInsert, false),
+        (WriteKind::BulkInsert, true),
+    ] {
         let old_server = RegionTestServer::start().await;
         let new_server = RegionTestServer::start().await;
         old_server.fail_region(2, [RetryHint::RetryAfterRouteRefresh]);
+        if fail_repartitioned {
+            new_server.fail_region(5, [RetryHint::NonRetryable]);
+        }
         let backend = test_util::prepare_mocked_backend().await;
         test_util::create_partition_rule_manager(backend.clone()).await;
         update_table_leader(&backend, &old_server.peer).await;
@@ -1101,14 +1163,30 @@ async fn test_write_retry_rebuilds_only_failed_rows_after_route_refresh() {
             catalog_manager,
             invalidator.clone(),
         );
-        let response = dispatcher
-            .dispatch(vec![
-                build_partitioned_request(kind, 1, old_versions[&1], &[70]),
-                build_partitioned_request(kind, 2, old_versions[&2], &[20, 40]),
-            ])
-            .await
-            .unwrap();
-        assert_eq!(response.affected_rows, 3, "{kind:?}");
+        let first = Arc::new(WriteProgress::default());
+        let second = Arc::new(WriteProgress::default());
+        let requests = vec![
+            build_partitioned_request(kind, 1, old_versions[&1], &[70]),
+            build_partitioned_request(kind, 2, old_versions[&2], &[20, 40]),
+        ];
+        let response = if matches!(kind, WriteKind::BulkInsert) {
+            let mut shared = WriteAttribution::new(1, Some(first.clone()));
+            shared.extend(WriteAttribution::new(1, Some(second.clone())));
+            let owners = [WriteAttribution::new(1, Some(first.clone())), shared];
+            let response = dispatcher
+                .dispatch_attributed(requests.into_iter().zip(owners).collect(), None)
+                .await;
+            assert_eq!(first.written(), 2);
+            assert_eq!(second.written(), if fail_repartitioned { 0 } else { 1 });
+            response
+        } else {
+            dispatcher.dispatch(requests).await
+        };
+        if fail_repartitioned {
+            assert!(response.is_err());
+        } else {
+            assert_eq!(response.unwrap().affected_rows, 3, "{kind:?}");
+        }
         assert_eq!(
             old_server.attempt_counts(),
             HashMap::from([

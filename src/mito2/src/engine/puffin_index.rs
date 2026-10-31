@@ -316,7 +316,7 @@ async fn try_read_bloom_meta(
                         CachedBloomFilterIndexBlobReader::new(
                             region_index_id.file_id(),
                             region_index_id.version,
-                            column_id,
+                            IndexTarget::ColumnId(column_id),
                             tag,
                             blob_size,
                             bloom_reader,

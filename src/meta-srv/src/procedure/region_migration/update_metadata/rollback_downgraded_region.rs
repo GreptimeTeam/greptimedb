@@ -64,7 +64,8 @@ impl UpdateMetadata {
                 "Rolling back downgraded leader region table route success, table_id: {table_id}, regions: {regions:?}"
             );
         }
-        ctx.register_failure_detectors().await;
+        ctx.register_failure_detectors(&ctx.persistent_ctx.region_ids)
+            .await;
 
         Ok(())
     }

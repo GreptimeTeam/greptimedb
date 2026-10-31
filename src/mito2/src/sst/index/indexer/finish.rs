@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use common_telemetry::{debug, warn};
+use index::target::IndexTarget;
 use puffin::puffin_manager::{PuffinManager, PuffinWriter};
 use store_api::storage::ColumnId;
 
@@ -57,6 +58,11 @@ impl Indexer {
 
         self.do_prune_intm_sst_dir().await;
         output.file_size = self.do_finish_puffin_writer(writer).await;
+        // A failed puffin file must not advertise the indexes written into it. Not covered by
+        // tests: `do_finish_puffin_writer` panics on failure in test builds.
+        if output.file_size == 0 {
+            return IndexOutput::default();
+        }
         output.version = self.index_version;
         output
     }
@@ -121,7 +127,13 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.indexed_column_ids().collect();
+        let column_ids = indexer
+            .indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_inverted_index_output(
@@ -198,7 +210,13 @@ impl Indexer {
             return true;
         };
 
-        let column_ids = indexer.column_ids().collect();
+        let column_ids = indexer
+            .indexed_targets()
+            .filter_map(|target| match target {
+                IndexTarget::ColumnId(id) => Some(*id),
+                IndexTarget::JsonPath(_) => None,
+            })
+            .collect();
         let err = match indexer.finish(puffin_writer).await {
             Ok((row_count, byte_count)) => {
                 self.fill_bloom_filter_output(

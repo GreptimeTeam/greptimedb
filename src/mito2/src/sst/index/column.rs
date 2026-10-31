@@ -13,10 +13,17 @@
 // limitations under the License.
 
 use api::v1::SemanticType;
+use arrow_schema::extension::ExtensionType;
+use common_function::scalars::json::json_get::{JsonGetWithType, json_object_path};
+use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, ArrayRef, StructArray};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::vectors::{Helper, VectorRef};
+use index::target::IndexTarget;
 use snafu::{OptionExt, ResultExt};
+use store_api::metadata::RegionMetadata;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 
 use crate::error::{ConvertVectorSnafu, InvalidRecordBatchSnafu, Result};
@@ -81,6 +88,109 @@ pub(crate) fn column_index_rows(
         }
         Some((start, row - start))
     })
+}
+
+/// Resolves a typed JSON access when its hint enables the requested index.
+pub(crate) fn json_index_target(
+    metadata: &RegionMetadata,
+    expr: &Expr,
+    enabled: impl Fn(&datatypes::json::JsonTypeHint) -> bool,
+) -> Result<Option<(IndexTarget, ConcreteDataType)>> {
+    let Expr::ScalarFunction(func) = expr else {
+        return Ok(None);
+    };
+
+    if func.func.name() != JsonGetWithType::NAME || !(2..=3).contains(&func.args.len()) {
+        return Ok(None);
+    }
+
+    let Expr::Column(column) = &func.args[0] else {
+        return Ok(None);
+    };
+
+    let Some(col) = metadata.column_by_name(&column.name) else {
+        return Ok(None);
+    };
+
+    if !col.column_schema.data_type.is_json2() {
+        return Ok(None);
+    }
+
+    let Some(path_literal) = func.args[1]
+        .as_literal()
+        .and_then(|v| v.try_as_str())
+        .flatten()
+    else {
+        return Ok(None);
+    };
+
+    let Some(path) = json_object_path(path_literal).ok().flatten() else {
+        return Ok(None);
+    };
+
+    let Ok(Some(extension)) = col.column_schema.extension_type::<Json2ExtensionType>() else {
+        return Ok(None);
+    };
+
+    let Some(hint) = extension
+        .metadata()
+        .json_settings()
+        .type_hints()
+        .iter()
+        .find(|hint| hint.path == path && enabled(hint))
+    else {
+        return Ok(None);
+    };
+
+    if let Some(type_arg) = func.args.get(2) {
+        let Expr::Literal(value, _) = type_arg else {
+            return Ok(None);
+        };
+        if !value.is_null() {
+            return Ok(None);
+        }
+        // A type conversion may change comparison semantics and invalidate index pruning.
+        let result_type = value.data_type();
+        if result_type != hint.data_type.as_arrow_type()
+            && !(result_type.is_string() && hint.data_type.is_string())
+        {
+            return Ok(None);
+        }
+    }
+
+    if !(hint.data_type.is_numeric() || hint.data_type.is_boolean() || hint.data_type.is_string()) {
+        return Ok(None);
+    }
+    Ok(IndexTarget::new_json_path(col.column_id, path)
+        .ok()
+        .map(|target| (target, hint.data_type.clone())))
+}
+
+/// Resolves a skipping target's encoding type from an SST's own hints.
+pub(crate) fn skipping_target_data_type(
+    metadata: &RegionMetadata,
+    target: &IndexTarget,
+) -> Option<ConcreteDataType> {
+    let path = match target {
+        IndexTarget::ColumnId(id) => {
+            return metadata
+                .column_by_id(*id)
+                .map(|col| col.column_schema.data_type.clone());
+        }
+        IndexTarget::JsonPath(path) => path,
+    };
+    let column = metadata.column_by_id(path.column_id())?;
+    let extension = column
+        .column_schema
+        .extension_type::<Json2ExtensionType>()
+        .ok()??;
+    extension
+        .metadata()
+        .json_settings()
+        .type_hints()
+        .iter()
+        .find(|hint| hint.path == path.path() && hint.skipping_index.is_some())
+        .map(|hint| hint.data_type.clone())
 }
 
 #[cfg(test)]

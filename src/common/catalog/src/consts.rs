@@ -152,6 +152,7 @@ pub fn default_engine() -> &'static str {
 }
 
 pub const FILE_ENGINE: &str = "file";
+pub const RELATIONAL_ENGINE: &str = "relational";
 
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";

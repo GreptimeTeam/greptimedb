@@ -15,13 +15,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use common_telemetry::warn;
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::ScalarValue;
 use datafusion_expr::expr::InList;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use datatypes::value::Value;
 use index::Bytes;
 use index::bloom_filter::applier::InListPredicate;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -29,7 +30,6 @@ use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metadata::RegionMetadata;
 use store_api::region_request::PathType;
-use store_api::storage::ColumnId;
 
 use crate::cache::file_cache::FileCacheRef;
 use crate::cache::index::bloom_filter_index::BloomFilterIndexCacheRef;
@@ -46,7 +46,7 @@ pub struct BloomFilterIndexApplierBuilder<'a> {
     file_cache: Option<FileCacheRef>,
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
     bloom_filter_index_cache: Option<BloomFilterIndexCacheRef>,
-    predicates: BTreeMap<ColumnId, Vec<InListPredicate>>,
+    predicates: BTreeMap<IndexTarget, Vec<InListPredicate>>,
 }
 
 impl<'a> BloomFilterIndexApplierBuilder<'a> {
@@ -101,14 +101,14 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             return Ok(None);
         }
 
-        let expected_predicate_column_types = self.expected_predicate_column_types();
+        let expected_predicate_target_types = self.expected_predicate_target_types();
         let applier = BloomFilterIndexApplier::new(
             self.table_dir,
             self.path_type,
             self.object_store,
             self.puffin_manager_factory,
             self.predicates,
-            expected_predicate_column_types,
+            expected_predicate_target_types,
         )
         .with_file_cache(self.file_cache)
         .with_puffin_metadata_cache(self.puffin_metadata_cache)
@@ -139,22 +139,23 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         }
     }
 
-    /// Returns `(column_id, data_type)` pairs for predicate columns.
-    fn expected_predicate_column_types(&self) -> BTreeMap<ColumnId, ConcreteDataType> {
+    /// Returns the encoding type of each predicate target.
+    fn expected_predicate_target_types(&self) -> BTreeMap<IndexTarget, ConcreteDataType> {
         self.predicates
             .keys()
             .filter_map(|col_id| {
-                let col = self.metadata.column_by_id(*col_id)?;
-                Some((*col_id, col.column_schema.data_type.clone()))
+                let ty =
+                    crate::sst::index::column::skipping_target_data_type(self.metadata, col_id)?;
+                Some((col_id.clone(), ty))
             })
             .collect()
     }
 
     /// Helper function to get the column id and type
-    fn column_id_and_type(
+    fn column_target_and_type(
         &self,
         column_name: &str,
-    ) -> Result<Option<(ColumnId, ConcreteDataType)>> {
+    ) -> Result<Option<(IndexTarget, ConcreteDataType)>> {
         let column = self
             .metadata
             .column_by_name(column_name)
@@ -163,9 +164,18 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
             })?;
 
         Ok(Some((
-            column.column_id,
+            IndexTarget::ColumnId(column.column_id),
             column.column_schema.data_type.clone(),
         )))
+    }
+
+    fn expr_to_index_target(&self, expr: &Expr) -> Result<Option<(IndexTarget, ConcreteDataType)>> {
+        if let Expr::Column(column) = expr {
+            return self.column_target_and_type(&column.name);
+        }
+        crate::sst::index::column::json_index_target(self.metadata, expr, |hint| {
+            hint.skipping_index.is_some()
+        })
     }
 
     /// Collects an equality expression (column = value)
@@ -176,7 +186,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if lit.is_null() {
             return Ok(());
         }
-        let Some((column_id, data_type)) = self.column_id_and_type(&col.name)? else {
+        let Some((column_id, data_type)) = self.expr_to_index_target(col)? else {
             return Ok(());
         };
         let value = encode_lit(lit, data_type)?;
@@ -192,15 +202,11 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
 
     /// Collects an in list expression in the form of `column IN (lit, lit, ...)`.
     fn collect_in_list(&mut self, in_list: &InList) -> Result<()> {
-        // Only collect InList predicates if they reference a column
-        let Expr::Column(column) = &in_list.expr.as_ref() else {
-            return Ok(());
-        };
         if in_list.list.is_empty() || in_list.negated {
             return Ok(());
         }
 
-        let Some((column_id, data_type)) = self.column_id_and_type(&column.name)? else {
+        let Some((column_id, data_type)) = self.expr_to_index_target(&in_list.expr)? else {
             return Ok(());
         };
 
@@ -252,13 +258,13 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if lit.is_null() {
             return Ok(());
         }
-        let Some((column_id, data_type)) = self.column_id_and_type(&col.name)? else {
+        let Some((column_id, data_type)) = self.expr_to_index_target(col)? else {
             return Ok(());
         };
 
         let mut inlist = BTreeSet::new();
         inlist.insert(encode_lit(lit, data_type.clone())?);
-        if Self::collect_or_eq_list_rec(&col.name, &data_type, or_list, &mut inlist)? {
+        if Self::collect_or_eq_list_rec(col, &data_type, or_list, &mut inlist)? {
             self.predicates
                 .entry(column_id)
                 .or_default()
@@ -269,7 +275,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     }
 
     fn collect_or_eq_list_rec(
-        column_name: &str,
+        column_expr: &Expr,
         data_type: &ConcreteDataType,
         expr: &Expr,
         inlist: &mut BTreeSet<Bytes>,
@@ -277,9 +283,9 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
         if let Expr::BinaryExpr(BinaryExpr { left, op, right }) = expr {
             match op {
                 Operator::Or => {
-                    let r = Self::collect_or_eq_list_rec(column_name, data_type, left, inlist)?
+                    let r = Self::collect_or_eq_list_rec(column_expr, data_type, left, inlist)?
                         .then(|| {
-                            Self::collect_or_eq_list_rec(column_name, data_type, right, inlist)
+                            Self::collect_or_eq_list_rec(column_expr, data_type, right, inlist)
                         })
                         .transpose()?
                         .unwrap_or(false);
@@ -289,7 +295,7 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
                     let Some((col, lit)) = Self::eq_expr_col_lit(left, right)? else {
                         return Ok(false);
                     };
-                    if lit.is_null() || column_name != col.name {
+                    if lit.is_null() || column_expr != col {
                         return Ok(false);
                     }
                     let bytes = encode_lit(lit, data_type.clone())?;
@@ -307,10 +313,10 @@ impl<'a> BloomFilterIndexApplierBuilder<'a> {
     fn eq_expr_col_lit<'b>(
         left: &'b Expr,
         right: &'b Expr,
-    ) -> Result<Option<(&'b Column, &'b ScalarValue)>> {
+    ) -> Result<Option<(&'b Expr, &'b ScalarValue)>> {
         let (col, lit) = match (left, right) {
-            (Expr::Column(col), Expr::Literal(lit, _)) => (col, lit),
-            (Expr::Literal(lit, _), Expr::Column(col)) => (col, lit),
+            (expr, Expr::Literal(lit, _)) => (expr, lit),
+            (Expr::Literal(lit, _), expr) => (expr, lit),
             _ => return Ok(None),
         };
         Ok(Some((col, lit)))
@@ -404,7 +410,7 @@ mod tests {
         let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 1);
 
-        let column_predicates = predicates.get(&1).unwrap();
+        let column_predicates = predicates.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(column_predicates.len(), 1);
 
         let expected = encode_lit(
@@ -419,7 +425,9 @@ mod tests {
         i.lit()
     }
 
-    fn build_bloom_predicates(exprs: &[Expr]) -> Option<BTreeMap<ColumnId, Vec<InListPredicate>>> {
+    fn build_bloom_predicates(
+        exprs: &[Expr],
+    ) -> Option<BTreeMap<IndexTarget, Vec<InListPredicate>>> {
         let (_d, factory) = PuffinManagerFactory::new_for_test_block("bloom_builder_");
         let metadata = test_region_metadata();
         BloomFilterIndexApplierBuilder::new(
@@ -460,7 +468,7 @@ mod tests {
         assert_eq!(
             build_bloom_predicates(&[expr]),
             Some(BTreeMap::from([(
-                2,
+                IndexTarget::ColumnId(2),
                 vec![int64_inlist_predicate([1, 2, 3])]
             )]))
         );
@@ -491,7 +499,10 @@ mod tests {
 
         assert_eq!(
             build_bloom_predicates(&[expr]),
-            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([1, 3])])]))
+            Some(BTreeMap::from([(
+                IndexTarget::ColumnId(2),
+                vec![int64_inlist_predicate([1, 3])]
+            )]))
         );
     }
 
@@ -523,7 +534,10 @@ mod tests {
 
         assert_eq!(
             build_bloom_predicates(&[expr]),
-            Some(BTreeMap::from([(2, vec![int64_inlist_predicate([42])])]))
+            Some(BTreeMap::from([(
+                IndexTarget::ColumnId(2),
+                vec![int64_inlist_predicate([42])]
+            )]))
         );
     }
 
@@ -560,7 +574,7 @@ mod tests {
         assert!(result.is_some());
 
         let predicates = result.unwrap().default_predicates;
-        let column_predicates = predicates.get(&2).unwrap();
+        let column_predicates = predicates.get(&IndexTarget::ColumnId(2)).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 3);
     }
@@ -590,7 +604,7 @@ mod tests {
         assert!(result.is_some());
 
         let predicates = result.unwrap().default_predicates;
-        let column_predicates = predicates.get(&1).unwrap();
+        let column_predicates = predicates.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(column_predicates.len(), 1);
         assert_eq!(column_predicates[0].list.len(), 4);
         let or_chain_predicates = &column_predicates[0].list;
@@ -655,8 +669,8 @@ mod tests {
 
         let predicates = result.unwrap().default_predicates;
         assert_eq!(predicates.len(), 2);
-        assert!(predicates.contains_key(&1));
-        assert!(predicates.contains_key(&2));
+        assert!(predicates.contains_key(&IndexTarget::ColumnId(1)));
+        assert!(predicates.contains_key(&IndexTarget::ColumnId(2)));
     }
 
     #[test]
@@ -692,8 +706,8 @@ mod tests {
         assert!(result.is_some());
 
         let predicates = result.unwrap().default_predicates;
-        assert!(!predicates.contains_key(&1)); // Null equality should be ignored
-        let column2_predicates = predicates.get(&2).unwrap();
+        assert!(!predicates.contains_key(&IndexTarget::ColumnId(1))); // Null equality should be ignored
+        let column2_predicates = predicates.get(&IndexTarget::ColumnId(2)).unwrap();
         assert_eq!(column2_predicates[0].list.len(), 2);
     }
 
@@ -761,7 +775,7 @@ mod tests {
         assert!(result.is_some());
 
         let predicates = result.unwrap().default_predicates;
-        let column_predicates = predicates.get(&1).unwrap();
+        let column_predicates = predicates.get(&IndexTarget::ColumnId(1)).unwrap();
         assert_eq!(column_predicates.len(), 2);
     }
 }

@@ -4,9 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-enterprise = []
-
 [lints]
 workspace = true
 
@@ -28,6 +25,7 @@ derive_builder.workspace = true
 derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

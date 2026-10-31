@@ -101,7 +101,10 @@ struct BenchWriteDispatcher;
 
 #[async_trait]
 impl PhysicalFlushWriteDispatcher for BenchWriteDispatcher {
-    async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
+    async fn dispatch(
+        &self,
+        _requests: Vec<(RegionRequest, operator::write_dispatcher::WriteAttribution)>,
+    ) -> error::Result<usize> {
         Ok(0)
     }
 }

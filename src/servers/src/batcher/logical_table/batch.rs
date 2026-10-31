@@ -237,6 +237,13 @@ pub async fn flush_batch_physical(
 
     // 4. Concatenate all modified batches (all share the same physical schema)
     let combined_batch = batch_convert::concat_modified_batches(&modified_batches)?;
+    let mut attribution = operator::write_dispatcher::WriteAttribution::default();
+    for batch in table_batches.iter().flat_map(|table| &table.batches) {
+        attribution.extend(operator::write_dispatcher::WriteAttribution::new(
+            batch.batch.num_rows(),
+            batch.progress.clone(),
+        ));
+    }
 
     // 5. Split by physical partition rule and send to regions
     let physical_table_id = physical_table_info.table_id();
@@ -244,6 +251,7 @@ pub async fn flush_batch_physical(
         combined_batch,
         physical_table_id,
         partition_rule.as_ref(),
+        attribution,
     )?;
 
     let region_writes = region_write::encode_region_write_requests(
@@ -428,6 +436,7 @@ mod tests {
         let limiter = RequestLimiter::try_new(1).unwrap();
         let (response_tx, response_rx) = oneshot::channel();
         let waiter = FlushWaiter {
+            _completion: None,
             response_tx,
             _permit: limiter.acquire().await.unwrap(),
         };
@@ -679,7 +688,10 @@ mod tests {
 
     #[async_trait]
     impl PhysicalFlushWriteDispatcher for MockFlushWriteDispatcher {
-        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
+        async fn dispatch(
+            &self,
+            _requests: Vec<(RegionRequest, operator::write_dispatcher::WriteAttribution)>,
+        ) -> error::Result<usize> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 return Err(Error::Internal {
@@ -706,7 +718,10 @@ mod tests {
 
     #[async_trait]
     impl PhysicalFlushWriteDispatcher for AffectedRowsFlushWriteDispatcher {
-        async fn dispatch(&self, _requests: Vec<RegionRequest>) -> error::Result<usize> {
+        async fn dispatch(
+            &self,
+            _requests: Vec<(RegionRequest, operator::write_dispatcher::WriteAttribution)>,
+        ) -> error::Result<usize> {
             Ok(self.affected_rows)
         }
     }

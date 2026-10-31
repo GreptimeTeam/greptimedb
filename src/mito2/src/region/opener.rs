@@ -403,6 +403,7 @@ impl RegionOpener {
             flushed_entry_id,
             region_manifest_options,
             sst_format,
+            options.append_mode,
             &self.stats,
         )
         .await?;
@@ -459,7 +460,6 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(flushed_entry_id),
-            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats,
         }))
@@ -698,7 +698,6 @@ impl RegionOpener {
             last_schedule_compaction_millis: AtomicI64::new(now),
             time_provider: self.time_provider.clone(),
             topic_latest_entry_id: AtomicU64::new(topic_latest_entry_id),
-            leader_deadline: Default::default(),
             region_stats: RegionStats::new(),
             stats: self.stats.clone(),
         };
@@ -797,6 +796,20 @@ pub(crate) fn version_builder_from_manifest(
 
 /// Updates region options by persistent options.
 pub(crate) fn sanitize_region_options(manifest: &RegionManifest, options: &mut RegionOptions) {
+    if let Some(encoding) = options.primary_key_encoding
+        && encoding != manifest.metadata.primary_key_encoding
+    {
+        common_telemetry::warn!(
+            "Overriding primary key encoding from {:?} to {:?} for region {}",
+            encoding,
+            manifest.metadata.primary_key_encoding,
+            manifest.metadata.region_id,
+        );
+    }
+    options.primary_key_encoding = Some(manifest.metadata.primary_key_encoding);
+    if manifest.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
+        options.sst_format = Some(FormatType::Flat);
+    }
     // Caller options take precedence over the manifest, except JSON2 always requires flat output.
     let format = options.sst_format.unwrap_or(manifest.sst_format);
     // Older versions allowed JSON2 with primary-key output; recover without rewriting its history.
@@ -1011,9 +1024,7 @@ where
             // columns like the write path, otherwise the memtable rejects the
             // batch. Skips sparse batches as they don't carry tag columns by
             // design.
-            if region_metadata.primary_key_encoding != PrimaryKeyEncoding::Sparse {
-                part.fill_missing_columns(&region_metadata)?;
-            }
+            part.fill_missing_columns(&region_metadata)?;
             rows_replayed += part.num_rows();
             // During replay, we should adopt the sequence from WAL.
             let bulk_sequence_from_wal = part.sequence;
@@ -1288,7 +1299,7 @@ async fn preload_parquet_meta_cache_for_files(
                 }
                 match metadata {
                     SstMetaPreparation::Prepared(metadata) => {
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     SstMetaPreparation::DecodedOnly { encoding_error, .. } => warn!(
@@ -1331,7 +1342,7 @@ async fn preload_parquet_meta_cache_for_files(
                     Ok(SstMetaPreparation::Prepared(metadata)) => {
                         // Preload the compact canonical entry only. Query traffic promotes decoded
                         // entries into the separate acceleration tier according to actual demand.
-                        cache_manager.put_prepared_sst_meta(file_id, metadata, false);
+                        cache_manager.put_compact_sst_meta(file_id, metadata.compact);
                         loaded += 1;
                     }
                     Ok(SstMetaPreparation::DecodedOnly { encoding_error, .. }) => warn!(
@@ -1449,6 +1460,7 @@ fn can_load_cache(state: RegionRoleState) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use store_api::codec::PrimaryKeyEncoding;
 
     use arrow_schema::extension::ExtensionType;
     use common_base::readable_size::ReadableSize;
@@ -1630,6 +1642,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sparse_reopen_uses_persisted_encoding_and_flat_sst() {
+        for supplied in [None, Some(PrimaryKeyEncoding::Dense)] {
+            let mut manifest = build_test_manifest(FormatType::PrimaryKey);
+            Arc::make_mut(&mut manifest.metadata).primary_key_encoding = PrimaryKeyEncoding::Sparse;
+            let mut options = RegionOptions {
+                primary_key_encoding: supplied,
+                sst_format: Some(FormatType::PrimaryKey),
+                ..Default::default()
+            };
+            sanitize_region_options(&manifest, &mut options);
+            assert_eq!(options.primary_key_encoding(), PrimaryKeyEncoding::Sparse);
+            assert_eq!(options.sst_format, Some(FormatType::Flat));
+        }
+    }
+
+    #[test]
     fn test_sanitize_region_options_options_format_wins() {
         // Manifest persisted PrimaryKey, but the re-parsed options now request Flat
         // (e.g., bulk memtable). The options' value must win.
@@ -1773,6 +1801,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1849,6 +1878,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 
@@ -1868,6 +1898,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
     }
@@ -1922,6 +1953,7 @@ mod tests {
         assert!(
             cache_manager
                 .get_parquet_meta_data_from_mem_cache(region_file_id)
+                .await
                 .is_none()
         );
 

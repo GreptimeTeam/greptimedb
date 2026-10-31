@@ -136,7 +136,7 @@ class CiSlashTest(unittest.TestCase):
 
     def test_fork_rerun_gates_cover_standard_jobs(self):
         import re
-        for name, count in [("rust", 7), ("integration", 5), ("checks", 5), ("docs", 3)]:
+        for name, count in [("rust", 6), ("integration", 8), ("checks", 6), ("docs", 3)]:
             workflow = (SCRIPT.parents[1] / "workflows" / (name + ".yml")).read_text()
             gates = re.findall(r"^    if:.*github.run_attempt > 1.*$", workflow, re.MULTILINE)
             self.assertEqual(len(gates), count, name)

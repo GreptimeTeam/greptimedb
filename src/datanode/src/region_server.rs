@@ -13,10 +13,6 @@
 // limitations under the License.
 
 mod catalog;
-#[cfg(feature = "enterprise")]
-mod flow_write;
-#[cfg(feature = "enterprise")]
-use flow_write::TrackedPayload;
 mod registrations;
 mod remote_dyn_filter;
 
@@ -42,8 +38,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
-#[cfg(feature = "enterprise")]
-use common_grpc::flow_write::{COMMAND_KEY, FlowWriteRegistry, Reply};
 use common_meta::datanode::TopicStatsReporter;
 use common_query::OutputData;
 use common_query::request::QueryRequest;
@@ -83,7 +77,7 @@ use session::context::{
 };
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
-    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
+    FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME, RELATIONAL_ENGINE_NAME,
 };
 use store_api::region_engine::{
     RegionEngineRef, RegionManifestInfo, RegionRole, RegionStatistic, RemapManifestsRequest,
@@ -122,8 +116,6 @@ pub struct RegionServer {
     inner: Arc<RegionServerInner>,
     flight_compression: FlightCompression,
     suspend: Arc<AtomicBool>,
-    #[cfg(feature = "enterprise")]
-    flow_write_registry: Arc<FlowWriteRegistry<TrackedPayload, Reply>>,
 }
 
 pub struct RegionStat {
@@ -172,8 +164,6 @@ impl RegionServer {
             )),
             flight_compression,
             suspend: Arc::new(AtomicBool::new(false)),
-            #[cfg(feature = "enterprise")]
-            flow_write_registry: Arc::new(FlowWriteRegistry::default()),
         }
     }
 
@@ -471,20 +461,23 @@ impl RegionServer {
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
-    /// Sets the role of a region from a lease the metasrv grants until `deadline`.
+    /// Sets the role of a region from a lease the metasrv grants until `deadline`, in reply to a
+    /// heartbeat sent at `sent_at`. Returns false if the engine ignores a Leader lease because the
+    /// region was downgraded or (re)opened after `sent_at`.
     pub fn set_region_role_with_lease(
         &self,
         region_id: RegionId,
         role: RegionRole,
+        sent_at: std::time::Instant,
         deadline: std::time::Instant,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let engine = self
             .inner
             .region_map
             .get(&region_id)
             .with_context(|| RegionNotFoundSnafu { region_id })?;
         engine
-            .set_region_role_with_lease(region_id, role, deadline)
+            .set_region_role_with_lease(region_id, role, sent_at, deadline)
             .with_context(|_| HandleRegionRequestSnafu { region_id })
     }
 
@@ -1069,15 +1062,6 @@ impl RegionServerHandler for RegionServer {
         &self,
         request: RegionRequestV1,
     ) -> ServerResult<RegionResponseV1> {
-        #[cfg(feature = "enterprise")]
-        if request
-            .header
-            .as_ref()
-            .and_then(|header| header.query_context.as_ref())
-            .is_some_and(|context| context.extensions.contains_key(COMMAND_KEY))
-        {
-            return self.handle_flow_write_request(request).await;
-        }
         let accept_partial_result = request
             .header
             .as_ref()
@@ -2090,6 +2074,9 @@ impl RegionServerInner {
                     RegionAttribute::File => {
                         // do nothing
                     }
+                    RegionAttribute::Relational => {
+                        // do nothing
+                    }
                 }
             }
             RegionChange::Deregisters => {
@@ -2297,7 +2284,7 @@ fn is_metric_engine(engine: &str) -> bool {
 /// Records failed open attempts without using arbitrary engine names as metric labels.
 fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
     let engine = match engine {
-        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME | RELATIONAL_ENGINE_NAME => engine,
         _ => "unknown",
     };
     crate::metrics::REGION_OPEN_FAILURES_TOTAL
@@ -2346,6 +2333,7 @@ fn parse_region_attribute(
             Ok(RegionAttribute::Metric { physical })
         }
         FILE_ENGINE_NAME => Ok(RegionAttribute::File),
+        RELATIONAL_ENGINE_NAME => Ok(RegionAttribute::Relational),
         _ => error::UnexpectedSnafu {
             violated: format!("Unknown engine: {}", engine),
         }
@@ -2358,6 +2346,7 @@ enum RegionAttribute {
     Mito,
     Metric { physical: bool },
     File,
+    Relational,
 }
 
 impl RegionAttribute {
@@ -2366,6 +2355,7 @@ impl RegionAttribute {
             RegionAttribute::Mito => MITO_ENGINE_NAME,
             RegionAttribute::Metric { .. } => METRIC_ENGINE_NAME,
             RegionAttribute::File => FILE_ENGINE_NAME,
+            RegionAttribute::Relational => RELATIONAL_ENGINE_NAME,
         }
     }
 }

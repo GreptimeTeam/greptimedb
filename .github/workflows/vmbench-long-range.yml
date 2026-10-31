@@ -132,6 +132,18 @@ jobs:
       run: |
         python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
         python3 greptimedb/tests/perf/test_ci_runner_scripts.py
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Validate budgets and build warm plan
       id: plan
       env:
@@ -279,6 +291,18 @@ jobs:
       with:
         name: ${{ needs.validate.outputs.plan_artifact }}
         path: ${{ env.METADATA_ROOT }}
+    - name: Configure AWS credentials for ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ECR_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_ECR_SECRET_ACCESS_KEY }}
+        aws-region: us-east-1
+    - name: Login to Amazon ECR Public
+      if: startsWith(env.RUNTIME_IMAGE, 'public.ecr.aws/')
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry-type: public
     - name: Check runner and resolve database images
       run: |
         set -euo pipefail

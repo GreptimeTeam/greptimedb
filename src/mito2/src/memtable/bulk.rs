@@ -1155,20 +1155,9 @@ impl PartToMerge {
             PartToMerge::Multi { part, .. } => {
                 Some((part.num_rows() as u64, part.estimated_size() as u64))
             }
-            PartToMerge::Encoded { part, .. } => part
-                .metadata()
-                .parquet_metadata
-                .row_groups()
-                .iter()
-                .map(|row_group| {
-                    let uncompressed_bytes = row_group
-                        .columns()
-                        .iter()
-                        .map(|column| column.uncompressed_size() as u64)
-                        .sum();
-                    (row_group.num_rows() as u64, uncompressed_bytes)
-                })
-                .max_by_key(|(_, uncompressed_bytes)| *uncompressed_bytes),
+            PartToMerge::Encoded { part, .. } => {
+                crate::batch_size::largest_row_group_statistic(&part.metadata().parquet_metadata)
+            }
         }
     }
 
@@ -2064,6 +2053,7 @@ mod tests {
                 path: vec!["id".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
                 inverted_index: false,
+                skipping_index: None,
             }],
             Some(0),
         )?;

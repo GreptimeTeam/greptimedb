@@ -35,6 +35,11 @@ on:
         description: Rebuild the query-regression ECS runner image (and update QUERY_REGRESSION_ECS_IMAGE_ID + RUNNER_IMAGE_EPOCH)
         required: false
         default: false
+      release_query_regression_helpers_image:
+        type: boolean
+        description: Publish precompiled query regression helpers and update the image repository variable
+        required: false
+        default: false
       update_dev_builder_image_tag:
         type: boolean
         description: Update the DEV_BUILDER_IMAGE_TAG in Makefile and create a PR
@@ -451,3 +456,8 @@ jobs:
           echo "## Lockstep updates" >> "$GITHUB_STEP_SUMMARY"
           echo "- QUERY_REGRESSION_ECS_IMAGE_ID → \`${image_id}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- RUNNER_IMAGE_EPOCH → \`${new_epoch}\` (PR on \`${BRANCH}\`, pending review/merge)" >> "$GITHUB_STEP_SUMMARY"
+
+  release-query-regression-helpers:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && inputs.release_query_regression_helpers_image }}
+    uses: ./.github/workflows/publish-query-regression-helpers.yml
+    secrets: inherit

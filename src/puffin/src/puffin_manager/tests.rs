@@ -383,3 +383,168 @@ async fn check_dir(
         assert_eq!(buf, *raw_data);
     }
 }
+
+#[tokio::test]
+async fn test_metadata_cache_shared_by_independent_readers() {
+    use common_cache::metrics::{CacheMetrics, OperationMetrics};
+    use prometheus::{Histogram, HistogramOpts, IntCounter, IntGauge, Opts};
+
+    use crate::puffin_manager::cache::PuffinMetadataCache;
+
+    let operation = |name: &str| OperationMetrics {
+        started: IntCounter::new(format!("{name}_started"), "test").unwrap(),
+        succeeded: IntCounter::new(format!("{name}_succeeded"), "test").unwrap(),
+        failed: IntCounter::new(format!("{name}_failed"), "test").unwrap(),
+        cancelled: IntCounter::new(format!("{name}_cancelled"), "test").unwrap(),
+        active: IntGauge::new(format!("{name}_active"), "test").unwrap(),
+        elapsed: Histogram::with_opts(HistogramOpts::new(format!("{name}_seconds"), "test"))
+            .unwrap(),
+    };
+    let metrics = Arc::new(CacheMetrics {
+        requests: operation("requests"),
+        loads: operation("loads"),
+    });
+    let bytes = common_cache::metrics::CacheSizeMetrics::new(
+        Opts::new("metadata_bytes", "test"),
+        &["type"],
+    )
+    .unwrap();
+    let cache =
+        Arc::new(PuffinMetadataCache::new(1024 * 1024, &bytes).with_load_metrics(metrics.clone()));
+    let (_dir, stager) = new_bounded_stager("shared_metadata", 1024).await;
+    let accessor = Arc::new(MockFileAccessor::new("shared_metadata"));
+    let manager =
+        FsPuffinManager::new(stager, accessor).with_puffin_metadata_cache(Some(cache.clone()));
+    let file = "file".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    put_blob("blob", b"payload", None, &mut writer).await;
+    writer.finish().await.unwrap();
+
+    let requests = (0..8).map(|_| async {
+        manager
+            .reader(&file)
+            .await
+            .unwrap()
+            .metadata()
+            .await
+            .unwrap()
+    });
+    let values = futures::future::join_all(requests).await;
+    assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
+    assert_eq!(8, metrics.requests.succeeded.get());
+    assert_eq!(1, metrics.loads.succeeded.get());
+    assert_eq!(0, metrics.loads.active.get());
+    assert_eq!(1, values[0].blobs.len());
+    assert_eq!("blob", values[0].blobs[0].blob_type);
+
+    cache.remove(&file).await;
+    let reloaded = manager
+        .reader(&file)
+        .await
+        .unwrap()
+        .metadata()
+        .await
+        .unwrap();
+    assert_eq!(values[0].as_ref(), reloaded.as_ref());
+    assert!(!Arc::ptr_eq(&values[0], &reloaded));
+    assert_eq!(2, metrics.loads.succeeded.get());
+}
+
+// After warming the metadata cache, reject footer reads while allowing blob reads.
+struct FooterGuardAccessor {
+    inner: MockFileAccessor,
+    blob_end: Arc<std::sync::atomic::AtomicU64>,
+}
+
+struct FooterGuardReader {
+    inner: common_base::range_read::FileReader,
+    blob_end: Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl crate::puffin_manager::file_accessor::PuffinFileAccessor for FooterGuardAccessor {
+    type Reader = FooterGuardReader;
+    type Writer =
+        <MockFileAccessor as crate::puffin_manager::file_accessor::PuffinFileAccessor>::Writer;
+    type FileHandle = String;
+
+    async fn reader(&self, handle: &String) -> crate::error::Result<Self::Reader> {
+        Ok(FooterGuardReader {
+            inner: self.inner.reader(handle).await?,
+            blob_end: self.blob_end.clone(),
+        })
+    }
+
+    async fn writer(&self, handle: &String) -> crate::error::Result<Self::Writer> {
+        self.inner.writer(handle).await
+    }
+}
+
+#[async_trait::async_trait]
+impl RangeReader for FooterGuardReader {
+    async fn metadata(&self) -> std::io::Result<common_base::range_read::Metadata> {
+        self.inner.metadata().await
+    }
+
+    async fn read(&self, range: std::ops::Range<u64>) -> std::io::Result<bytes::Bytes> {
+        if range.end > self.blob_end.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other(
+                "unexpected footer read after cache warmup",
+            ));
+        }
+        self.inner.read(range).await
+    }
+}
+
+impl common_base::range_read::SizeAwareRangeReader for FooterGuardReader {
+    fn with_file_size_hint(&mut self, size: u64) {
+        self.inner.with_file_size_hint(size);
+    }
+}
+
+#[tokio::test]
+async fn test_cached_metadata_used_when_staging_directory() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use prometheus::Opts;
+
+    use crate::puffin_manager::cache::PuffinMetadataCache;
+
+    let bytes = common_cache::metrics::CacheSizeMetrics::new(
+        Opts::new("directory_metadata_bytes", "test"),
+        &["type"],
+    )
+    .unwrap();
+    let cache = Arc::new(PuffinMetadataCache::new(1024 * 1024, &bytes));
+    let (_dir, stager) = new_bounded_stager("cached_directory", 1024 * 1024).await;
+    let blob_end = Arc::new(AtomicU64::new(u64::MAX));
+    let accessor = Arc::new(FooterGuardAccessor {
+        inner: MockFileAccessor::new("cached_directory"),
+        blob_end: blob_end.clone(),
+    });
+    let manager =
+        FsPuffinManager::new(stager.clone(), accessor).with_puffin_metadata_cache(Some(cache));
+    let file = "directory".to_string();
+    let mut writer = manager.writer(&file).await.unwrap();
+    let files: &[(&str, &[u8])] = &[("a.txt", b"hello"), ("b.txt", b"world")];
+    put_dir("dir", files, None, &mut writer).await;
+    writer.finish().await.unwrap();
+    let metadata = manager
+        .reader(&file)
+        .await
+        .unwrap()
+        .metadata()
+        .await
+        .unwrap();
+    blob_end.store(
+        metadata
+            .blobs
+            .iter()
+            .map(|blob| u64::try_from(blob.offset + blob.length).unwrap())
+            .max()
+            .unwrap(),
+        Ordering::Relaxed,
+    );
+    let reader = manager.reader(&file).await.unwrap();
+    check_dir(&file, "dir", files, &stager, &reader).await;
+}

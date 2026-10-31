@@ -44,6 +44,7 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
+use futures::future::join_all;
 use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::noop::log_store::NoopLogStore;
@@ -60,6 +61,7 @@ use object_store::util::normalize_dir;
 use query::QueryEngineFactory;
 use query::dummy_catalog::TableProviderFactoryRef;
 use query::region_query::RegionQueryHandlerFactoryRef;
+use relational_engine::engine::RelationalEngine;
 use servers::server::ServerHandlers;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::logstore::LogStore;
@@ -466,18 +468,81 @@ impl DatanodeBuilder {
         .await
     }
 
-    /// Builds [ObjectStoreManager] from [StorageConfig].
-    pub async fn build_object_store_manager(cfg: &StorageConfig) -> Result<ObjectStoreManagerRef> {
+    /// Builds [ObjectStoreManager] from [StorageConfig] and probes every remote
+    /// object store it contains, unless `probe_on_startup` is disabled.
+    ///
+    /// The probe fails the build when a store rejects any of the operations the
+    /// engines rely on, so a misconfigured storage surfaces here instead of failing
+    /// on the first write.
+    pub async fn build_object_store_manager(
+        cfg: &StorageConfig,
+        node_id: u64,
+    ) -> Result<ObjectStoreManagerRef> {
         let object_store = store::new_object_store(cfg.store.clone(), &cfg.data_home).await?;
         let default_name = cfg.store.config_name();
-        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
-        for store in &cfg.providers {
-            object_store_manager.add(
-                store.config_name(),
-                store::new_object_store(store.clone(), &cfg.data_home).await?,
-            );
+        let mut checks = Vec::with_capacity(1 + cfg.providers.len());
+        if cfg.store.is_object_storage() {
+            checks.push((default_name.to_string(), object_store.clone()));
         }
+        let mut object_store_manager = ObjectStoreManager::new(default_name, object_store);
+        for provider in &cfg.providers {
+            let name = provider.config_name();
+            let object_store = store::new_object_store(provider.clone(), &cfg.data_home).await?;
+            if provider.is_object_storage() {
+                checks.push((name.to_string(), object_store.clone()));
+            }
+            object_store_manager.add(name, object_store);
+        }
+
+        if cfg.probe_on_startup && !checks.is_empty() {
+            let prefix = store::probe_key_prefix(node_id);
+            Self::run_probes(&checks, &prefix).await?;
+        }
+
         Ok(Arc::new(object_store_manager))
+    }
+
+    /// Probes every store in `checks` under its own key prefix.
+    ///
+    /// Providers often share one object storage, so when there is more than one
+    /// store each probe starts after a random delay rather than all at once.
+    ///
+    /// Each check is bounded by [`store::PROBE_TIMEOUT`], so a store that accepts
+    /// connections but never answers fails startup instead of blocking it, after a
+    /// best-effort removal of its probe.
+    async fn run_probes(checks: &[(String, ObjectStore)], prefix: &str) -> Result<()> {
+        let stagger = checks.len() > 1;
+        let checks = checks
+            .iter()
+            .enumerate()
+            .map(|(index, (name, object_store))| {
+                let prefix = format!("{prefix}/{index}");
+                async move {
+                    if stagger {
+                        tokio::time::sleep(store::probe_start_delay()).await;
+                    }
+                    match tokio::time::timeout(
+                        store::PROBE_TIMEOUT,
+                        store::probe_object_store(object_store, name, &prefix),
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            store::remove_probe_object(object_store, &prefix).await;
+                            error::ObjectStoreProbeTimeoutSnafu {
+                                name,
+                                timeout: store::PROBE_TIMEOUT,
+                            }
+                            .fail()
+                        }
+                    }
+                }
+            });
+        for result in join_all(checks).await {
+            result?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -573,7 +638,11 @@ impl DatanodeBuilder {
         );
         region_server.install_remote_dyn_filter_receiver_injector(&self.plugins);
 
-        let object_store_manager = Self::build_object_store_manager(&opts.storage).await?;
+        let object_store_manager = Self::build_object_store_manager(
+            &opts.storage,
+            opts.node_id.context(MissingNodeIdSnafu)?,
+        )
+        .await?;
         let engines = self
             .build_store_engines(
                 object_store_manager,
@@ -642,10 +711,14 @@ impl DatanodeBuilder {
             self.local_file_access.clone(),
         );
 
+        let relational_engine =
+            RelationalEngine::new(object_store_manager.default_object_store().clone());
+
         Ok(vec![
             Arc::new(mito_engine) as _,
             Arc::new(metric_engine) as _,
             Arc::new(file_engine) as _,
+            Arc::new(relational_engine) as _,
         ])
     }
 
@@ -1074,10 +1147,13 @@ mod tests {
     use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
+    use common_base::secrets::SecretString;
     use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
+    use common_meta::cache::{SchemaCacheRef, TableSchemaCacheRef};
     use common_meta::key::RegionRoleSet;
+    use common_meta::key::SchemaMetadataManager;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
@@ -1090,8 +1166,10 @@ mod tests {
     use log_store::error::Error as LogStoreError;
     use meta_client::client::MetaClientBuilder;
     use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::sst::file_ref::FileReferenceManager;
     use mito2::test_util::{CreateRequestBuilder, build_rows, rows_schema};
     use object_store::ObjectStore;
+    use object_store::config::{S3Config, S3Connection};
     use object_store::manager::ObjectStoreManager;
     use partition::manager::PartitionRuleManagerRef;
     use query::region_query::{RegionQueryHandlerFactory, RegionQueryHandlerFactoryRef};
@@ -1100,7 +1178,7 @@ mod tests {
     use store_api::region_request::{PathType, RegionOpenRequest, RegionPutRequest, RegionRequest};
     use store_api::storage::RegionId;
 
-    use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
+    use crate::config::{DatanodeOptions, ObjectStoreConfig, RegionEngineConfig, StorageConfig};
     use crate::datanode::{
         Datanode, DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
         wal_object_store,
@@ -1457,6 +1535,80 @@ mod tests {
                 field: "storage_provider",
                 ..
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_object_store_probe_can_be_disabled() {
+        // The endpoint does not accept connections, so this only succeeds when the
+        // probe does not run.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            probe_on_startup: false,
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_file_store_is_not_probed() {
+        // The probe is enabled by default, but a File store must skip it.
+        let data_home = create_temp_dir("object-store-probe-file");
+        let storage = StorageConfig {
+            data_home: data_home.path().to_str().unwrap().to_string(),
+            ..Default::default()
+        };
+
+        DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap();
+
+        // The probe would leave this directory behind if it ran.
+        assert!(!data_home.path().join(".greptime_probe").exists());
+    }
+
+    #[tokio::test]
+    async fn test_object_store_probe_failure_aborts_build() {
+        // The endpoint does not accept connections, so the probe write fails and the
+        // build must fail with it.
+        let storage = StorageConfig {
+            store: ObjectStoreConfig::S3(S3Config {
+                connection: S3Connection {
+                    bucket: "test".to_string(),
+                    endpoint: Some("http://127.0.0.1:1".to_string()),
+                    region: Some("us-east-1".to_string()),
+                    access_key_id: SecretString::from("test".to_string()),
+                    secret_access_key: SecretString::from("test".to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let err = DatanodeBuilder::build_object_store_manager(&storage, 1)
+            .await
+            .unwrap_err();
+        assert_matches!(
+            err,
+            Error::ObjectStoreProbe {
+                name,
+                step: "write",
+                ..
+            } if name == storage.store.config_name()
         );
     }
 
@@ -1861,5 +2013,53 @@ mod tests {
             ..config
         };
         validate_object_store_wal_config(&derived).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_store_engines_registers_relational_engine() {
+        common_telemetry::init_default_ut_logging();
+        let kv_backend = Arc::new(MemoryKvBackend::new());
+        let cache_registry = Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
+        let schema_cache: SchemaCacheRef = cache_registry.get().unwrap();
+        let table_id_schema_cache: TableSchemaCacheRef = cache_registry.get().unwrap();
+        let schema_metadata_manager = Arc::new(SchemaMetadataManager::new(
+            table_id_schema_cache,
+            schema_cache,
+        ));
+        let file_ref_manager = Arc::new(FileReferenceManager::with_gc_enabled(Some(0), false));
+
+        let data_home = create_temp_dir("build-store-engines");
+        let mut opts = DatanodeOptions {
+            node_id: Some(0),
+            wal: DatanodeWalConfig::Noop,
+            enable_telemetry: false,
+            ..Default::default()
+        };
+        opts.storage.data_home = data_home.path().to_str().unwrap().to_string();
+
+        let object_store_manager =
+            DatanodeBuilder::build_object_store_manager(&opts.storage, opts.node_id.unwrap())
+                .await
+                .unwrap();
+
+        let mut builder = DatanodeBuilder::new(opts, Plugins::default(), kv_backend);
+        let engines = builder
+            .build_store_engines(
+                object_store_manager,
+                schema_metadata_manager,
+                file_ref_manager,
+                Plugins::default(),
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = engines.iter().map(|engine| engine.name()).collect();
+        assert_eq!(engines.len(), 4, "expected 4 engines, got: {names:?}");
+        for expected in [MITO_ENGINE_NAME, "metric", "file", "relational"] {
+            assert!(
+                names.contains(&expected),
+                "engine {expected:?} not registered, got: {names:?}"
+            );
+        }
     }
 }
