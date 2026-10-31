@@ -43,7 +43,7 @@ pub(crate) async fn write_target_group(
         .write_multi_min_size
         .unwrap_or(0);
     ensure!(
-        minimum_chunk <= plan.sort_memory_limit / 8,
+        minimum_chunk <= plan.memory_limit / 8,
         crate::error::MultiRegionCompactionResourceSnafu {
             reason: "Storage multipart minimum exceeds the table writer budget",
         }
@@ -78,7 +78,7 @@ pub(crate) async fn write_target_group(
         bloom_filter_index_config: context.config.bloom_filter_index.clone(),
     };
     let options = WriteOptions {
-        write_buffer_size: ReadableSize((plan.sort_memory_limit / 8) as u64),
+        write_buffer_size: ReadableSize((plan.memory_limit / 8) as u64),
         max_file_size: Some(plan.max_output_file_size),
         row_group_size: target.options.row_group_size().min(1024),
         float_field_encoding: target.options.float_field_encoding,

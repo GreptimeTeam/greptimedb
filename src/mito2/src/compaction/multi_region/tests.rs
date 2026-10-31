@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use api::v1::OpType;
 use datatypes::arrow::array::{
@@ -52,6 +53,7 @@ struct Protection {
     layer: AccessLayerRef,
     files: Mutex<HashSet<RegionFileId>>,
     fail_region: Option<RegionId>,
+    first_protected: tokio::sync::Notify,
 }
 
 #[async_trait::async_trait]
@@ -67,12 +69,16 @@ impl SstWriteGuard for Protection {
             "SST already existed before protection"
         );
         if self.fail_region == Some(file_id.region_id()) {
+            // Failure must occur after another worker has protected an output;
+            // worker scheduling no longer follows region-id order.
+            self.first_protected.notified().await;
             return InvalidMultiRegionCompactionSnafu {
                 reason: "injected output protection failure",
             }
             .fail();
         }
         assert!(self.files.lock().unwrap().insert(file_id));
+        self.first_protected.notify_one();
         Ok(())
     }
 }
@@ -165,6 +171,32 @@ impl Fixture {
         }
     }
 
+    async fn write_additional_source(&self, batches: Vec<RecordBatch>) -> FileMeta {
+        let info = self
+            .layer
+            .write_sst(
+                write_request(
+                    self.metadata.clone(),
+                    new_flat_source_from_record_batches(batches),
+                    &self.config,
+                    FormatType::Flat,
+                ),
+                &WriteOptions::default(),
+                &mut Metrics::new(WriteType::Flush),
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        FileMeta {
+            file_id: info.file_id,
+            file_size: info.file_size,
+            num_rows: info.num_rows as u64,
+            num_row_groups: info.num_row_groups,
+            max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
+            ..self.source.clone()
+        }
+    }
+
     fn plan(&self, regions: u32) -> MultiRegionCompactionPlan {
         let mut targets = BTreeMap::new();
         for region in 0..regions {
@@ -218,7 +250,8 @@ impl Fixture {
             partition_rule,
             sources: vec![self.source.clone()],
             targets,
-            sort_memory_limit: 16 * 1024 * 1024,
+            memory_limit: 16 * 1024 * 1024,
+            max_active_workers: 2,
             spill_limit: 64 * 1024 * 1024,
             max_output_file_size: 1024 * 1024,
             window_seconds: 3600,
@@ -233,6 +266,7 @@ impl Fixture {
             layer: self.layer.clone(),
             files: Mutex::default(),
             fail_region,
+            first_protected: tokio::sync::Notify::new(),
         });
         (
             MultiRegionCompactionContext {
@@ -247,20 +281,48 @@ impl Fixture {
         )
     }
 
-    async fn read_output(&self, file: FileMeta, metadata: RegionMetadataRef) -> Vec<RecordBatch> {
+    async fn read_output(
+        &self,
+        mut file: FileMeta,
+        metadata: RegionMetadataRef,
+    ) -> Vec<RecordBatch> {
+        let expected_region = file.region_id;
+        let expected_rows = file.num_rows;
+        // Inspect the physical contents: a partition filter or sequence override
+        // on read must not hide incorrectly routed/written records.
+        file.sequence = None;
+        file.preserve_row_sequence = true;
+        let mut unfiltered = (*metadata).clone();
+        unfiltered.set_partition_expr(None);
         let mut reader = self
             .layer
             .read_sst(FileHandle::new(file, Arc::new(NoopFilePurger)))
-            .expected_metadata(Some(metadata))
+            .expected_metadata(Some(Arc::new(unfiltered)))
             .cache(CacheStrategy::Disabled)
             .build()
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(expected_region, reader.metadata().region_id);
+        assert_eq!(
+            metadata.column_metadatas,
+            reader.metadata().column_metadatas
+        );
+        assert_eq!(
+            expected_rows,
+            reader.parquet_metadata().file_metadata().num_rows() as u64
+        );
         let mut batches = Vec::new();
         while let Some(batch) = reader.next_record_batch().await.unwrap() {
             batches.push(batch);
         }
+        assert_eq!(
+            expected_rows,
+            batches
+                .iter()
+                .map(|batch| batch.num_rows() as u64)
+                .sum::<u64>()
+        );
         batches
     }
 }
@@ -491,6 +553,7 @@ async fn failed_target_never_returns_a_partial_table_result() {
         fixture.layer.path_type(),
     );
     assert!(fixture.layer.object_store().exists(&path).await.unwrap());
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[rstest::rstest]
@@ -514,7 +577,7 @@ async fn table_stage_does_not_apply_target_merge_mode(
 }
 
 #[tokio::test]
-async fn external_sort_spills_and_exhaustion_fails_without_outputs() {
+async fn routed_runs_spill_and_exhaustion_fails_without_outputs() {
     let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
         (0..200)
             .map(|series| {
@@ -529,7 +592,7 @@ async fn external_sort_spills_and_exhaustion_fails_without_outputs() {
     })
     .await;
     let mut plan = fixture.plan(1);
-    plan.sort_memory_limit = 2 * 1024 * 1024;
+    plan.memory_limit = 2 * 1024 * 1024;
     for target in plan.targets.values_mut() {
         Arc::make_mut(&mut target.metadata).set_partition_expr(None);
     }
@@ -538,15 +601,48 @@ async fn external_sort_spills_and_exhaustion_fails_without_outputs() {
         .unwrap();
     assert_eq!(102400, output.stats.output_rows);
     assert!(output.stats.spilled_bytes > 0);
+    // Regression: IPC column buffers can share an allocation. Reusing spilled
+    // long-tag batches must not exhaust the budget through duplicate charges.
+    let mut ordinal = 0;
+    for file in output.files.into_values().flatten() {
+        for batch in fixture.read_output(file, fixture.metadata.clone()).await {
+            let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+            let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+            let values = batch
+                .column_by_name("field_0")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                assert_eq!(
+                    format!("{:03}{}", ordinal / 512, "x".repeat(96)),
+                    tags.value(row)
+                );
+                assert_eq!(ordinal % 512, values.value(row));
+                ordinal += 1;
+            }
+        }
+    }
+    assert_eq!(102400, ordinal);
     let mut plan = fixture.plan(1);
-    plan.sort_memory_limit = 2 * 1024 * 1024;
+    plan.memory_limit = 2 * 1024 * 1024;
     plan.spill_limit = 1;
     for target in plan.targets.values_mut() {
         Arc::make_mut(&mut target.metadata).set_partition_expr(None);
     }
     let (context, protected) = fixture.context(None);
-    assert!(compact_regions(plan, context).await.is_err());
+    let error = compact_regions(plan, context).await.err().unwrap();
+    assert!(
+        matches!(
+            &error,
+            crate::error::Error::MultiRegionCompactionResource { reason, .. }
+                if reason == "Multi-region temporary disk quota exhausted"
+        ),
+        "{error:?}"
+    );
     assert!(protected.files.lock().unwrap().is_empty());
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
 }
 
 #[tokio::test]
@@ -598,27 +694,7 @@ async fn multiple_sources_merge_versions_in_each_target_sequence_domain() {
     let batches = (0..31)
         .map(|series| source_batch(&fixture.metadata, series, 7))
         .collect();
-    let info = fixture
-        .layer
-        .write_sst(
-            write_request(
-                fixture.metadata.clone(),
-                new_flat_source_from_record_batches(batches),
-                &fixture.config,
-                FormatType::Flat,
-            ),
-            &WriteOptions::default(),
-            &mut Metrics::new(WriteType::Flush),
-        )
-        .await
-        .unwrap()
-        .remove(0);
-    let second = FileMeta {
-        file_id: info.file_id,
-        file_size: info.file_size,
-        max_row_group_uncompressed_size: info.max_row_group_uncompressed_size,
-        ..fixture.source.clone()
-    };
+    let second = fixture.write_additional_source(batches).await;
     let mut plan = fixture.plan(2);
     plan.sources.push(second.clone());
     for (id, target) in &mut plan.targets {
@@ -774,12 +850,375 @@ async fn unknown_partition_target_fails_before_creating_output() {
     );
     let (context, protection) = fixture.context(None);
     let error = compact_regions(plan, context).await.err().unwrap();
-    // DataFusion transports source errors through the external-sort stream.
     assert!(
         format!("{error:?}").contains("Partition rule selected a region outside"),
         "{error:?}"
     );
     assert!(protection.files.lock().unwrap().is_empty());
+}
+
+#[test]
+fn stable_merge_keeps_tied_source_order_across_empty_batches_and_refills() {
+    fn tied_batch(start: usize, end: usize) -> RecordBatch {
+        let batch = new_record_batch_with_custom_sequence(&["000", "series"], start, end, 7);
+        let mut columns = batch.columns().to_vec();
+        columns[3] = Arc::new(TimestampMillisecondArray::from(vec![0; end - start]));
+        RecordBatch::try_new(batch.schema(), columns).unwrap()
+    }
+    let schema = tied_batch(0, 1).schema();
+    let inputs: Vec<crate::memtable::BoxedRecordBatchIterator> = vec![
+        Box::new(
+            vec![tied_batch(0, 0), tied_batch(0, 2), tied_batch(2, 5)]
+                .into_iter()
+                .map(Ok),
+        ),
+        Box::new(
+            vec![tied_batch(100, 102), tied_batch(102, 105)]
+                .into_iter()
+                .map(Ok),
+        ),
+    ];
+    let merge = crate::read::flat_merge::FlatMergeIterator::new_stable(schema, inputs, 3).unwrap();
+    let mut payloads = Vec::new();
+    for batch in merge {
+        let batch = batch.unwrap();
+        let values = batch
+            .column_by_name("field_0")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        payloads.extend(values.values().iter().copied());
+    }
+    assert_eq!(vec![0, 1, 2, 3, 4, 100, 101, 102, 103, 104], payloads);
+}
+
+/// Five overlapping sources exercise both binary carries and the final merge
+/// of unequal levels. Every timestamp has tied puts and a tombstone.
+fn overlapping_batches(source: u64) -> Vec<RecordBatch> {
+    (0..31)
+        .map(|series| {
+            let batch = new_record_batch_with_custom_sequence(
+                &[&format!("{series:03}"), "series"],
+                0,
+                512,
+                5,
+            );
+            let mut columns = batch.columns().to_vec();
+            columns[2] = Arc::new(UInt64Array::from(
+                (0..512)
+                    .map(|row| (row % 4 != 2).then_some(source * 1000 + row))
+                    .collect::<Vec<_>>(),
+            ));
+            columns[3] = Arc::new(TimestampMillisecondArray::from(
+                (0..512)
+                    .map(|row| row / 128 * 3_600_000 + row % 128 / 4)
+                    .collect::<Vec<i64>>(),
+            ));
+            columns[6] = Arc::new(UInt8Array::from(
+                (0..512)
+                    .map(|row| {
+                        if row % 4 == 2 {
+                            OpType::Delete as u8
+                        } else {
+                            OpType::Put as u8
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+            RecordBatch::try_new(batch.schema(), columns).unwrap()
+        })
+        .collect()
+}
+
+async fn overlapping_fixture() -> (Fixture, MultiRegionCompactionPlan) {
+    let fixture = Fixture::with_source(PrimaryKeyEncoding::Dense, FormatType::Flat, |_| {
+        overlapping_batches(0)
+    })
+    .await;
+    let mut plan = fixture.plan(3);
+    plan.memory_limit = 2 * 1024 * 1024;
+    plan.max_output_file_size = 16 * 1024;
+    for source in 1..5 {
+        let file = fixture
+            .write_additional_source(overlapping_batches(source))
+            .await;
+        for target in plan.targets.values_mut() {
+            target.inputs.insert(file.file_id(), file.clone());
+        }
+        plan.sources.push(file);
+    }
+    for target in plan.targets.values_mut() {
+        for input in target.inputs.values_mut() {
+            input.sequence = NonZeroU64::new(777);
+        }
+    }
+    (fixture, plan)
+}
+
+#[rstest::rstest]
+#[case::range_single_work_slot(1, false)]
+#[case::range_parallel_workers(2, false)]
+#[case::multi_column_single_work_slot(1, true)]
+#[case::multi_column_parallel_workers(2, true)]
+#[tokio::test]
+async fn bounded_workers_merge_overlapping_sources_without_deadlock_or_reordering(
+    #[case] workers: usize,
+    #[case] multi_column: bool,
+) {
+    let (fixture, mut plan) = overlapping_fixture().await;
+    plan.max_active_workers = workers;
+    if multi_column {
+        // A single primary key can route to different targets across sources
+        // and versions. Unmatched rows, including tombstones, go to region 0.
+        let expressions = vec![
+            col("tag_0")
+                .lt(Value::String("010".into()))
+                .and(col("field_0").gt_eq(Value::UInt64(2000))),
+            col("tag_0").gt_eq(Value::String("010".into())).and(
+                col("field_0")
+                    .gt_eq(Value::UInt64(0))
+                    .and(col("field_0").lt(Value::UInt64(2000))),
+            ),
+        ];
+        plan.partition_rule = Arc::new(
+            MultiDimPartitionRule::try_new(
+                vec!["tag_0".into(), "field_0".into()],
+                vec![1, 2],
+                expressions.clone(),
+                false,
+            )
+            .unwrap(),
+        );
+        for (id, target) in &mut plan.targets {
+            let expression = id
+                .region_sequence()
+                .checked_sub(1)
+                .map(|index| expressions[index as usize].as_json_str().unwrap());
+            Arc::make_mut(&mut target.metadata).set_partition_expr(expression);
+        }
+    }
+    let source_paths: HashSet<_> = plan
+        .sources
+        .iter()
+        .map(|file| {
+            crate::sst::location::sst_file_path(
+                fixture.layer.table_dir(),
+                file.file_id(),
+                fixture.layer.path_type(),
+            )
+        })
+        .collect();
+    let targets = plan.targets.clone();
+    let memory_limit = plan.memory_limit;
+    let (context, protection) = fixture.context(None);
+    let output = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
+        .await
+        .expect("bounded worker pipeline stalled")
+        .unwrap();
+    assert_eq!(5, output.stats.source_files);
+    assert_eq!(5 * 31 * 512, output.stats.source_rows);
+    assert_eq!(output.stats.source_rows, output.stats.output_rows);
+    assert!(output.stats.spilled_bytes > 0);
+    assert!(output.stats.peak_buffered_bytes <= (memory_limit / 2) as u64);
+    assert_eq!(
+        targets.keys().collect::<Vec<_>>(),
+        output.files.keys().collect::<Vec<_>>()
+    );
+    println!(
+        "workers={workers}, multi_column={multi_column}, stats={:?}",
+        output.stats
+    );
+    let mut output_paths = HashSet::new();
+    for (id, files) in output.files {
+        assert_eq!(files.len(), output.sst_infos[&id].len());
+        assert!(
+            files.len() >= 4,
+            "each target must produce all four windows"
+        );
+        let file_count = files.len();
+        let mut windows = BTreeMap::<i64, Vec<_>>::new();
+        for (file, info) in files.into_iter().zip(&output.sst_infos[&id]) {
+            assert!(protection.files.lock().unwrap().contains(&file.file_id()));
+            assert_eq!(id, file.region_id);
+            assert_eq!(1, file.level);
+            assert_eq!(info.file_id, file.file_id);
+            assert_eq!(info.num_rows as u64, file.num_rows);
+            assert_eq!(info.file_size, file.file_size);
+            assert_eq!(info.time_range, file.time_range);
+            let file_window = file.time_range.0.value().div_euclid(3_600_000);
+            assert_eq!(file_window, file.time_range.1.value().div_euclid(3_600_000));
+            let path = crate::sst::location::sst_file_path(
+                fixture.layer.table_dir(),
+                file.file_id(),
+                fixture.layer.path_type(),
+            );
+            assert!(
+                !source_paths.contains(&path),
+                "output overwrote source {path}"
+            );
+            assert!(
+                output_paths.insert(path.clone()),
+                "shared output file {path}"
+            );
+            println!(
+                "region={id}, window={file_window}, rows={}, file={path}",
+                file.num_rows
+            );
+            for batch in fixture
+                .read_output(file, targets[&id].metadata.clone())
+                .await
+            {
+                let tags = cast(batch.column_by_name("tag_0").unwrap(), &DataType::Utf8).unwrap();
+                let tags = tags.as_any().downcast_ref::<StringArray>().unwrap();
+                let timestamps = crate::read::timestamp_array_to_i64_slice(
+                    batch.column(time_index_column_index(batch.num_columns())),
+                );
+                let sequences = batch
+                    .column(sequence_column_index(batch.num_columns()))
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                let operations = batch
+                    .column(batch.num_columns() - 1)
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .unwrap();
+                let values = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                for (row, timestamp) in timestamps.iter().copied().enumerate() {
+                    assert_eq!(file_window, timestamp.div_euclid(3_600_000));
+                    windows.entry(file_window).or_default().push((
+                        tags.value(row).parse::<u32>().unwrap(),
+                        timestamp,
+                        sequences.value(row),
+                        operations.value(row),
+                        values.is_valid(row).then(|| values.value(row)),
+                    ));
+                }
+            }
+        }
+        let mut expected = BTreeMap::new();
+        for window in 0..4 {
+            let mut rows = Vec::new();
+            for series in 0..31 {
+                for tick in 0..32 {
+                    for source in 0..5 {
+                        for version in 0..4 {
+                            let ordinal = window * 128 + tick * 4 + version;
+                            let payload = (version != 2).then_some(source * 1000 + ordinal as u64);
+                            // Independent oracle: do not reuse PartitionRule to
+                            // compute the expected routing of the physical rows.
+                            let owner = if multi_column {
+                                if series < 10 && payload.is_some_and(|value| value >= 2000) {
+                                    1
+                                } else if series >= 10 && payload.is_some_and(|value| value < 2000)
+                                {
+                                    2
+                                } else {
+                                    0
+                                }
+                            } else if series < 10 {
+                                0
+                            } else if series < 21 {
+                                1
+                            } else {
+                                2
+                            };
+                            if owner != id.region_sequence() {
+                                continue;
+                            }
+                            rows.push((
+                                series,
+                                window * 3_600_000 + tick,
+                                if id.region_sequence() == 0 { 5 } else { 777 },
+                                if version == 2 {
+                                    OpType::Delete as u8
+                                } else {
+                                    OpType::Put as u8
+                                },
+                                payload,
+                            ));
+                        }
+                    }
+                }
+            }
+            expected.insert(window, rows);
+        }
+        // Do not sort actual rows: this checks stability across input batches,
+        // merge passes, output batches and SST file boundaries, not just a multiset.
+        assert_eq!(expected, windows, "incorrect rows or ordering for {id}");
+        println!(
+            "verified region={id}, files={file_count}, rows={}",
+            windows.values().map(Vec::len).sum::<usize>()
+        );
+    }
+    for path in source_paths {
+        assert!(fixture.layer.object_store().exists(&path).await.unwrap());
+    }
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+}
+
+async fn assert_spill_cleaned(path: &std::path::Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match tokio::fs::read_dir(path).await {
+                Ok(mut entries) => {
+                    if entries.next_entry().await.unwrap().is_none() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                Err(error) => panic!("cannot inspect spill cleanup: {error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("attempt spill resources leaked");
+}
+
+struct CancelBeforeCreate(Arc<CancellationHandle>);
+
+#[async_trait::async_trait]
+impl SstWriteGuard for CancelBeforeCreate {
+    async fn before_create(&self, _file_id: RegionFileId) -> Result<()> {
+        self.0.cancel();
+        // The coordinator must interrupt a worker waiting on external I/O,
+        // rather than waiting for its next cooperative batch check.
+        futures::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_blocked_writer_cleans_spills_and_preserves_sources() {
+    let (fixture, mut plan) = overlapping_fixture().await;
+    plan.max_active_workers = 1;
+    let sources = plan.sources.clone();
+    let (mut context, _) = fixture.context(None);
+    context.protection = Arc::new(CancelBeforeCreate(context.cancellation.clone()));
+    let error = tokio::time::timeout(Duration::from_secs(60), compact_regions(plan, context))
+        .await
+        .expect("cancellation did not interrupt the worker")
+        .err()
+        .unwrap();
+    assert!(matches!(
+        error,
+        crate::error::Error::CompactionCancelled { .. }
+    ));
+    assert_spill_cleaned(&fixture.env.path.path().join("spill")).await;
+    for file in sources {
+        let path = crate::sst::location::sst_file_path(
+            fixture.layer.table_dir(),
+            file.file_id(),
+            fixture.layer.path_type(),
+        );
+        assert!(fixture.layer.object_store().exists(&path).await.unwrap());
+    }
 }
 
 #[tokio::test]

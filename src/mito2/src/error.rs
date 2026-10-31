@@ -69,10 +69,10 @@ pub enum Error {
     },
 
     #[cfg(feature = "enterprise")]
-    #[snafu(display("Multi-region compaction external sort failed"))]
-    MultiRegionCompactionSort {
+    #[snafu(display("Multi-region compaction temporary run I/O failed"))]
+    MultiRegionCompactionSpill {
         #[snafu(source)]
-        error: datafusion::error::DataFusionError,
+        error: std::io::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1505,7 +1505,7 @@ impl ErrorExt for Error {
             #[cfg(feature = "enterprise")]
             MultiRegionCompactionResource { .. } => StatusCode::RuntimeResourcesExhausted,
             #[cfg(feature = "enterprise")]
-            MultiRegionCompactionSort { .. } => StatusCode::Internal,
+            MultiRegionCompactionSpill { .. } => StatusCode::Internal,
             DataTypeMismatch { source, .. } => source.status_code(),
             OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
                 StatusCode::StorageUnavailable

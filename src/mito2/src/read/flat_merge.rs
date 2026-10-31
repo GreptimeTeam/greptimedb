@@ -797,12 +797,33 @@ impl FlatMergeIterator {
         iters: Vec<BoxedRecordBatchIterator>,
         batch_size: usize,
     ) -> Result<Self> {
+        Self::build(schema, iters, batch_size, |_| 0)
+    }
+
+    /// Breaks equal row keys by input order, preserving source order across batches.
+    /// Callers performing multiple merge passes must supply contiguous source intervals.
+    #[cfg(feature = "enterprise")]
+    pub(crate) fn new_stable(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchIterator>,
+        batch_size: usize,
+    ) -> Result<Self> {
+        Self::build(schema, iters, batch_size, |index| index)
+    }
+
+    fn build(
+        schema: SchemaRef,
+        iters: Vec<BoxedRecordBatchIterator>,
+        batch_size: usize,
+        source_rank: fn(usize) -> usize,
+    ) -> Result<Self> {
         let mut in_progress = BatchBuilder::new(schema, iters.len(), batch_size);
         let mut nodes = Vec::with_capacity(iters.len());
         // Initialize nodes and the buffer.
         for (node_index, iter) in iters.into_iter().enumerate() {
             let mut node = IterNode {
                 node_index,
+                stable_rank: source_rank(node_index),
                 iter,
                 cursor: None,
             };
@@ -952,6 +973,7 @@ impl FlatMergeReader {
         for (node_index, iter) in iters.into_iter().enumerate() {
             let mut node = StreamNode {
                 node_index,
+                stable_rank: 0,
                 iter,
                 cursor: None,
             };
@@ -1105,6 +1127,8 @@ impl Drop for FlatMergeReader {
 struct GenericNode<T> {
     /// Index of the node.
     node_index: usize,
+    /// Optional source-order tie breaker; zero retains the original comparison.
+    stable_rank: usize,
     /// Iterator of this `Node`.
     iter: T,
     /// Current batch to be read. The node should ensure the batch is not empty (The
@@ -1140,7 +1164,7 @@ impl<T> NodeCmp for GenericNode<T> {
 
 impl<T> PartialEq for GenericNode<T> {
     fn eq(&self, other: &GenericNode<T>) -> bool {
-        self.cursor == other.cursor
+        self.cursor == other.cursor && self.stable_rank == other.stable_rank
     }
 }
 
@@ -1156,7 +1180,10 @@ impl<T> Ord for GenericNode<T> {
     fn cmp(&self, other: &GenericNode<T>) -> Ordering {
         // The std binary heap is a max heap, but we want the nodes are ordered in
         // ascend order, so we compare the nodes in reverse order.
-        other.cursor.cmp(&self.cursor)
+        other
+            .cursor
+            .cmp(&self.cursor)
+            .then_with(|| other.stable_rank.cmp(&self.stable_rank))
     }
 }
 

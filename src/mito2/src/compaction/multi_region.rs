@@ -16,20 +16,21 @@
 //! does not select files, change persisted levels, publish manifests, or fold row
 //! versions. Output protection and eventual publication belong to its caller.
 
-mod sort;
 mod source;
+mod spill;
 #[cfg(test)]
 mod tests;
+mod worker;
 mod writer;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
-use common_base::cancellation::CancellationHandle;
+use common_base::cancellation::{CancellableFuture, CancellationHandle};
 use partition::PartitionRuleRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{OptionExt, ensure};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::RegionId;
 
@@ -59,9 +60,12 @@ pub struct MultiRegionCompactionPlan {
     pub sources: Vec<FileMeta>,
     /// Metadata and routing must belong to the same physical-table snapshot.
     pub targets: BTreeMap<RegionId, MultiRegionTarget>,
-    /// Memory budget for source batches and the external sort, not a process RSS cap.
-    /// SST/index writer memory is governed separately by the supplied MitoConfig.
-    pub sort_memory_limit: usize,
+    /// Shared byte budget for queued/cached runs and working batches, not a process RSS cap.
+    /// Reader page decoding and SST/index writer memory also depend on the supplied MitoConfig.
+    pub memory_limit: usize,
+    /// One or two simultaneous run operations or SST writers. The upper bound limits
+    /// uncharged working batches; idle region workers hold no slot.
+    pub max_active_workers: usize,
     pub spill_limit: u64,
     pub max_output_file_size: usize,
     pub window_seconds: i64,
@@ -87,6 +91,8 @@ pub struct MultiRegionCompactionStats {
     pub output_rows: u64,
     pub output_bytes: u64,
     pub spilled_bytes: u64,
+    /// Peak bytes reserved by queued and cached Arrow batches, including batch metadata.
+    pub peak_buffered_bytes: u64,
 }
 
 /// Complete per-target outputs, including explicit empty partitions.
@@ -114,54 +120,24 @@ pub async fn compact_regions(
     if context.cancellation.is_cancelled() {
         return crate::error::CompactionCancelledSnafu.fail();
     }
-    tokio::fs::create_dir_all(&context.spill_directory)
-        .await
-        .context(crate::error::CreateDirSnafu {
-            dir: context.spill_directory.display().to_string(),
-        })?;
-    let counters = Arc::new(SourceCounters::default());
-    let source = source::SharedSource::build(&plan, &context, metadata, counters.clone()).await?;
-    let (stream, sort_plan) = sort::sorted_stream(source, &plan, &context)?;
-    let mut groups = sort::SortedGroups::new(stream);
-    let mut output = MultiRegionCompactionOutput {
-        files: plan.targets.keys().map(|id| (*id, vec![])).collect(),
-        sst_infos: plan.targets.keys().map(|id| (*id, vec![])).collect(),
-        stats: MultiRegionCompactionStats::default(),
+    let cancellation = context.cancellation.clone();
+    let execution = async move {
+        let counters = Arc::new(SourceCounters::default());
+        let source =
+            source::SharedSource::build(&plan, &context, metadata, counters.clone()).await?;
+        worker::execute(plan, context, source, counters).await
     };
-    while let Some((region_id, source)) = groups.next_group().await? {
-        let target = plan
-            .targets
-            .get(&region_id)
-            .context(InvalidMultiRegionCompactionSnafu {
-                reason: "Sorted output names an unknown target",
-            })?;
-        let (files, infos) = writer::write_target_group(target, source, &plan, &context).await?;
-        output.stats.output_rows += files.iter().map(|file| file.num_rows).sum::<u64>();
-        output.stats.output_bytes += files
-            .iter()
-            .map(|file| file.file_size + file.index_file_size)
-            .sum::<u64>();
-        output.files.entry(region_id).or_default().extend(files);
-        output.sst_infos.entry(region_id).or_default().extend(infos);
-    }
-    output.stats.source_files = counters.files.load(Ordering::Relaxed);
-    output.stats.source_rows = counters.rows.load(Ordering::Relaxed);
-    output.stats.source_store_page_bytes = counters.store_page_bytes.load(Ordering::Relaxed);
-    output.stats.spilled_bytes = sort::spilled_bytes(&sort_plan);
-    ensure!(
-        output.stats.source_files == plan.sources.len() as u64
-            && output.stats.output_rows == output.stats.source_rows,
-        InvalidMultiRegionCompactionSnafu {
-            reason: "Multi-region compaction did not account for every source row"
-        }
-    );
-    Ok(output)
+    CancellableFuture::new(execution, cancellation)
+        .await
+        .map_err(|_| crate::error::CompactionCancelledSnafu.build())?
 }
 
 fn validate_plan(plan: &MultiRegionCompactionPlan) -> Result<RegionMetadataRef> {
     ensure!(
         !plan.sources.is_empty()
-            && plan.sort_memory_limit >= 1024 * 1024
+            && plan.memory_limit >= 1024 * 1024
+            && plan.max_active_workers > 0
+            && plan.max_active_workers <= 2
             && plan.spill_limit > 0
             && plan.max_output_file_size > 0
             && plan.window_seconds > 0,

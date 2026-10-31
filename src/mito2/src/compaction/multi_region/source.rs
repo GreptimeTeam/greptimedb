@@ -16,16 +16,11 @@ use std::sync::atomic::Ordering;
 
 use arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
 use common_time::{Timestamp, timestamp::TimeUnit};
-use datafusion::execution::TaskContext;
-use datafusion::physical_plan::SendableRecordBatchStream;
-use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
-use datafusion::physical_plan::streaming::PartitionStream;
-use datafusion_common::DataFusionError;
-use datatypes::arrow::array::{Array, ArrayRef, BooleanArray, Int64Array, UInt64Array};
+use datatypes::arrow::array::{Array, BooleanArray, UInt64Array};
 use datatypes::arrow::compute::filter_record_batch;
-use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
-use futures::TryStreamExt;
+use futures::Stream;
 use parquet::file::metadata::PageIndexPolicy;
 use partition::PartitionRuleRef;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -57,7 +52,16 @@ struct SourceBatch {
     batch: RecordBatch,
     source: FileMeta,
     legacy_override: bool,
-    ordinal: u64,
+}
+
+/// Source boundaries are ordered after all routed fragments of that source.
+pub(crate) enum SourceEvent {
+    Batch {
+        region_id: RegionId,
+        window: i64,
+        batch: RecordBatch,
+    },
+    SourceEnd,
 }
 
 pub(crate) struct SharedSource {
@@ -97,6 +101,9 @@ impl SharedSource {
         let cache = CacheStrategy::Compaction(context.cache.clone());
         let mut footers = Vec::with_capacity(plan.sources.len());
         for file in &plan.sources {
+            if context.cancellation.is_cancelled() {
+                return crate::error::CompactionCancelledSnafu.fail();
+            }
             let handle = FileHandle::new(file.clone(), Arc::new(NoopFilePurger));
             let path = handle.file_path(
                 context.access_layer.table_dir(),
@@ -152,19 +159,7 @@ impl SharedSource {
             ),
             &json2_targets,
         )?;
-        let flat_schema = mapper.input_arrow_schema(false);
-        let mut fields: Vec<_> = flat_schema.fields().iter().cloned().collect();
-        for (base, data_type) in [
-            ("__tc_target", DataType::UInt64),
-            ("__tc_window", DataType::Int64),
-            ("__tc_order", DataType::UInt64),
-        ] {
-            let mut name = base.to_string();
-            while fields.iter().any(|field| field.name() == &name) {
-                name.push('_');
-            }
-            fields.push(Arc::new(Field::new(name, data_type, false)));
-        }
+        let schema = mapper.input_arrow_schema(false);
         Ok(Arc::new(Self {
             layer: context.access_layer.clone(),
             cache,
@@ -173,18 +168,23 @@ impl SharedSource {
             metadata,
             mapper,
             json2_targets,
-            schema: Arc::new(Schema::new(fields)),
+            schema,
             partition_rule: plan.partition_rule.clone(),
             window_seconds: plan.window_seconds,
-            batch_memory_limit: plan.sort_memory_limit / 8,
+            batch_memory_limit: plan.memory_limit / 8,
             cancellation: context.cancellation.clone(),
             counters,
         }))
     }
 
-    fn batches(self: Arc<Self>) -> crate::read::BoxedRecordBatchStream {
+    pub(crate) fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    pub(crate) fn batches(
+        self: Arc<Self>,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = Result<SourceEvent>> + Send>> {
         Box::pin(async_stream::try_stream! {
-            let mut ordinal = 0_u64;
             for file in &self.sources {
                 self.check_cancelled()?;
                 // Preserve physical source sequences. Target-domain overrides are applied only after routing.
@@ -194,7 +194,9 @@ impl SharedSource {
                     .expected_metadata(Some(self.metadata.clone())).json2_rewrite_targets(self.json2_targets.clone())
                     .compaction(false).page_index_policy(PageIndexPolicy::Skip);
                 let Some((context, selection)) = builder.build_reader_input(&mut ReaderMetrics::default()).await? else {
-                    self.counters.files.fetch_add(1, Ordering::Relaxed); continue;
+                    self.counters.files.fetch_add(1, Ordering::Relaxed);
+                    yield SourceEvent::SourceEnd;
+                    continue;
                 };
                 let compat = FlatCompatBatch::try_new(&self.mapper, context.read_format(), false)?;
                 let mut reader = ParquetReader::new(Arc::new(context), selection).await?;
@@ -213,10 +215,9 @@ impl SharedSource {
                     let router = self.clone();
                     let source = file.clone();
                     let batches = common_runtime::spawn_blocking_compact(move || {
-                        router.route(SourceBatch { batch, source, legacy_override, ordinal })
+                        router.route(SourceBatch { batch, source, legacy_override })
                     }).await.context(crate::error::JoinSnafu)??;
-                    ordinal = ordinal.checked_add(batches.1).context(InvalidMultiRegionCompactionSnafu { reason: "Source row ordinal overflow" })?;
-                    for batch in batches.0 { yield batch; }
+                    for batch in batches { yield batch; }
                 }
                 if read_rows != expected_rows {
                     Err(InvalidMultiRegionCompactionSnafu { reason: "Shared source scan did not cover its complete footer row count" }.build())?;
@@ -224,18 +225,17 @@ impl SharedSource {
                 let page_bytes = reader.fetched_store_page_bytes()?;
                 self.counters.store_page_bytes.fetch_add(page_bytes, Ordering::Relaxed);
                 self.counters.files.fetch_add(1, Ordering::Relaxed);
+                yield SourceEvent::SourceEnd;
             }
         })
     }
 
-    fn route(&self, input: SourceBatch) -> Result<(Vec<RecordBatch>, u64)> {
+    fn route(&self, input: SourceBatch) -> Result<Vec<SourceEvent>> {
         let SourceBatch {
             batch,
             source,
             legacy_override,
-            ordinal,
         } = input;
-        let rows = batch.num_rows();
         let owners = self.row_owners(&batch)?;
         let mut routed = Vec::new();
         for (id, target) in &self.targets {
@@ -266,29 +266,25 @@ impl SharedSource {
                 columns[sequence_column_index(filtered.num_columns())] =
                     Arc::new(UInt64Array::from(vec![sequence.get(); selected]));
             }
+            let filtered =
+                RecordBatch::try_new(self.schema.clone(), columns).context(NewRecordBatchSnafu)?;
             let windows = self.time_windows(&filtered)?;
-            let ordinals = owners
-                .iter()
-                .enumerate()
-                .filter(|(_, owner)| **owner == Some(*id))
-                .map(|(row, _)| {
-                    ordinal
-                        .checked_add(row as u64)
-                        .context(InvalidMultiRegionCompactionSnafu {
-                            reason: "Row ordinal overflow",
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            columns.extend([
-                Arc::new(UInt64Array::from(vec![id.as_u64(); selected])) as ArrayRef,
-                Arc::new(Int64Array::from(windows)),
-                Arc::new(UInt64Array::from(ordinals)),
-            ]);
-            routed.push(
-                RecordBatch::try_new(self.schema.clone(), columns).context(NewRecordBatchSnafu)?,
-            );
+            let unique_windows: std::collections::BTreeSet<_> = windows.iter().copied().collect();
+            for window in unique_windows {
+                let mask = BooleanArray::from(
+                    windows
+                        .iter()
+                        .map(|value| *value == window)
+                        .collect::<Vec<_>>(),
+                );
+                routed.push(SourceEvent::Batch {
+                    region_id: *id,
+                    window,
+                    batch: filter_record_batch(&filtered, &mask).context(ComputeArrowSnafu)?,
+                });
+            }
         }
-        Ok((routed, rows as u64))
+        Ok(routed)
     }
 
     fn time_windows(&self, filtered: &RecordBatch) -> Result<Vec<i64>> {
@@ -408,23 +404,5 @@ impl SharedSource {
             return crate::error::CompactionCancelledSnafu.fail();
         }
         Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct SharedPartition(pub(crate) Arc<SharedSource>);
-
-impl PartitionStream for SharedPartition {
-    fn schema(&self) -> &SchemaRef {
-        &self.0.schema
-    }
-    fn execute(&self, _ctx: Arc<TaskContext>) -> SendableRecordBatchStream {
-        Box::pin(RecordBatchStreamAdapter::new(
-            self.0.schema.clone(),
-            self.0
-                .clone()
-                .batches()
-                .map_err(|error| DataFusionError::External(Box::new(error))),
-        ))
     }
 }
